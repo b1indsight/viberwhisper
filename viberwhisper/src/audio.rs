@@ -1,6 +1,8 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
@@ -9,6 +11,7 @@ pub struct AudioRecorder {
     recording: Arc<Mutex<bool>>,
     buffer: Arc<Mutex<Vec<i16>>>,
     stream: Option<cpal::Stream>,
+    sample_count: Arc<AtomicUsize>,
 }
 
 impl AudioRecorder {
@@ -17,6 +20,7 @@ impl AudioRecorder {
             recording: Arc::new(Mutex::new(false)),
             buffer: Arc::new(Mutex::new(Vec::new())),
             stream: None,
+            sample_count: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -29,16 +33,24 @@ impl AudioRecorder {
 
         let recording = Arc::clone(&self.recording);
         let buffer = Arc::clone(&self.buffer);
+        let sample_count = Arc::clone(&self.sample_count);
 
-        // Clear buffer
+        // Clear buffer and reset counter
         buffer.lock().unwrap().clear();
+        sample_count.store(0, Ordering::Relaxed);
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config.into(),
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     if *recording.lock().unwrap() {
+                        let len = data.len();
                         buffer.lock().unwrap().extend_from_slice(data);
+                        let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
+                        // Print every ~0.5 seconds (assuming 16kHz sample rate)
+                        if total % 8000 < len {
+                            println!("[DEBUG] Recorded {} samples (~{}s)", total, total / 16000);
+                        }
                     }
                 },
                 move |err| eprintln!("Stream error: {}", err),
@@ -48,11 +60,16 @@ impl AudioRecorder {
                 &config.into(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     if *recording.lock().unwrap() {
+                        let len = data.len();
                         let int_data: Vec<i16> = data
                             .iter()
                             .map(|&s| (s * i16::MAX as f32) as i16)
                             .collect();
                         buffer.lock().unwrap().extend_from_slice(&int_data);
+                        let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
+                        if total % 8000 < len {
+                            println!("[DEBUG] Recorded {} samples (~{}s)", total, total / 16000);
+                        }
                     }
                 },
                 move |err| eprintln!("Stream error: {}", err),
@@ -72,6 +89,10 @@ impl AudioRecorder {
     pub fn stop_recording(&mut self) -> Result<String, Box<dyn std::error::Error>> {
         println!("DEBUG: Stopping recording...");
         *self.recording.lock().unwrap() = false;
+
+        // Wait a bit for pending callbacks to complete
+        thread::sleep(Duration::from_millis(200));
+
         drop(self.stream.take());
         println!("DEBUG: Stream stopped");
 
