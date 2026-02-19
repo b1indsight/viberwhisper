@@ -1,0 +1,1 @@
+C:\Users\b1ind\viberwhisper\viberwhisper\target\debug\viberwhisper.exe: C:\Users\b1ind\viberwhisper\viberwhisper\src\audio.rs C:\Users\b1ind\viberwhisper\viberwhisper\src\hotkey.rs C:\Users\b1ind\viberwhisper\viberwhisper\src\main.rs

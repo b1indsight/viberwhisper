@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let recorder_for_press = Arc::clone(&recorder);
     let recorder_for_release = Arc::clone(&recorder);
 
-    println!("Hold Right Alt to record, release to save.");
+    println!("Hold F8 to record, release to save.");
     println!("Press Ctrl+C to exit.");
     println!();
 

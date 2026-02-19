@@ -6,7 +6,7 @@ Implement global hotkey (Right Alt) triggered audio recording that saves to a te
 ## Requirements
 
 1. **Global Hotkey Registration**
-   - Hardcoded to Right Alt key
+   - Hardcoded to F8 key (AltRight not supported by global-hotkey on Windows)
    - Works system-wide regardless of focused window
    - No GUI needed for MVP
 
@@ -31,7 +31,7 @@ Implement global hotkey (Right Alt) triggered audio recording that saves to a te
 
 1. **HotkeyManager** (`src/hotkey.rs`): Registers and listens for global hotkey events
    - Uses `GlobalHotKeyEvent::receiver()` to receive events
-   - Hardcoded to Right Alt key
+   - Hardcoded to F8 key (AltRight not supported on Windows by global-hotkey)
 
 2. **AudioRecorder** (`src/audio.rs`): Manages audio capture and file writing
    - Uses cpal for audio input

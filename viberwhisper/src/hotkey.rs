@@ -15,12 +15,12 @@ impl HotkeyManager {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let manager = GlobalHotKeyManager::new()?;
 
-        // Hardcoded to Right Alt (AltGr on some keyboards)
-        let hotkey = HotKey::new(Some(Modifiers::empty()), Code::AltRight);
+        // Hardcoded to F8 (reliable key for global hotkey)
+        let hotkey = HotKey::new(Some(Modifiers::empty()), Code::F8);
 
         manager.register(hotkey)?;
 
-        println!("Registered global hotkey: Right Alt");
+        println!("Registered global hotkey: F8");
 
         Ok(HotkeyManager { manager, hotkey })
     }
@@ -41,7 +41,7 @@ impl HotkeyManager {
     where
         F: FnMut(),
     {
-        println!("Hotkey event loop started. Press Right Alt to record...");
+        println!("Hotkey event loop started. Press F8 to record...");
 
         loop {
             if let Some(event) = self.check_event() {
