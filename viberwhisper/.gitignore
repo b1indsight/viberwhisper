@@ -1,0 +1,19 @@
+.alma-snapshots
+
+# Rust build artifacts
+/target/
+/Cargo.lock
+
+# Recording files
+/tmp/
+*.wav
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
