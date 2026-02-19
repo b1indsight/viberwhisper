@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -69,19 +70,35 @@ impl AudioRecorder {
     }
 
     pub fn stop_recording(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+        println!("DEBUG: Stopping recording...");
         *self.recording.lock().unwrap() = false;
         drop(self.stream.take());
+        println!("DEBUG: Stream stopped");
 
         let buffer = self.buffer.lock().unwrap();
+        println!("DEBUG: Buffer size: {} samples", buffer.len());
+
         if buffer.is_empty() {
             return Err("No audio data recorded".into());
+        }
+
+        // Save to Documents/ViberWhisper folder
+        let mut path = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
+        path.push("ViberWhisper");
+
+        // Create directory if it doesn't exist
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            eprintln!("WARNING: Failed to create directory: {}", e);
         }
 
         // Generate filename with timestamp
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
             .as_secs();
-        let filename = format!("recording_{}.wav", timestamp);
+        path.push(format!("recording_{}.wav", timestamp));
+
+        let filename = path.to_string_lossy().to_string();
+        println!("DEBUG: Saving to: {}", filename);
 
         // Write WAV file
         let spec = WavSpec {
@@ -91,11 +108,25 @@ impl AudioRecorder {
             sample_format: hound::SampleFormat::Int,
         };
 
-        let mut writer = WavWriter::create(&filename, spec)?;
-        for &sample in buffer.iter() {
-            writer.write_sample(sample)?;
+        let mut writer = match WavWriter::create(&path, spec) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("ERROR: Failed to create WAV writer: {}", e);
+                return Err(e.into());
+            }
+        };
+
+        for (i, &sample) in buffer.iter().enumerate() {
+            if let Err(e) = writer.write_sample(sample) {
+                eprintln!("ERROR: Failed to write sample {}: {}", i, e);
+                return Err(e.into());
+            }
         }
-        writer.finalize()?;
+
+        if let Err(e) = writer.finalize() {
+            eprintln!("ERROR: Failed to finalize WAV file: {}", e);
+            return Err(e.into());
+        }
 
         println!("Recording saved to: {}", filename);
         Ok(filename)

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-global-hotkey = "0.6"
+rdev = "0.5"
 cpal = "0.15"
 hound = "3.5"
+dirs = "5.0"
