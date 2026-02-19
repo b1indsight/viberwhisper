@@ -25,6 +25,12 @@ impl AudioRecorder {
     }
 
     pub fn start_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Check if already recording
+        if *self.recording.lock().unwrap() {
+            println!("DEBUG: Already recording, ignoring duplicate start request");
+            return Ok(());
+        }
+
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -87,6 +93,12 @@ impl AudioRecorder {
     }
 
     pub fn stop_recording(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+        // Check if actually recording
+        if !*self.recording.lock().unwrap() {
+            println!("DEBUG: Not recording, ignoring stop request");
+            return Err("Not currently recording".into());
+        }
+
         println!("DEBUG: Stopping recording...");
         *self.recording.lock().unwrap() = false;
 
