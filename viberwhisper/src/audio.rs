@@ -82,9 +82,8 @@ impl AudioRecorder {
             return Err("No audio data recorded".into());
         }
 
-        // Save to Documents/ViberWhisper folder
-        let mut path = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-        path.push("ViberWhisper");
+        // Save to ./tmp folder
+        let mut path = PathBuf::from("./tmp");
 
         // Create directory if it doesn't exist
         if let Err(e) = std::fs::create_dir_all(&path) {
