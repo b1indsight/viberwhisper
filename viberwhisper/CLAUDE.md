@@ -10,6 +10,10 @@ This is a Rust project named "viberwhisper" using the 2024 edition.
 
 ViberWhisper is a local/web-based recreation of [Typeless](https://typeless.ai/) - a voice-to-text input tool. The goal is to enable fast, hands-free text input anywhere via voice.
 
+### Platform
+
+This is a **Windows-only** project that uses Windows Desktop APIs for system integration (global hotkeys, simulated keyboard input, audio capture).
+
 ### Core Functionality
 
 The application provides these fundamental features:
@@ -72,3 +76,15 @@ When implementing any feature:
 This project follows TDD practices. Always:
 1. Write tests first
 2. Then implement the feature to make tests pass
+
+## Development Phases
+
+### Phase 1: MVP (Current)
+
+Implement a minimal working version with:
+- Global hotkey registration (e.g., Ctrl+Shift+Space)
+- Basic audio recording while hotkey is held
+- Speech-to-text conversion
+- Simulated keyboard output to active window
+
+Focus on core functionality over configuration or polish.
