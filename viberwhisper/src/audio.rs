@@ -13,6 +13,7 @@ pub struct AudioRecorder {
     stream: Option<cpal::Stream>,
     sample_count: Arc<AtomicUsize>,
     gain: f32,
+    sample_rate: u32,
 }
 
 impl AudioRecorder {
@@ -44,11 +45,11 @@ impl AudioRecorder {
             stream: None,
             sample_count: Arc::new(AtomicUsize::new(0)),
             gain,
+            sample_rate: 44100,
         })
     }
 
     pub fn start_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Check if already recording
         if *self.recording.lock().unwrap() {
             println!("DEBUG: Already recording, ignoring duplicate start request");
             return Ok(());
@@ -60,6 +61,14 @@ impl AudioRecorder {
             .ok_or("No input device available")?;
         let config = device.default_input_config()?;
 
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels() as usize;
+        let sample_format = config.sample_format();
+
+        println!("[Audio] 设备采样率: {} Hz，声道数: {}，格式: {:?}", sample_rate, channels, sample_format);
+
+        self.sample_rate = sample_rate;
+
         let recording = Arc::clone(&self.recording);
         let buffer = Arc::clone(&self.buffer);
         let sample_count = Arc::clone(&self.sample_count);
@@ -68,21 +77,26 @@ impl AudioRecorder {
         buffer.lock().unwrap().clear();
         sample_count.store(0, Ordering::Relaxed);
 
-        let apply_gain_i16 = move |s: i16| -> i16 {
-            ((s as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32)) as i16
-        };
+        // 先设为 true，再启动流，避免初始帧被丢弃
+        *self.recording.lock().unwrap() = true;
 
-        let stream = match config.sample_format() {
+        let stream = match sample_format {
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config.into(),
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     if *recording.lock().unwrap() {
-                        let len = data.len();
-                        let amplified: Vec<i16> = data.iter().map(|&s| apply_gain_i16(s)).collect();
-                        buffer.lock().unwrap().extend_from_slice(&amplified);
+                        let mono: Vec<i16> = data
+                            .chunks(channels)
+                            .map(|ch| {
+                                let avg = ch.iter().map(|&s| s as f32).sum::<f32>() / channels as f32;
+                                (avg * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                            })
+                            .collect();
+                        let len = mono.len();
+                        buffer.lock().unwrap().extend_from_slice(&mono);
                         let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
-                        if total % 8000 < len {
-                            println!("[DEBUG] Recorded {} samples (~{}s)", total, total / 16000);
+                        if total % (sample_rate as usize / 2) < len {
+                            println!("[DEBUG] 已录制 {} 帧 (~{}s)", total, total / sample_rate as usize);
                         }
                     }
                 },
@@ -93,26 +107,32 @@ impl AudioRecorder {
                 &config.into(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     if *recording.lock().unwrap() {
-                        let len = data.len();
-                        let int_data: Vec<i16> = data
-                            .iter()
-                            .map(|&s| ((s * gain).clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                        let mono: Vec<i16> = data
+                            .chunks(channels)
+                            .map(|ch| {
+                                let avg = ch.iter().sum::<f32>() / channels as f32;
+                                (avg * gain).clamp(-1.0, 1.0) * i16::MAX as f32
+                            })
+                            .map(|s| s as i16)
                             .collect();
-                        buffer.lock().unwrap().extend_from_slice(&int_data);
+                        let len = mono.len();
+                        buffer.lock().unwrap().extend_from_slice(&mono);
                         let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
-                        if total % 8000 < len {
-                            println!("[DEBUG] Recorded {} samples (~{}s)", total, total / 16000);
+                        if total % (sample_rate as usize / 2) < len {
+                            println!("[DEBUG] 已录制 {} 帧 (~{}s)", total, total / sample_rate as usize);
                         }
                     }
                 },
                 move |err| eprintln!("Stream error: {}", err),
                 None,
             )?,
-            _ => return Err("Unsupported sample format".into()),
+            _ => {
+                *self.recording.lock().unwrap() = false;
+                return Err("Unsupported sample format".into());
+            }
         };
 
         stream.play()?;
-        *self.recording.lock().unwrap() = true;
         self.stream = Some(stream);
 
         println!("Recording started...");
@@ -162,7 +182,7 @@ impl AudioRecorder {
         // Write WAV file
         let spec = WavSpec {
             channels: 1,
-            sample_rate: 16000,
+            sample_rate: self.sample_rate,
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };

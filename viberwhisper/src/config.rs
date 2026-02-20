@@ -18,7 +18,7 @@ impl Default for AppConfig {
         Self {
             groq_api_key: None,
             model: "whisper-large-v3-turbo".to_string(),
-            language: None,
+            language: Some("zh".to_string()),
             temperature: 0.0,
             hotkey: "F8".to_string(),
             mic_gain: 1.0,
@@ -85,7 +85,7 @@ mod tests {
         assert_eq!(config.hotkey, "F8");
         assert_eq!(config.temperature, 0.0);
         assert!(config.groq_api_key.is_none());
-        assert!(config.language.is_none());
+        assert_eq!(config.language.as_deref(), Some("zh"));
     }
 
     #[test]
