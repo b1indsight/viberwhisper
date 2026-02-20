@@ -208,7 +208,40 @@ impl AudioRecorder {
         }
 
         println!("Recording saved to: {}", filename);
+
+        self.cleanup_old_recordings("./tmp", 10);
+
         Ok(filename)
+    }
+
+    fn cleanup_old_recordings(&self, dir: &str, keep: usize) {
+        let mut entries: Vec<_> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext == "wav")
+                        .unwrap_or(false)
+                })
+                .collect(),
+            Err(_) => return,
+        };
+
+        if entries.len() <= keep {
+            return;
+        }
+
+        entries.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+
+        for entry in &entries[..entries.len() - keep] {
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                eprintln!("[Audio] 清理旧录音失败 {:?}: {}", entry.path(), e);
+            } else {
+                println!("[Audio] 已删除旧录音: {:?}", entry.path());
+            }
+        }
     }
 
     pub fn is_recording(&self) -> bool {
