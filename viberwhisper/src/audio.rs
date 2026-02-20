@@ -68,7 +68,7 @@ impl AudioRecorder {
         buffer.lock().unwrap().clear();
         sample_count.store(0, Ordering::Relaxed);
 
-        let apply_gain_i16 = |s: i16| -> i16 {
+        let apply_gain_i16 = move |s: i16| -> i16 {
             ((s as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32)) as i16
         };
 
