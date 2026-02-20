@@ -7,7 +7,7 @@ use audio::AudioRecorder;
 use hotkey::{HotkeyEvent, HotkeyManager};
 use std::sync::{Arc, Mutex};
 use transcriber::{MockTranscriber, Transcriber};
-use typer::{MockTyper, TextTyper};
+use typer::{TextTyper, WindowsTyper};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("ViberWhisper - Voice-to-Text Input");
@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hotkey_manager = HotkeyManager::new()?;
     let recorder = Arc::new(Mutex::new(AudioRecorder::new()?));
     let transcriber = MockTranscriber;
-    let typer = MockTyper;
+    let typer = WindowsTyper;
 
     println!("Hold F8 to record, release to transcribe and type.");
     println!("Press Ctrl+C to exit.");
@@ -77,6 +77,7 @@ mod integration_tests {
 
     #[test]
     fn test_full_pipeline_mock() {
+        use typer::MockTyper;
         let transcriber = MockTranscriber;
         let typer = MockTyper;
         let text = transcriber.transcribe("fake.wav").unwrap();
