@@ -19,6 +19,7 @@ pub struct GroqTranscriber {
     api_key: String,
     model: String,
     language: Option<String>,
+    prompt: Option<String>,
     temperature: f32,
 }
 
@@ -32,6 +33,7 @@ impl GroqTranscriber {
             api_key,
             model: config.model.clone(),
             language: config.language.clone(),
+            prompt: config.prompt.clone(),
             temperature: config.temperature,
         })
     }
@@ -60,6 +62,9 @@ impl Transcriber for GroqTranscriber {
 
         if let Some(lang) = &self.language {
             form = form.text("language", lang.clone());
+        }
+        if let Some(prompt) = &self.prompt {
+            form = form.text("prompt", prompt.clone());
         }
 
         let client = reqwest::blocking::Client::new();

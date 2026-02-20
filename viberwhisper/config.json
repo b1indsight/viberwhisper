@@ -2,7 +2,8 @@
   "groq_api_key": "YOUR_GROQ_API_KEY_HERE",
   "model": "whisper-large-v3-turbo",
   "language": "zh",
+  "prompt": "以下是一段简体中文的普通话句子，去掉首尾的语气词",
   "temperature": 0,
   "hotkey": "F8",
-  "mic_gain": 2.0
+  "mic_gain": 3.0
 }

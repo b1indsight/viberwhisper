@@ -8,6 +8,7 @@ pub struct AppConfig {
     pub groq_api_key: Option<String>,
     pub model: String,
     pub language: Option<String>,
+    pub prompt: Option<String>,
     pub temperature: f32,
     pub hotkey: String,
     pub mic_gain: f32,
@@ -19,6 +20,7 @@ impl Default for AppConfig {
             groq_api_key: None,
             model: "whisper-large-v3-turbo".to_string(),
             language: Some("zh".to_string()),
+            prompt: Some("以下是一段简体中文的普通话句子，去掉首尾的语气词".to_string()),
             temperature: 0.0,
             hotkey: "F8".to_string(),
             mic_gain: 1.0,
@@ -70,6 +72,9 @@ impl AppConfig {
         }
         if let Some(gain) = json["mic_gain"].as_f64() {
             self.mic_gain = gain as f32;
+        }
+        if let Some(prompt) = json["prompt"].as_str() {
+            self.prompt = Some(prompt.to_string());
         }
     }
 }
