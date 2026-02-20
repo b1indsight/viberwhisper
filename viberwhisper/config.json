@@ -1,7 +1,8 @@
 {
-  "groq_api_key": "",
+  "groq_api_key": "YOUR_GROQ_API_KEY_HERE",
   "model": "whisper-large-v3-turbo",
   "language": "zh",
   "temperature": 0,
-  "hotkey": "F8"
+  "hotkey": "F8",
+  "mic_gain": 2.0
 }

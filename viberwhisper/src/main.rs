@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let hotkey_manager = HotkeyManager::new()?;
-    let recorder = Arc::new(Mutex::new(AudioRecorder::new()?));
+    let recorder = Arc::new(Mutex::new(AudioRecorder::new(config.mic_gain)?));
     let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_config(&config) {
         Ok(t) => {
             println!("使用 Groq Whisper 进行语音识别");
@@ -90,7 +90,7 @@ mod integration_tests {
 
     #[test]
     fn test_audio_module_loads() {
-        let audio_result = AudioRecorder::new();
+        let audio_result = AudioRecorder::new(1.0);
         assert!(audio_result.is_ok());
     }
 

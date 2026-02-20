@@ -12,15 +12,38 @@ pub struct AudioRecorder {
     buffer: Arc<Mutex<Vec<i16>>>,
     stream: Option<cpal::Stream>,
     sample_count: Arc<AtomicUsize>,
+    gain: f32,
 }
 
 impl AudioRecorder {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(gain: f32) -> Result<Self, Box<dyn std::error::Error>> {
+        let host = cpal::default_host();
+
+        println!("[Audio] 默认输入设备: {}",
+            host.default_input_device()
+                .and_then(|d| d.name().ok())
+                .unwrap_or_else(|| "(未找到)".to_string())
+        );
+
+        println!("[Audio] 所有可用输入设备:");
+        match host.input_devices() {
+            Ok(devices) => {
+                for (i, device) in devices.enumerate() {
+                    let name = device.name().unwrap_or_else(|_| "(未知)".to_string());
+                    println!("  [{}] {}", i, name);
+                }
+            }
+            Err(e) => eprintln!("[Audio] 枚举设备失败: {}", e),
+        }
+
+        println!("[Audio] 麦克风增益: {}x", gain);
+
         Ok(AudioRecorder {
             recording: Arc::new(Mutex::new(false)),
             buffer: Arc::new(Mutex::new(Vec::new())),
             stream: None,
             sample_count: Arc::new(AtomicUsize::new(0)),
+            gain,
         })
     }
 
@@ -40,10 +63,14 @@ impl AudioRecorder {
         let recording = Arc::clone(&self.recording);
         let buffer = Arc::clone(&self.buffer);
         let sample_count = Arc::clone(&self.sample_count);
+        let gain = self.gain;
 
-        // Clear buffer and reset counter
         buffer.lock().unwrap().clear();
         sample_count.store(0, Ordering::Relaxed);
+
+        let apply_gain_i16 = |s: i16| -> i16 {
+            ((s as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32)) as i16
+        };
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::I16 => device.build_input_stream(
@@ -51,9 +78,9 @@ impl AudioRecorder {
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     if *recording.lock().unwrap() {
                         let len = data.len();
-                        buffer.lock().unwrap().extend_from_slice(data);
+                        let amplified: Vec<i16> = data.iter().map(|&s| apply_gain_i16(s)).collect();
+                        buffer.lock().unwrap().extend_from_slice(&amplified);
                         let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
-                        // Print every ~0.5 seconds (assuming 16kHz sample rate)
                         if total % 8000 < len {
                             println!("[DEBUG] Recorded {} samples (~{}s)", total, total / 16000);
                         }
@@ -69,7 +96,7 @@ impl AudioRecorder {
                         let len = data.len();
                         let int_data: Vec<i16> = data
                             .iter()
-                            .map(|&s| (s * i16::MAX as f32) as i16)
+                            .map(|&s| ((s * gain).clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
                             .collect();
                         buffer.lock().unwrap().extend_from_slice(&int_data);
                         let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
@@ -175,13 +202,13 @@ mod tests {
 
     #[test]
     fn test_audio_recorder_creation() {
-        let recorder = AudioRecorder::new();
+        let recorder = AudioRecorder::new(1.0);
         assert!(recorder.is_ok());
     }
 
     #[test]
     fn test_recorder_not_recording_initially() {
-        let recorder = AudioRecorder::new().unwrap();
+        let recorder = AudioRecorder::new(1.0).unwrap();
         assert!(!recorder.is_recording());
     }
 }

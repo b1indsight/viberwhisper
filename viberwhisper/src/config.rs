@@ -10,6 +10,7 @@ pub struct AppConfig {
     pub language: Option<String>,
     pub temperature: f32,
     pub hotkey: String,
+    pub mic_gain: f32,
 }
 
 impl Default for AppConfig {
@@ -20,6 +21,7 @@ impl Default for AppConfig {
             language: None,
             temperature: 0.0,
             hotkey: "F8".to_string(),
+            mic_gain: 1.0,
         }
     }
 }
@@ -65,6 +67,9 @@ impl AppConfig {
         }
         if let Some(hotkey) = json["hotkey"].as_str() {
             self.hotkey = hotkey.to_string();
+        }
+        if let Some(gain) = json["mic_gain"].as_f64() {
+            self.mic_gain = gain as f32;
         }
     }
 }
