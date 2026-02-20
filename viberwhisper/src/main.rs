@@ -6,7 +6,7 @@ mod typer;
 use audio::AudioRecorder;
 use hotkey::{HotkeyEvent, HotkeyManager};
 use std::sync::{Arc, Mutex};
-use transcriber::{MockTranscriber, Transcriber};
+use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
 use typer::{TextTyper, WindowsTyper};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -16,7 +16,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let hotkey_manager = HotkeyManager::new()?;
     let recorder = Arc::new(Mutex::new(AudioRecorder::new()?));
-    let transcriber = MockTranscriber;
+    let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_env() {
+        Ok(t) => {
+            println!("使用 Groq Whisper 进行语音识别");
+            Box::new(t)
+        }
+        Err(e) => {
+            eprintln!("警告: {} - 回退到 Mock 模式", e);
+            Box::new(MockTranscriber)
+        }
+    };
     let typer = WindowsTyper;
 
     println!("Hold F8 to record, release to transcribe and type.");
