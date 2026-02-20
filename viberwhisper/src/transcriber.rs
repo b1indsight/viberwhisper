@@ -1,3 +1,5 @@
+use crate::config::AppConfig;
+
 pub trait Transcriber {
     fn transcribe(&self, wav_path: &str) -> Result<String, Box<dyn std::error::Error>>;
 }
@@ -15,17 +17,23 @@ impl Transcriber for MockTranscriber {
 
 pub struct GroqTranscriber {
     api_key: String,
+    model: String,
+    language: Option<String>,
+    temperature: f32,
 }
 
 impl GroqTranscriber {
-    pub fn new(api_key: String) -> Self {
-        Self { api_key }
-    }
-
-    pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        let api_key = std::env::var("GROQ_API_KEY")
-            .map_err(|_| "环境变量 GROQ_API_KEY 未设置")?;
-        Ok(Self::new(api_key))
+    pub fn from_config(config: &AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let api_key = config
+            .groq_api_key
+            .clone()
+            .ok_or("GROQ_API_KEY 未配置（config.json 或环境变量）")?;
+        Ok(Self {
+            api_key,
+            model: config.model.clone(),
+            language: config.language.clone(),
+            temperature: config.temperature,
+        })
     }
 }
 
@@ -44,11 +52,15 @@ impl Transcriber for GroqTranscriber {
             .file_name(file_name)
             .mime_str("audio/wav")?;
 
-        let form = reqwest::blocking::multipart::Form::new()
-            .text("model", "whisper-large-v3-turbo")
-            .text("temperature", "0")
+        let mut form = reqwest::blocking::multipart::Form::new()
+            .text("model", self.model.clone())
+            .text("temperature", self.temperature.to_string())
             .text("response_format", "verbose_json")
             .part("file", part);
+
+        if let Some(lang) = &self.language {
+            form = form.text("language", lang.clone());
+        }
 
         let client = reqwest::blocking::Client::new();
         let response = client

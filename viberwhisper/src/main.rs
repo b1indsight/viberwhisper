@@ -1,9 +1,11 @@
 mod audio;
+mod config;
 mod hotkey;
 mod transcriber;
 mod typer;
 
 use audio::AudioRecorder;
+use config::AppConfig;
 use hotkey::{HotkeyEvent, HotkeyManager};
 use std::sync::{Arc, Mutex};
 use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
@@ -14,9 +16,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("===================================");
     println!();
 
+    let config = AppConfig::load();
+    println!("[Config] 热键: {}  模型: {}  语言: {}",
+        config.hotkey,
+        config.model,
+        config.language.as_deref().unwrap_or("auto"),
+    );
+    println!();
+
     let hotkey_manager = HotkeyManager::new()?;
     let recorder = Arc::new(Mutex::new(AudioRecorder::new()?));
-    let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_env() {
+    let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_config(&config) {
         Ok(t) => {
             println!("使用 Groq Whisper 进行语音识别");
             Box::new(t)
