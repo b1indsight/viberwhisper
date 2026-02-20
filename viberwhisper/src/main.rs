@@ -1,52 +1,61 @@
 mod audio;
 mod hotkey;
+mod transcriber;
+mod typer;
 
 use audio::AudioRecorder;
 use hotkey::{HotkeyEvent, HotkeyManager};
 use std::sync::{Arc, Mutex};
+use transcriber::{MockTranscriber, Transcriber};
+use typer::{MockTyper, TextTyper};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("ViberWhisper - Voice-to-Text Input");
     println!("===================================");
     println!();
 
-    // Initialize hotkey manager
     let hotkey_manager = HotkeyManager::new()?;
-
-    // Initialize audio recorder (wrapped in Arc<Mutex> for shared state)
     let recorder = Arc::new(Mutex::new(AudioRecorder::new()?));
-    let recorder_for_press = Arc::clone(&recorder);
-    let recorder_for_release = Arc::clone(&recorder);
+    let transcriber = MockTranscriber;
+    let typer = MockTyper;
 
-    println!("Hold F8 to record, release to save.");
+    println!("Hold F8 to record, release to transcribe and type.");
     println!("Press Ctrl+C to exit.");
     println!();
 
-    // Event loop
     let mut counter = 0;
     loop {
         if let Some(event) = hotkey_manager.check_event() {
             match event {
                 HotkeyEvent::Pressed => {
                     println!("F8 pressed, starting recording...");
-                    let mut rec = recorder_for_press.lock().unwrap();
+                    let mut rec = recorder.lock().unwrap();
                     match rec.start_recording() {
-                        Ok(()) => println!("Recording started successfully"),
+                        Ok(()) => println!("Recording started."),
                         Err(e) => eprintln!("Failed to start recording: {}", e),
                     }
                 }
                 HotkeyEvent::Released => {
                     println!("F8 released, stopping recording...");
-                    let mut rec = recorder_for_release.lock().unwrap();
+                    let mut rec = recorder.lock().unwrap();
                     match rec.stop_recording() {
-                        Ok(filename) => println!("Successfully saved to: {}", filename),
-                        Err(e) => eprintln!("Failed to save recording: {}", e),
+                        Ok(wav_path) => {
+                            println!("Recording saved: {}", wav_path);
+                            match transcriber.transcribe(&wav_path) {
+                                Ok(text) => {
+                                    if let Err(e) = typer.type_text(&text) {
+                                        eprintln!("Failed to type text: {}", e);
+                                    }
+                                }
+                                Err(e) => eprintln!("Transcription failed: {}", e),
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to stop recording: {}", e),
                     }
                 }
             }
         }
 
-        // Heartbeat every 3 seconds
         counter += 1;
         if counter % 300 == 0 {
             println!("[Heartbeat] Running... Hold F8 to record");
@@ -62,8 +71,15 @@ mod integration_tests {
 
     #[test]
     fn test_audio_module_loads() {
-        // Test that audio module can be instantiated
         let audio_result = AudioRecorder::new();
         assert!(audio_result.is_ok());
+    }
+
+    #[test]
+    fn test_full_pipeline_mock() {
+        let transcriber = MockTranscriber;
+        let typer = MockTyper;
+        let text = transcriber.transcribe("fake.wav").unwrap();
+        assert!(typer.type_text(&text).is_ok());
     }
 }
