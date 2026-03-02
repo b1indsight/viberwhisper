@@ -4,6 +4,9 @@
 /target/
 /Cargo.lock
 
+# Config with secrets
+/config.json
+
 # Recording files
 /tmp/
 *.wav
