@@ -1,0 +1,110 @@
+# ViberWhisper
+
+一个基于 Rust 实现的语音转文字输入工具，按住热键即可将语音实时转录并输入到任意文本框。
+
+灵感来源于 [Typeless](https://typeless.ai/)，使用 [Groq Whisper API](https://console.groq.com) 进行语音识别。
+
+## 功能特性
+
+- **全局热键录音**：按住 F8（可配置）开始录音，松开自动停止
+- **AI 语音识别**：通过 Groq Whisper API 将语音转为文字
+- **自动文本输入**：识别结果自动输入到当前光标位置（支持中文等 Unicode 字符）
+- **灵活配置**：支持自定义热键、模型、语言、麦克风增益等
+- **自动清理**：自动保留最新 10 条录音，旧文件自动删除
+
+## 系统要求
+
+- **操作系统**：Windows（依赖 Windows SendInput API）
+- **Rust**：1.70 及以上版本
+
+## 快速开始
+
+### 1. 获取 Groq API 密钥
+
+前往 [Groq Console](https://console.groq.com) 注册并获取 API 密钥。
+
+### 2. 配置
+
+在项目根目录创建 `config.json`：
+
+```json
+{
+  "groq_api_key": "YOUR_GROQ_API_KEY_HERE",
+  "model": "whisper-large-v3-turbo",
+  "language": "zh",
+  "prompt": "以下是一段简体中文的普通话句子，去掉首尾的语气词",
+  "temperature": 0,
+  "hotkey": "F8",
+  "mic_gain": 3.0
+}
+```
+
+也可以通过环境变量设置 API 密钥（优先级高于配置文件）：
+
+```bash
+set GROQ_API_KEY=your_api_key_here
+```
+
+### 3. 构建并运行
+
+```bash
+cargo build --release
+cargo run --release
+```
+
+### 4. 使用
+
+1. 启动程序
+2. 将光标定位到任意文本输入框（浏览器地址栏、编辑器、聊天框等）
+3. **按住 F8** 开始录音（控制台显示 "Recording started"）
+4. 说出需要输入的内容
+5. **松开 F8** 停止录音，程序自动转录并输入文字
+6. 按 **Ctrl+C** 退出程序
+
+## 配置说明
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `groq_api_key` | 字符串 | 无 | Groq API 密钥（必填） |
+| `model` | 字符串 | `whisper-large-v3-turbo` | Whisper 模型 |
+| `language` | 字符串 | `zh` | 语言代码，留空为自动检测 |
+| `prompt` | 字符串 | 中文提示词 | 指导转录风格和格式 |
+| `temperature` | 数字 | `0` | 随机性（0-1） |
+| `hotkey` | 字符串 | `F8` | 录音热键 |
+| `mic_gain` | 数字 | `1.0` | 麦克风增益倍数 |
+
+> **注意**：`config.json` 包含 API 密钥等敏感信息，已在 `.gitignore` 中排除，请勿提交到版本控制。
+
+## 项目结构
+
+```
+viberwhisper/
+├── src/
+│   ├── main.rs          # 主程序入口，事件循环
+│   ├── config.rs        # 配置加载和管理
+│   ├── hotkey.rs        # 全局热键监听
+│   ├── audio.rs         # 音频录制和 WAV 文件处理
+│   ├── transcriber.rs   # 语音识别（Groq API）
+│   └── typer.rs         # 文本输入（Windows SendInput API）
+├── doc/                 # 功能文档
+├── tmp/                 # 临时录音文件（自动管理）
+├── config.json          # 运行时配置（不纳入版本控制）
+└── Cargo.toml           # 项目依赖
+```
+
+## 开发
+
+```bash
+# 运行测试
+cargo test
+
+# 代码检查
+cargo clippy
+
+# 代码格式化
+cargo fmt
+```
+
+## 许可证
+
+MIT
