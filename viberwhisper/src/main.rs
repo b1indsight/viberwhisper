@@ -32,7 +32,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use config::AppConfig;
     use hotkey::{HotkeyEvent, HotkeyManager};
     use std::sync::{Arc, Mutex};
-    use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
+    use transcriber::{MockTranscriber, Transcriber, WhisperTranscriber};
     use typer::{TextTyper, WindowsTyper};
 
     println!("ViberWhisper - Voice-to-Text Input");
@@ -50,9 +50,13 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
 
     let hotkey_manager = HotkeyManager::new()?;
     let recorder = Arc::new(Mutex::new(AudioRecorder::new(config.mic_gain)?));
-    let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_config(&config) {
+    let transcriber: Box<dyn Transcriber> = match WhisperTranscriber::from_config(&config) {
         Ok(t) => {
-            println!("使用 Groq Whisper 进行语音识别");
+            let endpoint = config
+                .stt_endpoint
+                .as_deref()
+                .unwrap_or("Groq 默认端点");
+            println!("使用 Whisper STT 进行语音识别（端点: {}）", endpoint);
             Box::new(t)
         }
         Err(e) => {
@@ -126,6 +130,7 @@ fn handle_config(action: ConfigAction) {
                 "temperature",
                 "mic_gain",
                 "groq_api_key",
+                "stt_endpoint",
             ] {
                 let value = config
                     .get_field(key)
@@ -161,16 +166,16 @@ fn handle_config(action: ConfigAction) {
 /// 处理 convert 子命令
 fn handle_convert(input: &str, output: Option<&str>) {
     use config::AppConfig;
-    use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
+    use transcriber::{MockTranscriber, Transcriber, WhisperTranscriber};
 
     println!("正在转录: {}", input);
 
     let config = AppConfig::load();
 
-    let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_config(&config) {
+    let transcriber: Box<dyn Transcriber> = match WhisperTranscriber::from_config(&config) {
         Ok(t) => Box::new(t),
         Err(e) => {
-            eprintln!("警告：无法初始化 Groq（{}），使用 Mock 转录器", e);
+            eprintln!("警告：无法初始化 STT（{}），使用 Mock 转录器", e);
             Box::new(MockTranscriber)
         }
     };

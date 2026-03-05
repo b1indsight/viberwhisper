@@ -15,6 +15,9 @@ pub struct AppConfig {
     pub temperature: f32,
     pub hotkey: String,
     pub mic_gain: f32,
+    /// 自定义 STT 服务端点（OpenAI 兼容格式）。未设置时使用 Groq 默认端点。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stt_endpoint: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -27,6 +30,7 @@ impl Default for AppConfig {
             temperature: 0.0,
             hotkey: "F8".to_string(),
             mic_gain: 1.0,
+            stt_endpoint: None,
         }
     }
 }
@@ -78,6 +82,7 @@ impl AppConfig {
                 .groq_api_key
                 .as_ref()
                 .map(|_| "***（已设置）".to_string()),
+            "stt_endpoint" => self.stt_endpoint.clone(),
             _ => None,
         }
     }
@@ -117,8 +122,16 @@ impl AppConfig {
                 self.groq_api_key = Some(value.to_string());
                 Ok(())
             }
+            "stt_endpoint" => {
+                self.stt_endpoint = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                };
+                Ok(())
+            }
             _ => Err(format!(
-                "未知配置项: {}。可用项: model, hotkey, language, prompt, temperature, mic_gain, groq_api_key",
+                "未知配置项: {}。可用项: model, hotkey, language, prompt, temperature, mic_gain, groq_api_key, stt_endpoint",
                 key
             )),
         }
@@ -145,6 +158,9 @@ impl AppConfig {
         }
         if let Some(prompt) = json["prompt"].as_str() {
             self.prompt = Some(prompt.to_string());
+        }
+        if let Some(endpoint) = json["stt_endpoint"].as_str() {
+            self.stt_endpoint = Some(endpoint.to_string());
         }
     }
 }
@@ -223,5 +239,50 @@ mod tests {
         let mut config = AppConfig::default();
         let result = config.set_field("nonexistent", "value");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_default_stt_endpoint_is_none() {
+        let config = AppConfig::default();
+        assert!(config.stt_endpoint.is_none());
+    }
+
+    #[test]
+    fn test_get_field_stt_endpoint_unset() {
+        let config = AppConfig::default();
+        assert_eq!(config.get_field("stt_endpoint"), None);
+    }
+
+    #[test]
+    fn test_set_field_stt_endpoint() {
+        let mut config = AppConfig::default();
+        config
+            .set_field("stt_endpoint", "http://localhost:8080/v1/audio/transcriptions")
+            .unwrap();
+        assert_eq!(
+            config.stt_endpoint,
+            Some("http://localhost:8080/v1/audio/transcriptions".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_field_stt_endpoint_empty_clears() {
+        let mut config = AppConfig::default();
+        config.stt_endpoint = Some("http://example.com".to_string());
+        config.set_field("stt_endpoint", "").unwrap();
+        assert!(config.stt_endpoint.is_none());
+    }
+
+    #[test]
+    fn test_apply_json_stt_endpoint() {
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({
+            "stt_endpoint": "http://localhost:8080/v1/audio/transcriptions"
+        });
+        config.apply_json(&json);
+        assert_eq!(
+            config.stt_endpoint,
+            Some("http://localhost:8080/v1/audio/transcriptions".to_string())
+        );
     }
 }
