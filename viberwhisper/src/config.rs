@@ -1,13 +1,16 @@
-use serde_json::Value;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::fs;
 
 const CONFIG_FILE: &str = "config.json";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub groq_api_key: Option<String>,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     pub temperature: f32,
     pub hotkey: String,
@@ -32,16 +35,13 @@ impl AppConfig {
     pub fn load() -> Self {
         let mut config = AppConfig::default();
 
-        if Path::new(CONFIG_FILE).exists() {
-            match std::fs::read_to_string(CONFIG_FILE) {
-                Ok(content) => match serde_json::from_str::<Value>(&content) {
-                    Ok(json) => {
-                        config.apply_json(&json);
-                        println!("[Config] 已从 {} 加载配置", CONFIG_FILE);
-                    }
-                    Err(e) => eprintln!("[Config] 解析 {} 失败: {}", CONFIG_FILE, e),
-                },
-                Err(e) => eprintln!("[Config] 读取 {} 失败: {}", CONFIG_FILE, e),
+        if let Ok(content) = fs::read_to_string(CONFIG_FILE) {
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(json) => {
+                    config.apply_json(&json);
+                    println!("[Config] 已从 {} 加载配置", CONFIG_FILE);
+                }
+                Err(e) => eprintln!("[Config] 解析 {} 失败: {}", CONFIG_FILE, e),
             }
         } else {
             println!("[Config] 未找到 {}，使用默认配置", CONFIG_FILE);
@@ -54,7 +54,77 @@ impl AppConfig {
         config
     }
 
-    fn apply_json(&mut self, json: &Value) {
+    /// 将配置保存到 config.json（不包含 groq_api_key）
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut value = serde_json::to_value(self)?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("groq_api_key");
+        }
+        let json = serde_json::to_string_pretty(&value)?;
+        fs::write(CONFIG_FILE, json)?;
+        Ok(())
+    }
+
+    /// 获取指定字段的字符串值
+    pub fn get_field(&self, key: &str) -> Option<String> {
+        match key {
+            "model" => Some(self.model.clone()),
+            "hotkey" => Some(self.hotkey.clone()),
+            "temperature" => Some(self.temperature.to_string()),
+            "mic_gain" => Some(self.mic_gain.to_string()),
+            "language" => self.language.clone(),
+            "prompt" => self.prompt.clone(),
+            "groq_api_key" => self
+                .groq_api_key
+                .as_ref()
+                .map(|_| "***（已设置）".to_string()),
+            _ => None,
+        }
+    }
+
+    /// 设置指定字段的值（接受字符串，自动转换类型）
+    pub fn set_field(&mut self, key: &str, value: &str) -> Result<(), String> {
+        match key {
+            "model" => {
+                self.model = value.to_string();
+                Ok(())
+            }
+            "hotkey" => {
+                self.hotkey = value.to_string();
+                Ok(())
+            }
+            "language" => {
+                self.language = Some(value.to_string());
+                Ok(())
+            }
+            "prompt" => {
+                self.prompt = Some(value.to_string());
+                Ok(())
+            }
+            "temperature" => {
+                self.temperature = value
+                    .parse::<f32>()
+                    .map_err(|_| format!("temperature 必须是浮点数，收到: {}", value))?;
+                Ok(())
+            }
+            "mic_gain" => {
+                self.mic_gain = value
+                    .parse::<f32>()
+                    .map_err(|_| format!("mic_gain 必须是浮点数，收到: {}", value))?;
+                Ok(())
+            }
+            "groq_api_key" => {
+                self.groq_api_key = Some(value.to_string());
+                Ok(())
+            }
+            _ => Err(format!(
+                "未知配置项: {}。可用项: model, hotkey, language, prompt, temperature, mic_gain, groq_api_key",
+                key
+            )),
+        }
+    }
+
+    fn apply_json(&mut self, json: &serde_json::Value) {
         if let Some(key) = json["groq_api_key"].as_str() {
             self.groq_api_key = Some(key.to_string());
         }
@@ -109,5 +179,49 @@ mod tests {
         assert_eq!(config.language.unwrap(), "zh");
         assert_eq!(config.temperature, 0.2);
         assert_eq!(config.hotkey, "F9");
+    }
+
+    #[test]
+    fn test_get_field_known_key() {
+        let config = AppConfig::default();
+        assert_eq!(
+            config.get_field("model"),
+            Some("whisper-large-v3-turbo".to_string())
+        );
+        assert_eq!(config.get_field("hotkey"), Some("F8".to_string()));
+    }
+
+    #[test]
+    fn test_get_field_unknown_key() {
+        let config = AppConfig::default();
+        assert_eq!(config.get_field("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_set_field_string() {
+        let mut config = AppConfig::default();
+        config.set_field("hotkey", "F9").unwrap();
+        assert_eq!(config.hotkey, "F9");
+    }
+
+    #[test]
+    fn test_set_field_float() {
+        let mut config = AppConfig::default();
+        config.set_field("mic_gain", "2.5").unwrap();
+        assert!((config.mic_gain - 2.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_set_field_float_invalid() {
+        let mut config = AppConfig::default();
+        let result = config.set_field("mic_gain", "not_a_number");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_field_unknown_key() {
+        let mut config = AppConfig::default();
+        let result = config.set_field("nonexistent", "value");
+        assert!(result.is_err());
     }
 }

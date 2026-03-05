@@ -1,23 +1,47 @@
 mod audio;
+mod cli;
 mod config;
 mod hotkey;
 mod transcriber;
 mod typer;
 
-use audio::AudioRecorder;
-use config::AppConfig;
-use hotkey::{HotkeyEvent, HotkeyManager};
-use std::sync::{Arc, Mutex};
-use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
-use typer::{TextTyper, WindowsTyper};
+use clap::Parser;
+use cli::{Cli, Commands, ConfigAction};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        None => {
+            run_listener()?;
+        }
+        Some(Commands::Config { action }) => {
+            handle_config(action);
+        }
+        Some(Commands::Convert { input, output }) => {
+            handle_convert(&input, output.as_deref());
+        }
+    }
+
+    Ok(())
+}
+
+/// 原有的语音监听主循环
+fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
+    use audio::AudioRecorder;
+    use config::AppConfig;
+    use hotkey::{HotkeyEvent, HotkeyManager};
+    use std::sync::{Arc, Mutex};
+    use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
+    use typer::{TextTyper, WindowsTyper};
+
     println!("ViberWhisper - Voice-to-Text Input");
     println!("===================================");
     println!();
 
     let config = AppConfig::load();
-    println!("[Config] 热键: {}  模型: {}  语言: {}",
+    println!(
+        "[Config] 热键: {}  模型: {}  语言: {}",
         config.hotkey,
         config.model,
         config.language.as_deref().unwrap_or("auto"),
@@ -38,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let typer = WindowsTyper;
 
-    println!("Hold F8 to record, release to transcribe and type.");
+    println!("Hold {} to record, release to transcribe and type.", config.hotkey);
     println!("Press Ctrl+C to exit.");
     println!();
 
@@ -47,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(event) = hotkey_manager.check_event() {
             match event {
                 HotkeyEvent::Pressed => {
-                    println!("F8 pressed, starting recording...");
+                    println!("{} pressed, starting recording...", config.hotkey);
                     let mut rec = recorder.lock().unwrap();
                     match rec.start_recording() {
                         Ok(()) => println!("Recording started."),
@@ -55,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 HotkeyEvent::Released => {
-                    println!("F8 released, stopping recording...");
+                    println!("{} released, stopping recording...", config.hotkey);
                     let mut rec = recorder.lock().unwrap();
                     match rec.stop_recording() {
                         Ok(wav_path) => {
@@ -77,16 +101,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         counter += 1;
         if counter % 300 == 0 {
-            println!("[Heartbeat] Running... Hold F8 to record");
+            println!("[Heartbeat] Running... Hold {} to record", config.hotkey);
         }
 
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
+/// 处理 config 子命令
+fn handle_config(action: ConfigAction) {
+    use config::AppConfig;
+
+    let mut config = AppConfig::load();
+
+    match action {
+        ConfigAction::List => {
+            println!("{:<15} {}", "配置项", "当前值");
+            println!("{}", "-".repeat(50));
+            for key in &[
+                "model",
+                "hotkey",
+                "language",
+                "prompt",
+                "temperature",
+                "mic_gain",
+                "groq_api_key",
+            ] {
+                let value = config
+                    .get_field(key)
+                    .unwrap_or_else(|| "（未设置）".to_string());
+                println!("{:<15} {}", key, value);
+            }
+        }
+
+        ConfigAction::Get { key } => match config.get_field(&key) {
+            Some(value) => println!("{}", value),
+            None => {
+                eprintln!("错误：未知配置项 '{}'", key);
+                std::process::exit(1);
+            }
+        },
+
+        ConfigAction::Set { key, value } => match config.set_field(&key, &value) {
+            Ok(()) => {
+                if let Err(e) = config.save() {
+                    eprintln!("保存配置失败: {}", e);
+                    std::process::exit(1);
+                }
+                println!("已设置 {} = {}", key, value);
+            }
+            Err(e) => {
+                eprintln!("错误：{}", e);
+                std::process::exit(1);
+            }
+        },
+    }
+}
+
+/// 处理 convert 子命令
+fn handle_convert(input: &str, output: Option<&str>) {
+    use config::AppConfig;
+    use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
+
+    println!("正在转录: {}", input);
+
+    let config = AppConfig::load();
+
+    let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_config(&config) {
+        Ok(t) => Box::new(t),
+        Err(e) => {
+            eprintln!("警告：无法初始化 Groq（{}），使用 Mock 转录器", e);
+            Box::new(MockTranscriber)
+        }
+    };
+
+    match transcriber.transcribe(input) {
+        Ok(text) => match output {
+            Some(path) => {
+                if let Err(e) = std::fs::write(path, &text) {
+                    eprintln!("写入文件失败: {}", e);
+                    std::process::exit(1);
+                }
+                println!("已保存到: {}", path);
+            }
+            None => println!("{}", text),
+        },
+        Err(e) => {
+            eprintln!("转录失败: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    use audio::AudioRecorder;
+    use transcriber::{MockTranscriber, Transcriber};
 
     #[test]
     fn test_audio_module_loads() {
@@ -96,7 +207,7 @@ mod integration_tests {
 
     #[test]
     fn test_full_pipeline_mock() {
-        use typer::MockTyper;
+        use typer::{MockTyper, TextTyper};
         let transcriber = MockTranscriber;
         let typer = MockTyper;
         let text = transcriber.transcribe("fake.wav").unwrap();
