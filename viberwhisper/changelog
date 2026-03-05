@@ -1,1 +1,2 @@
 2024-02-19: Add global hotkey (F8) triggered audio recording with WAV output to current directory
+2026-03-05: Add CLI config system: config get/set/list subcommands and convert subcommand for WAV transcription
