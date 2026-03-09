@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// 原有的语音监听主循环
 fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use audio::AudioRecorder;
-    use config::AppConfig;
+    use config::{AppConfig, RecordingMode};
     use hotkey::{HotkeyEvent, HotkeyManager};
     use std::sync::{Arc, Mutex};
     use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
@@ -41,10 +41,11 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = AppConfig::load();
     println!(
-        "[Config] 热键: {}  模型: {}  语言: {}",
+        "[Config] 热键: {}  模型: {}  语言: {}  录音模式: {}",
         config.hotkey,
         config.model,
         config.language.as_deref().unwrap_or("auto"),
+        config.recording_mode,
     );
     println!();
 
@@ -62,38 +63,69 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     };
     let typer = WindowsTyper;
 
-    println!("Hold {} to record, release to transcribe and type.", config.hotkey);
+    match config.recording_mode {
+        RecordingMode::Hold => {
+            println!("Hold {} to record, release to transcribe and type.", config.hotkey);
+        }
+        RecordingMode::Toggle => {
+            println!("Press {} to start recording, press again to stop and transcribe.", config.hotkey);
+        }
+    }
     println!("Press Ctrl+C to exit.");
     println!();
+
+    // 停止录音并转录的辅助闭包
+    let stop_and_transcribe = |rec: &mut AudioRecorder| {
+        match rec.stop_recording() {
+            Ok(wav_path) => {
+                println!("Recording saved: {}", wav_path);
+                match transcriber.transcribe(&wav_path) {
+                    Ok(text) => {
+                        if let Err(e) = typer.type_text(&text) {
+                            eprintln!("Failed to type text: {}", e);
+                        }
+                    }
+                    Err(e) => eprintln!("Transcription failed: {}", e),
+                }
+            }
+            Err(e) => eprintln!("Failed to stop recording: {}", e),
+        }
+    };
 
     let mut counter = 0;
     loop {
         if let Some(event) = hotkey_manager.check_event() {
-            match event {
-                HotkeyEvent::Pressed => {
-                    println!("{} pressed, starting recording...", config.hotkey);
-                    let mut rec = recorder.lock().unwrap();
-                    match rec.start_recording() {
-                        Ok(()) => println!("Recording started."),
-                        Err(e) => eprintln!("Failed to start recording: {}", e),
-                    }
-                }
-                HotkeyEvent::Released => {
-                    println!("{} released, stopping recording...", config.hotkey);
-                    let mut rec = recorder.lock().unwrap();
-                    match rec.stop_recording() {
-                        Ok(wav_path) => {
-                            println!("Recording saved: {}", wav_path);
-                            match transcriber.transcribe(&wav_path) {
-                                Ok(text) => {
-                                    if let Err(e) = typer.type_text(&text) {
-                                        eprintln!("Failed to type text: {}", e);
-                                    }
-                                }
-                                Err(e) => eprintln!("Transcription failed: {}", e),
+            match config.recording_mode {
+                RecordingMode::Hold => {
+                    match event {
+                        HotkeyEvent::Pressed => {
+                            println!("{} pressed, starting recording...", config.hotkey);
+                            let mut rec = recorder.lock().unwrap();
+                            match rec.start_recording() {
+                                Ok(()) => println!("Recording started."),
+                                Err(e) => eprintln!("Failed to start recording: {}", e),
                             }
                         }
-                        Err(e) => eprintln!("Failed to stop recording: {}", e),
+                        HotkeyEvent::Released => {
+                            println!("{} released, stopping recording...", config.hotkey);
+                            let mut rec = recorder.lock().unwrap();
+                            stop_and_transcribe(&mut rec);
+                        }
+                    }
+                }
+                RecordingMode::Toggle => {
+                    if let HotkeyEvent::Pressed = event {
+                        let mut rec = recorder.lock().unwrap();
+                        if rec.is_recording() {
+                            println!("{} pressed, stopping recording...", config.hotkey);
+                            stop_and_transcribe(&mut rec);
+                        } else {
+                            println!("{} pressed, starting recording...", config.hotkey);
+                            match rec.start_recording() {
+                                Ok(()) => println!("Recording started."),
+                                Err(e) => eprintln!("Failed to start recording: {}", e),
+                            }
+                        }
                     }
                 }
             }
@@ -101,7 +133,12 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
 
         counter += 1;
         if counter % 300 == 0 {
-            println!("[Heartbeat] Running... Hold {} to record", config.hotkey);
+            let status = if recorder.lock().unwrap().is_recording() {
+                "Recording..."
+            } else {
+                "Idle"
+            };
+            println!("[Heartbeat] {} | {} mode | {}", status, config.recording_mode, config.hotkey);
         }
 
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -125,6 +162,7 @@ fn handle_config(action: ConfigAction) {
                 "prompt",
                 "temperature",
                 "mic_gain",
+                "recording_mode",
                 "groq_api_key",
             ] {
                 let value = config
