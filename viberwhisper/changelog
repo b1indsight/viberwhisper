@@ -1,3 +1,4 @@
 2024-02-19: Add global hotkey (F8) triggered audio recording with WAV output to current directory
 2026-03-05: Add CLI config system: config get/set/list subcommands and convert subcommand for WAV transcription
 2026-03-10: Add dual-hotkey recording: hold_hotkey (F8) for press-and-hold recording, toggle_hotkey (F9) for press-to-toggle recording
+2026-03-10: Add system tray icon: idle (gray) / recording (red) status indicator, right-click menu with exit option, cross-platform (macOS + Windows)
