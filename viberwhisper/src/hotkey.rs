@@ -6,41 +6,80 @@ use std::time::Duration;
 use rdev::{listen, Event, EventType, Key};
 
 // Thread-safe state for tracking key states
-static F8_PRESSED: AtomicBool = AtomicBool::new(false);
-static F8_RELEASED: AtomicBool = AtomicBool::new(false);
+static HOLD_PRESSED: AtomicBool = AtomicBool::new(false);
+static HOLD_RELEASED: AtomicBool = AtomicBool::new(false);
+static TOGGLE_PRESSED: AtomicBool = AtomicBool::new(false);
+
+/// 将热键字符串解析为 rdev::Key
+pub fn parse_key(s: &str) -> Option<Key> {
+    match s.to_uppercase().as_str() {
+        "F1" => Some(Key::F1),
+        "F2" => Some(Key::F2),
+        "F3" => Some(Key::F3),
+        "F4" => Some(Key::F4),
+        "F5" => Some(Key::F5),
+        "F6" => Some(Key::F6),
+        "F7" => Some(Key::F7),
+        "F8" => Some(Key::F8),
+        "F9" => Some(Key::F9),
+        "F10" => Some(Key::F10),
+        "F11" => Some(Key::F11),
+        "F12" => Some(Key::F12),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HotkeySource {
+    Hold,
+    Toggle,
+}
+
+pub enum HotkeyEvent {
+    Pressed(HotkeySource),
+    Released(HotkeySource),
+}
 
 pub struct HotkeyManager {
     running: Arc<AtomicBool>,
 }
 
-pub enum HotkeyEvent {
-    Pressed,
-    Released,
-}
-
 impl HotkeyManager {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        hold_hotkey: &str,
+        toggle_hotkey: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let hold_key = parse_key(hold_hotkey);
+        let toggle_key = parse_key(toggle_hotkey);
+
+        if hold_key.is_none() && toggle_key.is_none() {
+            return Err("至少需要配置一个有效的热键 (hold_hotkey 或 toggle_hotkey)".into());
+        }
+
         let running = Arc::new(AtomicBool::new(true));
 
-        // Start rdev listener in a new thread
         thread::spawn(move || {
             println!("[DEBUG] rdev listener thread started");
 
             let callback = move |event: Event| {
-                // Log ALL key events for debugging
                 match &event.event_type {
                     EventType::KeyPress(key) => {
-                        println!("[rdev] KeyPress: {:?}", key);
-                        if *key == Key::F8 {
-                            println!("[rdev] >>> F8 key PRESSED <<<");
-                            F8_PRESSED.store(true, Ordering::Relaxed);
+                        if let Some(hk) = hold_key {
+                            if *key == hk {
+                                HOLD_PRESSED.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        if let Some(tk) = toggle_key {
+                            if *key == tk {
+                                TOGGLE_PRESSED.store(true, Ordering::Relaxed);
+                            }
                         }
                     }
                     EventType::KeyRelease(key) => {
-                        println!("[rdev] KeyRelease: {:?}", key);
-                        if *key == Key::F8 {
-                            println!("[rdev] >>> F8 key RELEASED <<<");
-                            F8_RELEASED.store(true, Ordering::Relaxed);
+                        if let Some(hk) = hold_key {
+                            if *key == hk {
+                                HOLD_RELEASED.store(true, Ordering::Relaxed);
+                            }
                         }
                     }
                     _ => {}
@@ -57,22 +96,26 @@ impl HotkeyManager {
         // Give the listener a moment to start
         thread::sleep(Duration::from_millis(100));
 
-        println!("Registered global hotkey: F8");
+        if let Some(_) = hold_key {
+            println!("Registered hold hotkey: {}", hold_hotkey);
+        }
+        if let Some(_) = toggle_key {
+            println!("Registered toggle hotkey: {}", toggle_hotkey);
+        }
 
         Ok(HotkeyManager { running })
     }
 
     pub fn check_event(&self) -> Option<HotkeyEvent> {
-        // Check for F8 press event
-        if F8_PRESSED.swap(false, Ordering::Relaxed) {
-            return Some(HotkeyEvent::Pressed);
+        if HOLD_PRESSED.swap(false, Ordering::Relaxed) {
+            return Some(HotkeyEvent::Pressed(HotkeySource::Hold));
         }
-
-        // Check for F8 release event
-        if F8_RELEASED.swap(false, Ordering::Relaxed) {
-            return Some(HotkeyEvent::Released);
+        if HOLD_RELEASED.swap(false, Ordering::Relaxed) {
+            return Some(HotkeyEvent::Released(HotkeySource::Hold));
         }
-
+        if TOGGLE_PRESSED.swap(false, Ordering::Relaxed) {
+            return Some(HotkeyEvent::Pressed(HotkeySource::Toggle));
+        }
         None
     }
 }
@@ -89,8 +132,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_parse_key() {
+        assert_eq!(parse_key("F8"), Some(Key::F8));
+        assert_eq!(parse_key("f9"), Some(Key::F9));
+        assert_eq!(parse_key("F12"), Some(Key::F12));
+        assert_eq!(parse_key("invalid"), None);
+    }
+
+    #[test]
     fn test_hotkey_manager_creation() {
         // Note: rdev listener requires appropriate permissions
-        let _ = HotkeyManager::new();
+        let _ = HotkeyManager::new("F8", "F9");
     }
 }

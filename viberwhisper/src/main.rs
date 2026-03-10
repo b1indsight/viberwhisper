@@ -29,8 +29,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// 原有的语音监听主循环
 fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use audio::AudioRecorder;
-    use config::{AppConfig, RecordingMode};
-    use hotkey::{HotkeyEvent, HotkeyManager};
+    use config::AppConfig;
+    use hotkey::{HotkeyEvent, HotkeyManager, HotkeySource};
     use std::sync::{Arc, Mutex};
     use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
     use typer::{TextTyper, WindowsTyper};
@@ -41,15 +41,15 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = AppConfig::load();
     println!(
-        "[Config] 热键: {}  模型: {}  语言: {}  录音模式: {}",
-        config.hotkey,
+        "[Config] Hold热键: {}  Toggle热键: {}  模型: {}  语言: {}",
+        config.hold_hotkey,
+        config.toggle_hotkey,
         config.model,
         config.language.as_deref().unwrap_or("auto"),
-        config.recording_mode,
     );
     println!();
 
-    let hotkey_manager = HotkeyManager::new()?;
+    let hotkey_manager = HotkeyManager::new(&config.hold_hotkey, &config.toggle_hotkey)?;
     let recorder = Arc::new(Mutex::new(AudioRecorder::new(config.mic_gain)?));
     let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_config(&config) {
         Ok(t) => {
@@ -63,14 +63,11 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     };
     let typer = WindowsTyper;
 
-    match config.recording_mode {
-        RecordingMode::Hold => {
-            println!("Hold {} to record, release to transcribe and type.", config.hotkey);
-        }
-        RecordingMode::Toggle => {
-            println!("Press {} to start recording, press again to stop and transcribe.", config.hotkey);
-        }
-    }
+    println!("Hold {} to record, release to transcribe.", config.hold_hotkey);
+    println!(
+        "Press {} to start recording, press again to stop.",
+        config.toggle_hotkey
+    );
     println!("Press Ctrl+C to exit.");
     println!();
 
@@ -95,39 +92,47 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     let mut counter = 0;
     loop {
         if let Some(event) = hotkey_manager.check_event() {
-            match config.recording_mode {
-                RecordingMode::Hold => {
-                    match event {
-                        HotkeyEvent::Pressed => {
-                            println!("{} pressed, starting recording...", config.hotkey);
-                            let mut rec = recorder.lock().unwrap();
-                            match rec.start_recording() {
-                                Ok(()) => println!("Recording started."),
-                                Err(e) => eprintln!("Failed to start recording: {}", e),
-                            }
-                        }
-                        HotkeyEvent::Released => {
-                            println!("{} released, stopping recording...", config.hotkey);
-                            let mut rec = recorder.lock().unwrap();
-                            stop_and_transcribe(&mut rec);
+            match event {
+                // Hold 模式：按下开始录音
+                HotkeyEvent::Pressed(HotkeySource::Hold) => {
+                    println!("{} pressed (hold), starting recording...", config.hold_hotkey);
+                    let mut rec = recorder.lock().unwrap();
+                    match rec.start_recording() {
+                        Ok(()) => println!("Recording started."),
+                        Err(e) => eprintln!("Failed to start recording: {}", e),
+                    }
+                }
+                // Hold 模式：松开停止录音并转录
+                HotkeyEvent::Released(HotkeySource::Hold) => {
+                    println!(
+                        "{} released (hold), stopping recording...",
+                        config.hold_hotkey
+                    );
+                    let mut rec = recorder.lock().unwrap();
+                    stop_and_transcribe(&mut rec);
+                }
+                // Toggle 模式：按下切换录音状态
+                HotkeyEvent::Pressed(HotkeySource::Toggle) => {
+                    let mut rec = recorder.lock().unwrap();
+                    if rec.is_recording() {
+                        println!(
+                            "{} pressed (toggle), stopping recording...",
+                            config.toggle_hotkey
+                        );
+                        stop_and_transcribe(&mut rec);
+                    } else {
+                        println!(
+                            "{} pressed (toggle), starting recording...",
+                            config.toggle_hotkey
+                        );
+                        match rec.start_recording() {
+                            Ok(()) => println!("Recording started."),
+                            Err(e) => eprintln!("Failed to start recording: {}", e),
                         }
                     }
                 }
-                RecordingMode::Toggle => {
-                    if let HotkeyEvent::Pressed = event {
-                        let mut rec = recorder.lock().unwrap();
-                        if rec.is_recording() {
-                            println!("{} pressed, stopping recording...", config.hotkey);
-                            stop_and_transcribe(&mut rec);
-                        } else {
-                            println!("{} pressed, starting recording...", config.hotkey);
-                            match rec.start_recording() {
-                                Ok(()) => println!("Recording started."),
-                                Err(e) => eprintln!("Failed to start recording: {}", e),
-                            }
-                        }
-                    }
-                }
+                // Toggle 模式不需要处理 Released 事件
+                HotkeyEvent::Released(HotkeySource::Toggle) => {}
             }
         }
 
@@ -138,7 +143,10 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 "Idle"
             };
-            println!("[Heartbeat] {} | {} mode | {}", status, config.recording_mode, config.hotkey);
+            println!(
+                "[Heartbeat] {} | hold={} toggle={}",
+                status, config.hold_hotkey, config.toggle_hotkey
+            );
         }
 
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -157,12 +165,12 @@ fn handle_config(action: ConfigAction) {
             println!("{}", "-".repeat(50));
             for key in &[
                 "model",
-                "hotkey",
+                "hold_hotkey",
+                "toggle_hotkey",
                 "language",
                 "prompt",
                 "temperature",
                 "mic_gain",
-                "recording_mode",
                 "groq_api_key",
             ] {
                 let value = config

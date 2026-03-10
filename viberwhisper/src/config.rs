@@ -3,22 +3,6 @@ use std::fs;
 
 const CONFIG_FILE: &str = "config.json";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum RecordingMode {
-    Hold,
-    Toggle,
-}
-
-impl std::fmt::Display for RecordingMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RecordingMode::Hold => write!(f, "hold"),
-            RecordingMode::Toggle => write!(f, "toggle"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,9 +13,9 @@ pub struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     pub temperature: f32,
-    pub hotkey: String,
+    pub hold_hotkey: String,
+    pub toggle_hotkey: String,
     pub mic_gain: f32,
-    pub recording_mode: RecordingMode,
 }
 
 impl Default for AppConfig {
@@ -42,9 +26,9 @@ impl Default for AppConfig {
             language: Some("zh".to_string()),
             prompt: Some("以下是一段简体中文的普通话句子，去掉首尾的语气词".to_string()),
             temperature: 0.0,
-            hotkey: "F8".to_string(),
+            hold_hotkey: "F8".to_string(),
+            toggle_hotkey: "F9".to_string(),
             mic_gain: 1.0,
-            recording_mode: RecordingMode::Toggle,
         }
     }
 }
@@ -87,7 +71,8 @@ impl AppConfig {
     pub fn get_field(&self, key: &str) -> Option<String> {
         match key {
             "model" => Some(self.model.clone()),
-            "hotkey" => Some(self.hotkey.clone()),
+            "hold_hotkey" => Some(self.hold_hotkey.clone()),
+            "toggle_hotkey" => Some(self.toggle_hotkey.clone()),
             "temperature" => Some(self.temperature.to_string()),
             "mic_gain" => Some(self.mic_gain.to_string()),
             "language" => self.language.clone(),
@@ -96,7 +81,6 @@ impl AppConfig {
                 .groq_api_key
                 .as_ref()
                 .map(|_| "***（已设置）".to_string()),
-            "recording_mode" => Some(self.recording_mode.to_string()),
             _ => None,
         }
     }
@@ -108,8 +92,12 @@ impl AppConfig {
                 self.model = value.to_string();
                 Ok(())
             }
-            "hotkey" => {
-                self.hotkey = value.to_string();
+            "hold_hotkey" => {
+                self.hold_hotkey = value.to_string();
+                Ok(())
+            }
+            "toggle_hotkey" => {
+                self.toggle_hotkey = value.to_string();
                 Ok(())
             }
             "language" => {
@@ -136,24 +124,8 @@ impl AppConfig {
                 self.groq_api_key = Some(value.to_string());
                 Ok(())
             }
-            "recording_mode" => {
-                match value.to_lowercase().as_str() {
-                    "hold" => {
-                        self.recording_mode = RecordingMode::Hold;
-                        Ok(())
-                    }
-                    "toggle" => {
-                        self.recording_mode = RecordingMode::Toggle;
-                        Ok(())
-                    }
-                    _ => Err(format!(
-                        "recording_mode 必须是 hold 或 toggle，收到: {}",
-                        value
-                    )),
-                }
-            }
             _ => Err(format!(
-                "未知配置项: {}。可用项: model, hotkey, language, prompt, temperature, mic_gain, recording_mode, groq_api_key",
+                "未知配置项: {}。可用项: model, hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain, groq_api_key",
                 key
             )),
         }
@@ -172,21 +144,21 @@ impl AppConfig {
         if let Some(temp) = json["temperature"].as_f64() {
             self.temperature = temp as f32;
         }
+        // 向后兼容：旧的 hotkey 字段映射到 hold_hotkey
         if let Some(hotkey) = json["hotkey"].as_str() {
-            self.hotkey = hotkey.to_string();
+            self.hold_hotkey = hotkey.to_string();
+        }
+        if let Some(hotkey) = json["hold_hotkey"].as_str() {
+            self.hold_hotkey = hotkey.to_string();
+        }
+        if let Some(hotkey) = json["toggle_hotkey"].as_str() {
+            self.toggle_hotkey = hotkey.to_string();
         }
         if let Some(gain) = json["mic_gain"].as_f64() {
             self.mic_gain = gain as f32;
         }
         if let Some(prompt) = json["prompt"].as_str() {
             self.prompt = Some(prompt.to_string());
-        }
-        if let Some(mode) = json["recording_mode"].as_str() {
-            match mode {
-                "hold" => self.recording_mode = RecordingMode::Hold,
-                "toggle" => self.recording_mode = RecordingMode::Toggle,
-                _ => eprintln!("[Config] 未知 recording_mode: {}，忽略", mode),
-            }
         }
     }
 }
@@ -199,11 +171,11 @@ mod tests {
     fn test_default_config() {
         let config = AppConfig::default();
         assert_eq!(config.model, "whisper-large-v3-turbo");
-        assert_eq!(config.hotkey, "F8");
+        assert_eq!(config.hold_hotkey, "F8");
+        assert_eq!(config.toggle_hotkey, "F9");
         assert_eq!(config.temperature, 0.0);
         assert!(config.groq_api_key.is_none());
         assert_eq!(config.language.as_deref(), Some("zh"));
-        assert_eq!(config.recording_mode, RecordingMode::Toggle);
     }
 
     #[test]
@@ -214,14 +186,26 @@ mod tests {
             "model": "whisper-large-v3",
             "language": "zh",
             "temperature": 0.2,
-            "hotkey": "F9"
+            "hold_hotkey": "F10",
+            "toggle_hotkey": "F11"
         });
         config.apply_json(&json);
         assert_eq!(config.groq_api_key.unwrap(), "test_key");
         assert_eq!(config.model, "whisper-large-v3");
         assert_eq!(config.language.unwrap(), "zh");
         assert_eq!(config.temperature, 0.2);
-        assert_eq!(config.hotkey, "F9");
+        assert_eq!(config.hold_hotkey, "F10");
+        assert_eq!(config.toggle_hotkey, "F11");
+    }
+
+    #[test]
+    fn test_apply_json_backward_compat() {
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({
+            "hotkey": "F10"
+        });
+        config.apply_json(&json);
+        assert_eq!(config.hold_hotkey, "F10");
     }
 
     #[test]
@@ -231,7 +215,8 @@ mod tests {
             config.get_field("model"),
             Some("whisper-large-v3-turbo".to_string())
         );
-        assert_eq!(config.get_field("hotkey"), Some("F8".to_string()));
+        assert_eq!(config.get_field("hold_hotkey"), Some("F8".to_string()));
+        assert_eq!(config.get_field("toggle_hotkey"), Some("F9".to_string()));
     }
 
     #[test]
@@ -243,8 +228,10 @@ mod tests {
     #[test]
     fn test_set_field_string() {
         let mut config = AppConfig::default();
-        config.set_field("hotkey", "F9").unwrap();
-        assert_eq!(config.hotkey, "F9");
+        config.set_field("hold_hotkey", "F10").unwrap();
+        assert_eq!(config.hold_hotkey, "F10");
+        config.set_field("toggle_hotkey", "F11").unwrap();
+        assert_eq!(config.toggle_hotkey, "F11");
     }
 
     #[test]
@@ -266,33 +253,5 @@ mod tests {
         let mut config = AppConfig::default();
         let result = config.set_field("nonexistent", "value");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_recording_mode_default_is_toggle() {
-        let config = AppConfig::default();
-        assert_eq!(config.recording_mode, RecordingMode::Toggle);
-    }
-
-    #[test]
-    fn test_set_recording_mode() {
-        let mut config = AppConfig::default();
-        config.set_field("recording_mode", "hold").unwrap();
-        assert_eq!(config.recording_mode, RecordingMode::Hold);
-        config.set_field("recording_mode", "toggle").unwrap();
-        assert_eq!(config.recording_mode, RecordingMode::Toggle);
-    }
-
-    #[test]
-    fn test_set_recording_mode_invalid() {
-        let mut config = AppConfig::default();
-        let result = config.set_field("recording_mode", "invalid");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_get_recording_mode() {
-        let config = AppConfig::default();
-        assert_eq!(config.get_field("recording_mode"), Some("toggle".to_string()));
     }
 }
