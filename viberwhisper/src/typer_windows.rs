@@ -1,4 +1,5 @@
 use crate::typer::TextTyper;
+use tracing::info;
 
 pub struct WindowsTyper;
 
@@ -35,7 +36,7 @@ impl TextTyper for WindowsTyper {
             .into());
         }
 
-        println!("[WindowsTyper] 已输入: {}", text);
+        info!(text = %text, "已输入");
         Ok(())
     }
 }
