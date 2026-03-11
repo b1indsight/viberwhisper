@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use tracing::{info, instrument};
 
 pub trait Transcriber {
     fn transcribe(&self, wav_path: &str) -> Result<String, Box<dyn std::error::Error>>;
@@ -7,10 +8,11 @@ pub trait Transcriber {
 pub struct MockTranscriber;
 
 impl Transcriber for MockTranscriber {
+    #[instrument(name = "mock_stt", skip(self), fields(path = %wav_path))]
     fn transcribe(&self, wav_path: &str) -> Result<String, Box<dyn std::error::Error>> {
-        println!("[Mock STT] 正在识别: {}", wav_path);
+        info!("开始识别");
         let text = "这是一段模拟识别出来的文字".to_string();
-        println!("[Mock STT] 识别结果: {}", text);
+        info!(result = %text, "识别完成");
         Ok(text)
     }
 }
@@ -40,8 +42,9 @@ impl GroqTranscriber {
 }
 
 impl Transcriber for GroqTranscriber {
+    #[instrument(name = "groq_stt", skip(self), fields(path = %wav_path))]
     fn transcribe(&self, wav_path: &str) -> Result<String, Box<dyn std::error::Error>> {
-        println!("[Groq STT] 正在识别: {}", wav_path);
+        info!("开始识别");
 
         let file_bytes = std::fs::read(wav_path)?;
         let file_name = std::path::Path::new(wav_path)
@@ -88,7 +91,7 @@ impl Transcriber for GroqTranscriber {
             .trim()
             .to_string();
 
-        println!("[Groq STT] 识别结果: {}", text);
+        info!(result = %text, "识别完成");
         Ok(text)
     }
 }
