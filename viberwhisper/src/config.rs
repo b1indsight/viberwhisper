@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use tracing::{info, warn};
 
 const CONFIG_FILE: &str = "config.json";
 
@@ -41,12 +42,12 @@ impl AppConfig {
             match serde_json::from_str::<serde_json::Value>(&content) {
                 Ok(json) => {
                     config.apply_json(&json);
-                    println!("[Config] 已从 {} 加载配置", CONFIG_FILE);
+                    info!(file = %CONFIG_FILE, "配置加载成功");
                 }
-                Err(e) => eprintln!("[Config] 解析 {} 失败: {}", CONFIG_FILE, e),
+                Err(e) => warn!(file = %CONFIG_FILE, error = %e, "配置解析失败，使用默认配置"),
             }
         } else {
-            println!("[Config] 未找到 {}，使用默认配置", CONFIG_FILE);
+            info!(file = %CONFIG_FILE, "配置文件未找到，使用默认配置");
         }
 
         if let Ok(key) = std::env::var("GROQ_API_KEY") {
