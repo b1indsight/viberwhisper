@@ -1,4 +1,4 @@
-use crate::typer::TextTyper;
+use crate::input::typer::TextTyper;
 use tracing::info;
 
 pub struct WindowsTyper;

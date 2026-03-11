@@ -1,17 +1,11 @@
 mod audio;
-mod cli;
-mod config;
-mod hotkey;
+mod core;
+mod input;
+mod platform;
 mod transcriber;
-mod tray;
-mod typer;
-#[cfg(target_os = "macos")]
-mod typer_macos;
-#[cfg(target_os = "windows")]
-mod typer_windows;
 
 use clap::Parser;
-use cli::{Cli, Commands, ConfigAction};
+use core::cli::{Cli, Commands, ConfigAction};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -43,12 +37,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use audio::AudioRecorder;
-    use config::AppConfig;
-    use hotkey::{HotkeyEvent, HotkeyManager, HotkeySource};
+    use core::config::AppConfig;
+    use input::hotkey::{HotkeyEvent, HotkeyManager, HotkeySource};
+    use input::tray::TrayManager;
+    use input::typer::TextTyper;
     use std::sync::{Arc, Mutex};
     use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
-    use tray::TrayManager;
-    use typer::TextTyper;
 
     println!("ViberWhisper - Voice-to-Text Input");
     println!("===================================");
@@ -77,11 +71,11 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     #[cfg(target_os = "macos")]
-    let typer = typer_macos::MacTyper;
+    let typer = platform::macos::MacTyper;
     #[cfg(target_os = "windows")]
-    let typer = typer_windows::WindowsTyper;
+    let typer = platform::windows::WindowsTyper;
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let typer = typer::MockTyper;
+    let typer = input::typer::MockTyper;
 
     let mut tray = TrayManager::new()?;
     info!("System tray icon started");
@@ -178,7 +172,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn handle_config(action: ConfigAction) {
-    use config::AppConfig;
+    use core::config::AppConfig;
 
     let mut config = AppConfig::load();
 
@@ -228,7 +222,7 @@ fn handle_config(action: ConfigAction) {
 }
 
 fn handle_convert(input: &str, output: Option<&str>) {
-    use config::AppConfig;
+    use core::config::AppConfig;
     use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
 
     println!("Transcribing: {}", input);
@@ -275,7 +269,7 @@ mod integration_tests {
 
     #[test]
     fn test_full_pipeline_mock() {
-        use typer::{MockTyper, TextTyper};
+        use input::typer::{MockTyper, TextTyper};
         let transcriber = MockTranscriber;
         let typer = MockTyper;
         let text = transcriber.transcribe("fake.wav").unwrap();

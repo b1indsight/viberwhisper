@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::core::config::AppConfig;
 use tracing::{info, instrument};
 
 pub trait Transcriber {
