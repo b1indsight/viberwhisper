@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod hotkey;
 mod transcriber;
+mod tray;
 mod typer;
 #[cfg(target_os = "macos")]
 mod typer_macos;
@@ -37,6 +38,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use hotkey::{HotkeyEvent, HotkeyManager, HotkeySource};
     use std::sync::{Arc, Mutex};
     use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
+    use tray::TrayManager;
     use typer::TextTyper;
 
     println!("ViberWhisper - Voice-to-Text Input");
@@ -73,6 +75,9 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let typer = typer::MockTyper;
 
+    let mut tray = TrayManager::new()?;
+    println!("[Tray] 系统托盘图标已启动");
+
     println!("Hold {} to record, release to transcribe.", config.hold_hotkey);
     println!(
         "Press {} to start recording, press again to stop.",
@@ -108,7 +113,10 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{} pressed (hold), starting recording...", config.hold_hotkey);
                     let mut rec = recorder.lock().unwrap();
                     match rec.start_recording() {
-                        Ok(()) => println!("Recording started."),
+                        Ok(()) => {
+                            println!("Recording started.");
+                            tray.set_recording(true);
+                        }
                         Err(e) => eprintln!("Failed to start recording: {}", e),
                     }
                 }
@@ -120,6 +128,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     let mut rec = recorder.lock().unwrap();
                     stop_and_transcribe(&mut rec);
+                    tray.set_recording(false);
                 }
                 // Toggle 模式：按下切换录音状态
                 HotkeyEvent::Pressed(HotkeySource::Toggle) => {
@@ -130,13 +139,17 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                             config.toggle_hotkey
                         );
                         stop_and_transcribe(&mut rec);
+                        tray.set_recording(false);
                     } else {
                         println!(
                             "{} pressed (toggle), starting recording...",
                             config.toggle_hotkey
                         );
                         match rec.start_recording() {
-                            Ok(()) => println!("Recording started."),
+                            Ok(()) => {
+                                println!("Recording started.");
+                                tray.set_recording(true);
+                            }
                             Err(e) => eprintln!("Failed to start recording: {}", e),
                         }
                     }
@@ -144,6 +157,12 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                 // Toggle 模式不需要处理 Released 事件
                 HotkeyEvent::Released(HotkeySource::Toggle) => {}
             }
+        }
+
+        // 检查托盘菜单退出
+        if tray.check_exit() {
+            println!("[Tray] 用户点击退出");
+            break Ok(());
         }
 
         counter += 1;
