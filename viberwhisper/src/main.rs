@@ -12,6 +12,7 @@ mod typer_windows;
 
 use clap::Parser;
 use cli::{Cli, Commands, ConfigAction};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,7 +41,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 原有的语音监听主循环
 fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use audio::AudioRecorder;
     use config::AppConfig;
@@ -55,24 +55,23 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let config = AppConfig::load();
-    println!(
-        "[Config] Hold热键: {}  Toggle热键: {}  模型: {}  语言: {}",
-        config.hold_hotkey,
-        config.toggle_hotkey,
-        config.model,
-        config.language.as_deref().unwrap_or("auto"),
+    info!(
+        hold_hotkey = %config.hold_hotkey,
+        toggle_hotkey = %config.toggle_hotkey,
+        model = %config.model,
+        language = %config.language.as_deref().unwrap_or("auto"),
+        "Config loaded"
     );
-    println!();
 
     let hotkey_manager = HotkeyManager::new(&config.hold_hotkey, &config.toggle_hotkey)?;
     let recorder = Arc::new(Mutex::new(AudioRecorder::new(config.mic_gain)?));
     let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_config(&config) {
         Ok(t) => {
-            println!("使用 Groq Whisper 进行语音识别");
+            info!("Using Groq Whisper for speech recognition");
             Box::new(t)
         }
         Err(e) => {
-            eprintln!("警告: {} - 回退到 Mock 模式", e);
+            warn!(error = %e, "Failed to initialize Groq, falling back to Mock mode");
             Box::new(MockTranscriber)
         }
     };
@@ -85,7 +84,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     let typer = typer::MockTyper;
 
     let mut tray = TrayManager::new()?;
-    println!("[Tray] 系统托盘图标已启动");
+    info!("System tray icon started");
 
     println!("Hold {} to record, release to transcribe.", config.hold_hotkey);
     println!(
@@ -95,21 +94,20 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     println!("Press Ctrl+C to exit.");
     println!();
 
-    // 停止录音并转录的辅助闭包
     let stop_and_transcribe = |rec: &mut AudioRecorder| {
         match rec.stop_recording() {
             Ok(wav_path) => {
-                println!("Recording saved: {}", wav_path);
+                debug!(path = %wav_path, "Recording saved");
                 match transcriber.transcribe(&wav_path) {
                     Ok(text) => {
                         if let Err(e) = typer.type_text(&text) {
-                            eprintln!("Failed to type text: {}", e);
+                            error!(error = %e, "Failed to type text");
                         }
                     }
-                    Err(e) => eprintln!("Transcription failed: {}", e),
+                    Err(e) => error!(error = %e, "Transcription failed"),
                 }
             }
-            Err(e) => eprintln!("Failed to stop recording: {}", e),
+            Err(e) => error!(error = %e, "Failed to stop recording"),
         }
     };
 
@@ -117,73 +115,61 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         if let Some(event) = hotkey_manager.check_event() {
             match event {
-                // Hold 模式：按下开始录音
                 HotkeyEvent::Pressed(HotkeySource::Hold) => {
-                    println!("{} pressed (hold), starting recording...", config.hold_hotkey);
+                    info!(hotkey = %config.hold_hotkey, "Hold key pressed, starting recording");
                     let mut rec = recorder.lock().unwrap();
                     match rec.start_recording() {
                         Ok(()) => {
-                            println!("Recording started.");
+                            info!("Recording started");
                             tray.set_recording(true);
                         }
-                        Err(e) => eprintln!("Failed to start recording: {}", e),
+                        Err(e) => error!(error = %e, "Failed to start recording"),
                     }
                 }
-                // Hold 模式：松开停止录音并转录
                 HotkeyEvent::Released(HotkeySource::Hold) => {
-                    println!(
-                        "{} released (hold), stopping recording...",
-                        config.hold_hotkey
-                    );
+                    info!(hotkey = %config.hold_hotkey, "Hold key released, stopping recording");
                     let mut rec = recorder.lock().unwrap();
                     stop_and_transcribe(&mut rec);
                     tray.set_recording(false);
                 }
-                // Toggle 模式：按下切换录音状态
                 HotkeyEvent::Pressed(HotkeySource::Toggle) => {
                     let mut rec = recorder.lock().unwrap();
                     if rec.is_recording() {
-                        println!(
-                            "{} pressed (toggle), stopping recording...",
-                            config.toggle_hotkey
-                        );
+                        info!(hotkey = %config.toggle_hotkey, "Toggle key pressed, stopping recording");
                         stop_and_transcribe(&mut rec);
                         tray.set_recording(false);
                     } else {
-                        println!(
-                            "{} pressed (toggle), starting recording...",
-                            config.toggle_hotkey
-                        );
+                        info!(hotkey = %config.toggle_hotkey, "Toggle key pressed, starting recording");
                         match rec.start_recording() {
                             Ok(()) => {
-                                println!("Recording started.");
+                                info!("Recording started");
                                 tray.set_recording(true);
                             }
-                            Err(e) => eprintln!("Failed to start recording: {}", e),
+                            Err(e) => error!(error = %e, "Failed to start recording"),
                         }
                     }
                 }
-                // Toggle 模式不需要处理 Released 事件
                 HotkeyEvent::Released(HotkeySource::Toggle) => {}
             }
         }
 
-        // 检查托盘菜单退出
         if tray.check_exit() {
-            println!("[Tray] 用户点击退出");
+            info!("User clicked exit from tray");
             break Ok(());
         }
 
         counter += 1;
         if counter % 300 == 0 {
             let status = if recorder.lock().unwrap().is_recording() {
-                "Recording..."
+                "recording"
             } else {
-                "Idle"
+                "idle"
             };
-            println!(
-                "[Heartbeat] {} | hold={} toggle={}",
-                status, config.hold_hotkey, config.toggle_hotkey
+            debug!(
+                status = status,
+                hold_hotkey = %config.hold_hotkey,
+                toggle_hotkey = %config.toggle_hotkey,
+                "Heartbeat"
             );
         }
 
@@ -191,7 +177,6 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// 处理 config 子命令
 fn handle_config(action: ConfigAction) {
     use config::AppConfig;
 
@@ -199,7 +184,7 @@ fn handle_config(action: ConfigAction) {
 
     match action {
         ConfigAction::List => {
-            println!("{:<15} {}", "配置项", "当前值");
+            println!("{:<15} {}", "Key", "Value");
             println!("{}", "-".repeat(50));
             for key in &[
                 "model",
@@ -213,7 +198,7 @@ fn handle_config(action: ConfigAction) {
             ] {
                 let value = config
                     .get_field(key)
-                    .unwrap_or_else(|| "（未设置）".to_string());
+                    .unwrap_or_else(|| "(not set)".to_string());
                 println!("{:<15} {}", key, value);
             }
         }
@@ -221,7 +206,7 @@ fn handle_config(action: ConfigAction) {
         ConfigAction::Get { key } => match config.get_field(&key) {
             Some(value) => println!("{}", value),
             None => {
-                eprintln!("错误：未知配置项 '{}'", key);
+                eprintln!("Error: unknown config key '{}'", key);
                 std::process::exit(1);
             }
         },
@@ -229,32 +214,31 @@ fn handle_config(action: ConfigAction) {
         ConfigAction::Set { key, value } => match config.set_field(&key, &value) {
             Ok(()) => {
                 if let Err(e) = config.save() {
-                    eprintln!("保存配置失败: {}", e);
+                    eprintln!("Failed to save config: {}", e);
                     std::process::exit(1);
                 }
-                println!("已设置 {} = {}", key, value);
+                println!("Set {} = {}", key, value);
             }
             Err(e) => {
-                eprintln!("错误：{}", e);
+                eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
         },
     }
 }
 
-/// 处理 convert 子命令
 fn handle_convert(input: &str, output: Option<&str>) {
     use config::AppConfig;
     use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
 
-    println!("正在转录: {}", input);
+    println!("Transcribing: {}", input);
 
     let config = AppConfig::load();
 
     let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_config(&config) {
         Ok(t) => Box::new(t),
         Err(e) => {
-            eprintln!("警告：无法初始化 Groq（{}），使用 Mock 转录器", e);
+            eprintln!("Warning: failed to initialize Groq ({}), using Mock transcriber", e);
             Box::new(MockTranscriber)
         }
     };
@@ -263,15 +247,15 @@ fn handle_convert(input: &str, output: Option<&str>) {
         Ok(text) => match output {
             Some(path) => {
                 if let Err(e) = std::fs::write(path, &text) {
-                    eprintln!("写入文件失败: {}", e);
+                    eprintln!("Failed to write file: {}", e);
                     std::process::exit(1);
                 }
-                println!("已保存到: {}", path);
+                println!("Saved to: {}", path);
             }
             None => println!("{}", text),
         },
         Err(e) => {
-            eprintln!("转录失败: {}", e);
+            eprintln!("Transcription failed: {}", e);
             std::process::exit(1);
         }
     }

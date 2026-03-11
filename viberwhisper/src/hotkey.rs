@@ -11,7 +11,7 @@ static HOLD_PRESSED: AtomicBool = AtomicBool::new(false);
 static HOLD_RELEASED: AtomicBool = AtomicBool::new(false);
 static TOGGLE_PRESSED: AtomicBool = AtomicBool::new(false);
 
-/// 将热键字符串解析为 rdev::Key
+/// Parse a hotkey string into an rdev::Key
 pub fn parse_key(s: &str) -> Option<Key> {
     match s.to_uppercase().as_str() {
         "F1" => Some(Key::F1),
@@ -54,7 +54,7 @@ impl HotkeyManager {
         let toggle_key = parse_key(toggle_hotkey);
 
         if hold_key.is_none() && toggle_key.is_none() {
-            return Err("至少需要配置一个有效的热键 (hold_hotkey 或 toggle_hotkey)".into());
+            return Err("At least one valid hotkey must be configured (hold_hotkey or toggle_hotkey)".into());
         }
 
         let running = Arc::new(AtomicBool::new(true));

@@ -8,7 +8,7 @@ pub struct MockTyper;
 
 impl TextTyper for MockTyper {
     fn type_text(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
-        info!(text = %text, "向当前窗口输入文字");
+        info!(text = %text, "Typing text to current window");
         Ok(())
     }
 }

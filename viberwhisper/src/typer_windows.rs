@@ -5,7 +5,7 @@ pub struct WindowsTyper;
 
 impl TextTyper for WindowsTyper {
     fn type_text(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // 给目标窗口一点时间重新获得焦点
+        // Give the target window time to regain focus
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         let utf16: Vec<u16> = text.encode_utf16().collect();
@@ -29,14 +29,14 @@ impl TextTyper for WindowsTyper {
 
         if sent as usize != inputs.len() {
             return Err(format!(
-                "SendInput 只发送了 {}/{} 个事件",
+                "SendInput only sent {}/{} events",
                 sent,
                 inputs.len()
             )
             .into());
         }
 
-        info!(text = %text, "已输入");
+        info!(text = %text, "Text typed");
         Ok(())
     }
 }

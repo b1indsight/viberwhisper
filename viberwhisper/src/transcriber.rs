@@ -10,9 +10,9 @@ pub struct MockTranscriber;
 impl Transcriber for MockTranscriber {
     #[instrument(name = "mock_stt", skip(self), fields(path = %wav_path))]
     fn transcribe(&self, wav_path: &str) -> Result<String, Box<dyn std::error::Error>> {
-        info!("开始识别");
-        let text = "这是一段模拟识别出来的文字".to_string();
-        info!(result = %text, "识别完成");
+        info!("Starting transcription");
+        let text = "This is mock transcribed text".to_string();
+        info!(result = %text, "Transcription complete");
         Ok(text)
     }
 }
@@ -30,7 +30,7 @@ impl GroqTranscriber {
         let api_key = config
             .groq_api_key
             .clone()
-            .ok_or("GROQ_API_KEY 未配置（config.json 或环境变量）")?;
+            .ok_or("GROQ_API_KEY not configured (set in config.json or env var)")?;
         Ok(Self {
             api_key,
             model: config.model.clone(),
@@ -44,7 +44,7 @@ impl GroqTranscriber {
 impl Transcriber for GroqTranscriber {
     #[instrument(name = "groq_stt", skip(self), fields(path = %wav_path))]
     fn transcribe(&self, wav_path: &str) -> Result<String, Box<dyn std::error::Error>> {
-        info!("开始识别");
+        info!("Starting transcription");
 
         let file_bytes = std::fs::read(wav_path)?;
         let file_name = std::path::Path::new(wav_path)
@@ -81,17 +81,17 @@ impl Transcriber for GroqTranscriber {
         let body = response.text()?;
 
         if !status.is_success() {
-            return Err(format!("Groq API 错误 {}: {}", status, body).into());
+            return Err(format!("Groq API error {}: {}", status, body).into());
         }
 
         let json: serde_json::Value = serde_json::from_str(&body)?;
         let text = json["text"]
             .as_str()
-            .ok_or("响应中未找到 text 字段")?
+            .ok_or("text field not found in response")?
             .trim()
             .to_string();
 
-        info!(result = %text, "识别完成");
+        info!(result = %text, "Transcription complete");
         Ok(text)
     }
 }

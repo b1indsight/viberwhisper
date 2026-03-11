@@ -9,11 +9,11 @@ impl TextTyper for MacTyper {
             return Ok(());
         }
 
-        // 给目标窗口一点时间重新获得焦点
+        // Give the target window time to regain focus
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // 使用剪贴板方案：先设置剪贴板内容，再模拟 Cmd+V 粘贴
-        // 这样可以避免 keystroke 的长度限制和特殊字符问题
+        // Use clipboard approach: set clipboard content then simulate Cmd+V paste
+        // This avoids keystroke length limits and special character issues
         let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
         let script = format!(
             r#"set the clipboard to "{}"
@@ -28,10 +28,10 @@ tell application "System Events" to keystroke "v" using command down"#,
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("osascript 失败: {}", stderr).into());
+            return Err(format!("osascript failed: {}", stderr).into());
         }
 
-        info!(text = %text, "已输入");
+        info!(text = %text, "Text typed");
         Ok(())
     }
 }
