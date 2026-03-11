@@ -1,4 +1,5 @@
 use crate::typer::TextTyper;
+use tracing::info;
 
 pub struct MacTyper;
 
@@ -30,7 +31,7 @@ tell application "System Events" to keystroke "v" using command down"#,
             return Err(format!("osascript 失败: {}", stderr).into());
         }
 
-        println!("[MacTyper] 已输入: {}", text);
+        info!(text = %text, "已输入");
         Ok(())
     }
 }
