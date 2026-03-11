@@ -4,6 +4,10 @@ mod config;
 mod hotkey;
 mod transcriber;
 mod typer;
+#[cfg(target_os = "macos")]
+mod typer_macos;
+#[cfg(target_os = "windows")]
+mod typer_windows;
 
 use clap::Parser;
 use cli::{Cli, Commands, ConfigAction};
@@ -33,7 +37,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use hotkey::{HotkeyEvent, HotkeyManager, HotkeySource};
     use std::sync::{Arc, Mutex};
     use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
-    use typer::{TextTyper, WindowsTyper};
+    use typer::TextTyper;
 
     println!("ViberWhisper - Voice-to-Text Input");
     println!("===================================");
@@ -61,7 +65,13 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
             Box::new(MockTranscriber)
         }
     };
-    let typer = WindowsTyper;
+
+    #[cfg(target_os = "macos")]
+    let typer = typer_macos::MacTyper;
+    #[cfg(target_os = "windows")]
+    let typer = typer_windows::WindowsTyper;
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let typer = typer::MockTyper;
 
     println!("Hold {} to record, release to transcribe.", config.hold_hotkey);
     println!(
