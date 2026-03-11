@@ -80,17 +80,27 @@ cargo run --release
 ```
 viberwhisper/
 ├── src/
-│   ├── main.rs          # 主程序入口，事件循环
-│   ├── config.rs        # 配置加载和管理
-│   ├── hotkey.rs        # 全局热键监听
-│   ├── audio.rs         # 音频录制和 WAV 文件处理
-│   ├── transcriber.rs   # 语音识别（Groq API）
-│   └── typer.rs         # 文本输入（Windows SendInput API）
-├── doc/                 # 功能文档
+│   ├── main.rs          # 主程序入口
+│   ├── audio/           # 音频录制
+│   ├── core/            # 配置和 CLI
+│   ├── input/           # 热键、输入、托盘
+│   ├── platform/        # 平台适配 (macOS/Windows)
+│   └── transcriber/     # 语音识别
+├── docs/                # 功能文档
 ├── tmp/                 # 临时录音文件（自动管理）
 ├── config.json          # 运行时配置（不纳入版本控制）
 └── Cargo.toml           # 项目依赖
 ```
+
+## 依赖项
+
+- [rdev](https://crates.io/crates/rdev) - 全局热键监听
+- [cpal](https://crates.io/crates/cpal) - 跨平台音频录制
+- [hound](https://crates.io/crates/hound) - WAV 音频文件处理
+- [dirs](https://crates.io/crates/dirs) - 跨平台目录路径获取
+- [reqwest](https://crates.io/crates/reqwest) - HTTP 客户端，用于调用 Groq API
+- [serde_json](https://crates.io/crates/serde_json) - JSON 序列化/反序列化
+- [tracing](https://crates.io/crates/tracing) - 结构化日志
 
 ## 开发
 
