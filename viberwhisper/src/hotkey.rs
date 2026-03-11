@@ -4,13 +4,14 @@ use std::thread;
 use std::time::Duration;
 
 use rdev::{listen, Event, EventType, Key};
+use tracing::{debug, error, info};
 
 // Thread-safe state for tracking key states
 static HOLD_PRESSED: AtomicBool = AtomicBool::new(false);
 static HOLD_RELEASED: AtomicBool = AtomicBool::new(false);
 static TOGGLE_PRESSED: AtomicBool = AtomicBool::new(false);
 
-/// 将热键字符串解析为 rdev::Key
+/// Parse a hotkey string into an rdev::Key
 pub fn parse_key(s: &str) -> Option<Key> {
     match s.to_uppercase().as_str() {
         "F1" => Some(Key::F1),
@@ -53,13 +54,13 @@ impl HotkeyManager {
         let toggle_key = parse_key(toggle_hotkey);
 
         if hold_key.is_none() && toggle_key.is_none() {
-            return Err("至少需要配置一个有效的热键 (hold_hotkey 或 toggle_hotkey)".into());
+            return Err("At least one valid hotkey must be configured (hold_hotkey or toggle_hotkey)".into());
         }
 
         let running = Arc::new(AtomicBool::new(true));
 
         thread::spawn(move || {
-            println!("[DEBUG] rdev listener thread started");
+            debug!("rdev listener thread started");
 
             let callback = move |event: Event| {
                 match &event.event_type {
@@ -87,20 +88,20 @@ impl HotkeyManager {
             };
 
             if let Err(e) = listen(callback) {
-                eprintln!("[ERROR] rdev listen failed: {:?}", e);
+                error!(error = ?e, "rdev listen failed");
             }
 
-            println!("[DEBUG] rdev listener thread exiting");
+            debug!("rdev listener thread exiting");
         });
 
         // Give the listener a moment to start
         thread::sleep(Duration::from_millis(100));
 
         if let Some(_) = hold_key {
-            println!("Registered hold hotkey: {}", hold_hotkey);
+            info!(hotkey = %hold_hotkey, "hold hotkey registered");
         }
         if let Some(_) = toggle_key {
-            println!("Registered toggle hotkey: {}", toggle_hotkey);
+            info!(hotkey = %toggle_hotkey, "toggle hotkey registered");
         }
 
         Ok(HotkeyManager { running })
@@ -122,7 +123,7 @@ impl HotkeyManager {
 
 impl Drop for HotkeyManager {
     fn drop(&mut self) {
-        println!("[DEBUG] HotkeyManager::drop() called");
+        debug!("HotkeyManager dropped");
         self.running.store(false, Ordering::Relaxed);
     }
 }

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use tracing::{info, warn};
 
 const CONFIG_FILE: &str = "config.json";
 
@@ -41,12 +42,12 @@ impl AppConfig {
             match serde_json::from_str::<serde_json::Value>(&content) {
                 Ok(json) => {
                     config.apply_json(&json);
-                    println!("[Config] 已从 {} 加载配置", CONFIG_FILE);
+                    info!(file = %CONFIG_FILE, "Config loaded successfully");
                 }
-                Err(e) => eprintln!("[Config] 解析 {} 失败: {}", CONFIG_FILE, e),
+                Err(e) => warn!(file = %CONFIG_FILE, error = %e, "Failed to parse config, using defaults"),
             }
         } else {
-            println!("[Config] 未找到 {}，使用默认配置", CONFIG_FILE);
+            info!(file = %CONFIG_FILE, "Config file not found, using defaults");
         }
 
         if let Ok(key) = std::env::var("GROQ_API_KEY") {
@@ -56,7 +57,7 @@ impl AppConfig {
         config
     }
 
-    /// 将配置保存到 config.json（不包含 groq_api_key）
+    /// Save config to config.json (excludes groq_api_key)
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut value = serde_json::to_value(self)?;
         if let Some(obj) = value.as_object_mut() {
@@ -67,7 +68,7 @@ impl AppConfig {
         Ok(())
     }
 
-    /// 获取指定字段的字符串值
+    /// Get the string value of a config field
     pub fn get_field(&self, key: &str) -> Option<String> {
         match key {
             "model" => Some(self.model.clone()),
@@ -80,12 +81,12 @@ impl AppConfig {
             "groq_api_key" => self
                 .groq_api_key
                 .as_ref()
-                .map(|_| "***（已设置）".to_string()),
+                .map(|_| "*** (set)".to_string()),
             _ => None,
         }
     }
 
-    /// 设置指定字段的值（接受字符串，自动转换类型）
+    /// Set a config field value (accepts string, auto-converts types)
     pub fn set_field(&mut self, key: &str, value: &str) -> Result<(), String> {
         match key {
             "model" => {
@@ -111,13 +112,13 @@ impl AppConfig {
             "temperature" => {
                 self.temperature = value
                     .parse::<f32>()
-                    .map_err(|_| format!("temperature 必须是浮点数，收到: {}", value))?;
+                    .map_err(|_| format!("temperature must be a float, got: {}", value))?;
                 Ok(())
             }
             "mic_gain" => {
                 self.mic_gain = value
                     .parse::<f32>()
-                    .map_err(|_| format!("mic_gain 必须是浮点数，收到: {}", value))?;
+                    .map_err(|_| format!("mic_gain must be a float, got: {}", value))?;
                 Ok(())
             }
             "groq_api_key" => {
@@ -125,7 +126,7 @@ impl AppConfig {
                 Ok(())
             }
             _ => Err(format!(
-                "未知配置项: {}。可用项: model, hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain, groq_api_key",
+                "Unknown config key: {}. Available: model, hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain, groq_api_key",
                 key
             )),
         }
@@ -144,7 +145,7 @@ impl AppConfig {
         if let Some(temp) = json["temperature"].as_f64() {
             self.temperature = temp as f32;
         }
-        // 向后兼容：旧的 hotkey 字段映射到 hold_hotkey
+        // Backward compat: old hotkey field maps to hold_hotkey
         if let Some(hotkey) = json["hotkey"].as_str() {
             self.hold_hotkey = hotkey.to_string();
         }

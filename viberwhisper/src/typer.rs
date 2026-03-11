@@ -1,3 +1,5 @@
+use tracing::info;
+
 pub trait TextTyper {
     fn type_text(&self, text: &str) -> Result<(), Box<dyn std::error::Error>>;
 }
@@ -6,7 +8,7 @@ pub struct MockTyper;
 
 impl TextTyper for MockTyper {
     fn type_text(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
-        println!("[Mock Typer] 向当前窗口输入文字: {}", text);
+        info!(text = %text, "Typing text to current window");
         Ok(())
     }
 }
