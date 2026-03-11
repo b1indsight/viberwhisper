@@ -65,10 +65,19 @@ chore(deps): bump tray-icon to 0.21
 ## 开发流程
 
 1. **创建分支**: `git checkout -b feature/<name>`
-2. **开发功能**: 小步提交，遵循提交规范
+2. **开发功能**: 
+   - **必须使用 Claude Code 进行代码变更** (通过 `acpx` 或 Task 工具)
+   - 小步提交，遵循提交规范
+   - **遇到问题时先请求用户协助，不要自行硬实现**
 3. **解决冲突**: 如有冲突，使用 `git merge origin/master`
 4. **推送代码**: `git push origin feature/<name>`
 5. **创建 PR**: 在 GitHub 上创建 Pull Request
+
+## Agent 工作准则
+
+- ✅ **使用 Claude Code**: 所有代码修改通过 Claude Code 完成
+- ✅ **遇到问题先问**: 实现受阻时及时请求用户协助
+- ❌ **不要自行硬实现**: 不确定的方案不要强行推进
 
 ## 代码规范
 
