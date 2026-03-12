@@ -16,11 +16,8 @@ Module-level design docs covering structs, methods, and dependencies.
 
 Implementation plans and technical specs for each feature.
 
-### Hotkey Recording
-- [01-global-hotkey-recording.md](features/hotkey-recording/01-global-hotkey-recording.md) — Global hotkey (F8) triggered audio recording with WAV output
-
-### Toggle Recording
-- [toggle_recording_plan.md](features/toggle-recording/toggle_recording_plan.md) — Dual-mode recording: hold-to-record (F8) and toggle (F9)
-
-### Cross-Platform
-- [cross_platform_plan.md](features/cross-platform/cross_platform_plan.md) — macOS + Windows support via platform-specific `TextTyper` implementations
+| Document | Description |
+|---|---|
+| [hotkey-recording.md](plan/hotkey-recording.md) | Global hotkey (F8) triggered audio recording with WAV output |
+| [toggle-recording.md](plan/toggle-recording.md) | Dual-mode recording: hold-to-record (F8) and toggle (F9) |
+| [cross-platform.md](plan/cross-platform.md) | macOS + Windows support via platform-specific `TextTyper` implementations
