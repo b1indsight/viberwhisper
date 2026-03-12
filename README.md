@@ -75,23 +75,6 @@ cargo run --release
 
 > **注意**：`config.json` 包含 API 密钥等敏感信息，已在 `.gitignore` 中排除，请勿提交到版本控制。
 
-## 项目结构
-
-```
-viberwhisper/
-├── src/
-│   ├── main.rs          # 主程序入口
-│   ├── audio/           # 音频录制
-│   ├── core/            # 配置和 CLI
-│   ├── input/           # 热键、输入、托盘
-│   ├── platform/        # 平台适配 (macOS/Windows)
-│   └── transcriber/     # 语音识别
-├── docs/                # 功能文档
-├── tmp/                 # 临时录音文件（自动管理）
-├── config.json          # 运行时配置（不纳入版本控制）
-└── Cargo.toml           # 项目依赖
-```
-
 ## 依赖项
 
 - [rdev](https://crates.io/crates/rdev) - 全局热键监听
