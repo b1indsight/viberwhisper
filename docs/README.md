@@ -18,6 +18,6 @@ Implementation plans and technical specs for each feature.
 
 | Document | Description |
 |---|---|
-| [hotkey-recording.md](plan/hotkey-recording.md) | Global hotkey (F8) triggered audio recording with WAV output |
-| [toggle-recording.md](plan/toggle-recording.md) | Dual-mode recording: hold-to-record (F8) and toggle (F9) |
-| [cross-platform.md](plan/cross-platform.md) | macOS + Windows support via platform-specific `TextTyper` implementations
+| [01-hotkey-recording.md](plan/01-hotkey-recording.md) | Global hotkey (F8) triggered audio recording with WAV output |
+| [02-toggle-recording.md](plan/02-toggle-recording.md) | Dual-mode recording: hold-to-record (F8) and toggle (F9) |
+| [03-cross-platform.md](plan/03-cross-platform.md) | macOS + Windows support via platform-specific `TextTyper` implementations
