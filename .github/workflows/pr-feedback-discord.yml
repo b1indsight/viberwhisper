@@ -1,0 +1,119 @@
+name: PR Feedback → Discord
+
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    if: >
+      github.actor != 'github-actions[bot]' &&
+      github.actor != 'dependabot[bot]' &&
+      !endsWith(github.actor, '[bot]')
+    steps:
+      - name: Build and send Discord notification
+        uses: actions/github-script@v7
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_CHANNEL_NAME: ${{ secrets.DISCORD_CHANNEL_NAME }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          ALMA_DISCORD_USER_ID: ${{ secrets.ALMA_DISCORD_USER_ID }}
+        with:
+          script: |
+            const eventName = context.eventName;
+            const payload = context.payload;
+
+            if (eventName === 'issue_comment' && !payload.issue.pull_request) {
+              console.log('Skipping: comment is on a plain issue, not a PR.');
+              return;
+            }
+
+            let prTitle, prUrl, prNumber, actor, updateType, body;
+
+            if (eventName === 'pull_request_review') {
+              const review = payload.review;
+              const pr = payload.pull_request;
+              prTitle = pr.title;
+              prUrl = pr.html_url;
+              prNumber = pr.number;
+              actor = review.user.login;
+              body = review.body || '';
+
+              const stateMap = {
+                approved: '✅ APPROVED',
+                changes_requested: '🚨 CHANGES REQUESTED',
+                commented: '💬 REVIEW COMMENTED',
+              };
+              updateType = stateMap[review.state.toLowerCase()] || `💬 ${review.state}`;
+            } else if (eventName === 'pull_request_review_comment') {
+              const comment = payload.comment;
+              const pr = payload.pull_request;
+              prTitle = pr.title;
+              prUrl = pr.html_url;
+              prNumber = pr.number;
+              actor = comment.user.login;
+              body = comment.body || '';
+              updateType = '🧵 REVIEW COMMENT';
+            } else {
+              const comment = payload.comment;
+              const issue = payload.issue;
+              prTitle = issue.title;
+              prUrl = issue.pull_request.html_url;
+              prNumber = issue.number;
+              actor = comment.user.login;
+              body = comment.body || '';
+              updateType = '💬 PR COMMENT';
+            }
+
+            const maxLen = 300;
+            const compactBody = body.replace(/\s+/g, ' ').trim();
+            const bodyPreview = compactBody.length > maxLen
+              ? `${compactBody.slice(0, maxLen)}…`
+              : compactBody;
+
+            const almaUserId = process.env.ALMA_DISCORD_USER_ID;
+            const mention = almaUserId ? `<@${almaUserId}>` : '@Alma';
+            const channelName = process.env.DISCORD_CHANNEL_NAME || '未命名频道';
+            const channelId = process.env.DISCORD_CHANNEL_ID || '未配置';
+
+            const message = [
+              '🚨 **ViberWhisper PR 有新反馈** 🚨',
+              `**标题**：#${prNumber} ${prTitle}`,
+              `**更新**：${updateType}`,
+              `**来自**：${actor}`,
+              `**频道**：${channelName} (${channelId})`,
+              `**链接**：${prUrl}`,
+              bodyPreview ? `**内容**：${bodyPreview}` : '**内容**：_空_ ',
+              '',
+              `${mention} 处理一下这个 PR。`,
+            ].join('\n');
+
+            const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
+            if (!webhookUrl) {
+              core.setFailed('DISCORD_WEBHOOK_URL secret is not set.');
+              return;
+            }
+
+            const response = await fetch(webhookUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                content: message,
+                allowed_mentions: almaUserId
+                  ? { users: [almaUserId] }
+                  : { parse: [] },
+              }),
+            });
+
+            if (!response.ok) {
+              const text = await response.text();
+              core.setFailed(`Discord webhook failed: ${response.status} ${text}`);
+              return;
+            }
+
+            console.log('Discord notification sent successfully.');
