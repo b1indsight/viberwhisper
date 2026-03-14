@@ -114,13 +114,17 @@ let transcriber = create_transcriber(&config);
 - [x] 未知 provider 会回退到 `MockTranscriber`
 - [x] `cargo test` 通过
 
-## 后续扩展
+## 后续扩展（已进一步抽象）
 
-后续如果要接入更多 provider（例如 OpenAI / 其他兼容接口），只需要：
+在原有工厂模式基础上，已将 `GroqTranscriber` 重构为通用的 `ApiTranscriber`，实现以下进一步解耦：
+
+- `GroqTranscriber` → `ApiTranscriber`，通过 `api_key` + `transcription_api_url` + `model` 初始化，不再硬编码 provider 名称
+- `factory.rs` 不再 match `config.provider`，而是直接尝试从 config 构造 `ApiTranscriber`
+- 配置字段 `groq_api_key` → `api_key`（旧字段保持兼容），新增 `transcription_api_url` 字段
+- 旧环境变量 `GROQ_API_KEY` 继续生效（向后兼容），新增 `TRANSCRIPTION_API_KEY`
+
+如果后续要接入格式不兼容的 provider：
 
 1. 新增对应 transcriber 实现文件
-2. 在 `factory.rs` 中加入一个 match 分支
-3. 为新 provider 增加配置项或鉴权字段
-4. 更新文档与测试
-
-这样可以把多模型支持继续扩展成“多 provider + 多 model”，而不会把业务逻辑重新塞回 `main.rs`。
+2. 在 `factory.rs` 中增加选择逻辑（可基于 `transcription_api_url` 特征或新增 config 字段）
+3. 更新文档与测试

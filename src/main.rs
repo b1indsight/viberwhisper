@@ -52,9 +52,9 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         hold_hotkey = %config.hold_hotkey,
         toggle_hotkey = %config.toggle_hotkey,
-        provider = %config.provider,
         model = %config.model,
         language = %config.language.as_deref().unwrap_or("auto"),
+        api_url = %config.transcription_api_url,
         "Config loaded"
     );
 
@@ -170,10 +170,11 @@ fn handle_config(action: ConfigAction) {
 
     match action {
         ConfigAction::List => {
-            println!("{:<15} {}", "Key", "Value");
-            println!("{}", "-".repeat(50));
+            println!("{:<25} {}", "Key", "Value");
+            println!("{}", "-".repeat(60));
             for key in &[
-                "provider",
+                "api_key",
+                "transcription_api_url",
                 "model",
                 "hold_hotkey",
                 "toggle_hotkey",
@@ -181,12 +182,11 @@ fn handle_config(action: ConfigAction) {
                 "prompt",
                 "temperature",
                 "mic_gain",
-                "groq_api_key",
             ] {
                 let value = config
                     .get_field(key)
                     .unwrap_or_else(|| "(not set)".to_string());
-                println!("{:<15} {}", key, value);
+                println!("{:<25} {}", key, value);
             }
         }
 
