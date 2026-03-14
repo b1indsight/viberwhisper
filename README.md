@@ -38,6 +38,7 @@ cp config.example.json config.json
 ```json
 {
   "api_key": "YOUR_API_KEY_HERE",
+  "provider": "groq",
   "transcription_api_url": "https://api.groq.com/openai/v1/audio/transcriptions",
   "model": "whisper-large-v3-turbo",
   "language": "zh",
