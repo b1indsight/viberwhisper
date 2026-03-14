@@ -30,3 +30,4 @@ Implementation plans and technical specs for each feature.
 | [02-toggle-recording.md](plan/02-toggle-recording.md) | Dual-mode recording: hold-to-record (F8) and toggle (F9) |
 | [03-cross-platform.md](plan/03-cross-platform.md) | macOS + Windows support via platform-specific `TextTyper` implementations |
 | [04-multiple-models.md](plan/04-multiple-models.md) | Provider + model config abstraction for future multi-provider expansion |
+| [05-long-audio-streaming.md](plan/05-long-audio-streaming.md) | Long audio chunked transcription — auto-split recordings that exceed single-request API limits |
