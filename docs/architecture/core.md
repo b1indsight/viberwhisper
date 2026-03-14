@@ -25,7 +25,7 @@ pub struct AppConfig {
 }
 ```
 
-Serialized to/from `config.json` via `serde_json`. `api_key` is excluded from the saved file (`#[serde(skip)]`) and loaded from the `GROQ_API_KEY` or `TRANSCRIPTION_API_KEY` environment variable instead.
+Serialized to/from `config.json` via `serde_json`. The repository also includes a tracked `config.example.json` template for local setup. `api_key` is excluded from the saved file (`#[serde(skip)]`) and loaded from the `GROQ_API_KEY` or `TRANSCRIPTION_API_KEY` environment variable instead.
 
 **Defaults:**
 

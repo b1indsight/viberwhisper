@@ -27,7 +27,13 @@
 
 ### 2. 配置
 
-在项目根目录创建 `config.json`：
+项目已提供示例配置文件 `config.example.json`，先复制一份：
+
+```bash
+cp config.example.json config.json
+```
+
+然后按需修改 `config.json` 中的字段，例如：
 
 ```json
 {
@@ -83,7 +89,7 @@ cargo run --release
 | `toggle_hotkey` | 字符串 | `F9` | 切换录音热键（Toggle 模式） |
 | `mic_gain` | 数字 | `1.0` | 麦克风增益倍数 |
 
-> **注意**：`api_key` 不会被写入 `config.json`，请通过环境变量或在 `config.json` 中临时设置（但该文件已在 `.gitignore` 中排除）。
+> **注意**：`config.json` 已在 `.gitignore` 中排除，避免误提交真实密钥；建议从 `config.example.json` 复制后再填写自己的配置。`api_key` 不会被程序写回磁盘，但如果你手动填进 `config.json`，文件里依然会存在明文密钥。
 
 ### 切换转写服务
 

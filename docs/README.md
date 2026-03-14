@@ -9,8 +9,16 @@ Module-level design docs covering structs, methods, and dependencies.
 | [audio.md](architecture/audio.md) | Audio recording — `AudioRecorder`, cpal stream management, WAV output |
 | [core.md](architecture/core.md) | Config persistence (`AppConfig`) and CLI argument parsing (`Cli`, `Commands`) |
 | [input.md](architecture/input.md) | Hotkey detection (`HotkeyManager`), text injection (`TextTyper`), system tray (`TrayManager`) |
-| [transcriber.md](architecture/transcriber.md) | Transcription trait, `GroqTranscriber` (Groq API), `MockTranscriber` |
+| [transcriber.md](architecture/transcriber.md) | Transcription trait, `ApiTranscriber` (OpenAI-compatible API), `MockTranscriber` |
 | [platform.md](architecture/platform.md) | Platform text injection — `MacTyper` (osascript) and `WindowsTyper` (SendInput) |
+
+## Examples
+
+Tracked example files for local setup.
+
+| File | Description |
+|---|---|
+| [../config.example.json](../config.example.json) | Example local config; copy to `config.json` and fill your own API key |
 
 ## Feature Plans
 
