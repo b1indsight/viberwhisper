@@ -1,2 +1,4 @@
+pub mod factory;
 pub mod groq;
-pub use groq::{GroqTranscriber, MockTranscriber, Transcriber};
+pub use factory::create_transcriber;
+pub use groq::{MockTranscriber, Transcriber};

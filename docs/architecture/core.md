@@ -13,6 +13,7 @@ The `core` module (`src/core/`) contains two sub-modules: configuration persiste
 ```rust
 pub struct AppConfig {
     pub groq_api_key: Option<String>,
+    pub provider: String,
     pub model: String,
     pub language: Option<String>,
     pub prompt: Option<String>,
@@ -29,12 +30,15 @@ Serialized to/from `config.json` via `serde_json`. `groq_api_key` is excluded fr
 
 | Field | Default |
 |---|---|
+| `provider` | `"groq"` |
 | `model` | `"whisper-large-v3-turbo"` |
 | `language` | `"zh"` |
 | `temperature` | `0.0` |
 | `hold_hotkey` | `"F8"` |
 | `toggle_hotkey` | `"F9"` |
 | `mic_gain` | `1.0` |
+
+**Provider/model pairing:** `provider` selects which transcription backend to use; `model` is interpreted by the chosen provider. Currently supported provider: `"groq"`. Adding a new provider means adding a match arm in `src/transcriber/factory.rs`.
 
 ### Key Methods
 
@@ -59,7 +63,7 @@ Sets a field by name, auto-parsing float values for `temperature` and `mic_gain`
 
 **`apply_json(&mut self, json: &Value)`** *(private)*
 
-Applies partial JSON overrides. Supports backward compatibility: the old `"hotkey"` key maps to `hold_hotkey`.
+Applies partial JSON overrides. Supports backward compatibility: the old `"hotkey"` key maps to `hold_hotkey`. Old configs without `provider` default to `"groq"`.
 
 ---
 

@@ -73,7 +73,8 @@ cargo run --release
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `groq_api_key` | 字符串 | 无 | Groq API 密钥（必填） |
-| `model` | 字符串 | `whisper-large-v3-turbo` | Whisper 模型 |
+| `provider` | 字符串 | `groq` | 转录服务提供商（当前支持：`groq`） |
+| `model` | 字符串 | `whisper-large-v3-turbo` | 转录模型（与 provider 配套） |
 | `language` | 字符串 | `zh` | 语言代码，留空为自动检测 |
 | `prompt` | 字符串 | 中文提示词 | 指导转录风格和格式 |
 | `temperature` | 数字 | `0` | 随机性（0-1） |

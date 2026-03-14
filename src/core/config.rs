@@ -8,6 +8,7 @@ const CONFIG_FILE: &str = "config.json";
 pub struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub groq_api_key: Option<String>,
+    pub provider: String,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
@@ -23,6 +24,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             groq_api_key: None,
+            provider: "groq".to_string(),
             model: "whisper-large-v3-turbo".to_string(),
             language: Some("zh".to_string()),
             prompt: Some("以下是一段简体中文的普通话句子，去掉首尾的语气词".to_string()),
@@ -71,6 +73,7 @@ impl AppConfig {
     /// Get the string value of a config field
     pub fn get_field(&self, key: &str) -> Option<String> {
         match key {
+            "provider" => Some(self.provider.clone()),
             "model" => Some(self.model.clone()),
             "hold_hotkey" => Some(self.hold_hotkey.clone()),
             "toggle_hotkey" => Some(self.toggle_hotkey.clone()),
@@ -89,6 +92,10 @@ impl AppConfig {
     /// Set a config field value (accepts string, auto-converts types)
     pub fn set_field(&mut self, key: &str, value: &str) -> Result<(), String> {
         match key {
+            "provider" => {
+                self.provider = value.to_string();
+                Ok(())
+            }
             "model" => {
                 self.model = value.to_string();
                 Ok(())
@@ -126,7 +133,7 @@ impl AppConfig {
                 Ok(())
             }
             _ => Err(format!(
-                "Unknown config key: {}. Available: model, hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain, groq_api_key",
+                "Unknown config key: {}. Available: provider, model, hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain, groq_api_key",
                 key
             )),
         }
@@ -135,6 +142,9 @@ impl AppConfig {
     fn apply_json(&mut self, json: &serde_json::Value) {
         if let Some(key) = json["groq_api_key"].as_str() {
             self.groq_api_key = Some(key.to_string());
+        }
+        if let Some(provider) = json["provider"].as_str() {
+            self.provider = provider.to_string();
         }
         if let Some(model) = json["model"].as_str() {
             self.model = model.to_string();
@@ -171,12 +181,38 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = AppConfig::default();
+        assert_eq!(config.provider, "groq");
         assert_eq!(config.model, "whisper-large-v3-turbo");
         assert_eq!(config.hold_hotkey, "F8");
         assert_eq!(config.toggle_hotkey, "F9");
         assert_eq!(config.temperature, 0.0);
         assert!(config.groq_api_key.is_none());
         assert_eq!(config.language.as_deref(), Some("zh"));
+    }
+
+    #[test]
+    fn test_provider_get_set() {
+        let mut config = AppConfig::default();
+        assert_eq!(config.get_field("provider"), Some("groq".to_string()));
+        config.set_field("provider", "custom").unwrap();
+        assert_eq!(config.provider, "custom");
+        assert_eq!(config.get_field("provider"), Some("custom".to_string()));
+    }
+
+    #[test]
+    fn test_apply_json_provider() {
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({"provider": "groq"});
+        config.apply_json(&json);
+        assert_eq!(config.provider, "groq");
+    }
+
+    #[test]
+    fn test_apply_json_no_provider_keeps_default() {
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({"model": "whisper-large-v3"});
+        config.apply_json(&json);
+        assert_eq!(config.provider, "groq");
     }
 
     #[test]
