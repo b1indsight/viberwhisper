@@ -106,6 +106,27 @@ cargo clippy
 cargo fmt
 ```
 
+## GitHub Actions：PR 评论 Discord 通知
+
+`.github/workflows/pr-feedback-discord.yml` 会在以下事件发生时自动向 Discord 频道发送通知：
+
+- PR Review（Approved / Changes Requested / Commented）
+- PR Review Comment（行内评论）
+- PR 评论（`issue_comment` 属于 PR 的部分）
+
+通知不会忽略你的评论；只会跳过机器人账号，免得一堆自动化自嗨刷屏。
+
+**配置步骤**：在仓库的 **Settings → Secrets and variables → Actions** 中添加 Secret：
+
+| Secret 名称 | 说明 |
+|---|---|
+| `DISCORD_WEBHOOK_URL` | Discord 频道的 Incoming Webhook URL |
+| `DISCORD_CHANNEL_NAME` | 频道名称，仅用于通知正文展示 |
+| `DISCORD_CHANNEL_ID` | 频道 ID，仅用于通知正文展示 |
+| `ALMA_DISCORD_USER_ID` | Alma 的 Discord 用户 ID，用于真实 `<@mention>` |
+
+> `DISCORD_WEBHOOK_URL` 决定消息最终发到哪个频道；`DISCORD_CHANNEL_NAME` 和 `DISCORD_CHANNEL_ID` 用于避免在 workflow 里硬编码频道信息。
+
 ## 许可证
 
 MIT
