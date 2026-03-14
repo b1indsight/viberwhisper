@@ -12,7 +12,9 @@ The `core` module (`src/core/`) contains two sub-modules: configuration persiste
 
 ```rust
 pub struct AppConfig {
-    pub groq_api_key: Option<String>,
+    pub api_key: Option<String>,           // not saved to file; from env or JSON
+    pub transcription_api_url: String,     // full URL of the audio transcription endpoint
+    pub provider: Option<String>,          // informational label only, not used for dispatch
     pub model: String,
     pub language: Option<String>,
     pub prompt: Option<String>,
@@ -23,18 +25,21 @@ pub struct AppConfig {
 }
 ```
 
-Serialized to/from `config.json` via `serde_json`. `groq_api_key` is excluded from the saved file and loaded from the `GROQ_API_KEY` environment variable instead.
+Serialized to/from `config.json` via `serde_json`. The repository also includes a tracked `config.example.json` template for local setup. `api_key` is excluded from the saved file (`#[serde(skip)]`) and loaded from the `GROQ_API_KEY` or `TRANSCRIPTION_API_KEY` environment variable instead.
 
 **Defaults:**
 
 | Field | Default |
 |---|---|
+| `transcription_api_url` | `"https://api.groq.com/openai/v1/audio/transcriptions"` |
 | `model` | `"whisper-large-v3-turbo"` |
 | `language` | `"zh"` |
 | `temperature` | `0.0` |
 | `hold_hotkey` | `"F8"` |
 | `toggle_hotkey` | `"F9"` |
 | `mic_gain` | `1.0` |
+
+**`transcription_api_url`** points to the audio transcription HTTP endpoint (OpenAI-compatible multipart format). Changing this field is sufficient to switch providers — no code changes needed.
 
 ### Key Methods
 
@@ -43,23 +48,26 @@ Serialized to/from `config.json` via `serde_json`. `groq_api_key` is excluded fr
 Loads config in priority order:
 1. Defaults via `Default::default()`
 2. `config.json` (partial override via `apply_json`)
-3. `GROQ_API_KEY` env var (overrides json)
+3. `GROQ_API_KEY` env var → `api_key` (backward compat, lower priority)
+4. `TRANSCRIPTION_API_KEY` env var → `api_key` (higher priority)
 
 **`save(&self) -> Result<()>`**
 
-Serializes to pretty-printed JSON, stripping `groq_api_key` before writing to `config.json`.
+Serializes to pretty-printed JSON. `api_key` is never written to disk (marked `#[serde(skip)]`).
 
 **`get_field(&self, key: &str) -> Option<String>`**
 
-Returns a string representation of the named field. Returns `"*** (set)"` for `groq_api_key` if present, `None` for unknown keys.
+Returns a string representation of the named field. Returns `"*** (set)"` for `api_key` / `groq_api_key` if present, `None` for unknown keys.
 
 **`set_field(&mut self, key: &str, value: &str) -> Result<(), String>`**
 
-Sets a field by name, auto-parsing float values for `temperature` and `mic_gain`. Returns an error string for unknown keys or invalid float values.
+Sets a field by name, auto-parsing float values for `temperature` and `mic_gain`. Returns an error string for unknown keys or invalid float values. `groq_api_key` is accepted as an alias for `api_key`.
 
 **`apply_json(&mut self, json: &Value)`** *(private)*
 
-Applies partial JSON overrides. Supports backward compatibility: the old `"hotkey"` key maps to `hold_hotkey`.
+Applies partial JSON overrides. Backward compatibility:
+- Old `"hotkey"` key maps to `hold_hotkey`
+- Old `"groq_api_key"` key maps to `api_key` (if `api_key` not already set)
 
 ---
 
