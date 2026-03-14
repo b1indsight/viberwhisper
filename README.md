@@ -14,7 +14,9 @@
 
 ## 系统要求
 
-- **操作系统**：Windows（依赖 Windows SendInput API）
+- **操作系统**：macOS 或 Windows
+  - macOS：文字输入通过 System Events（osascript）实现，需在「系统设置 → 隐私与安全性 → 辅助功能」中授权终端应用
+  - Windows：使用 SendInput API，无需额外权限
 - **Rust**：1.70 及以上版本
 
 ## 快速开始
@@ -34,15 +36,19 @@
   "language": "zh",
   "prompt": "以下是一段简体中文的普通话句子，去掉首尾的语气词",
   "temperature": 0,
-  "hotkey": "F8",
+  "hold_hotkey": "F8",
+  "toggle_hotkey": "F9",
   "mic_gain": 3.0
 }
 ```
 
+> 旧版配置使用 `hotkey` 字段，程序仍能识别并自动映射到 `hold_hotkey`。
+
 也可以通过环境变量设置 API 密钥（优先级高于配置文件）：
 
 ```bash
-set GROQ_API_KEY=your_api_key_here
+export GROQ_API_KEY=your_api_key_here   # macOS
+set GROQ_API_KEY=your_api_key_here      # Windows
 ```
 
 ### 3. 构建并运行
@@ -54,12 +60,13 @@ cargo run --release
 
 ### 4. 使用
 
-1. 启动程序
-2. 将光标定位到任意文本输入框（浏览器地址栏、编辑器、聊天框等）
-3. **按住 F8** 开始录音（控制台显示 "Recording started"）
-4. 说出需要输入的内容
-5. **松开 F8** 停止录音，程序自动转录并输入文字
-6. 按 **Ctrl+C** 退出程序
+1. 启动程序，系统托盘会出现灰色图标
+2. 将光标定位到任意文本输入框（浏览器、编辑器、聊天框等）
+3. **按住 F8** 开始录音（图标变红），松开后自动转录并输入文字（Hold 模式）
+4. 或按一下 **F9** 开始录音，再按一下停止（Toggle 模式）
+5. 退出：右键点击托盘图标选择「退出」，或按 **Ctrl+C**
+
+> macOS 首次运行时，系统会弹出辅助功能授权请求，需要允许才能完成文字输入。
 
 ## 配置说明
 
@@ -70,7 +77,8 @@ cargo run --release
 | `language` | 字符串 | `zh` | 语言代码，留空为自动检测 |
 | `prompt` | 字符串 | 中文提示词 | 指导转录风格和格式 |
 | `temperature` | 数字 | `0` | 随机性（0-1） |
-| `hotkey` | 字符串 | `F8` | 录音热键 |
+| `hold_hotkey` | 字符串 | `F8` | 按住录音热键（Hold 模式） |
+| `toggle_hotkey` | 字符串 | `F9` | 切换录音热键（Toggle 模式） |
 | `mic_gain` | 数字 | `1.0` | 麦克风增益倍数 |
 
 > **注意**：`config.json` 包含 API 密钥等敏感信息，已在 `.gitignore` 中排除，请勿提交到版本控制。
