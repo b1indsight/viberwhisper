@@ -1,95 +1,230 @@
-# 长音频分片/流式识别支持
+# 长音频自动分片转写
 
 ## 背景
 
-当前 `ApiTranscriber` 将整段录音作为单个 multipart 请求发送给转写 API。大多数 OpenAI 兼容端点（包括 Groq）对单次请求的音频文件有大小和时长上限（Groq 限制约为 25 MB / 单次请求）。
+当前 `ApiTranscriber::transcribe` 将整段录音作为单个 multipart 请求上传到转写 API。大多数 OpenAI 兼容端点（包括 Groq）对单次请求的音频文件有硬性上限：
 
-用户在以下场景中会触碰该上限：
+| 提供商 | 文件大小上限 | 时长参考（44100 Hz 单声道 16-bit） |
+|--------|-------------|-----------------------------------|
+| Groq   | 25 MB       | ≈ 288 秒                         |
+| OpenAI | 25 MB       | ≈ 288 秒                         |
 
-- Toggle 模式下长时间连续录音（超过约 10 分钟）
-- 低比特率设备上采样率较高时，文件体积增长更快
-- 未来若引入更高质量的录音格式
+**数学验证**：`44100 Hz × 1 ch × 2 bytes × 288 s = 25,401,600 bytes ≈ 24.2 MB`，实际安全阈值取 23 MB（留 2 MB 余量应对 HTTP multipart 封装头）。
 
-超出限制时，API 返回 4xx 错误，当前代码直接将错误暴露给用户，没有任何降级或重试机制。
+Toggle 模式录音长度无上限，用户进行 5 分钟以上的会议记录或口述时，文件体积将超出该上限，当前代码直接将 API 返回的 4xx 错误透传给用户，没有任何降级处理。
 
 ## 当前限制
 
 | 层 | 问题 |
 |----|------|
-| `AudioRecorder` | 全程录音数据累积在内存 `Vec<i16>` 中，不设上限 |
-| `ApiTranscriber::transcribe` | 一次性将整个文件上传，不检查文件大小 |
+| `AudioRecorder` | 全程录音数据累积在内存 `Vec<i16>` 中，无大小上限 |
+| `ApiTranscriber::transcribe` | 一次性将整个文件上传，不检查文件大小或时长 |
 | `AppConfig` | 无分片相关配置项 |
-| `main.rs` / `handle_convert` | 无超时保护，无分片重组逻辑 |
+| `handle_convert` | 批量转写时同样无保护 |
 
 ## 目标
 
-1. 支持对超过单次 API 请求上限的长音频**按时长/大小自动分片**，依次转写后拼接结果。
-2. 单片请求失败时支持可配置次数的**自动重试**（指数退避）。
-3. 分片和重试逻辑对调用方（`main.rs`）完全透明，调用接口不变。
-4. 新增相关配置项，允许用户按需调整分片策略。
+1. 超过单次 API 限制的长录音**自动分片**，依次上传后将结果拼接返回。
+2. 单片上传遇到网络错误或 5xx 时，支持**指数退避自动重试**，次数可配置。
+3. 分片和重试逻辑对调用方完全透明：`Transcriber::transcribe(&self, wav_path: &str)` 签名不变。
+4. 新增三个可选配置项，有合理默认值，旧配置无需修改。
 
 ## 非目标
 
-- **真正的流式识别**（边录音边转写、实时字幕）：本期不涉及，留作后续扩展点。
-- **多线程并发上传多个分片**：串行上传已足够，并发带来实现复杂度不值得现阶段引入。
-- **跨平台音频格式支持**（mp3、opus 等）：当前维持 WAV，分片同样输出 WAV。
-- **修改 `Transcriber` trait 签名**：调用接口保持 `transcribe(&self, wav_path: &str)` 不变。
+- **真正的流式 ASR**（边录音边转写、实时字幕流）：本期不涉及。
+  - 流式 ASR 需要在 `AudioRecorder` 录音回调中周期性 flush 原始 PCM 到磁盘，同时并行驱动转写，最终实时拼接输出——这是与本方案完全不同的架构方向，留作后续专项规划。
+- **多分片并发上传**：串行上传已能满足需求，并发需引入 `tokio`，当前 codebase 使用 `reqwest::blocking`，不值得现阶段引入异步运行时。
+- **非 WAV 格式支持**：分片输入和输出均维持 WAV，保持与现有 `ApiTranscriber` 接口的一致性。
+- **修改 `Transcriber` trait**：调用接口不变。
 
 ## 架构方案
 
-### 整体思路
-
-在 `ApiTranscriber::transcribe` 内部引入一个私有的"分片-转写-拼接"流程：
+### 总体流程
 
 ```
 transcribe(wav_path)
-  └─ detect_needs_splitting(wav_path) → bool
-       ├─ false: 现有单次请求路径（不变）
-       └─ true:
-            split_wav(wav_path) → Vec<TmpChunk>
-            for chunk in chunks:
-                transcribe_chunk_with_retry(&chunk) → String
-            merge_texts(Vec<String>) → String
-            cleanup temp chunks
+  └─ detect_needs_splitting(wav_path)
+       │
+       ├─ false（文件 ≤ 阈值）──→ 现有单次上传路径（零改动）
+       │
+       └─ true（文件 > 阈值）
+              │
+              ├─ split_wav(wav_path, max_duration_secs, max_size_bytes)
+              │        → Vec<TmpChunk>  // 临时分片文件，Drop 时自动清理
+              │
+              ├─ for chunk in chunks:
+              │      transcribe_chunk_with_retry(&chunk, max_retries)
+              │        → Result<String>
+              │
+              └─ merge_texts(results, language) → String
 ```
 
-分片本身是**纯本地操作**（读 WAV header、按采样数切割、写临时 WAV 文件），不依赖外部服务。
+关键设计决策：
 
-### 分片策略
+- **检测前置**：`detect_needs_splitting` 只读 WAV 文件头（44 字节），O(1) 代价。
+- **分片纯本地**：`split_wav` 不依赖任何外部服务，仅使用 `hound` 读写 WAV。
+- **RAII 清理**：分片文件封装在 `TmpChunk` 中，实现 `Drop` trait，无论成功或出错均删除临时文件。
+- **短路失败**：任意一个分片在耗尽重试次数后仍失败，立即返回错误，不上传后续分片。
 
-以**最大时长**（`max_chunk_duration_secs`，默认 600 秒 = 10 分钟）为主要切割维度，原因：
+### WAV 分片策略
 
-- 采样率因设备不同（如 44100 Hz vs 16000 Hz），按字节切割需要换算；按时长更直观。
-- 10 分钟 × 单声道 16-bit 44100 Hz ≈ 53 MB，超出 Groq 25 MB 限制；实际默认值应根据目标 API 限制调整（建议 300 秒，对应约 26 MB）。
+以**时长**为主要切割维度，**字节大小**为安全上限，两者取先到者：
 
-辅助安全上限：`max_chunk_size_bytes`（默认 23 MB），两者取更严格的先到先切。
+```
+chunk_max_samples = min(
+    max_chunk_duration_secs × sample_rate,          // 时长上限
+    (max_chunk_size_bytes - WAV_HEADER_SIZE) / bytes_per_sample  // 大小上限
+)
+```
+
+**不同采样率下的实际安全时长**（max_chunk_size_bytes = 23 MB，单声道 16-bit）：
+
+| 采样率 | bytes/sample | 23 MB 对应时长 | 300 s 对应大小 |
+|--------|-------------|---------------|----------------|
+| 16000 Hz | 2 | 731 s | 9.2 MB ✓ |
+| 44100 Hz | 2 | 261 s ← 先触发 | 25.2 MB ✗ |
+| 48000 Hz | 2 | 239 s ← 先触发 | 27.5 MB ✗ |
+
+结论：在 44100 Hz/48000 Hz 设备上，大小上限（23 MB）比时长上限（300 s）更先触发，分片将以约 260 秒为单位；在 16000 Hz 设备上，时长上限先触发。两个阈值互为保障。
+
+分片文件命名：`./tmp/chunk_<原始文件名去扩展名>_<序号零填充>_<unix_timestamp>.wav`
+
+例：`./tmp/chunk_recording_1719000000_00_1719001000.wav`
 
 ### 重试策略
 
-针对单个分片的网络/5xx 错误（不重试 4xx 客户端错误，例如格式不支持）：
+仅对可重试错误重试：网络超时 / 连接错误 / HTTP 5xx。**不重试 HTTP 4xx**（格式不支持、权限不足等客户端错误，重试无意义）。
 
-- 最大重试次数：`max_retries`（默认 3）
-- 退避：初始等待 1 秒，每次翻倍，最大 16 秒
+```
+attempt 0: 立即上传
+attempt 1: 等待 1 s 后重试
+attempt 2: 等待 2 s 后重试
+attempt 3: 等待 4 s 后重试
+（最多 max_retries 次，退避上限 16 s）
+```
+
+退避计算：`wait_secs = min(2^attempt, 16)`，使用 `std::thread::sleep`。
 
 ### 文本拼接
 
-各分片转写结果以空格（或换行符，视语言而定）拼接。若 API 返回 `verbose_json` 中包含 `segments`，可在拼接前去除首尾标点重复，但本期以简单字符串拼接为准，保留扩展点。
+各分片结果拼接时，分隔符根据配置的 `language` 决定：
+
+- 中文（`zh`、`zh-CN`、`zh-TW`）：直接相邻拼接，不插入空格
+- 其他语言：插入单个空格
+
+拼接后去除首尾空白。拼接结果为空字符串时视为转写失败，返回错误。
+
+## 数据类型设计
+
+### `TmpChunk`（`src/audio/splitter.rs`）
+
+```rust
+/// 临时分片文件，实现 Drop 以确保退出时自动删除
+pub struct TmpChunk {
+    pub path: PathBuf,
+    pub index: usize,
+}
+
+impl Drop for TmpChunk {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+```
+
+### `split_wav` 函数签名
+
+```rust
+/// 将 WAV 文件按时长/大小上限分片，返回临时分片列表。
+/// 若文件未超过任何阈值，返回空 Vec（调用方走原有路径）。
+pub fn split_wav(
+    src_path: &str,
+    max_duration_secs: u32,
+    max_size_bytes: u64,
+) -> Result<Vec<TmpChunk>, Box<dyn std::error::Error>>
+```
+
+**实现要点**（使用 `hound` crate）：
+
+```rust
+let reader = hound::WavReader::open(src_path)?;
+let spec = reader.spec();           // sample_rate, channels, bits_per_sample
+let total_samples = reader.len();   // 总采样数（所有声道）
+let samples_per_frame = spec.channels as u32;
+let total_frames = total_samples / samples_per_frame;
+let duration_secs = total_frames as f64 / spec.sample_rate as f64;
+
+let bytes_per_frame = samples_per_frame * (spec.bits_per_sample as u32 / 8);
+let chunk_max_frames = {
+    let by_duration = max_duration_secs as u64 * spec.sample_rate as u64;
+    let by_size = (max_size_bytes - 44) / bytes_per_frame as u64;
+    by_duration.min(by_size) as u32
+};
+
+// 若整个文件在阈值内，返回空 Vec
+if total_frames <= chunk_max_frames { return Ok(vec![]); }
+```
+
+每个分片用独立的 `hound::WavWriter` 写出，继承原始 `WavSpec`（保持采样率、声道数、位深度不变）。
 
 ## 模块改动点
 
-| 文件 | 变更类型 | 说明 |
-|------|----------|------|
-| `src/audio/splitter.rs` | **新增** | WAV 分片工具函数：`split_wav(path, max_duration_secs, max_bytes) -> Vec<PathBuf>` |
-| `src/audio/mod.rs` | **修改** | 导出 `splitter` 模块 |
-| `src/transcriber/api.rs` | **修改** | `ApiTranscriber` 新增私有方法 `transcribe_with_chunks`、`transcribe_chunk_with_retry`；`transcribe` 入口按需分派 |
-| `src/transcriber/api.rs` | **修改** | `ApiTranscriber` 结构体新增 `max_chunk_duration_secs`、`max_chunk_size_bytes`、`max_retries` 字段，由 `from_config` 注入 |
-| `src/core/config.rs` | **修改** | `AppConfig` 新增三个可选配置字段（见下方配置项建议） |
+| 文件 | 变更类型 | 具体说明 |
+|------|----------|----------|
+| `src/audio/splitter.rs` | **新增** | `TmpChunk` struct + `split_wav` 函数 |
+| `src/audio/mod.rs` | **修改** | `pub mod splitter;` + `pub use splitter::{split_wav, TmpChunk};` |
+| `src/transcriber/api.rs` | **修改** | `ApiTranscriber` 新增三个字段，`transcribe` 增加分派逻辑，新增两个私有方法 |
+| `src/core/config.rs` | **修改** | `AppConfig` 新增三个带默认值的可选字段，更新 `get_field`/`set_field`/`apply_json` |
 
-`Transcriber` trait、`MockTranscriber`、`factory.rs`、`main.rs` **均不需要修改**。
+`Transcriber` trait、`MockTranscriber`、`factory.rs`、`main.rs`、`tray.rs`、`hotkey.rs` **均不需要修改**。
 
-## 配置项建议
+### `ApiTranscriber` 字段扩展
 
-在 `AppConfig` 中新增以下字段（均为可选，有合理默认值）：
+```rust
+pub struct ApiTranscriber {
+    // 现有字段（不变）
+    api_key: String,
+    api_url: String,
+    model: String,
+    language: Option<String>,
+    prompt: Option<String>,
+    temperature: f32,
+    // 新增字段
+    max_chunk_duration_secs: u32,   // 默认 300
+    max_chunk_size_bytes: u64,      // 默认 23 * 1024 * 1024
+    max_retries: u32,               // 默认 3
+}
+```
+
+`from_config` 从 `AppConfig` 注入新字段（有默认值，不影响现有调用）。
+
+### `transcribe` 入口改动（伪代码）
+
+```rust
+fn transcribe(&self, wav_path: &str) -> Result<String, Box<dyn Error>> {
+    let chunks = split_wav(wav_path, self.max_chunk_duration_secs, self.max_chunk_size_bytes)?;
+    if chunks.is_empty() {
+        // 原有路径：单次上传
+        return self.upload_file(wav_path);
+    }
+    if chunks.len() > 100 {
+        return Err("分片数量超过 100，拒绝处理".into());
+    }
+    let texts: Vec<String> = chunks.iter().enumerate()
+        .map(|(i, chunk)| {
+            tracing::info!("转写分片 {}/{}", i + 1, chunks.len());
+            self.transcribe_chunk_with_retry(chunk)
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(merge_texts(&texts, self.language.as_deref()))
+}
+```
+
+## 配置项
+
+在 `AppConfig` 中新增以下字段（均可选，有默认值，旧配置向后兼容）：
 
 ```json
 {
@@ -101,91 +236,121 @@ transcribe(wav_path)
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `max_chunk_duration_secs` | `u32` | `300` | 单个分片最大时长（秒）。设为 `0` 禁用时长切割 |
-| `max_chunk_size_bytes` | `u64` | `23 * 1024 * 1024` (23 MB) | 单个分片最大字节数。设为 `0` 禁用大小切割 |
-| `max_retries` | `u32` | `3` | 单片上传失败后最大重试次数（指数退避） |
+| `max_chunk_duration_secs` | `u32` | `300` | 单分片最大时长（秒）。`0` 表示不按时长切割（仍受大小限制） |
+| `max_chunk_size_bytes` | `u64` | `23 * 1024 * 1024` | 单分片最大字节数。`0` 表示不按大小切割（仍受时长限制） |
+| `max_retries` | `u32` | `3` | 单分片上传失败后的最大重试次数（指数退避，不含首次） |
 
-- 旧配置不含这些字段时，按默认值处理，**向后兼容**。
-- `config get/set` 支持读写这三个字段。
+Rust 端 `AppConfig` 定义：
 
-## 失败重试与边界情况
+```rust
+#[serde(default = "default_chunk_duration")]
+pub max_chunk_duration_secs: u32,  // fn default_chunk_duration() -> u32 { 300 }
+
+#[serde(default = "default_chunk_size")]
+pub max_chunk_size_bytes: u64,     // fn default_chunk_size() -> u64 { 23 * 1024 * 1024 }
+
+#[serde(default = "default_retries")]
+pub max_retries: u32,              // fn default_retries() -> u32 { 3 }
+```
+
+`config get/set` 支持读写这三个字段（与现有 `get_field`/`set_field` 模式一致）。
+
+## 边界与错误处理
 
 | 情况 | 处理方式 |
 |------|----------|
-| 整个文件未超过阈值 | 走原有单次上传路径，零额外开销 |
-| 分片过程中磁盘写入失败 | 返回错误，不上传任何分片，临时文件尽力清理 |
-| 某分片重试耗尽仍失败 | 整体返回错误，附带分片索引信息，临时文件清理 |
-| API 返回 4xx（格式/大小不符） | 不重试，立即透传错误 |
-| 分片数量异常多（> 100 片）| 提前返回错误，避免无限制磁盘占用 |
-| 拼接结果为空字符串 | 视同转写失败，返回错误 |
-| 临时分片文件未清理 | 通过 `Drop` 或显式 `cleanup` 确保退出前删除 |
+| 文件未超过任何阈值 | `split_wav` 返回空 Vec，走原有单次上传路径，零额外开销 |
+| 分片写入失败（磁盘满等） | 返回错误，`TmpChunk` Drop 自动清理已写出的文件 |
+| 分片数 > 100 | 提前返回错误，避免无限制磁盘占用（100 片 × 23 MB ≈ 2.3 GB） |
+| 某分片 5xx，重试耗尽 | 返回错误（包含分片序号），`TmpChunk` Drop 清理所有临时文件 |
+| 某分片 4xx | 不重试，立即返回错误（包含 HTTP 状态码和响应体） |
+| 所有分片成功但拼接为空 | 返回错误（不静默丢失转写结果） |
+| `max_chunk_duration_secs=0` 且 `max_chunk_size_bytes=0` | `split_wav` 直接返回空 Vec，退化为单次上传 |
 
 ## 测试计划
 
-### 单元测试（`src/audio/splitter.rs`）
+### `src/audio/splitter.rs` 单元测试
 
-- `test_split_short_audio_no_split`：短于阈值的音频不产生额外分片，返回单元素列表
-- `test_split_long_audio_produces_chunks`：超过时长阈值时产生正确数量的分片
-- `test_split_by_size_threshold`：超过字节阈值时正确切割
-- `test_split_chunk_wav_valid`：每个分片都是合法的 WAV 文件（header 可解析）
-- `test_split_cleanup`：分片临时文件在使用后可被删除
+用 `hound` 在内存生成合成 WAV，无需真实麦克风。
 
-### 单元测试（`src/transcriber/api.rs`）
+| 测试名 | 验证内容 |
+|--------|----------|
+| `test_short_audio_no_split` | 未超阈值的文件返回空 Vec |
+| `test_split_by_duration` | 超过时长阈值时产生正确分片数 |
+| `test_split_by_size` | 超过字节阈值时产生正确分片数（高采样率场景） |
+| `test_each_chunk_is_valid_wav` | 每个分片可被 `hound::WavReader` 解析，spec 与原始一致 |
+| `test_chunks_cover_all_samples` | 所有分片的采样数总和 = 原始文件采样数 |
+| `test_tmp_chunk_drop_deletes_file` | `TmpChunk` drop 后文件不存在 |
+| `test_chunk_count_limit` | 超过 100 片时返回错误 |
 
-- `test_no_split_when_short`：短文件走单次请求路径（mock HTTP）
-- `test_retry_on_server_error`：5xx 触发重试，达到最大次数后返回错误
-- `test_no_retry_on_client_error`：4xx 不触发重试
-- `test_chunk_results_merged`：多片结果按序拼接
+### `src/transcriber/api.rs` 单元测试（mock HTTP）
+
+使用 `mockito` 或直接构造 mock server 拦截请求。
+
+| 测试名 | 验证内容 |
+|--------|----------|
+| `test_short_file_single_request` | 未超阈值时只发出 1 次 HTTP 请求 |
+| `test_long_file_multiple_requests` | 超阈值时发出 N 次请求（N = 分片数） |
+| `test_retry_on_503` | 5xx 触发重试，验证重试次数 = max_retries |
+| `test_no_retry_on_400` | 4xx 不触发重试，立即返回错误 |
+| `test_results_merged_zh` | 中文分片结果相邻拼接（无空格） |
+| `test_results_merged_en` | 英文分片结果以空格拼接 |
+| `test_empty_merge_is_error` | 所有分片返回空字符串时返回错误 |
+
+### `src/core/config.rs` 配置测试
+
+| 测试名 | 验证内容 |
+|--------|----------|
+| `test_default_chunk_config` | 三个字段默认值正确 |
+| `test_apply_json_chunk_config` | 从 JSON 反序列化正确加载 |
+| `test_backward_compat_missing_fields` | 旧配置（无三个字段）加载后使用默认值，不报错 |
+| `test_get_set_chunk_fields` | `get_field`/`set_field` 对三个新字段正常工作 |
 
 ### 集成测试
 
-- `test_long_recording_end_to_end`（需要 API key，CI 中跳过）：使用真实 API 转写超过 5 分钟的测试音频，验证分片拼接后结果语义连贯
+`test_long_recording_end_to_end`（需要 `TRANSCRIPTION_API_KEY`，CI 中自动跳过）：使用 5 分钟以上的合成语音 WAV，验证分片上传后返回语义连贯的文本。
 
-### 配置测试（`src/core/config.rs`）
-
-- `test_default_chunk_config`：默认值正确
-- `test_apply_json_chunk_config`：从 JSON 正确加载三个新字段
-- `test_backward_compat_no_chunk_fields`：旧配置加载后使用默认值
-
-## 分阶段落地步骤
+## 分阶段落地
 
 ### Phase 1 — WAV 分片工具（纯本地，无网络）
 
-1. 新增 `src/audio/splitter.rs`，实现 `split_wav` 函数
-2. 写对应单元测试（使用 `hound` 生成测试 WAV 数据）
+1. 新增 `src/audio/splitter.rs`，实现 `TmpChunk` 和 `split_wav`
+2. 写全部 splitter 单元测试（使用 `hound` 生成合成 WAV）
 3. 更新 `src/audio/mod.rs` 导出
 
-**验收**：`cargo test -p viberwhisper audio::splitter` 全绿。
+**验收**：`cargo test audio::splitter` 全绿。
 
 ### Phase 2 — 配置扩展
 
-1. `AppConfig` 新增三个字段及默认值
+1. `AppConfig` 新增三个字段及 serde 默认值函数
 2. 更新 `get_field`、`set_field`、`apply_json`
-3. 写配置测试
+3. 更新 `config.example.json` 注释
+4. 写配置单元测试
 
-**验收**：`cargo test -p viberwhisper core::config` 全绿，`config list` 展示新字段。
+**验收**：`cargo test core::config` 全绿；`config list` 显示三个新字段及当前值。
 
 ### Phase 3 — 转写器分片逻辑
 
-1. `ApiTranscriber` 结构体新增字段，`from_config` 注入
-2. 实现 `transcribe_chunk_with_retry`（含指数退避）
-3. 实现 `transcribe_with_chunks`（调用 `split_wav` + 循环重试 + 拼接）
-4. `transcribe` 入口：检测文件大小/时长，按需分派
-5. 写 mock HTTP 的单元测试
+1. `ApiTranscriber` 结构体新增三个字段，`from_config` 注入（有默认值）
+2. 将现有上传逻辑提取为私有方法 `upload_file`
+3. 实现 `transcribe_chunk_with_retry`（含指数退避 + 重试判断）
+4. 实现 `merge_texts`（语言感知拼接）
+5. 改写 `transcribe` 入口，调用 `split_wav` 并按需分派
+6. 写 mock HTTP 单元测试
 
-**验收**：`cargo test -p viberwhisper transcriber::api` 全绿；对短音频行为与改动前完全一致。
+**验收**：`cargo test transcriber::api` 全绿；对短音频，行为与改动前完全一致（快照测试）。
 
-### Phase 4 — 文档与收尾
+### Phase 4 — 文档收尾
 
-1. 更新 `docs/architecture/transcriber.md`，说明分片流程和配置项
-2. 更新 `docs/architecture/audio.md`，说明 `splitter` 模块
-3. 更新根目录 `README.md` 配置表格，加入新字段说明
-4. 更新 `config.example.json` 注释，说明新字段用途
+1. 更新 `docs/architecture/transcriber.md`：说明分片流程、新字段、`upload_file` 私有方法
+2. 更新 `docs/architecture/audio.md`：说明 `splitter` 模块和 `TmpChunk`
+3. 更新根 `README.md` 配置表格，加入三个新字段
+4. 本文档（`05-long-audio-streaming.md`）状态标记为 IMPLEMENTED
 
-**验收**：`cargo test` 全绿；文档 review 通过。
+**验收**：`cargo test` 全绿；PR review 通过。
 
 ## 后续扩展方向
 
-- **边录边转写**（真正流式）：在 `AudioRecorder` 录音过程中周期性 flush 分片到磁盘并触发转写，最终结果实时追加到输出
-- **并发上传**：多个分片并行上传，需引入 `tokio` 或 `rayon`，待评估是否值得引入异步运行时
-- **支持非 WAV 格式**：若 API 支持 opus/mp3，可在分片后转码以减小体积
+- **真正的流式 ASR**：在 `AudioRecorder` 的 cpal 回调中积累固定帧数后写临时 WAV 并触发异步转写，需引入 `tokio` 和 `Arc<Mutex<Sender<String>>>` 回调通道，最终实时将结果注入 `TextTyper`。
+- **多分片并发上传**：引入 `rayon` 并行迭代 `chunks`，需处理结果有序合并；仅在串行延迟成为实际瓶颈后评估。
+- **非 WAV 格式分片**：分片后转码为 opus/mp3 可显著减小上传体积，需引入 FFmpeg 绑定或 `symphonia`。
