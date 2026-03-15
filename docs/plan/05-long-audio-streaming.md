@@ -112,7 +112,7 @@ attempt 3: 等待 4 s 后重试
 - 中文（`zh`、`zh-CN`、`zh-TW`）：直接相邻拼接，不插入空格
 - 其他语言：插入单个空格
 
-拼接后去除首尾空白。拼接结果为空字符串时视为转写失败，返回错误。
+拼接后仅去除分片之间引入的冗余空白，不额外将空字符串判定为失败；若转写服务返回空字符串，则按服务返回结果透传。
 
 ## 数据类型设计
 
@@ -295,7 +295,7 @@ pub max_retries: u32,              // fn default_retries() -> u32 { 3 }
 | `test_no_retry_on_400` | 4xx 不触发重试，立即返回错误 |
 | `test_results_merged_zh` | 中文分片结果相邻拼接（无空格） |
 | `test_results_merged_en` | 英文分片结果以空格拼接 |
-| `test_empty_merge_is_error` | 所有分片返回空字符串时返回错误 |
+| `test_empty_merge_passthrough` | 所有分片返回空字符串时，按转写服务结果原样返回 |
 
 ### `src/core/config.rs` 配置测试
 
