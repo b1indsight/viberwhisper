@@ -155,7 +155,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     println!("Press Ctrl+C to exit.");
     println!();
 
-    // Active streaming session for toggle-mode background transcription.
+    // Active streaming session for background transcription (used by both hold and toggle modes).
     let mut streaming: Option<StreamingSession> = None;
 
     /// Merge text segments using language-aware separator.
@@ -253,6 +253,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                     let mut rec = recorder.lock().unwrap();
                     match rec.start_recording() {
                         Ok(()) => {
+                            streaming = Some(StreamingSession::new());
                             info!("Recording started");
                             tray.set_recording(true);
                         }
@@ -262,8 +263,8 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                 HotkeyEvent::Released(HotkeySource::Hold) => {
                     info!(hotkey = %config.hold_hotkey, "Hold key released, stopping recording");
                     let mut rec = recorder.lock().unwrap();
-                    // Hold mode: no streaming session, use simple single-shot path.
-                    stop_and_finalize(&mut rec, None, &transcriber, &language);
+                    let session = streaming.take();
+                    stop_and_finalize(&mut rec, session, &transcriber, &language);
                     tray.set_recording(false);
                 }
                 HotkeyEvent::Pressed(HotkeySource::Toggle) => {
@@ -289,7 +290,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Poll for ready chunks from a streaming toggle recording and dispatch them.
+        // Poll for ready chunks from any active recording (hold or toggle) and dispatch them.
         if streaming.is_some() {
             let chunk_path = recorder.lock().unwrap().take_ready_chunk();
             if let Some(path) = chunk_path {
