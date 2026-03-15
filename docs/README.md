@@ -30,3 +30,5 @@ Implementation plans and technical specs for each feature.
 | [02-toggle-recording.md](plan/02-toggle-recording.md) | Dual-mode recording: hold-to-record (F8) and toggle (F9) |
 | [03-cross-platform.md](plan/03-cross-platform.md) | macOS + Windows support via platform-specific `TextTyper` implementations |
 | [04-multiple-models.md](plan/04-multiple-models.md) | Provider + model config abstraction for future multi-provider expansion |
+| [05-long-audio-streaming.md](plan/05-long-audio-streaming.md) | Long audio chunking, offline split, retry with exponential backoff, and text merge |
+| [06-end-to-end-stream-recognition.md](plan/06-end-to-end-stream-recognition.md) | 全流程 stream 识别：统一 Hold/Toggle 会话生命周期、chunk 状态机、结果收敛、错误传播与 `SessionOrchestrator` 规划 |
