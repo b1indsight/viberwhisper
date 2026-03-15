@@ -8,6 +8,18 @@ const CONFIG_FILE: &str = "config.json";
 const DEFAULT_TRANSCRIPTION_API_URL: &str =
     "https://api.groq.com/openai/v1/audio/transcriptions";
 
+fn default_chunk_duration() -> u32 {
+    30
+}
+
+fn default_chunk_size() -> u64 {
+    23 * 1024 * 1024
+}
+
+fn default_retries() -> u32 {
+    3
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     /// API key for the transcription service.
@@ -28,6 +40,17 @@ pub struct AppConfig {
     pub hold_hotkey: String,
     pub toggle_hotkey: String,
     pub mic_gain: f32,
+    /// Maximum duration (in seconds) per audio chunk when splitting long recordings.
+    /// 0 means no duration limit (size limit still applies). Default: 30.
+    #[serde(default = "default_chunk_duration")]
+    pub max_chunk_duration_secs: u32,
+    /// Maximum byte size per audio chunk (including WAV header). Default: 23 MiB.
+    /// 0 means no size limit (duration limit still applies).
+    #[serde(default = "default_chunk_size")]
+    pub max_chunk_size_bytes: u64,
+    /// Maximum number of retry attempts per chunk upload on transient errors. Default: 3.
+    #[serde(default = "default_retries")]
+    pub max_retries: u32,
 }
 
 impl Default for AppConfig {
@@ -43,6 +66,9 @@ impl Default for AppConfig {
             hold_hotkey: "F8".to_string(),
             toggle_hotkey: "F9".to_string(),
             mic_gain: 1.0,
+            max_chunk_duration_secs: default_chunk_duration(),
+            max_chunk_size_bytes: default_chunk_size(),
+            max_retries: default_retries(),
         }
     }
 }
@@ -100,6 +126,9 @@ impl AppConfig {
             "mic_gain" => Some(self.mic_gain.to_string()),
             "language" => self.language.clone(),
             "prompt" => self.prompt.clone(),
+            "max_chunk_duration_secs" => Some(self.max_chunk_duration_secs.to_string()),
+            "max_chunk_size_bytes" => Some(self.max_chunk_size_bytes.to_string()),
+            "max_retries" => Some(self.max_retries.to_string()),
             _ => None,
         }
     }
@@ -151,9 +180,28 @@ impl AppConfig {
                     .map_err(|_| format!("mic_gain must be a float, got: {}", value))?;
                 Ok(())
             }
+            "max_chunk_duration_secs" => {
+                self.max_chunk_duration_secs = value
+                    .parse::<u32>()
+                    .map_err(|_| format!("max_chunk_duration_secs must be a u32, got: {}", value))?;
+                Ok(())
+            }
+            "max_chunk_size_bytes" => {
+                self.max_chunk_size_bytes = value
+                    .parse::<u64>()
+                    .map_err(|_| format!("max_chunk_size_bytes must be a u64, got: {}", value))?;
+                Ok(())
+            }
+            "max_retries" => {
+                self.max_retries = value
+                    .parse::<u32>()
+                    .map_err(|_| format!("max_retries must be a u32, got: {}", value))?;
+                Ok(())
+            }
             _ => Err(format!(
                 "Unknown config key: {}. Available: api_key, transcription_api_url, model, \
-                 hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain",
+                 hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain, \
+                 max_chunk_duration_secs, max_chunk_size_bytes, max_retries",
                 key
             )),
         }
@@ -200,6 +248,15 @@ impl AppConfig {
         }
         if let Some(prompt) = json["prompt"].as_str() {
             self.prompt = Some(prompt.to_string());
+        }
+        if let Some(v) = json["max_chunk_duration_secs"].as_u64() {
+            self.max_chunk_duration_secs = v as u32;
+        }
+        if let Some(v) = json["max_chunk_size_bytes"].as_u64() {
+            self.max_chunk_size_bytes = v;
+        }
+        if let Some(v) = json["max_retries"].as_u64() {
+            self.max_retries = v as u32;
         }
     }
 }
@@ -367,5 +424,57 @@ mod tests {
         let mut config = AppConfig::default();
         let result = config.set_field("nonexistent", "value");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_default_chunk_config() {
+        let config = AppConfig::default();
+        assert_eq!(config.max_chunk_duration_secs, 30);
+        assert_eq!(config.max_chunk_size_bytes, 23 * 1024 * 1024);
+        assert_eq!(config.max_retries, 3);
+    }
+
+    #[test]
+    fn test_apply_json_chunk_config() {
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({
+            "max_chunk_duration_secs": 60,
+            "max_chunk_size_bytes": 10485760u64,
+            "max_retries": 5
+        });
+        config.apply_json(&json);
+        assert_eq!(config.max_chunk_duration_secs, 60);
+        assert_eq!(config.max_chunk_size_bytes, 10485760);
+        assert_eq!(config.max_retries, 5);
+    }
+
+    #[test]
+    fn test_backward_compat_missing_chunk_fields() {
+        // Old config without chunk fields should use defaults after apply_json
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({ "model": "whisper-large-v3" });
+        config.apply_json(&json);
+        assert_eq!(config.max_chunk_duration_secs, 30);
+        assert_eq!(config.max_chunk_size_bytes, 23 * 1024 * 1024);
+        assert_eq!(config.max_retries, 3);
+    }
+
+    #[test]
+    fn test_get_set_chunk_fields() {
+        let mut config = AppConfig::default();
+        assert_eq!(
+            config.get_field("max_chunk_duration_secs"),
+            Some("30".to_string())
+        );
+        assert_eq!(
+            config.get_field("max_retries"),
+            Some("3".to_string())
+        );
+        config.set_field("max_chunk_duration_secs", "45").unwrap();
+        assert_eq!(config.max_chunk_duration_secs, 45);
+        config.set_field("max_chunk_size_bytes", "10485760").unwrap();
+        assert_eq!(config.max_chunk_size_bytes, 10485760);
+        config.set_field("max_retries", "5").unwrap();
+        assert_eq!(config.max_retries, 5);
     }
 }

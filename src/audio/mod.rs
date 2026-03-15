@@ -1,2 +1,5 @@
 pub mod recorder;
-pub use recorder::AudioRecorder;
+pub mod splitter;
+pub use recorder::{AudioRecorder, StopResult};
+#[allow(unused_imports)]
+pub use splitter::{split_wav, TmpChunk};
