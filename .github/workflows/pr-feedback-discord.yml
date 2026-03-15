@@ -33,7 +33,45 @@ jobs:
               return;
             }
 
-            let prTitle, prUrl, prNumber, actor, updateType, body;
+            const maxLen = 1200;
+            const standaloneReviewCommentDelayMs = 20000;
+            const standaloneReviewCommentGapMs = 45000;
+            const compactText = (text) => (text || '').replace(/\s+/g, ' ').trim();
+            const truncate = (text) => text.length > maxLen
+              ? `${text.slice(0, maxLen)}…`
+              : text;
+            const formatReviewComments = (comments) => comments
+              .map((comment, index) => {
+                const text = compactText(comment.body) || '_空_';
+                return `${index + 1}. ${text}`;
+              })
+              .join('\n');
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const parseDate = (value) => new Date(value).getTime();
+            const collectTrailingStandaloneComments = (comments, anchorCommentId) => {
+              const anchorIndex = comments.findIndex((comment) => comment.id === anchorCommentId);
+              if (anchorIndex === -1) {
+                return [];
+              }
+
+              const collected = [comments[anchorIndex]];
+              for (let index = anchorIndex - 1; index >= 0; index -= 1) {
+                const current = comments[index];
+                const next = comments[index + 1];
+                if (parseDate(next.created_at) - parseDate(current.created_at) > standaloneReviewCommentGapMs) {
+                  break;
+                }
+                collected.unshift(current);
+              }
+              return collected;
+            };
+
+            let prTitle;
+            let prUrl;
+            let prNumber;
+            let actor;
+            let updateType;
+            let body = '';
 
             if (eventName === 'pull_request_review') {
               const review = payload.review;
@@ -42,7 +80,6 @@ jobs:
               prUrl = pr.html_url;
               prNumber = pr.number;
               actor = review.user.login;
-              body = review.body || '';
 
               const stateMap = {
                 approved: '✅ APPROVED',
@@ -50,14 +87,66 @@ jobs:
                 commented: '💬 REVIEW COMMENTED',
               };
               updateType = stateMap[review.state.toLowerCase()] || `💬 ${review.state}`;
+
+              const { data: reviewComments } = await github.rest.pulls.listCommentsForReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                review_id: review.id,
+                per_page: 100,
+              });
+
+              const sections = [];
+              const reviewBody = compactText(review.body);
+              if (reviewBody) {
+                sections.push(`Review：${reviewBody}`);
+              }
+              if (reviewComments.length > 0) {
+                sections.push(`Review comments (${reviewComments.length})：\n${formatReviewComments(reviewComments)}`);
+              }
+              body = truncate(sections.join('\n\n'));
             } else if (eventName === 'pull_request_review_comment') {
               const comment = payload.comment;
+
+              if (comment.pull_request_review_id) {
+                console.log(`Skipping review comment ${comment.id}: will be summarized by review ${comment.pull_request_review_id}.`);
+                return;
+              }
+
+              await sleep(standaloneReviewCommentDelayMs);
+
               const pr = payload.pull_request;
+              const actorLogin = comment.user.login;
+              const allStandaloneComments = await github.paginate(github.rest.pulls.listReviewComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                per_page: 100,
+              });
+              const actorStandaloneComments = allStandaloneComments
+                .filter((reviewComment) => !reviewComment.pull_request_review_id)
+                .filter((reviewComment) => reviewComment.user.login === actorLogin)
+                .sort((left, right) => parseDate(left.created_at) - parseDate(right.created_at));
+              const trailingComments = collectTrailingStandaloneComments(actorStandaloneComments, comment.id);
+
+              if (trailingComments.length === 0) {
+                console.log(`Skipping review comment ${comment.id}: aggregation anchor not found.`);
+                return;
+              }
+
+              const latestComment = trailingComments[trailingComments.length - 1];
+              if (latestComment.id !== comment.id) {
+                console.log(`Skipping review comment ${comment.id}: newer standalone comment ${latestComment.id} will send the summary.`);
+                return;
+              }
+
               prTitle = pr.title;
               prUrl = pr.html_url;
               prNumber = pr.number;
-              actor = comment.user.login;
-              body = comment.body || '';
+              actor = actorLogin;
+              body = trailingComments.length === 1
+                ? truncate(compactText(comment.body))
+                : truncate(`连续 review comments (${trailingComments.length})：\n${formatReviewComments(trailingComments)}`);
               updateType = '🧵 REVIEW COMMENT';
             } else {
               const comment = payload.comment;
@@ -66,20 +155,15 @@ jobs:
               prUrl = issue.pull_request.html_url;
               prNumber = issue.number;
               actor = comment.user.login;
-              body = comment.body || '';
+              body = truncate(compactText(comment.body));
               updateType = '💬 PR COMMENT';
             }
-
-            const maxLen = 300;
-            const compactBody = body.replace(/\s+/g, ' ').trim();
-            const bodyPreview = compactBody.length > maxLen
-              ? `${compactBody.slice(0, maxLen)}…`
-              : compactBody;
 
             const almaUserId = process.env.ALMA_DISCORD_USER_ID;
             const mention = almaUserId ? `<@${almaUserId}>` : '@Alma';
             const channelName = process.env.DISCORD_CHANNEL_NAME || '未命名频道';
             const channelId = process.env.DISCORD_CHANNEL_ID || '未配置';
+            const bodyPreview = body || '_空_';
 
             const message = [
               '🚨 **ViberWhisper PR 有新反馈** 🚨',
@@ -88,7 +172,7 @@ jobs:
               `**来自**：${actor}`,
               `**频道**：${channelName} (${channelId})`,
               `**链接**：${prUrl}`,
-              bodyPreview ? `**内容**：${bodyPreview}` : '**内容**：_空_ ',
+              `**内容**：${bodyPreview}`,
               '',
               `${mention} 处理一下这个 PR。`,
             ].join('\n');
