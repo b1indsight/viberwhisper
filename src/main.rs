@@ -6,7 +6,7 @@ mod transcriber;
 
 use clap::Parser;
 use core::cli::{Cli, Commands, ConfigAction};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,7 +42,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use input::tray::TrayManager;
     use input::typer::TextTyper;
     use std::sync::{Arc, Mutex};
-    use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
+    use transcriber::{create_transcriber, Transcriber};
 
     println!("ViberWhisper - Voice-to-Text Input");
     println!("===================================");
@@ -54,21 +54,13 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
         toggle_hotkey = %config.toggle_hotkey,
         model = %config.model,
         language = %config.language.as_deref().unwrap_or("auto"),
+        api_url = %config.transcription_api_url,
         "Config loaded"
     );
 
     let hotkey_manager = HotkeyManager::new(&config.hold_hotkey, &config.toggle_hotkey)?;
     let recorder = Arc::new(Mutex::new(AudioRecorder::new(config.mic_gain)?));
-    let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_config(&config) {
-        Ok(t) => {
-            info!("Using Groq Whisper for speech recognition");
-            Box::new(t)
-        }
-        Err(e) => {
-            warn!(error = %e, "Failed to initialize Groq, falling back to Mock mode");
-            Box::new(MockTranscriber)
-        }
-    };
+    let transcriber: Box<dyn Transcriber> = create_transcriber(&config);
 
     #[cfg(target_os = "macos")]
     let typer = platform::macos::MacTyper;
@@ -178,9 +170,11 @@ fn handle_config(action: ConfigAction) {
 
     match action {
         ConfigAction::List => {
-            println!("{:<15} {}", "Key", "Value");
-            println!("{}", "-".repeat(50));
+            println!("{:<25} {}", "Key", "Value");
+            println!("{}", "-".repeat(60));
             for key in &[
+                "api_key",
+                "transcription_api_url",
                 "model",
                 "hold_hotkey",
                 "toggle_hotkey",
@@ -188,12 +182,11 @@ fn handle_config(action: ConfigAction) {
                 "prompt",
                 "temperature",
                 "mic_gain",
-                "groq_api_key",
             ] {
                 let value = config
                     .get_field(key)
                     .unwrap_or_else(|| "(not set)".to_string());
-                println!("{:<15} {}", key, value);
+                println!("{:<25} {}", key, value);
             }
         }
 
@@ -223,19 +216,12 @@ fn handle_config(action: ConfigAction) {
 
 fn handle_convert(input: &str, output: Option<&str>) {
     use core::config::AppConfig;
-    use transcriber::{GroqTranscriber, MockTranscriber, Transcriber};
+    use transcriber::{create_transcriber, Transcriber};
 
     println!("Transcribing: {}", input);
 
     let config = AppConfig::load();
-
-    let transcriber: Box<dyn Transcriber> = match GroqTranscriber::from_config(&config) {
-        Ok(t) => Box::new(t),
-        Err(e) => {
-            eprintln!("Warning: failed to initialize Groq ({}), using Mock transcriber", e);
-            Box::new(MockTranscriber)
-        }
-    };
+    let transcriber: Box<dyn Transcriber> = create_transcriber(&config);
 
     match transcriber.transcribe(input) {
         Ok(text) => match output {
