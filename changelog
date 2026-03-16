@@ -3,3 +3,5 @@
 2026-03-10: Add dual-hotkey recording: hold_hotkey (F8) for press-and-hold recording, toggle_hotkey (F9) for press-to-toggle recording
 2026-03-10: Add cross-platform support: macOS typer (osascript) + Windows typer (SendInput), conditional compilation with #[cfg(target_os)]
 2026-03-10: Add system tray icon: idle (gray) / recording (red) status indicator, right-click menu with exit option, cross-platform (macOS + Windows)
+2026-03-15: Add long-audio streaming plan covering in-recording chunking, offline WAV split fallback, retry, and result merge
+2026-03-15: Add end-to-end stream recognition plan covering unified Hold/Toggle session orchestration, chunk state machine, convergence, and error propagation
