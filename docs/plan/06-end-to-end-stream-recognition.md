@@ -44,8 +44,8 @@ PR #26（`05-long-audio-streaming.md`）已落地以下底层能力：
 
 ## TODO
 
-- [ ] 明确后台上传线程与主线程之间的同步原语选型（`std::sync::mpsc` vs `Arc<Mutex<Vec<_>>>` vs `std::sync::Condvar`）
-- [ ] 确认停止录音时等待收敛的超时上限（建议默认 `convergence_timeout_secs = 60`）
+- [x] 明确后台上传线程与主线程之间的同步原语选型：使用 `std::sync::mpsc`（上传 worker 通过 `Sender<TmpChunk>` 接收分片，主线程通过 `Receiver` 驱动收敛等待）
+- [x] 确认停止录音时等待收敛的超时上限（默认 `convergence_timeout_secs = 30`）
 - [ ] 评估 `SessionOrchestrator` 是否需要持有 `Arc<dyn Transcriber>` 以便测试注入
 - [ ] 补充日志 / 进度可观测性（分片序号、上传耗时、重试次数）
 
@@ -117,8 +117,10 @@ KeyUp(Hold)                        KeyDown(Toggle) [第二次]
                   ┌──────────────────────────────────────────┐
                   │                                          │
   录音中 ──封片──▶ Flushed ──提交队列──▶ Uploading ──成功──▶ Transcribed
-                                         │
-                                    重试耗尽 / 4xx
+                                         │    ▲
+                                         │    │ 网络错误（非 API 内部）且未超时 → 重试
+                                         │    └────────────────────────────────┘
+                                    重试耗尽（5xx）/ 4xx / 超时后网络仍失败
                                          │
                                          ▼
                                        Failed(TranscribeError)
@@ -190,13 +192,14 @@ fn collect_results(&self) -> Result<String, SessionError> {
 
 | 错误来源 | 当前行为（PR #26） | 本方案调整 |
 |----------|-------------------|-----------|
-| 单片上传失败（网络 / 5xx，重试耗尽） | 立即中断，不处理后续分片 | 记录 `Failed`，继续处理其他分片，收敛时汇总报告 |
-| 单片 4xx（客户端错误） | 立即中断 | 同上，标记 `Failed(Api { status, body })`，继续 |
+| 单片上传失败（网络错误，非 API 内部错误） | 立即中断，不处理后续分片 | 在超时范围内重试（`convergence_timeout_secs` 窗口内）；超时前未能成功则标记为 `Failed(Network)`，继续处理其他分片 |
+| 单片上传失败（5xx API 错误，重试耗尽） | 立即中断，不处理后续分片 | 记录 `Failed(Api { status, body })`，继续处理其他分片，收敛时汇总报告 |
+| 单片 4xx（客户端错误） | 立即中断 | 同上，标记 `Failed(Api { status, body })`，不重试，继续 |
 | 收敛超时 | 不存在（无超时机制） | 标记未完成分片为 `Failed(Timeout)`，返回 `ConvergenceError::Timeout` |
 | 所有分片成功 | `Ok(merged_text)` | 不变 |
 | 部分分片失败 | 不存在（短路失败） | `Err(SessionError::PartialFailure { ... })` |
 
-**设计理由**：长录音场景下单片偶发失败不应丢弃用户前几分钟的转录结果。改为"尽力收集 + 收敛时汇总"的策略，上层可根据错误详情决定是否重新上传失败分片（后续扩展点）。
+**设计理由**：长录音场景下单片偶发失败不应丢弃用户前几分钟的转录结果。网络层面的瞬时抖动（非 API 内部错误）应在 `convergence_timeout_secs` 窗口内进行重试，给网络恢复机会；API 4xx / 5xx 耗尽重试后则直接标记失败。整体改为"尽力收集 + 收敛时汇总"的策略，上层可根据错误详情决定是否重新上传失败分片（后续扩展点）。
 
 ### Orchestrator 抽离
 
@@ -298,7 +301,7 @@ impl SessionOrchestrator {
 | `src/core/mod.rs` | **修改** | `pub mod orchestrator;` + `pub use orchestrator::SessionOrchestrator;` |
 | `src/audio/recorder.rs` | **修改** | `start_recording` 接受 `chunk_tx: Sender<TmpChunk>` 参数；移除原有的内联调度逻辑 |
 | `src/main.rs` | **修改** | `run_listener` 持有 `SessionOrchestrator`；热键事件映射到 `start_session` / `stop_session`；移除原有内联分片转写逻辑 |
-| `src/core/config.rs` | **修改** | 新增 `convergence_timeout_secs: u64`（默认 60），更新 `get_field`/`set_field`/`apply_json` |
+| `src/core/config.rs` | **修改** | 新增 `convergence_timeout_secs: u64`（默认 30），更新 `get_field`/`set_field`/`apply_json` |
 | `src/transcriber/mod.rs` | **不变** | `Transcriber` trait 签名不变 |
 | `src/transcriber/api.rs` | **不变** | `transcribe_chunk_with_retry`、`merge_texts` 不变；orchestrator 直接调用 |
 | `docs/architecture/core.md` | **修改** | 补充 `SessionOrchestrator` 及其与 recorder / transcriber 的协作关系 |
@@ -309,20 +312,20 @@ impl SessionOrchestrator {
 
 ```json
 {
-  "convergence_timeout_secs": 60
+  "convergence_timeout_secs": 30
 }
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `convergence_timeout_secs` | `u64` | `60` | `stop_session` 等待所有后台分片完成的最长时间（秒）。超时后未完成分片标记为 `Failed(Timeout)`，返回部分结果 |
+| `convergence_timeout_secs` | `u64` | `30` | `stop_session` 等待所有后台分片完成的最长时间（秒）。超时后未完成分片标记为 `Failed(Timeout)`，返回部分结果 |
 
 Rust 端定义：
 
 ```rust
 #[serde(default = "default_convergence_timeout")]
 pub convergence_timeout_secs: u64,
-// fn default_convergence_timeout() -> u64 { 60 }
+// fn default_convergence_timeout() -> u64 { 30 }
 ```
 
 ## 边界与错误处理
@@ -366,7 +369,7 @@ pub convergence_timeout_secs: u64,
 
 | 测试名 | 验证内容 |
 |--------|----------|
-| `test_default_convergence_timeout` | 默认值为 60 |
+| `test_default_convergence_timeout` | 默认值为 30 |
 | `test_apply_json_convergence_timeout` | 从 JSON 正确反序列化 |
 | `test_backward_compat_missing_convergence_timeout` | 旧配置缺少该字段时使用默认值 |
 | `test_get_set_convergence_timeout` | `get_field`/`set_field` 正常工作 |
