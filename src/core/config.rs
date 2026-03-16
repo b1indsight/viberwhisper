@@ -20,6 +20,10 @@ fn default_retries() -> u32 {
     3
 }
 
+fn default_convergence_timeout() -> u64 {
+    30
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     /// API key for the transcription service.
@@ -51,6 +55,11 @@ pub struct AppConfig {
     /// Maximum number of retry attempts per chunk upload on transient errors. Default: 3.
     #[serde(default = "default_retries")]
     pub max_retries: u32,
+    /// How long (in seconds) `stop_session` waits for background chunk uploads to
+    /// complete after recording stops. Chunks still pending at the deadline are
+    /// marked `Failed(Timeout)` and the partial result is returned. Default: 30.
+    #[serde(default = "default_convergence_timeout")]
+    pub convergence_timeout_secs: u64,
 }
 
 impl Default for AppConfig {
@@ -69,6 +78,7 @@ impl Default for AppConfig {
             max_chunk_duration_secs: default_chunk_duration(),
             max_chunk_size_bytes: default_chunk_size(),
             max_retries: default_retries(),
+            convergence_timeout_secs: default_convergence_timeout(),
         }
     }
 }
@@ -129,6 +139,7 @@ impl AppConfig {
             "max_chunk_duration_secs" => Some(self.max_chunk_duration_secs.to_string()),
             "max_chunk_size_bytes" => Some(self.max_chunk_size_bytes.to_string()),
             "max_retries" => Some(self.max_retries.to_string()),
+            "convergence_timeout_secs" => Some(self.convergence_timeout_secs.to_string()),
             _ => None,
         }
     }
@@ -198,10 +209,17 @@ impl AppConfig {
                     .map_err(|_| format!("max_retries must be a u32, got: {}", value))?;
                 Ok(())
             }
+            "convergence_timeout_secs" => {
+                self.convergence_timeout_secs = value
+                    .parse::<u64>()
+                    .map_err(|_| format!("convergence_timeout_secs must be a u64, got: {}", value))?;
+                Ok(())
+            }
             _ => Err(format!(
                 "Unknown config key: {}. Available: api_key, transcription_api_url, model, \
                  hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain, \
-                 max_chunk_duration_secs, max_chunk_size_bytes, max_retries",
+                 max_chunk_duration_secs, max_chunk_size_bytes, max_retries, \
+                 convergence_timeout_secs",
                 key
             )),
         }
@@ -257,6 +275,9 @@ impl AppConfig {
         }
         if let Some(v) = json["max_retries"].as_u64() {
             self.max_retries = v as u32;
+        }
+        if let Some(v) = json["convergence_timeout_secs"].as_u64() {
+            self.convergence_timeout_secs = v;
         }
     }
 }
@@ -457,6 +478,44 @@ mod tests {
         assert_eq!(config.max_chunk_duration_secs, 30);
         assert_eq!(config.max_chunk_size_bytes, 23 * 1024 * 1024);
         assert_eq!(config.max_retries, 3);
+    }
+
+    #[test]
+    fn test_default_convergence_timeout() {
+        let config = AppConfig::default();
+        assert_eq!(config.convergence_timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_apply_json_convergence_timeout() {
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({ "convergence_timeout_secs": 60u64 });
+        config.apply_json(&json);
+        assert_eq!(config.convergence_timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_backward_compat_missing_convergence_timeout() {
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({ "model": "whisper-large-v3" });
+        config.apply_json(&json);
+        // Missing field → default applied.
+        assert_eq!(config.convergence_timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_get_set_convergence_timeout() {
+        let mut config = AppConfig::default();
+        assert_eq!(
+            config.get_field("convergence_timeout_secs"),
+            Some("30".to_string())
+        );
+        config.set_field("convergence_timeout_secs", "120").unwrap();
+        assert_eq!(config.convergence_timeout_secs, 120);
+        assert_eq!(
+            config.get_field("convergence_timeout_secs"),
+            Some("120".to_string())
+        );
     }
 
     #[test]
