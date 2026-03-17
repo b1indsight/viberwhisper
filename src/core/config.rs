@@ -24,6 +24,7 @@ fn default_convergence_timeout() -> u64 {
     30
 }
 
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     /// API key for the transcription service.
