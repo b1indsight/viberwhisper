@@ -5,3 +5,4 @@
 2026-03-10: Add system tray icon: idle (gray) / recording (red) status indicator, right-click menu with exit option, cross-platform (macOS + Windows)
 2026-03-15: Add long-audio streaming plan covering in-recording chunking, offline WAV split fallback, retry, and result merge
 2026-03-15: Add end-to-end stream recognition plan covering unified Hold/Toggle session orchestration, chunk state machine, convergence, and error propagation
+2026-03-18: Add LLM post-processing plan covering punctuation cleanup, filler removal, and graceful fallback after STT

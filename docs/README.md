@@ -32,3 +32,4 @@ Implementation plans and technical specs for each feature.
 | [04-multiple-models.md](plan/04-multiple-models.md) | Provider + model config abstraction for future multi-provider expansion |
 | [05-long-audio-streaming.md](plan/05-long-audio-streaming.md) | Long audio chunking, offline split, retry with exponential backoff, and text merge |
 | [06-end-to-end-stream-recognition.md](plan/06-end-to-end-stream-recognition.md) | End-to-end stream recognition: unified Hold/Toggle session lifecycle, chunk state machine, result convergence, error propagation, and `SessionOrchestrator` design |
+| [08-llm-post-processing.md](plan/08-llm-post-processing.md) | LLM post-processing after STT: punctuation, filler removal, interruption cleanup, and graceful fallback design |
