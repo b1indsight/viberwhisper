@@ -101,10 +101,12 @@ impl StreamingSession {
 fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use audio::{AudioRecorder, StopResult};
     use core::config::AppConfig;
+    use core::orchestrator::{SessionError, SessionMode, SessionOrchestrator};
     use input::hotkey::{HotkeyEvent, HotkeyManager, HotkeySource};
     use input::tray::TrayManager;
     use input::typer::TextTyper;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use transcriber::{create_transcriber, Transcriber};
 
     println!("ViberWhisper - Voice-to-Text Input");
@@ -121,6 +123,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
         max_chunk_duration_secs = config.max_chunk_duration_secs,
         max_chunk_size_bytes = config.max_chunk_size_bytes,
         max_retries = config.max_retries,
+        convergence_timeout_secs = config.convergence_timeout_secs,
         "Config loaded"
     );
 
@@ -132,10 +135,14 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
         config.max_chunk_size_bytes,
     )?));
 
-    // Wrap transcriber in Arc so it can be shared across background threads.
-    let transcriber: Arc<Box<dyn Transcriber>> = Arc::new(create_transcriber(&config));
+    // Build transcriber and wrap in Arc<dyn Transcriber> for orchestrator injection.
+    let transcriber: Arc<dyn Transcriber> = Arc::from(create_transcriber(&config));
 
-    let language = config.language.clone();
+    let orchestrator = SessionOrchestrator::new(
+        Arc::clone(&transcriber),
+        config.language.clone(),
+        Duration::from_secs(config.convergence_timeout_secs),
+    );
 
     #[cfg(target_os = "macos")]
     let typer = platform::macos::MacTyper;
@@ -155,94 +162,62 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     println!("Press Ctrl+C to exit.");
     println!();
 
-    // Active streaming session for background transcription (used by both hold and toggle modes).
-    let mut streaming: Option<StreamingSession> = None;
+    // Finalize a stopped recording: submit the tail chunk (if any) to the orchestrator,
+    // then wait for convergence and type (or log) the result.
+    let finalize = |stop_result: StopResult| {
+        match stop_result {
+            StopResult::SingleFile(path) | StopResult::TailChunk(path) => {
+                orchestrator.on_chunk_ready(path);
+            }
+            StopResult::ChunksOnly => {
+                debug!("All audio was flushed to background chunks during recording; no tail");
+            }
+        }
 
-    /// Merge text segments using language-aware separator.
-    fn merge_segments(segments: &[String], language: Option<&str>) -> String {
-        let sep = match language {
-            Some(lang) if lang.starts_with("zh") => "",
-            _ => " ",
-        };
-        segments
-            .iter()
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(sep)
-    }
-
-    // Stop recording, collect all chunk results (background + tail), merge and type.
-    let stop_and_finalize =
-        |rec: &mut AudioRecorder,
-         session: Option<StreamingSession>,
-         transcriber: &Arc<Box<dyn Transcriber>>,
-         language: &Option<String>| {
-            match rec.stop_recording() {
-                Err(e) => {
-                    error!(error = %e, "Failed to stop recording");
-                    // Still drain any background session to avoid leaking threads.
-                    if let Some(s) = session {
-                        let _ = s.collect();
-                    }
+        match orchestrator.stop_session() {
+            Ok(text) => {
+                if text.is_empty() {
+                    info!("Transcription returned empty text");
+                    return;
                 }
-                Ok(stop_result) => {
-                    // Collect background chunk results first (in-order).
-                    let mut all_texts: Vec<String> = match session {
-                        None => Vec::new(),
-                        Some(s) => {
-                            if s.has_pending() {
-                                info!("Waiting for background chunk transcriptions to complete");
-                            }
-                            s.collect()
-                                .into_iter()
-                                .filter_map(|r| match r {
-                                    Ok(t) => Some(t),
-                                    Err(e) => {
-                                        error!(error = %e, "Background chunk transcription failed");
-                                        None
-                                    }
-                                })
-                                .collect()
-                        }
-                    };
-
-                    // Transcribe the tail (or single full file).
-                    match stop_result {
-                        StopResult::SingleFile(path) | StopResult::TailChunk(path) => {
-                            debug!(path = %path, "Transcribing tail/full recording");
-                            match transcriber.transcribe(&path) {
-                                Ok(text) => all_texts.push(text),
-                                Err(e) => error!(error = %e, "Tail transcription failed"),
-                            }
-                            // Clean up the tail WAV.
-                            if let Err(e) = std::fs::remove_file(&path) {
-                                warn!(path = %path, error = %e, "Failed to delete tail WAV");
-                            }
-                        }
-                        StopResult::ChunksOnly => {
-                            debug!("All audio was flushed to background chunks; no tail");
-                        }
-                    }
-
-                    if all_texts.is_empty() {
-                        warn!("No transcription results to type");
-                        return;
-                    }
-
-                    let merged = merge_segments(&all_texts, language.as_deref());
-                    if merged.is_empty() {
-                        info!("Transcription returned empty text");
-                        return;
-                    }
-
-                    info!(text = %merged, "Typing transcribed text");
-                    if let Err(e) = typer.type_text(&merged) {
-                        error!(error = %e, "Failed to type text");
+                info!(text = %text, "Typing transcribed text");
+                if let Err(e) = typer.type_text(&text) {
+                    error!(error = %e, "Failed to type text");
+                }
+            }
+            Err(SessionError::NoChunks) => {
+                warn!("No audio chunks to transcribe (recording too short?)");
+            }
+            Err(SessionError::PartialFailure {
+                errors,
+                partial_text,
+            }) => {
+                error!(
+                    failed_chunks = errors.len(),
+                    "Partial transcription failure; typing available text"
+                );
+                if !partial_text.is_empty() {
+                    if let Err(e) = typer.type_text(&partial_text) {
+                        error!(error = %e, "Failed to type partial text");
                     }
                 }
             }
-        };
+            Err(SessionError::ConvergenceTimeout {
+                pending_count,
+                partial_text,
+            }) => {
+                warn!(
+                    pending_count = pending_count,
+                    "Convergence timeout; typing available partial text"
+                );
+                if !partial_text.is_empty() {
+                    if let Err(e) = typer.type_text(&partial_text) {
+                        error!(error = %e, "Failed to type partial text");
+                    }
+                }
+            }
+        }
+    };
 
     let mut counter = 0;
     loop {
@@ -253,8 +228,8 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                     let mut rec = recorder.lock().unwrap();
                     match rec.start_recording() {
                         Ok(()) => {
-                            streaming = Some(StreamingSession::new());
-                            info!("Recording started");
+                            orchestrator.start_session(SessionMode::Hold);
+                            info!("Recording started (hold mode)");
                             tray.set_recording(true);
                         }
                         Err(e) => error!(error = %e, "Failed to start recording"),
@@ -263,23 +238,37 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                 HotkeyEvent::Released(HotkeySource::Hold) => {
                     info!(hotkey = %config.hold_hotkey, "Hold key released, stopping recording");
                     let mut rec = recorder.lock().unwrap();
-                    let session = streaming.take();
-                    stop_and_finalize(&mut rec, session, &transcriber, &language);
-                    tray.set_recording(false);
+                    match rec.stop_recording() {
+                        Ok(stop_result) => {
+                            tray.set_recording(false);
+                            finalize(stop_result);
+                        }
+                        Err(e) => {
+                            error!(error = %e, "Failed to stop recording");
+                            tray.set_recording(false);
+                        }
+                    }
                 }
                 HotkeyEvent::Pressed(HotkeySource::Toggle) => {
                     let mut rec = recorder.lock().unwrap();
                     if rec.is_recording() {
                         info!(hotkey = %config.toggle_hotkey, "Toggle key pressed, stopping recording");
-                        let session = streaming.take();
-                        stop_and_finalize(&mut rec, session, &transcriber, &language);
-                        tray.set_recording(false);
+                        match rec.stop_recording() {
+                            Ok(stop_result) => {
+                                tray.set_recording(false);
+                                finalize(stop_result);
+                            }
+                            Err(e) => {
+                                error!(error = %e, "Failed to stop recording");
+                                tray.set_recording(false);
+                            }
+                        }
                     } else {
                         info!(hotkey = %config.toggle_hotkey, "Toggle key pressed, starting recording");
                         match rec.start_recording() {
                             Ok(()) => {
-                                streaming = Some(StreamingSession::new());
-                                info!("Recording started (streaming mode)");
+                                orchestrator.start_session(SessionMode::Toggle);
+                                info!("Recording started (toggle mode)");
                                 tray.set_recording(true);
                             }
                             Err(e) => error!(error = %e, "Failed to start recording"),
@@ -290,14 +279,12 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Poll for ready chunks from any active recording (hold or toggle) and dispatch them.
-        if streaming.is_some() {
+        // Poll for in-recording chunks from the recorder and forward to the orchestrator.
+        {
             let chunk_path = recorder.lock().unwrap().take_ready_chunk();
             if let Some(path) = chunk_path {
-                info!(path = %path, "Ready chunk detected, dispatching background transcription");
-                if let Some(session) = &mut streaming {
-                    session.dispatch(path, Arc::clone(&transcriber));
-                }
+                info!(path = %path, "Ready chunk detected, forwarding to orchestrator");
+                orchestrator.on_chunk_ready(path);
             }
         }
 
@@ -347,6 +334,7 @@ fn handle_config(action: ConfigAction) {
                 "max_chunk_duration_secs",
                 "max_chunk_size_bytes",
                 "max_retries",
+                "convergence_timeout_secs",
             ] {
                 let value = config
                     .get_field(key)
@@ -428,21 +416,34 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_streaming_session_collect_empty() {
-        let session = StreamingSession::new();
-        let results = session.collect();
-        assert!(results.is_empty());
+    fn test_orchestrator_integration_single_chunk() {
+        use self::core::orchestrator::{SessionMode, SessionOrchestrator};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
+        let orch = SessionOrchestrator::new(t, Some("en".to_string()), Duration::from_secs(5));
+
+        orch.start_session(SessionMode::Hold);
+        // MockTranscriber ignores the path, so a non-existent path is fine.
+        orch.on_chunk_ready("fake_chunk.wav".to_string());
+        let result = orch.stop_session();
+
+        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
+        assert!(!result.unwrap().is_empty());
     }
 
     #[test]
-    fn test_streaming_session_dispatch_and_collect() {
+    fn test_orchestrator_no_chunks() {
+        use self::core::orchestrator::{SessionError, SessionMode, SessionOrchestrator};
         use std::sync::Arc;
-        let mut session = StreamingSession::new();
-        let transcriber: Arc<Box<dyn Transcriber>> = Arc::new(Box::new(MockTranscriber));
-        // Dispatch against a non-existent path — MockTranscriber ignores the path.
-        session.dispatch("fake_chunk.wav".to_string(), Arc::clone(&transcriber));
-        let results = session.collect();
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_ok());
+        use std::time::Duration;
+
+        let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
+        let orch = SessionOrchestrator::new(t, None, Duration::from_secs(5));
+
+        orch.start_session(SessionMode::Toggle);
+        let result = orch.stop_session();
+        assert!(matches!(result, Err(SessionError::NoChunks)));
     }
 }
