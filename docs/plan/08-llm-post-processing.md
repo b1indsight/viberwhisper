@@ -4,51 +4,42 @@
 
 Issue #16 需要的不是“让 LLM 直接识别音频”，而是在现有语音识别链路之后增加一层 **LLM 文本后处理**。
 
-目标链路应为：
+结合 review 反馈，这条链路应明确拆成两层：
 
 ```text
-audio -> speech-to-text -> raw text -> LLM post-process -> final text
+audio -> OpenAI-compatible streaming STT -> partial/final text buffer -> LLM post-process -> final text
 ```
 
-当前 ViberWhisper 已经具备稳定的音频采集、分片、转写与文本注入链路。无论是短录音还是 `SessionOrchestrator` 驱动的长录音，会话最终都会收敛为一个 `String`，然后由 `TextTyper` 输出。
+这里有两个关键点：
 
-这意味着：
+1. **识别层要优先使用兼容 OpenAI 格式的流式 API**，并配合语言识别或语言提示来降低整体延迟。
+2. **LLM 只负责文本后处理**，例如补标点、去掉无意义语气词、清理中断与重复，不直接替代音频识别层。
 
-- **音频识别本身不是问题焦点**
-- 问题在于 STT 原始输出往往接近口语草稿
-- 用户希望在输入前再清洗一遍文本，使结果更接近可直接发送的书面表达
+当前 ViberWhisper 已经具备稳定的音频采集、分片、转写与文本注入链路。无论是短录音还是 `SessionOrchestrator` 驱动的长录音，会话最终都会收敛为文本并输出。因此，这个 feature 更准确的定位是：
 
-具体诉求包括：
-
-- 添加标点
-- 去掉不必要的语气词
-- 去掉口误、自我打断和重复片段
-- 保留原意，不凭空扩写
-
-因此，这个 feature 更准确的定位是：
-
-> 在转写结果与最终输入之间，增加一个可选的 **LLM rewrite/post-processing layer**。
+> 在“流式识别结果”与“最终输入文本”之间，增加一个可选的 **LLM rewrite/post-processing layer**。
 
 ## 目标
 
-1. 保留现有 STT 流程不变，把 LLM 能力放在**文本后处理层**，而不是替换转写后端。
-2. 允许用户通过配置开关启用/禁用后处理。
-3. 支持为后处理单独配置模型、API 地址、提示词和温度等参数。
-4. 后处理失败时，系统应优雅降级为输出原始转写文本，而不是整次会话失败。
-5. 让 `run_listener` 与 `convert` 两条路径都能复用同一套后处理逻辑。
-6. 补充测试与文档，明确该层的职责边界与失败策略。
+1. 将识别链路升级为**兼容 OpenAI 格式的流式语音识别 API**，用语言识别/语言提示配合流式结果来降低延迟。
+2. 在 STT 之后增加独立的 **LLM 文本后处理层**，负责补标点、去语气词、清理中断与重复。
+3. 允许用户通过配置开关启用/禁用后处理。
+4. 支持为识别与后处理分别配置模型、API 地址、提示词和温度等参数，并优先直接兼容 OpenAI 格式 API。
+5. 后处理失败时，系统应优雅降级为输出原始 STT 文本，而不是整次会话失败。
+6. 让 `run_listener` 与 `convert` 两条路径都能复用同一套后处理逻辑。
+7. 补充测试与文档，明确流式识别层与后处理层的职责边界。
 
 ## 非目标
 
-- **不替换现有 `Transcriber`**：Whisper / Groq / OpenAI-compatible audio transcription 仍负责语音转文字。
-- **不引入音频多模态 LLM 输入**：LLM 不直接接收音频文件。
-- **不做实时边录边润色**：仍然在一次会话收敛后，对完整文本做单次后处理。
+- **不让 LLM 直接替代 STT 的职责**：语音转文字仍然是识别层的工作，LLM 负责文本整理。
+- **不引入音频多模态 LLM 输入**：后处理层不直接接收音频文件。
+- **不做 token 级实时润色 UI**：本期重点是流式 STT 降低识别延迟，LLM 后处理仍以稳定的阶段性文本或最终文本为输入。
 - **不尝试做复杂 NLP 管线**：例如句法分析、关键词提取、风格模板链等，都不在本期范围内。
 - **不强制所有用户使用 LLM 后处理**：默认应保持关闭，避免破坏当前体验与成本预期。
 
 ## 当前限制
 
-### 1. 转写结果直接进入输出层
+### 1. 识别链路还不是以流式 API 为中心
 
 当前主要链路大致是：
 
@@ -59,9 +50,16 @@ AudioRecorder / SessionOrchestrator
   -> TextTyper::type_text(...)
 ```
 
-中间没有独立的文本修正阶段。
+问题有两个：
 
-### 2. 配置层没有“后处理”概念
+- 识别结果以整段文本收口为主，延迟主要取决于录音结束后的整体转写。
+- 还没有把 **兼容 OpenAI 格式的流式识别 API** 作为明确前提写清楚。
+
+### 2. 转写结果直接进入输出层
+
+即使识别成功，中间也没有独立的文本修正阶段。
+
+### 3. 配置层没有“后处理”概念
 
 `AppConfig` 目前只覆盖：
 
@@ -78,8 +76,9 @@ AudioRecorder / SessionOrchestrator
 - 后处理用哪个模型
 - 后处理 API 地址是什么
 - 后处理提示词如何定制
+- 识别层和后处理层是否都走 OpenAI-compatible API
 
-### 3. 失败语义过于粗糙
+### 4. 失败语义过于粗糙
 
 如果未来把 LLM 后处理硬塞进现有转写器内部：
 
@@ -92,10 +91,31 @@ AudioRecorder / SessionOrchestrator
 
 ### 设计原则
 
-- **职责分离**：`Transcriber` 只负责把音频变成原始文本；新增组件负责把原始文本清洗成最终文本。
+- **职责分离**：流式识别层负责尽快产出原始文本；后处理层负责把原始文本清洗成最终文本。
+- **OpenAI 兼容优先**：识别与后处理都优先直接兼容 OpenAI 格式 API，减少自定义协议。
 - **默认保守**：不开启配置时，行为与现在完全一致。
 - **失败可降级**：后处理失败时，不影响原始转写结果输出。
 - **接口轻量**：尽量以 `String -> String` 为核心抽象，避免过度设计。
+
+### 识别层前提：OpenAI-compatible streaming STT
+
+本计划不把识别层视为完全静态前提，而是明确要求上游识别优先对接 **兼容 OpenAI 格式的流式语音识别 API**。
+
+核心要求：
+
+- 使用流式识别降低“停止录音后再等整段转写”的感知延迟。
+- 保留语言识别或语言提示能力，让识别端尽可能拿到足够上下文。
+- 允许上层维护一个 **partial/final text buffer**，把阶段性结果与最终结果区分开。
+- 后处理层只消费已经稳定的阶段性文本或最终文本，不直接绑定底层流事件细节。
+
+职责关系：
+
+```text
+streaming STT (OpenAI-compatible)
+  -> partial/final text buffer
+  -> post-processor
+  -> typer / CLI output
+```
 
 ### 新增抽象：`TextPostProcessor`
 
@@ -125,14 +145,13 @@ pub trait TextPostProcessor: Send + Sync {
 
 ### 主流程接入点
 
-建议在上层文本已经收敛、但尚未注入到输入框之前接入：
+建议在上层已经拿到**稳定文本**、但尚未注入到输入框之前接入。
 
 #### `run_listener` 路径
 
 ```text
-录音结束
-  -> orchestrator.stop_session()
-  -> transcribed_text
+录音结束 / 阶段性稳定文本到达
+  -> streaming STT final text
   -> post_processor.process(&transcribed_text)
   -> final_text
   -> typer.type_text(&final_text)
@@ -150,18 +169,23 @@ pub trait TextPostProcessor: Send + Sync {
 
 这样可以保证：
 
-- 同一套后处理逻辑覆盖交互录音和 CLI 转写
-- `SessionOrchestrator` 完全不需要知道 LLM 的存在
-- 音频相关模块不被文本清洗逻辑污染
+- 同一套后处理逻辑覆盖交互录音和 CLI 转写。
+- `SessionOrchestrator` 不需要理解 LLM 细节。
+- 音频相关模块不被文本清洗逻辑污染。
 
 ### 配置设计
+
+建议把“识别层”和“后处理层”配置显式分开，并默认优先兼容 OpenAI 格式 API。
 
 建议在 `src/core/config.rs` 的 `AppConfig` 中新增以下字段：
 
 ```rust
+pub transcription_streaming_enabled: bool,
+pub transcription_api_format: String,
 pub post_process_enabled: bool,
 pub post_process_api_url: Option<String>,
 pub post_process_api_key: Option<String>,
+pub post_process_api_format: String,
 pub post_process_model: Option<String>,
 pub post_process_prompt: Option<String>,
 pub post_process_temperature: f32,
@@ -171,9 +195,12 @@ pub post_process_temperature: f32,
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
+| `transcription_streaming_enabled` | `true` | 新实现默认走流式识别路径 |
+| `transcription_api_format` | `"openai"` | 识别层直接兼容 OpenAI 格式 API |
 | `post_process_enabled` | `false` | 默认关闭，保持现有行为 |
 | `post_process_api_url` | `None` | 未启用时不需要 |
 | `post_process_api_key` | `None` | 建议支持环境变量覆盖 |
+| `post_process_api_format` | `"openai"` | 后处理层直接兼容 OpenAI 格式 API |
 | `post_process_model` | `None` | 未启用时不需要 |
 | `post_process_prompt` | 内置默认 prompt 或 `None` | 用户可覆盖 |
 | `post_process_temperature` | `0.0` | 保守输出，降低发散 |
@@ -211,13 +238,6 @@ pub post_process_temperature: f32,
 - 只输出整理后的最终文本，不要解释
 ```
 
-后续用户可以通过 `post_process_prompt` 覆盖默认行为，例如：
-
-- 更口语化
-- 更书面化
-- 保留 filler words
-- 不改换行结构
-
 ### `LlmPostProcessor` 设计
 
 建议新增 `src/postprocess/llm.rs`，结构大致如下：
@@ -242,13 +262,14 @@ pub struct LlmPostProcessor {
 
 #### 请求协议
 
-本期建议保持 practical：
+本期建议**直接兼容 OpenAI 格式 API**，而不是重新定义一套自有协议。
 
-- 使用项目已经熟悉的 HTTP JSON 请求方式
-- 选定一种明确的文本生成 API contract
-- 不在第一期追求兼容所有 provider 的所有响应格式
+- 识别层：优先对接 OpenAI-compatible streaming transcription / realtime API
+- 后处理层：优先对接 OpenAI-compatible text generation API
+- 配置层通过 `*_api_url` + `*_api_format = "openai"` 保持明确语义
+- 第一阶段只做 OpenAI 格式，其他 provider 如有必要再在此基础上扩展
 
-换句话说，这里应该是“**先支持 1 条清晰且可测试的文本 rewrite 路径**”，而不是提前抽象成万能网关。
+换句话说，这里不是“先造一个万能 contract”，而是“**先把 OpenAI 格式直接跑通并作为默认兼容面**”。
 
 ### 工厂与降级逻辑
 
@@ -270,14 +291,12 @@ match LlmPostProcessor::from_config(config) {
 
 这样可以把风险收口：
 
-- 没配置好 LLM → 不影响主流程
-- API 短暂异常 → 上层可决定是否回退原文
+- 没配置好 LLM -> 不影响主流程
+- API 短暂异常 -> 上层可回退原文
 
 ### 错误处理策略
 
 推荐把后处理视为 **soft-fail enhancement**，不是 hard dependency。
-
-也就是说：
 
 | 场景 | 行为 |
 |---|---|
@@ -285,7 +304,7 @@ match LlmPostProcessor::from_config(config) {
 | STT 成功，LLM 后处理失败 | 记录 warning，输出原始 STT 结果 |
 | STT 失败 | 与当前行为一致，直接报错 |
 
-这是本 feature 最重要的产品决策之一：
+最重要的产品决策是：
 
 > 后处理是“锦上添花”，不能变成“原本能用，现在因为 LLM 炸了所以整个不可用”。
 
@@ -293,25 +312,35 @@ match LlmPostProcessor::from_config(config) {
 
 | 文件 | 变更类型 | 说明 |
 |------|----------|------|
+| `src/transcriber/*` | 修改 | 将识别层整理为兼容 OpenAI 格式的流式 STT 路径，并暴露稳定的 partial/final text 接口 |
 | `src/postprocess/mod.rs` | 新增 | 导出 trait、factory、实现 |
 | `src/postprocess/llm.rs` | 新增 | `LlmPostProcessor` 实现 |
 | `src/postprocess/factory.rs` | 新增 | 根据配置返回 `NoopPostProcessor` 或 `LlmPostProcessor` |
-| `src/core/config.rs` | 修改 | 新增后处理配置项、默认值、读取/保存、CLI 配置支持 |
-| `src/main.rs` | 修改 | 在 `run_listener` / `convert` 中接入后处理层 |
-| `docs/architecture/core.md` | 修改 | 补充后处理配置说明 |
-| `docs/architecture/transcriber.md` 或新增文档 | 修改 | 说明转写与后处理的职责边界 |
-| `README.md` | 修改 | 增加配置示例与功能说明 |
-| `config.example.json` | 修改 | 增加后处理示例配置 |
+| `src/core/config.rs` | 修改 | 新增流式识别与后处理配置项、默认值、读取/保存、CLI 配置支持 |
+| `src/main.rs` | 修改 | 在 `run_listener` / `convert` 中接入后处理层，并衔接流式 STT 输出 |
+| `docs/architecture/core.md` | 修改 | 补充流式识别与后处理配置说明 |
+| `docs/architecture/transcriber.md` 或新增文档 | 修改 | 说明流式识别、OpenAI 兼容格式与后处理的职责边界 |
+| `README.md` | 修改 | 增加 OpenAI-compatible API 配置示例与功能说明 |
+| `config.example.json` | 修改 | 增加流式识别与后处理示例配置 |
 
 ## 测试计划
 
 ### `src/core/config.rs`
 
+- [ ] 默认配置中 `transcription_streaming_enabled == true`
+- [ ] 默认配置中 `transcription_api_format == "openai"`
 - [ ] 默认配置中 `post_process_enabled == false`
 - [ ] `config get/set post_process_enabled` 可用
 - [ ] `config get/set post_process_model` / `post_process_prompt` 可用
+- [ ] `config get/set transcription_api_format` 可用
 - [ ] 环境变量 `POST_PROCESS_API_KEY` 可覆盖配置
 - [ ] 旧配置缺少新字段时仍能正常加载
+
+### `src/transcriber/*`
+
+- [ ] 流式识别路径能正确消费 OpenAI-compatible API 响应
+- [ ] 语言识别/语言提示配置能透传到识别层
+- [ ] partial/final 结果边界清晰，不会把未稳定文本直接交给后处理层
 
 ### `src/postprocess/factory.rs`
 
@@ -328,38 +357,48 @@ match LlmPostProcessor::from_config(config) {
 
 ### 集成验证
 
-- [ ] `run_listener` 成功转写后能调用后处理器
+- [ ] `run_listener` 能消费流式 STT 的稳定文本并调用后处理器
 - [ ] 后处理失败时仍会输出原始文本
 - [ ] `convert` 子命令也能复用同一后处理逻辑
+- [ ] OpenAI-compatible API 配置能同时覆盖识别层与后处理层
 - [ ] `cargo test` 全绿
 
 ## 验收标准
 
 1. 用户可以显式开启/关闭 LLM 文本后处理。
 2. 不开启时，行为与当前版本完全一致。
-3. 开启后，最终输出文本会经过 LLM 整理。
-4. LLM 失败不会导致整次录音/转写失败。
-5. README 与配置模板包含可直接参考的使用示例。
+3. 识别层优先通过 OpenAI-compatible streaming STT 降低延迟。
+4. 开启后，最终输出文本会经过 LLM 整理。
+5. LLM 失败不会导致整次录音/转写失败。
+6. README 与配置模板包含可直接参考的 OpenAI-compatible API 示例。
 
 ## 分阶段实施
 
-### Phase 1 — 抽象后处理层
+### Phase 1 — 流式识别前提与配置抽象
+
+1. 明确识别层走 OpenAI-compatible streaming STT
+2. 在 `AppConfig` 中新增流式识别与后处理相关配置字段
+3. 规范 partial/final text buffer 与后处理的边界
+
+**验收**：配置与接口边界明确；默认行为可保持兼容。
+
+### Phase 2 — 抽象后处理层
 
 1. 新增 `TextPostProcessor` trait 与 `NoopPostProcessor`
 2. 在 `main.rs` 中接好调用点，但先默认只走 no-op
-3. 在 `AppConfig` 中新增后处理相关配置字段
+3. 确保后处理只消费稳定文本
 
 **验收**：编译通过；默认行为完全不变。
 
-### Phase 2 — 接入 LLM 后处理实现
+### Phase 3 — 接入 LLM 后处理实现
 
 1. 实现 `LlmPostProcessor`
 2. 增加工厂函数与降级逻辑
-3. 完成请求 / 响应 / 错误处理测试
+3. 完成 OpenAI-compatible 请求 / 响应 / 错误处理测试
 
 **验收**：启用配置后可得到整理后的文本；失败时回退原文。
 
-### Phase 3 — 文档与示例
+### Phase 4 — 文档与示例
 
 1. 更新 `README.md`
 2. 更新架构文档
@@ -374,9 +413,9 @@ match LlmPostProcessor::from_config(config) {
 
 取舍：默认 prompt 强调“只整理，不扩写，不改变原意”，并允许用户自定义 prompt。
 
-### 风险 2：后处理会增加整体延迟
+### 风险 2：额外后处理会增加整体延迟
 
-取舍：默认关闭；启用后接受一次额外网络请求成本。必要时后续再考虑更小模型或开关策略。
+取舍：识别层优先通过流式 API 降低前半段延迟；后处理默认关闭，启用后接受一次额外网络请求成本。
 
 ### 风险 3：后处理结果偶尔为空或格式异常
 
@@ -392,7 +431,7 @@ match LlmPostProcessor::from_config(config) {
    - 更新 `changelog`
 
 2. **Implementation PR**
-   - 先做 Phase 1 + Phase 2
-   - 再补 README / config example / architecture 文档
+   - 先做流式识别前提与后处理层抽象
+   - 再补 README / `config.example.json` / architecture 文档
 
 这样 review 边界清楚，也避免再把“音频识别后端”和“文本后处理层”混成一锅。
