@@ -1,4 +1,6 @@
 pub mod api;
 pub mod factory;
-pub use api::{MockTranscriber, Transcriber};
+#[cfg(test)]
+pub use api::MockTranscriber;
+pub use api::Transcriber;
 pub use factory::create_transcriber;

@@ -28,7 +28,7 @@ pub struct AudioRecorder {
 }
 
 impl AudioRecorder {
-    #[instrument(skip_all, fields(gain))]
+    #[cfg(test)]
     pub fn new(gain: f32) -> Result<Self, Box<dyn std::error::Error>> {
         Self::with_config(gain, 30, 23 * 1024 * 1024)
     }
@@ -139,7 +139,8 @@ impl AudioRecorder {
                         let mono: Vec<i16> = data
                             .chunks(channels)
                             .map(|ch| {
-                                let avg = ch.iter().map(|&s| s as f32).sum::<f32>() / channels as f32;
+                                let avg =
+                                    ch.iter().map(|&s| s as f32).sum::<f32>() / channels as f32;
                                 (avg * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16
                             })
                             .collect();
@@ -147,7 +148,11 @@ impl AudioRecorder {
                         buffer.lock().unwrap().extend_from_slice(&mono);
                         let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
                         if total % (sample_rate as usize / 2) < len {
-                            debug!(frames = total, seconds = total / sample_rate as usize, "Recording progress");
+                            debug!(
+                                frames = total,
+                                seconds = total / sample_rate as usize,
+                                "Recording progress"
+                            );
                         }
                         // Signal flush when chunk threshold is crossed.
                         if chunk_max_samples > 0
@@ -177,7 +182,11 @@ impl AudioRecorder {
                         buffer.lock().unwrap().extend_from_slice(&mono);
                         let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
                         if total % (sample_rate as usize / 2) < len {
-                            debug!(frames = total, seconds = total / sample_rate as usize, "Recording progress");
+                            debug!(
+                                frames = total,
+                                seconds = total / sample_rate as usize,
+                                "Recording progress"
+                            );
                         }
                         if chunk_max_samples > 0
                             && !flush_needed.load(Ordering::Relaxed)
@@ -332,10 +341,7 @@ impl AudioRecorder {
     }
 
     /// Write the entire buffer as a single WAV file (legacy path, no chunking).
-    fn write_full_recording(
-        &self,
-        buffer: &[i16],
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    fn write_full_recording(&self, buffer: &[i16]) -> Result<String, Box<dyn std::error::Error>> {
         let mut path = PathBuf::from("./tmp");
         std::fs::create_dir_all(&path)?;
 

@@ -4,6 +4,7 @@ pub trait TextTyper {
     fn type_text(&self, text: &str) -> Result<(), Box<dyn std::error::Error>>;
 }
 
+#[allow(dead_code)]
 pub struct MockTyper;
 
 impl TextTyper for MockTyper {
