@@ -95,8 +95,10 @@ impl fmt::Display for SessionError {
 enum ChunkState {
     /// Written to disk; not yet picked up by the worker.
     Flushed,
-    /// Worker is transcribing this chunk (attempt number tracked internally).
-    Uploading { attempt: u32 },
+    /// Worker is transcribing this chunk.
+    /// `attempt` is reserved for future retry logic (see `max_retries` in AppConfig);
+    /// retry is not yet implemented — on failure the chunk transitions directly to `Failed`.
+    Uploading { #[allow(dead_code)] attempt: u32 },
     /// Successfully transcribed.
     Transcribed(String),
     /// Transcription failed (all retries exhausted, or timeout).
@@ -120,6 +122,7 @@ enum WorkerMsg {
 }
 
 struct ActiveSessionInner {
+    #[allow(dead_code)]
     mode: SessionMode,
     chunks: Arc<Mutex<Vec<ChunkEntry>>>,
     chunk_tx: mpsc::SyncSender<WorkerMsg>,

@@ -35,69 +35,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Manages background transcription tasks spawned during a streaming (toggle) recording.
-///
-/// Each time a live chunk is ready, `dispatch` spawns a thread to transcribe it.
-/// `collect` waits for all spawned threads and returns their results in order.
-struct StreamingSession {
-    handles: Vec<(usize, std::thread::JoinHandle<Result<String, String>>)>,
-    next_index: usize,
-}
-
-impl StreamingSession {
-    fn new() -> Self {
-        Self {
-            handles: Vec::new(),
-            next_index: 0,
-        }
-    }
-
-    /// Spawn a background thread to transcribe `chunk_path`.
-    fn dispatch(
-        &mut self,
-        chunk_path: String,
-        transcriber: std::sync::Arc<Box<dyn transcriber::Transcriber>>,
-    ) {
-        let index = self.next_index;
-        self.next_index += 1;
-        info!(index = index, path = %chunk_path, "Dispatching background chunk transcription");
-        let handle = std::thread::spawn(move || {
-            transcriber
-                .transcribe(&chunk_path)
-                .map_err(|e| e.to_string())
-                // Clean up the chunk file after transcription.
-                .inspect(|_| {
-                    if let Err(e) = std::fs::remove_file(&chunk_path) {
-                        // Non-fatal: file might already be gone.
-                        let _ = e;
-                    }
-                })
-                .inspect_err(|_| {
-                    let _ = std::fs::remove_file(&chunk_path);
-                })
-        });
-        self.handles.push((index, handle));
-    }
-
-    fn has_pending(&self) -> bool {
-        !self.handles.is_empty()
-    }
-
-    /// Wait for all background threads and return results sorted by chunk index.
-    fn collect(self) -> Vec<Result<String, String>> {
-        let mut indexed: Vec<(usize, Result<String, String>)> = self
-            .handles
-            .into_iter()
-            .map(|(idx, h)| {
-                let result = h.join().unwrap_or_else(|_| Err("thread panicked".to_string()));
-                (idx, result)
-            })
-            .collect();
-        indexed.sort_by_key(|(idx, _)| *idx);
-        indexed.into_iter().map(|(_, r)| r).collect()
-    }
-}
-
 fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use audio::{AudioRecorder, StopResult};
     use core::config::AppConfig;
