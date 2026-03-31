@@ -8,5 +8,15 @@
   "temperature": 0,
   "hold_hotkey": "F8",
   "toggle_hotkey": "F9",
-  "mic_gain": 3.0
+  "mic_gain": 3.0,
+  "max_chunk_duration_secs": 30,
+  "max_chunk_size_bytes": 24117248,
+  "max_retries": 3,
+  "convergence_timeout_secs": 30,
+  "post_process_enabled": false,
+  "post_process_streaming_enabled": true,
+  "post_process_api_url": "https://api.openai.com/v1/chat/completions",
+  "post_process_model": "gpt-4o-mini",
+  "post_process_api_format": "openai",
+  "post_process_temperature": 0.0
 }

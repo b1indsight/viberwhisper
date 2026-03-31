@@ -2,6 +2,7 @@ mod audio;
 mod core;
 mod input;
 mod platform;
+mod postprocess;
 mod transcriber;
 
 use clap::Parser;
@@ -44,6 +45,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use input::typer::TextTyper;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use postprocess::create_post_processor;
     use transcriber::{create_transcriber, Transcriber};
 
     println!("ViberWhisper - Voice-to-Text Input");
@@ -61,6 +63,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
         max_chunk_size_bytes = config.max_chunk_size_bytes,
         max_retries = config.max_retries,
         convergence_timeout_secs = config.convergence_timeout_secs,
+        post_process_enabled = config.post_process_enabled,
         "Config loaded"
     );
 
@@ -74,6 +77,8 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build transcriber and wrap in Arc<dyn Transcriber> for orchestrator injection.
     let transcriber: Arc<dyn Transcriber> = Arc::from(create_transcriber(&config));
+
+    let post_processor = create_post_processor(&config);
 
     let orchestrator = SessionOrchestrator::new(
         Arc::clone(&transcriber),
@@ -112,11 +117,26 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         match orchestrator.stop_session() {
-            Ok(text) => {
-                if text.is_empty() {
+            Ok(stt_text) => {
+                if stt_text.is_empty() {
                     info!("Transcription returned empty text");
                     return;
                 }
+                let text = {
+                    let mut session = post_processor.start_session();
+                    session.push_stable_chunk(&stt_text);
+                    match session.finish() {
+                        Ok(processed) if !processed.is_empty() => processed,
+                        Ok(_) => {
+                            warn!("Post-processing returned empty text, using original STT text");
+                            stt_text
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Post-processing failed, using original STT text");
+                            stt_text
+                        }
+                    }
+                };
                 info!(text = %text, "Typing transcribed text");
                 if let Err(e) = typer.type_text(&text) {
                     error!(error = %e, "Failed to type text");
@@ -272,6 +292,14 @@ fn handle_config(action: ConfigAction) {
                 "max_chunk_size_bytes",
                 "max_retries",
                 "convergence_timeout_secs",
+                "post_process_enabled",
+                "post_process_streaming_enabled",
+                "post_process_api_url",
+                "post_process_api_key",
+                "post_process_api_format",
+                "post_process_model",
+                "post_process_prompt",
+                "post_process_temperature",
             ] {
                 let value = config
                     .get_field(key)
@@ -306,24 +334,39 @@ fn handle_config(action: ConfigAction) {
 
 fn handle_convert(input: &str, output: Option<&str>) {
     use core::config::AppConfig;
+    use postprocess::create_post_processor;
     use transcriber::{create_transcriber, Transcriber};
 
     println!("Transcribing: {}", input);
 
     let config = AppConfig::load();
     let transcriber: Box<dyn Transcriber> = create_transcriber(&config);
+    let post_processor = create_post_processor(&config);
 
     match transcriber.transcribe(input) {
-        Ok(text) => match output {
-            Some(path) => {
-                if let Err(e) = std::fs::write(path, &text) {
-                    eprintln!("Failed to write file: {}", e);
-                    std::process::exit(1);
+        Ok(stt_text) => {
+            let text = match post_processor.process(&stt_text) {
+                Ok(processed) if !processed.is_empty() => processed,
+                Ok(_) => {
+                    warn!("Post-processing returned empty text, using original STT text");
+                    stt_text
                 }
-                println!("Saved to: {}", path);
+                Err(e) => {
+                    warn!(error = %e, "Post-processing failed, using original STT text");
+                    stt_text
+                }
+            };
+            match output {
+                Some(path) => {
+                    if let Err(e) = std::fs::write(path, &text) {
+                        eprintln!("Failed to write file: {}", e);
+                        std::process::exit(1);
+                    }
+                    println!("Saved to: {}", path);
+                }
+                None => println!("{}", text),
             }
-            None => println!("{}", text),
-        },
+        }
         Err(e) => {
             eprintln!("Transcription failed: {}", e);
             std::process::exit(1);

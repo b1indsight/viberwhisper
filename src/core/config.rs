@@ -24,6 +24,13 @@ fn default_convergence_timeout() -> u64 {
     30
 }
 
+fn default_post_process_streaming_enabled() -> bool {
+    true
+}
+
+fn default_post_process_api_format() -> String {
+    "openai".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -61,6 +68,36 @@ pub struct AppConfig {
     /// marked `Failed(Timeout)` and the partial result is returned. Default: 30.
     #[serde(default = "default_convergence_timeout")]
     pub convergence_timeout_secs: u64,
+
+    // --- LLM text post-processing ---
+
+    /// Enable LLM-based text post-processing after STT. Default: false.
+    #[serde(default)]
+    pub post_process_enabled: bool,
+    /// If true, the `run_listener` path feeds stable STT chunks to the post-processor
+    /// incrementally instead of waiting for the full session to complete. Default: true.
+    #[serde(default = "default_post_process_streaming_enabled")]
+    pub post_process_streaming_enabled: bool,
+    /// Full URL of the LLM chat-completions endpoint (OpenAI-compatible).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_process_api_url: Option<String>,
+    /// API key for the post-processing LLM service.
+    /// Not saved to config.json; load from `post_process_api_key` in JSON or
+    /// `POST_PROCESS_API_KEY` env var.
+    #[serde(skip)]
+    pub post_process_api_key: Option<String>,
+    /// API format for the post-processor (currently only "openai" is supported).
+    #[serde(default = "default_post_process_api_format")]
+    pub post_process_api_format: String,
+    /// LLM model name for post-processing (e.g., "gpt-4o-mini").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_process_model: Option<String>,
+    /// System prompt for the post-processing LLM. Falls back to a built-in default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_process_prompt: Option<String>,
+    /// Temperature for the post-processing LLM. Default: 0.0.
+    #[serde(default)]
+    pub post_process_temperature: f32,
 }
 
 impl Default for AppConfig {
@@ -80,6 +117,14 @@ impl Default for AppConfig {
             max_chunk_size_bytes: default_chunk_size(),
             max_retries: default_retries(),
             convergence_timeout_secs: default_convergence_timeout(),
+            post_process_enabled: false,
+            post_process_streaming_enabled: default_post_process_streaming_enabled(),
+            post_process_api_url: None,
+            post_process_api_key: None,
+            post_process_api_format: default_post_process_api_format(),
+            post_process_model: None,
+            post_process_prompt: None,
+            post_process_temperature: 0.0,
         }
     }
 }
@@ -111,6 +156,9 @@ impl AppConfig {
         if let Ok(key) = std::env::var("TRANSCRIPTION_API_KEY") {
             config.api_key = Some(key);
         }
+        if let Ok(key) = std::env::var("POST_PROCESS_API_KEY") {
+            config.post_process_api_key = Some(key);
+        }
 
         config
     }
@@ -141,6 +189,19 @@ impl AppConfig {
             "max_chunk_size_bytes" => Some(self.max_chunk_size_bytes.to_string()),
             "max_retries" => Some(self.max_retries.to_string()),
             "convergence_timeout_secs" => Some(self.convergence_timeout_secs.to_string()),
+            "post_process_enabled" => Some(self.post_process_enabled.to_string()),
+            "post_process_streaming_enabled" => {
+                Some(self.post_process_streaming_enabled.to_string())
+            }
+            "post_process_api_url" => self.post_process_api_url.clone(),
+            "post_process_api_key" => self
+                .post_process_api_key
+                .as_ref()
+                .map(|_| "*** (set)".to_string()),
+            "post_process_api_format" => Some(self.post_process_api_format.clone()),
+            "post_process_model" => self.post_process_model.clone(),
+            "post_process_prompt" => self.post_process_prompt.clone(),
+            "post_process_temperature" => Some(self.post_process_temperature.to_string()),
             _ => None,
         }
     }
@@ -216,11 +277,54 @@ impl AppConfig {
                     .map_err(|_| format!("convergence_timeout_secs must be a u64, got: {}", value))?;
                 Ok(())
             }
+            "post_process_enabled" => {
+                self.post_process_enabled = value
+                    .parse::<bool>()
+                    .map_err(|_| format!("post_process_enabled must be true/false, got: {}", value))?;
+                Ok(())
+            }
+            "post_process_streaming_enabled" => {
+                self.post_process_streaming_enabled = value.parse::<bool>().map_err(|_| {
+                    format!(
+                        "post_process_streaming_enabled must be true/false, got: {}",
+                        value
+                    )
+                })?;
+                Ok(())
+            }
+            "post_process_api_url" => {
+                self.post_process_api_url = Some(value.to_string());
+                Ok(())
+            }
+            "post_process_api_key" => {
+                self.post_process_api_key = Some(value.to_string());
+                Ok(())
+            }
+            "post_process_api_format" => {
+                self.post_process_api_format = value.to_string();
+                Ok(())
+            }
+            "post_process_model" => {
+                self.post_process_model = Some(value.to_string());
+                Ok(())
+            }
+            "post_process_prompt" => {
+                self.post_process_prompt = Some(value.to_string());
+                Ok(())
+            }
+            "post_process_temperature" => {
+                self.post_process_temperature = value.parse::<f32>().map_err(|_| {
+                    format!("post_process_temperature must be a float, got: {}", value)
+                })?;
+                Ok(())
+            }
             _ => Err(format!(
                 "Unknown config key: {}. Available: api_key, transcription_api_url, model, \
                  hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain, \
                  max_chunk_duration_secs, max_chunk_size_bytes, max_retries, \
-                 convergence_timeout_secs",
+                 convergence_timeout_secs, post_process_enabled, post_process_streaming_enabled, \
+                 post_process_api_url, post_process_api_key, post_process_api_format, \
+                 post_process_model, post_process_prompt, post_process_temperature",
                 key
             )),
         }
@@ -279,6 +383,30 @@ impl AppConfig {
         }
         if let Some(v) = json["convergence_timeout_secs"].as_u64() {
             self.convergence_timeout_secs = v;
+        }
+        if let Some(v) = json["post_process_enabled"].as_bool() {
+            self.post_process_enabled = v;
+        }
+        if let Some(v) = json["post_process_streaming_enabled"].as_bool() {
+            self.post_process_streaming_enabled = v;
+        }
+        if let Some(v) = json["post_process_api_url"].as_str() {
+            self.post_process_api_url = Some(v.to_string());
+        }
+        if let Some(v) = json["post_process_api_key"].as_str() {
+            self.post_process_api_key = Some(v.to_string());
+        }
+        if let Some(v) = json["post_process_api_format"].as_str() {
+            self.post_process_api_format = v.to_string();
+        }
+        if let Some(v) = json["post_process_model"].as_str() {
+            self.post_process_model = Some(v.to_string());
+        }
+        if let Some(v) = json["post_process_prompt"].as_str() {
+            self.post_process_prompt = Some(v.to_string());
+        }
+        if let Some(v) = json["post_process_temperature"].as_f64() {
+            self.post_process_temperature = v as f32;
         }
     }
 }
@@ -536,5 +664,125 @@ mod tests {
         assert_eq!(config.max_chunk_size_bytes, 10485760);
         config.set_field("max_retries", "5").unwrap();
         assert_eq!(config.max_retries, 5);
+    }
+
+    // --- post-process config tests ---
+
+    #[test]
+    fn test_default_post_process_disabled() {
+        let config = AppConfig::default();
+        assert!(!config.post_process_enabled);
+    }
+
+    #[test]
+    fn test_default_post_process_streaming_enabled() {
+        let config = AppConfig::default();
+        assert!(config.post_process_streaming_enabled);
+    }
+
+    #[test]
+    fn test_default_post_process_api_format() {
+        let config = AppConfig::default();
+        assert_eq!(config.post_process_api_format, "openai");
+    }
+
+    #[test]
+    fn test_get_set_post_process_enabled() {
+        let mut config = AppConfig::default();
+        assert_eq!(
+            config.get_field("post_process_enabled"),
+            Some("false".to_string())
+        );
+        config.set_field("post_process_enabled", "true").unwrap();
+        assert!(config.post_process_enabled);
+        assert_eq!(
+            config.get_field("post_process_enabled"),
+            Some("true".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_set_post_process_streaming_enabled() {
+        let mut config = AppConfig::default();
+        config
+            .set_field("post_process_streaming_enabled", "false")
+            .unwrap();
+        assert!(!config.post_process_streaming_enabled);
+    }
+
+    #[test]
+    fn test_get_set_post_process_model() {
+        let mut config = AppConfig::default();
+        assert_eq!(config.get_field("post_process_model"), None);
+        config
+            .set_field("post_process_model", "gpt-4o-mini")
+            .unwrap();
+        assert_eq!(
+            config.post_process_model.as_deref(),
+            Some("gpt-4o-mini")
+        );
+        assert_eq!(
+            config.get_field("post_process_model"),
+            Some("gpt-4o-mini".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_set_post_process_prompt() {
+        let mut config = AppConfig::default();
+        config
+            .set_field("post_process_prompt", "custom prompt")
+            .unwrap();
+        assert_eq!(config.get_field("post_process_prompt"), Some("custom prompt".to_string()));
+    }
+
+    #[test]
+    fn test_get_set_post_process_api_key_masked() {
+        let mut config = AppConfig::default();
+        assert_eq!(config.get_field("post_process_api_key"), None);
+        config
+            .set_field("post_process_api_key", "secret")
+            .unwrap();
+        assert_eq!(config.post_process_api_key.as_deref(), Some("secret"));
+        assert_eq!(
+            config.get_field("post_process_api_key"),
+            Some("*** (set)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_apply_json_post_process_fields() {
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({
+            "post_process_enabled": true,
+            "post_process_streaming_enabled": false,
+            "post_process_api_url": "https://api.example.com/v1/chat/completions",
+            "post_process_model": "gpt-4o-mini",
+            "post_process_prompt": "clean up",
+            "post_process_temperature": 0.1
+        });
+        config.apply_json(&json);
+        assert!(config.post_process_enabled);
+        assert!(!config.post_process_streaming_enabled);
+        assert_eq!(
+            config.post_process_api_url.as_deref(),
+            Some("https://api.example.com/v1/chat/completions")
+        );
+        assert_eq!(config.post_process_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(config.post_process_prompt.as_deref(), Some("clean up"));
+        assert!((config.post_process_temperature - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_backward_compat_missing_post_process_fields() {
+        // Old config without post-process fields should use defaults.
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({ "model": "whisper-large-v3" });
+        config.apply_json(&json);
+        assert!(!config.post_process_enabled);
+        assert!(config.post_process_streaming_enabled);
+        assert_eq!(config.post_process_api_format, "openai");
+        assert!(config.post_process_api_key.is_none());
+        assert!(config.post_process_model.is_none());
     }
 }

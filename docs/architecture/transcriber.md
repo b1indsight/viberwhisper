@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Converts a WAV file path to a transcribed text string. The module defines a trait, provides a generic HTTP implementation, and exposes a factory function that creates a transcriber from config — no provider name hardcoding required.
+Converts a WAV file path to a transcribed text string. The module defines a trait, provides a generic HTTP implementation with automatic chunking and retry, and exposes a factory function that creates a transcriber from config.
 
 ## Module Layout
 
@@ -33,14 +33,10 @@ pub fn create_transcriber(config: &AppConfig) -> Box<dyn Transcriber>
 
 Creates an `ApiTranscriber` from `config.api_key` and `config.transcription_api_url`. Falls back to `MockTranscriber` when no API key is configured.
 
-**Dispatch logic:**
-
 | Condition | Result |
 |---|---|
 | `config.api_key` is set | `ApiTranscriber` |
 | `config.api_key` is `None` | `MockTranscriber` (with a warning log) |
-
-`main.rs` calls `create_transcriber(&config)` — it has no direct dependency on any concrete transcriber type and no dependency on provider names.
 
 ---
 
@@ -54,24 +50,54 @@ pub struct ApiTranscriber {
     language: Option<String>,
     prompt: Option<String>,
     temperature: f32,
+    max_chunk_duration_secs: u32,
+    max_chunk_size_bytes: u64,
+    max_retries: u32,
 }
 ```
 
-A generic HTTP transcriber compatible with OpenAI-style multipart audio endpoints. All connection details come from config — no provider name is hardcoded in the struct or its constructor.
+A generic HTTP transcriber compatible with OpenAI-style multipart audio endpoints. All connection details come from config.
 
 ### Construction
 
 **`ApiTranscriber::from_config(config: &AppConfig) -> Result<Self>`**
 
-Reads `config.api_key` (required), `config.transcription_api_url`, and other transcription fields. Returns an error if `api_key` is not set.
+Reads `config.api_key` (required), `config.transcription_api_url`, transcription fields, and chunk config fields.
 
 ### `transcribe` Implementation
 
-1. Reads the WAV file into bytes.
-2. Builds a `multipart/form-data` request with fields: `model`, `temperature`, `response_format=verbose_json`, optional `language` and `prompt`, and the `file` part.
-3. POSTs to `config.transcription_api_url` with `Bearer` auth.
-4. On non-2xx status, returns an error with status code and body.
-5. Parses the JSON response and extracts the `text` field (trimmed).
+1. Reads the WAV file and checks if it exceeds chunk limits.
+2. If the file is within limits, sends a single multipart request.
+3. If the file exceeds limits, splits it via `split_wav()` and transcribes each chunk individually.
+4. Merges chunk results using language-aware text joining.
+
+### Automatic Chunking
+
+When a WAV file exceeds `max_chunk_duration_secs` or `max_chunk_size_bytes`:
+
+1. The file is split into chunks using `audio::splitter::split_wav()`.
+2. Each chunk is transcribed independently.
+3. Results are merged with `merge_texts()`.
+
+### Retry with Exponential Backoff
+
+Each chunk upload retries on transient failures:
+
+- **4xx errors**: Non-retryable (client errors, bad request). Fails immediately.
+- **5xx errors**: Retryable (server errors). Retries up to `max_retries` times with exponential backoff (1s, 2s, 4s, ...).
+- **Network errors**: Retryable. Same backoff strategy.
+
+### Language-Aware Text Merging
+
+`merge_texts(texts, language)` joins transcribed chunks:
+
+- **Chinese** (`zh`, `zh-cn`, etc.): Joins without separator (Chinese text doesn't use spaces between words).
+- **Other languages**: Joins with a single space.
+- Empty segments are filtered out before joining.
+
+### Request Format
+
+Multipart POST with fields: `model`, `temperature`, `response_format=verbose_json`, optional `language` and `prompt`, and the `file` part.
 
 **Dependencies:** `reqwest` (blocking client), `serde_json`
 
@@ -83,7 +109,7 @@ Reads `config.api_key` (required), `config.transcription_api_url`, and other tra
 pub struct MockTranscriber;
 ```
 
-Returns the fixed string `"This is mock transcribed text"` without making any network calls or reading any file. Used in unit tests to isolate the transcription step, and as a runtime fallback when no valid API key is configured.
+Returns the fixed string `"This is mock transcribed text"` without making any network calls. Used in unit tests and as a runtime fallback when no API key is configured.
 
 ---
 
@@ -100,7 +126,7 @@ pub use factory::create_transcriber;
 
 ## Switching Endpoints
 
-To use a different OpenAI-compatible transcription endpoint (e.g. OpenAI, a local whisper server), set `transcription_api_url` in `config.json` or via `config set transcription_api_url <url>`. No code changes needed.
+To use a different OpenAI-compatible transcription endpoint, set `transcription_api_url` in `config.json` or via `config set transcription_api_url <url>`. No code changes needed.
 
 ## Adding a New Provider Type
 
