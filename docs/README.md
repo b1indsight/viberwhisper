@@ -6,11 +6,12 @@ Module-level design docs covering structs, methods, and dependencies.
 
 | Document | Description |
 |---|---|
-| [audio.md](architecture/audio.md) | Audio recording — `AudioRecorder`, cpal stream management, WAV output |
-| [core.md](architecture/core.md) | Config persistence (`AppConfig`) and CLI argument parsing (`Cli`, `Commands`) |
+| [audio.md](architecture/audio.md) | Audio recording — `AudioRecorder`, cpal stream management, live chunking, WAV output |
+| [core.md](architecture/core.md) | Config persistence (`AppConfig`), CLI argument parsing (`Cli`, `Commands`), `SessionOrchestrator` |
 | [input.md](architecture/input.md) | Hotkey detection (`HotkeyManager`), text injection (`TextTyper`), system tray (`TrayManager`) |
-| [transcriber.md](architecture/transcriber.md) | Transcription trait, `ApiTranscriber` (OpenAI-compatible API), `MockTranscriber` |
+| [transcriber.md](architecture/transcriber.md) | Transcription trait, `ApiTranscriber` (OpenAI-compatible API), chunking, retry, text merging |
 | [platform.md](architecture/platform.md) | Platform text injection — `MacTyper` (osascript) and `WindowsTyper` (SendInput) |
+| [postprocess.md](architecture/postprocess.md) | Post-processing — `TextPostProcessor` trait, LLM integration, preheat/conservative sessions |
 
 ## Examples
 
@@ -24,12 +25,12 @@ Tracked example files for local setup.
 
 Implementation plans and technical specs for each feature.
 
-| Document | Description |
-|---|---|
-| [01-hotkey-recording.md](plan/01-hotkey-recording.md) | Global hotkey (F8) triggered audio recording with WAV output |
-| [02-toggle-recording.md](plan/02-toggle-recording.md) | Dual-mode recording: hold-to-record (F8) and toggle (F9) |
-| [03-cross-platform.md](plan/03-cross-platform.md) | macOS + Windows support via platform-specific `TextTyper` implementations |
-| [04-multiple-models.md](plan/04-multiple-models.md) | Provider + model config abstraction for future multi-provider expansion |
-| [05-long-audio-streaming.md](plan/05-long-audio-streaming.md) | Long audio chunking, offline split, retry with exponential backoff, and text merge |
-| [06-end-to-end-stream-recognition.md](plan/06-end-to-end-stream-recognition.md) | End-to-end stream recognition: unified Hold/Toggle session lifecycle, chunk state machine, result convergence, error propagation, and `SessionOrchestrator` design |
-| [08-llm-post-processing.md](plan/08-llm-post-processing.md) | OpenAI-compatible streaming STT plus LLM post-processing: punctuation, filler removal, interruption cleanup, and graceful fallback |
+| Document | Status | Description |
+|---|---|---|
+| [01-hotkey-recording.md](plan/01-hotkey-recording.md) | Done | Global hotkey (F8) triggered audio recording with WAV output |
+| [02-toggle-recording.md](plan/02-toggle-recording.md) | Done | Dual-mode recording: hold-to-record (F8) and toggle (F9) |
+| [03-cross-platform.md](plan/03-cross-platform.md) | Done | macOS + Windows support via platform-specific `TextTyper` implementations |
+| [04-multiple-models.md](plan/04-multiple-models.md) | Done | Provider + model config abstraction (evolved to URL-based config) |
+| [05-long-audio-streaming.md](plan/05-long-audio-streaming.md) | Done | Long audio chunking, offline split, retry with exponential backoff, and text merge |
+| [06-end-to-end-stream-recognition.md](plan/06-end-to-end-stream-recognition.md) | Done | Session orchestrator: unified Hold/Toggle lifecycle, chunk state machine, convergence |
+| [08-llm-post-processing.md](plan/08-llm-post-processing.md) | Done | LLM text post-processing: punctuation, filler removal, preheat/conservative modes |

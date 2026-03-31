@@ -2,7 +2,15 @@
 
 ## Purpose
 
-Captures microphone input and saves it as a WAV file for transcription. Handles device enumeration, stream management, sample format conversion, and cleanup of old recordings.
+Captures microphone input and saves it as WAV files for transcription. Handles device enumeration, stream management, sample format conversion, live chunking during recording, and cleanup of old recordings.
+
+## Module Layout
+
+```
+src/audio/
+  recorder.rs  — AudioRecorder with cpal stream and live chunking
+  splitter.rs  — Offline WAV file splitting utilities (TmpChunk)
+```
 
 ## Key Struct
 
@@ -16,6 +24,11 @@ pub struct AudioRecorder {
     sample_count: Arc<AtomicUsize>,
     gain: f32,
     sample_rate: u32,
+    flushed_samples: usize,
+    flush_needed: Arc<AtomicBool>,
+    chunk_max_samples: usize,
+    max_chunk_duration_secs: u32,
+    max_chunk_size_bytes: u64,
 }
 ```
 
@@ -27,37 +40,69 @@ pub struct AudioRecorder {
 | `sample_count` | Atomic counter for progress logging |
 | `gain` | Microphone amplification multiplier |
 | `sample_rate` | Detected at stream-open time (typically 44100 Hz) |
+| `flushed_samples` | Number of samples already flushed to chunk files during recording |
+| `flush_needed` | Atomic flag set by audio callback when chunk threshold is crossed |
+| `chunk_max_samples` | Max samples per chunk, computed from config at `start_recording` |
+| `max_chunk_duration_secs` | Config: max chunk duration in seconds (0 = unlimited) |
+| `max_chunk_size_bytes` | Config: max chunk size in bytes including WAV header (0 = unlimited) |
 
 ## Key Methods
 
 ### `new(gain: f32) -> Result<Self>`
 
-Creates the recorder. Queries `cpal::default_host()` for the default input device and logs available devices at `DEBUG` level. Does **not** open a stream yet.
+Creates a recorder with default chunk config (30s / 23 MiB). Queries `cpal::default_host()` for the default input device.
+
+### `with_config(gain, max_chunk_duration_secs, max_chunk_size_bytes) -> Result<Self>`
+
+Creates a recorder with explicit chunk-splitting config. The chunk threshold is computed as `min(duration_limit, size_limit)` in sample count.
 
 ### `start_recording(&mut self) -> Result<()>`
 
 1. Returns early (no-op) if already recording.
 2. Opens a `cpal` input stream using the device's default config.
-3. Supports `I16` and `F32` sample formats; converts multi-channel to mono by averaging channels, then applies gain.
+3. Supports `I16` and `F32` sample formats; converts multi-channel to mono by averaging, then applies gain.
 4. Sets `recording = true` before playing the stream to avoid dropping initial frames.
-5. Clears the buffer and resets `sample_count`.
+5. Computes `chunk_max_samples` from duration/size config.
+6. Resets `flushed_samples` and `flush_needed`.
 
-### `stop_recording(&mut self) -> Result<String>`
+### `take_ready_chunk(&mut self) -> Option<String>`
 
-1. Sets `recording = false`, then sleeps 200 ms to let in-flight callbacks drain.
+Polls for a completed chunk during recording. Returns `Some(path)` when a chunk has been flushed to disk. Should be called periodically from the main event loop.
+
+The audio callback sets `flush_needed` when the sample count crosses a chunk boundary. This method checks the flag, writes the chunk to `./tmp/chunk_live_NNNN_TIMESTAMP.wav`, advances `flushed_samples`, and returns the path.
+
+### `stop_recording(&mut self) -> Result<StopResult>`
+
+1. Sets `recording = false`, sleeps 200 ms for pending callbacks.
 2. Drops the stream.
-3. Writes the buffer to `./tmp/recording_<unix_timestamp>.wav` using `hound` with spec: 1 channel, native sample rate, 16-bit signed PCM.
-4. Calls `cleanup_old_recordings("./tmp", 10)` to keep at most 10 WAV files.
-5. Returns the file path string.
+3. Writes remaining samples (tail) or full recording to WAV.
+4. Calls `cleanup_old_recordings("./tmp", 10)`.
 
-### `is_recording(&self) -> bool`
+### `StopResult` Enum
 
-Returns the current recording state. Used by the main loop and tests.
+| Variant | Description |
+|---|---|
+| `SingleFile(String)` | No chunking occurred; entire recording in one WAV file |
+| `TailChunk(String)` | Some chunks were flushed during recording; this is the final tail |
+| `ChunksOnly` | All audio was flushed to chunks; no tail remains |
+
+### Private Methods
+
+- `write_chunk(samples, chunk_index) -> Result<String>`: Writes PCM samples to a WAV file under `./tmp/`.
+- `write_full_recording(buffer) -> Result<String>`: Writes the entire buffer as a single WAV (legacy path, no chunking).
+- `cleanup_old_recordings(dir, keep)`: Keeps at most `keep` WAV files, deletes oldest.
+
+## Audio Splitter (`src/audio/splitter.rs`)
+
+Offline WAV splitting for files that exceed size or duration limits.
+
+- `split_wav(path, max_duration_secs, max_size_bytes) -> Result<Vec<TmpChunk>>`: Splits a WAV file into chunks.
+- `TmpChunk`: Wraps a temporary WAV file path with `Drop` trait for auto-cleanup.
 
 ## Dependencies
 
 | Crate | Usage |
 |---|---|
 | `cpal` | Cross-platform audio I/O; device enumeration and stream creation |
-| `hound` | WAV file writing (`WavWriter`, `WavSpec`) |
+| `hound` | WAV file reading/writing (`WavWriter`, `WavSpec`) |
 | `tracing` | Structured logging via `instrument` macro |

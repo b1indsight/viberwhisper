@@ -6,8 +6,10 @@
 
 ## 功能特性
 
-- **全局热键录音**：按住 F8（可配置）开始录音，松开自动停止
+- **全局热键录音**：按住 F8 开始录音，松开自动停止（Hold 模式）；按一下 F9 开始，再按一下停止（Toggle 模式）
 - **AI 语音识别**：通过可配置的 HTTP 转写接口将语音转为文字（默认 Groq Whisper）
+- **长录音自动分片**：超过时长/大小限制的录音自动切分，后台并行转写，结果智能合并
+- **LLM 文本后处理**：可选的 LLM 后处理层，自动补标点、去语气词、清理中断与重复
 - **自动文本输入**：识别结果自动输入到当前光标位置（支持中文等 Unicode 字符）
 - **灵活配置**：支持自定义热键、模型、语言、API 地址、麦克风增益等
 - **自动清理**：自动保留最新 10 条录音，旧文件自动删除
@@ -52,11 +54,12 @@ cp config.example.json config.json
 
 > **向后兼容**：旧版配置中的 `groq_api_key` 和 `hotkey` 字段仍可识别，自动映射到 `api_key` 和 `hold_hotkey`。
 
-也可以通过环境变量设置 API 密钥（优先级高于配置文件中的 `groq_api_key`）：
+也可以通过环境变量设置 API 密钥（优先级高于配置文件）：
 
 ```bash
 export GROQ_API_KEY=your_api_key_here          # 旧版兼容
-export TRANSCRIPTION_API_KEY=your_api_key_here  # 新版推荐（优先级更高）
+export TRANSCRIPTION_API_KEY=your_api_key_here  # 转写 API 密钥（优先级最高）
+export POST_PROCESS_API_KEY=your_key_here       # LLM 后处理 API 密钥
 ```
 
 ### 3. 构建并运行
@@ -76,31 +79,105 @@ cargo run --release
 
 > macOS 首次运行时，系统会弹出辅助功能授权请求，需要允许才能完成文字输入。
 
+## CLI 命令
+
+```bash
+# 启动录音监听（默认，无子命令）
+viberwhisper
+
+# 查看所有配置
+viberwhisper config list
+
+# 查看单个配置项
+viberwhisper config get <key>
+
+# 修改配置项
+viberwhisper config set <key> <value>
+
+# 离线转写 WAV 文件
+viberwhisper convert input.wav
+viberwhisper convert input.wav --output output.txt
+```
+
 ## 配置说明
+
+### 转写服务
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `api_key` | 字符串 | 无 | 转写服务 API 密钥（必填，不写入配置文件） |
 | `transcription_api_url` | 字符串 | Groq Whisper URL | 转写 API 地址（兼容 OpenAI multipart 格式） |
+| `provider` | 字符串 | 无 | 服务商标签（仅用于标注，不影响行为） |
 | `model` | 字符串 | `whisper-large-v3-turbo` | 转录模型 |
 | `language` | 字符串 | `zh` | 语言代码，留空为自动检测 |
 | `prompt` | 字符串 | 中文提示词 | 指导转录风格和格式 |
 | `temperature` | 数字 | `0` | 随机性（0-1） |
+
+### 热键与音频
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
 | `hold_hotkey` | 字符串 | `F8` | 按住录音热键（Hold 模式） |
 | `toggle_hotkey` | 字符串 | `F9` | 切换录音热键（Toggle 模式） |
 | `mic_gain` | 数字 | `1.0` | 麦克风增益倍数 |
 
-> **注意**：`config.json` 已在 `.gitignore` 中排除，避免误提交真实密钥；建议从 `config.example.json` 复制后再填写自己的配置。`api_key` 不会被程序写回磁盘，但如果你手动填进 `config.json`，文件里依然会存在明文密钥。
+### 音频分片
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_chunk_duration_secs` | 数字 | `30` | 每个分片最大秒数（0 = 不限） |
+| `max_chunk_size_bytes` | 数字 | `24117248` | 每个分片最大字节数（0 = 不限） |
+| `max_retries` | 数字 | `3` | 分片上传失败最大重试次数 |
+| `convergence_timeout_secs` | 数字 | `30` | 录音结束后等待所有分片转写完成的超时秒数 |
+
+### LLM 后处理
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `post_process_enabled` | 布尔 | `false` | 是否启用 LLM 后处理 |
+| `post_process_streaming_enabled` | 布尔 | `true` | 是否启用预热模式（录音中提前发送 LLM 请求） |
+| `post_process_api_url` | 字符串 | 无 | LLM chat completions API 地址 |
+| `post_process_api_key` | 字符串 | 无 | LLM API 密钥（不写入配置文件，可通过 `POST_PROCESS_API_KEY` 环境变量设置） |
+| `post_process_api_format` | 字符串 | `openai` | API 格式（目前仅支持 openai） |
+| `post_process_model` | 字符串 | 无 | LLM 模型名（如 `gpt-4o-mini`） |
+| `post_process_prompt` | 字符串 | 内置默认 | 后处理系统提示词 |
+| `post_process_temperature` | 数字 | `0.0` | 后处理温度 |
+
+> **注意**：`config.json` 已在 `.gitignore` 中排除，避免误提交真实密钥。`api_key` 和 `post_process_api_key` 不会被程序写回磁盘。
 
 ### 切换转写服务
 
 只需修改 `transcription_api_url` 和 `api_key` 即可切换到任何兼容 OpenAI Whisper multipart 格式的接口：
 
 ```bash
-# 命令行方式
 ./viberwhisper config set transcription_api_url https://api.openai.com/v1/audio/transcriptions
 ./viberwhisper config set model whisper-1
 ```
+
+## LLM 后处理
+
+启用后，转写结果会在输出前经过 LLM 整理，自动补标点、去除语气词、清理中断与重复。
+
+### 启用方法
+
+```bash
+# 启用后处理
+viberwhisper config set post_process_enabled true
+
+# 配置 LLM API
+viberwhisper config set post_process_api_url https://api.openai.com/v1/chat/completions
+viberwhisper config set post_process_model gpt-4o-mini
+
+# 设置 API 密钥（通过环境变量）
+export POST_PROCESS_API_KEY=your_key_here
+```
+
+### 两种模式
+
+- **预热模式**（默认，`post_process_streaming_enabled = true`）：录音过程中每收到一段稳定文本就提前发送 LLM 请求，录音结束后几乎零等待
+- **保守模式**（`post_process_streaming_enabled = false`）：录音全部结束后一次性发送，零 token 浪费
+
+后处理失败时自动降级为输出原始转写文本，不会导致整次录音失败。
 
 ## 依赖项
 
@@ -108,21 +185,18 @@ cargo run --release
 - [cpal](https://crates.io/crates/cpal) - 跨平台音频录制
 - [hound](https://crates.io/crates/hound) - WAV 音频文件处理
 - [dirs](https://crates.io/crates/dirs) - 跨平台目录路径获取
-- [reqwest](https://crates.io/crates/reqwest) - HTTP 客户端，用于调用转写 API
+- [reqwest](https://crates.io/crates/reqwest) - HTTP 客户端
 - [serde_json](https://crates.io/crates/serde_json) - JSON 序列化/反序列化
+- [clap](https://crates.io/crates/clap) - CLI 参数解析
+- [tray-icon](https://crates.io/crates/tray-icon) - 系统托盘图标
 - [tracing](https://crates.io/crates/tracing) - 结构化日志
 
 ## 开发
 
 ```bash
-# 运行测试
-cargo test
-
-# 代码检查
-cargo clippy
-
-# 代码格式化
-cargo fmt
+cargo test     # 运行测试
+cargo clippy   # 代码检查
+cargo fmt      # 代码格式化
 ```
 
 ## 许可证
