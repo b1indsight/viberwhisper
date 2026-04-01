@@ -95,7 +95,7 @@ pub fn split_wav(
         channels: spec.channels,
         sample_rate: spec.sample_rate,
         bits_per_sample: spec.bits_per_sample,
-        sample_format: hound::SampleFormat::Int,
+        sample_format: spec.sample_format,
     };
 
     let mut chunks: Vec<TmpChunk> = Vec::new();

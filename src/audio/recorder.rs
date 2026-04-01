@@ -9,7 +9,7 @@ use hound::{WavSpec, WavWriter};
 use tracing::{debug, error, info, instrument, warn};
 
 pub struct AudioRecorder {
-    recording: Arc<Mutex<bool>>,
+    recording: Arc<AtomicBool>,
     buffer: Arc<Mutex<Vec<i16>>>,
     stream: Option<cpal::Stream>,
     sample_count: Arc<AtomicUsize>,
@@ -25,6 +25,54 @@ pub struct AudioRecorder {
     max_chunk_duration_secs: u32,
     /// Config: max chunk size in bytes (including 44-byte WAV header).
     max_chunk_size_bytes: u64,
+}
+
+/// Shared logic for both I16 and F32 audio callbacks: append mono samples to the
+/// buffer and signal a flush when the chunk threshold is crossed.
+fn push_mono_chunk(
+    mono: Vec<i16>,
+    buffer: &Mutex<Vec<i16>>,
+    sample_count: &AtomicUsize,
+    flush_needed: &AtomicBool,
+    sample_rate: u32,
+    chunk_max_samples: usize,
+) {
+    let len = mono.len();
+    buffer.lock().unwrap().extend_from_slice(&mono);
+    let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
+    if total % (sample_rate as usize / 2) < len {
+        debug!(
+            frames = total,
+            seconds = total / sample_rate as usize,
+            "Recording progress"
+        );
+    }
+    if chunk_max_samples > 0
+        && !flush_needed.load(Ordering::Relaxed)
+        && total % chunk_max_samples < len
+    {
+        flush_needed.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Write `samples` as a 16-bit mono WAV file to `path`.
+fn write_wav_to_path(
+    path: &PathBuf,
+    samples: &[i16],
+    sample_rate: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = WavWriter::create(path, spec)?;
+    for &sample in samples {
+        writer.write_sample(sample)?;
+    }
+    writer.finalize()?;
+    Ok(())
 }
 
 impl AudioRecorder {
@@ -64,7 +112,7 @@ impl AudioRecorder {
         info!(gain = gain, "Mic gain set");
 
         Ok(AudioRecorder {
-            recording: Arc::new(Mutex::new(false)),
+            recording: Arc::new(AtomicBool::new(false)),
             buffer: Arc::new(Mutex::new(Vec::new())),
             stream: None,
             sample_count: Arc::new(AtomicUsize::new(0)),
@@ -80,7 +128,7 @@ impl AudioRecorder {
 
     #[instrument(skip(self))]
     pub fn start_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if *self.recording.lock().unwrap() {
+        if self.recording.load(Ordering::Relaxed) {
             debug!("Already recording, ignoring duplicate start request");
             return Ok(());
         }
@@ -129,13 +177,13 @@ impl AudioRecorder {
         sample_count.store(0, Ordering::Relaxed);
 
         // Set to true before starting stream to avoid dropping initial frames
-        *self.recording.lock().unwrap() = true;
+        self.recording.store(true, Ordering::Relaxed);
 
         let stream = match sample_format {
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config.into(),
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    if *recording.lock().unwrap() {
+                    if recording.load(Ordering::Relaxed) {
                         let mono: Vec<i16> = data
                             .chunks(channels)
                             .map(|ch| {
@@ -144,23 +192,7 @@ impl AudioRecorder {
                                 (avg * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16
                             })
                             .collect();
-                        let len = mono.len();
-                        buffer.lock().unwrap().extend_from_slice(&mono);
-                        let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
-                        if total % (sample_rate as usize / 2) < len {
-                            debug!(
-                                frames = total,
-                                seconds = total / sample_rate as usize,
-                                "Recording progress"
-                            );
-                        }
-                        // Signal flush when chunk threshold is crossed.
-                        if chunk_max_samples > 0
-                            && !flush_needed.load(Ordering::Relaxed)
-                            && total % chunk_max_samples < len
-                        {
-                            flush_needed.store(true, Ordering::Relaxed);
-                        }
+                        push_mono_chunk(mono, &buffer, &sample_count, &flush_needed, sample_rate, chunk_max_samples);
                     }
                 },
                 move |err| error!(error = %err, "Stream error"),
@@ -169,7 +201,7 @@ impl AudioRecorder {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    if *recording.lock().unwrap() {
+                    if recording.load(Ordering::Relaxed) {
                         let mono: Vec<i16> = data
                             .chunks(channels)
                             .map(|ch| {
@@ -178,29 +210,14 @@ impl AudioRecorder {
                             })
                             .map(|s| s as i16)
                             .collect();
-                        let len = mono.len();
-                        buffer.lock().unwrap().extend_from_slice(&mono);
-                        let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
-                        if total % (sample_rate as usize / 2) < len {
-                            debug!(
-                                frames = total,
-                                seconds = total / sample_rate as usize,
-                                "Recording progress"
-                            );
-                        }
-                        if chunk_max_samples > 0
-                            && !flush_needed.load(Ordering::Relaxed)
-                            && total % chunk_max_samples < len
-                        {
-                            flush_needed.store(true, Ordering::Relaxed);
-                        }
+                        push_mono_chunk(mono, &buffer, &sample_count, &flush_needed, sample_rate, chunk_max_samples);
                     }
                 },
                 move |err| error!(error = %err, "Stream error"),
                 None,
             )?,
             _ => {
-                *self.recording.lock().unwrap() = false;
+                self.recording.store(false, Ordering::Relaxed);
                 return Err("Unsupported sample format".into());
             }
         };
@@ -268,18 +285,7 @@ impl AudioRecorder {
             chunk_index, timestamp
         ));
 
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: self.sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-
-        let mut writer = WavWriter::create(&path, spec)?;
-        for &sample in samples {
-            writer.write_sample(sample)?;
-        }
-        writer.finalize()?;
+        write_wav_to_path(&path, samples, self.sample_rate)?;
 
         let path_str = path.to_string_lossy().to_string();
         info!(path = %path_str, index = chunk_index, samples = samples.len(), "Live chunk written");
@@ -288,13 +294,13 @@ impl AudioRecorder {
 
     #[instrument(skip(self))]
     pub fn stop_recording(&mut self) -> Result<StopResult, Box<dyn std::error::Error>> {
-        if !*self.recording.lock().unwrap() {
+        if !self.recording.load(Ordering::Relaxed) {
             debug!("Not recording, ignoring stop request");
             return Err("Not currently recording".into());
         }
 
         debug!("Stopping recording");
-        *self.recording.lock().unwrap() = false;
+        self.recording.store(false, Ordering::Relaxed);
 
         // Wait for pending callbacks to complete
         thread::sleep(Duration::from_millis(200));
@@ -342,29 +348,13 @@ impl AudioRecorder {
 
     /// Write the entire buffer as a single WAV file (legacy path, no chunking).
     fn write_full_recording(&self, buffer: &[i16]) -> Result<String, Box<dyn std::error::Error>> {
-        let mut path = PathBuf::from("./tmp");
-        std::fs::create_dir_all(&path)?;
-
+        std::fs::create_dir_all("./tmp")?;
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        path.push(format!("recording_{}.wav", timestamp));
+        let path = PathBuf::from(format!("./tmp/recording_{}.wav", timestamp));
         let filename = path.to_string_lossy().to_string();
         debug!(path = %filename, "Saving recording");
 
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: self.sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-
-        let mut writer = WavWriter::create(&path, spec)?;
-        for (i, &sample) in buffer.iter().enumerate() {
-            if let Err(e) = writer.write_sample(sample) {
-                error!(sample_index = i, error = %e, "Failed to write sample");
-                return Err(e.into());
-            }
-        }
-        writer.finalize()?;
+        write_wav_to_path(&path, buffer, self.sample_rate)?;
 
         info!(path = %filename, "Recording saved");
         Ok(filename)
@@ -401,7 +391,7 @@ impl AudioRecorder {
     }
 
     pub fn is_recording(&self) -> bool {
-        *self.recording.lock().unwrap()
+        self.recording.load(Ordering::Relaxed)
     }
 }
 
