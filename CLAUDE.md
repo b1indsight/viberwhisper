@@ -82,12 +82,19 @@ changelog                    — Project changelog
 
 ## Development Principles
 
-### 1. Feature Documentation Workflow
+### 1. Feature Implementation Workflow
 
-When implementing any feature:
-1. First, read the feature documentation in `./docs/plan/` directory
-2. After implementation is complete, update the corresponding feature doc to reflect the actual implementation
-3. Add a line to the `changelog` file describing the updated feature
+When implementing any feature, **strictly follow this order**:
+
+1. Read the feature documentation in `./docs/plan/` directory (if exists)
+2. Write an implementation plan (design doc with tech choices, file structure, implementation steps)
+3. **Submit a PR with the plan only** — notify the user to review
+4. **Wait for user approval** before writing any code
+5. Implement the feature according to the approved plan
+6. Append code commits to the same PR (do NOT create a separate PR)
+7. Update the corresponding feature doc and `changelog` to reflect the actual implementation
+
+**Never skip the plan review step.** The user must approve the plan before any code is written.
 
 ### 2. Test-Driven Development (TDD)
 
