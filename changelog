@@ -13,3 +13,4 @@
 2026-03-26: Add LLM text post-processing: OpenAI-compatible API integration, preheat mode (incremental during recording) and conservative mode, graceful fallback to raw transcription
 2026-03-30: Add preheat mode for LLM post-processing: send LLM requests incrementally during recording for near-zero wait after transcription completes
 2026-03-31: Refactor audio module: replace Mutex<bool> with AtomicBool, extract shared helper functions, remove dead code
+2026-04-01: Add floating overlay window: always-on-top clickable mic icon, system theme matching, click-to-toggle recording, draggable (macOS)
