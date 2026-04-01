@@ -105,3 +105,4 @@ This project follows TDD practices. Always:
 - Optional LLM text post-processing (preheat + conservative modes)
 - System tray with recording status indicator
 - CLI config management and offline WAV transcription
+- Floating overlay window with click-to-toggle recording (macOS)

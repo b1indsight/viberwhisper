@@ -6,3 +6,4 @@
 2026-03-15: Add long-audio streaming plan covering in-recording chunking, offline WAV split fallback, retry, and result merge
 2026-03-15: Add end-to-end stream recognition plan covering unified Hold/Toggle session orchestration, chunk state machine, convergence, and error propagation
 2026-03-18: Add LLM post-processing plan covering punctuation cleanup, filler removal, and graceful fallback after STT
+2026-04-01: Add floating overlay window: always-on-top clickable mic icon, system theme matching, click-to-toggle recording, draggable (macOS)
