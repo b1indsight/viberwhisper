@@ -3,6 +3,13 @@
 2026-03-10: Add dual-hotkey recording: hold_hotkey (F8) for press-and-hold recording, toggle_hotkey (F9) for press-to-toggle recording
 2026-03-10: Add cross-platform support: macOS typer (osascript) + Windows typer (SendInput), conditional compilation with #[cfg(target_os)]
 2026-03-10: Add system tray icon: idle (gray) / recording (red) status indicator, right-click menu with exit option, cross-platform (macOS + Windows)
+2026-03-10: Refactor logging: replace println! with tracing structured logging
+2026-03-15: Add multiple model support: configurable provider + model, abstract GroqTranscriber into generic ApiTranscriber
+2026-03-15: Add long audio streaming: in-recording chunking, offline WAV split fallback, retry with exponential backoff, language-aware result merge
 2026-03-15: Add long-audio streaming plan covering in-recording chunking, offline WAV split fallback, retry, and result merge
 2026-03-15: Add end-to-end stream recognition plan covering unified Hold/Toggle session orchestration, chunk state machine, convergence, and error propagation
+2026-03-18: Add end-to-end stream recognition: SessionOrchestrator for unified Hold/Toggle lifecycle, chunk state machine, convergence timeout, partial failure handling
 2026-03-18: Add LLM post-processing plan covering punctuation cleanup, filler removal, and graceful fallback after STT
+2026-03-26: Add LLM text post-processing: OpenAI-compatible API integration, preheat mode (incremental during recording) and conservative mode, graceful fallback to raw transcription
+2026-03-30: Add preheat mode for LLM post-processing: send LLM requests incrementally during recording for near-zero wait after transcription completes
+2026-03-31: Refactor audio module: replace Mutex<bool> with AtomicBool, extract shared helper functions, remove dead code
