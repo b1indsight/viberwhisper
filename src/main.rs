@@ -41,12 +41,13 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     use core::config::AppConfig;
     use core::orchestrator::{SessionError, SessionMode, SessionOrchestrator};
     use input::hotkey::{HotkeyEvent, HotkeyManager, HotkeySource};
+    use input::overlay::OverlayManager;
     use input::tray::TrayManager;
     use input::typer::TextTyper;
+    use postprocess::create_post_processor;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use postprocess::create_post_processor;
-    use transcriber::{create_transcriber, Transcriber};
+    use transcriber::{Transcriber, create_transcriber};
 
     println!("ViberWhisper - Voice-to-Text Input");
     println!("===================================");
@@ -96,7 +97,13 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     let mut tray = TrayManager::new()?;
     info!("System tray icon started");
 
-    println!("Hold {} to record, release to transcribe.", config.hold_hotkey);
+    let mut overlay = OverlayManager::new()?;
+    info!("Floating overlay window started");
+
+    println!(
+        "Hold {} to record, release to transcribe.",
+        config.hold_hotkey
+    );
     println!(
         "Press {} to start recording, press again to stop.",
         config.toggle_hotkey
@@ -188,6 +195,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                             orchestrator.start_session(SessionMode::Hold);
                             info!("Recording started (hold mode)");
                             tray.set_recording(true);
+                            overlay.set_recording(true);
                         }
                         Err(e) => error!(error = %e, "Failed to start recording"),
                     }
@@ -198,11 +206,13 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                     match rec.stop_recording() {
                         Ok(stop_result) => {
                             tray.set_recording(false);
+                            overlay.set_recording(false);
                             finalize(stop_result);
                         }
                         Err(e) => {
                             error!(error = %e, "Failed to stop recording");
                             tray.set_recording(false);
+                            overlay.set_recording(false);
                         }
                     }
                 }
@@ -213,11 +223,13 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                         match rec.stop_recording() {
                             Ok(stop_result) => {
                                 tray.set_recording(false);
+                                overlay.set_recording(false);
                                 finalize(stop_result);
                             }
                             Err(e) => {
                                 error!(error = %e, "Failed to stop recording");
                                 tray.set_recording(false);
+                                overlay.set_recording(false);
                             }
                         }
                     } else {
@@ -227,12 +239,44 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                                 orchestrator.start_session(SessionMode::Toggle);
                                 info!("Recording started (toggle mode)");
                                 tray.set_recording(true);
+                                overlay.set_recording(true);
                             }
                             Err(e) => error!(error = %e, "Failed to start recording"),
                         }
                     }
                 }
                 HotkeyEvent::Released(HotkeySource::Toggle) => {}
+            }
+        }
+
+        // Check overlay click (acts like toggle hotkey)
+        if overlay.check_click() {
+            let mut rec = recorder.lock().unwrap();
+            if rec.is_recording() {
+                info!("Overlay clicked, stopping recording");
+                match rec.stop_recording() {
+                    Ok(stop_result) => {
+                        tray.set_recording(false);
+                        overlay.set_recording(false);
+                        finalize(stop_result);
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to stop recording");
+                        tray.set_recording(false);
+                        overlay.set_recording(false);
+                    }
+                }
+            } else {
+                info!("Overlay clicked, starting recording");
+                match rec.start_recording() {
+                    Ok(()) => {
+                        orchestrator.start_session(SessionMode::Toggle);
+                        info!("Recording started (overlay toggle)");
+                        tray.set_recording(true);
+                        overlay.set_recording(true);
+                    }
+                    Err(e) => error!(error = %e, "Failed to start recording"),
+                }
             }
         }
 
@@ -265,6 +309,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
+        overlay.update();
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
@@ -335,7 +380,7 @@ fn handle_config(action: ConfigAction) {
 fn handle_convert(input: &str, output: Option<&str>) {
     use core::config::AppConfig;
     use postprocess::create_post_processor;
-    use transcriber::{create_transcriber, Transcriber};
+    use transcriber::{Transcriber, create_transcriber};
 
     println!("Transcribing: {}", input);
 
