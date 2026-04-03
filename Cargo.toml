@@ -7,15 +7,6 @@ edition = "2024"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
 [dependencies]
-
-[package.metadata.bundle]
-name = "ViberWhisper"
-identifier = "com.b1indsight.viberwhisper"
-icon = ["assets/icon-32x32.png", "assets/icon-128x128.png", "assets/icon-256x256.png"]
-copyright = "Copyright (c) 2026 b1indsight"
-osx_minimum_system_version = "11.0"
-short_description = "Voice-to-text input tool"
-
 rdev = "0.5"
 cpal = "0.15"
 hound = "3.5"
@@ -32,3 +23,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSDate", "NSRunLoop", "NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSAppearance", "NSApplication", "NSBezierPath", "NSColor", "NSEvent", "NSGraphics", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow"] }
+
+[package.metadata.bundle]
+name = "ViberWhisper"
+identifier = "com.b1indsight.viberwhisper"
+icon = ["assets/icon-32x32.png", "assets/icon-128x128.png", "assets/icon-256x256.png"]
+copyright = "Copyright (c) 2026 b1indsight"
+osx_minimum_system_version = "11.0"
+short_description = "Voice-to-text input tool"
