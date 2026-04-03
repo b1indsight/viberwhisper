@@ -14,3 +14,4 @@
 2026-03-30: Add preheat mode for LLM post-processing: send LLM requests incrementally during recording for near-zero wait after transcription completes
 2026-03-31: Refactor audio module: replace Mutex<bool> with AtomicBool, extract shared helper functions, remove dead code
 2026-04-01: Add floating overlay window: always-on-top clickable mic icon, system theme matching, click-to-toggle recording, draggable (macOS)
+2026-04-03: Add packaging & CI: ci.yml (build/test gate with Discord alerts), release.yml (cross-platform release pipeline), cargo-bundle metadata, placeholder app icons

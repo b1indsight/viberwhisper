@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Build aarch64
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          lipo -create \
+            target/x86_64-apple-darwin/release/viberwhisper \
+            target/aarch64-apple-darwin/release/viberwhisper \
+            -output target/release/viberwhisper-universal
+
+      - name: Create .app bundle
+        run: cargo bundle --release
+
+      - name: Replace binary with universal binary
+        run: |
+          cp target/release/viberwhisper-universal \
+            target/release/bundle/osx/ViberWhisper.app/Contents/MacOS/viberwhisper
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname ViberWhisper \
+            -srcfolder target/release/bundle/osx/ViberWhisper.app \
+            -ov -format UDZO \
+            target/release/ViberWhisper.dmg
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: |
+            target/release/ViberWhisper.dmg
+            target/x86_64-apple-darwin/release/viberwhisper
+            target/aarch64-apple-darwin/release/viberwhisper
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install WiX Toolset
+        run: |
+          dotnet tool install --global wix
+        shell: pwsh
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix
+
+      - name: Build release
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Init WiX (if needed)
+        run: |
+          if (!(Test-Path "wix/main.wxs")) { cargo wix init }
+        shell: pwsh
+
+      - name: Create MSI
+        run: cargo wix
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: |
+            target/wix/*.msi
+            target/x86_64-pc-windows-msvc/release/viberwhisper.exe
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-artifacts
+          path: artifacts/macos
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-artifacts
+          path: artifacts/windows
+
+      - name: Rename artifacts
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p release-assets
+          cp artifacts/macos/target/release/ViberWhisper.dmg "release-assets/ViberWhisper-${TAG}-macos-universal.dmg"
+          cp artifacts/macos/target/x86_64-apple-darwin/release/viberwhisper "release-assets/viberwhisper-${TAG}-macos-x86_64"
+          cp artifacts/macos/target/aarch64-apple-darwin/release/viberwhisper "release-assets/viberwhisper-${TAG}-macos-aarch64"
+          # Find and copy Windows artifacts
+          find artifacts/windows -name "*.msi" -exec cp {} "release-assets/ViberWhisper-${TAG}-windows-x86_64.msi" \;
+          find artifacts/windows -name "viberwhisper.exe" -exec cp {} "release-assets/viberwhisper-${TAG}-windows-x86_64.exe" \;
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
