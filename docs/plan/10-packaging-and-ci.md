@@ -8,9 +8,10 @@ Package ViberWhisper as proper desktop applications (macOS `.app`/`.dmg`, Window
 
 1. **macOS packaging**: Binary wrapped in `.app` bundle → packaged as `.dmg`
 2. **Windows packaging**: Binary packaged as `.msi` installer
-3. **CI automation**: GitHub Actions builds and publishes releases on tag push
-4. **Universal macOS binary**: Support both x86_64 (Intel) and aarch64 (Apple Silicon)
-5. **Raw binaries available**: GitHub Releases include both installers and raw binaries
+3. **CI release automation**: GitHub Actions builds and publishes releases on tag push
+4. **CI build/test gate**: `cargo build` + `cargo test` on every push to master / PR merge, failure sends Discord alert
+5. **Universal macOS binary**: Support both x86_64 (Intel) and aarch64 (Apple Silicon)
+6. **Raw binaries available**: GitHub Releases include both installers and raw binaries
 
 ## Tech Choice
 
@@ -84,7 +85,36 @@ WiX template in `wix/main.wxs` — customized from default to include:
 - Desktop shortcut (optional)
 - Uninstaller entry in Add/Remove Programs
 
-### 4. GitHub Actions Workflow
+### 4. GitHub Actions Workflows
+
+#### Workflow A: Build & Test Gate
+
+File: `.github/workflows/ci.yml`
+
+**Trigger**: Push to `master` + Pull request to `master`
+
+**Job**: `build-and-test`
+Runner: `macos-latest` (needed for cocoa/objc deps)
+
+Steps:
+1. Checkout code
+2. Install Rust stable
+3. Cache `~/.cargo` and `target/`
+4. `cargo build`
+5. `cargo test`
+6. `cargo clippy -- -D warnings`
+7. On failure → send Discord webhook alert with job URL
+
+Discord failure alert uses the same `DISCORD_WEBHOOK_URL` secret as `pr-feedback-discord.yml`. Message format:
+```
+🔴 **CI Build Failed** 🔴
+**Branch**: master (or PR #xx)
+**Commit**: <sha> by <author>
+**Failed step**: cargo test
+**Link**: <job URL>
+```
+
+#### Workflow B: Release
 
 File: `.github/workflows/release.yml`
 
@@ -136,6 +166,7 @@ assets/
 wix/
   main.wxs                    # WiX installer template (new, auto-generated)
 .github/workflows/
+  ci.yml                      # Build & test gate (new)
   release.yml                 # CI release workflow (new)
   pr-feedback-discord.yml     # Existing
 Cargo.toml                    # Add [package.metadata.bundle] section
@@ -150,15 +181,17 @@ Cargo.toml                    # Add [package.metadata.bundle] section
 
 ## Implementation Steps
 
-1. Create `assets/` directory with placeholder app icons
-2. Add `[package.metadata.bundle]` section to `Cargo.toml`
-3. Run `cargo wix init` to generate `wix/main.wxs` template
-4. Create `.github/workflows/release.yml` with the 3-job pipeline
-5. Test macOS build locally: `cargo bundle --release`
-6. Test DMG creation locally: `hdiutil create -volname ViberWhisper -srcfolder target/release/bundle/osx/ViberWhisper.app -ov -format UDZO ViberWhisper.dmg`
-7. Push tag to trigger CI and verify artifacts
-8. Update `CLAUDE.md` with packaging commands
-9. Update `changelog`
+1. Create `.github/workflows/ci.yml` — build & test gate with Discord failure alert
+2. Create `assets/` directory with placeholder app icons
+3. Add `[package.metadata.bundle]` section to `Cargo.toml`
+4. Run `cargo wix init` to generate `wix/main.wxs` template
+5. Create `.github/workflows/release.yml` with the 3-job pipeline
+6. Test macOS build locally: `cargo bundle --release`
+7. Test DMG creation locally: `hdiutil create -volname ViberWhisper -srcfolder target/release/bundle/osx/ViberWhisper.app -ov -format UDZO ViberWhisper.dmg`
+8. Push to master to verify CI gate runs correctly
+9. Push tag to trigger release CI and verify artifacts
+10. Update `CLAUDE.md` with packaging commands
+11. Update `changelog`
 
 ## Deferred
 
