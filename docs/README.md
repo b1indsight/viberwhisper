@@ -35,4 +35,4 @@ Implementation plans and technical specs for each feature.
 | [06-end-to-end-stream-recognition.md](plan/06-end-to-end-stream-recognition.md) | Done | Session orchestrator: unified Hold/Toggle lifecycle, chunk state machine, convergence |
 | [08-llm-post-processing.md](plan/08-llm-post-processing.md) | Done | LLM text post-processing: punctuation, filler removal, preheat/conservative modes |
 | [09-floating-window.md](plan/09-floating-window.md) | Done | Floating overlay window: draggable always-on-top mic overlay with click-to-toggle |
-| [10-objc2-overlay-migration.md](plan/10-objc2-overlay-migration.md) | Planned | Migrate the macOS overlay from deprecated `cocoa` / `objc` to the `objc2` ecosystem |
+| [10-objc2-overlay-migration.md](plan/10-objc2-overlay-migration.md) | Done | Migrate the macOS overlay from deprecated `cocoa` / `objc` to the `objc2` ecosystem |

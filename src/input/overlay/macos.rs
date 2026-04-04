@@ -1,13 +1,13 @@
-#![allow(deprecated)]
-
-use cocoa::appkit::{
-    NSApp, NSBackingStoreBuffered, NSColor, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+use objc2::rc::{Allocated, Retained};
+use objc2::runtime::AnyObject;
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, extern_methods};
+use objc2_app_kit::{
+    NSApp, NSAppearance, NSAppearanceNameAccessibilityHighContrastDarkAqua,
+    NSAppearanceNameDarkAqua, NSAppearanceNameVibrantDark, NSApplication,
+    NSApplicationActivationPolicy, NSBackingStoreType, NSBezierPath, NSColor, NSEvent,
+    NSEventMask, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
-use cocoa::base::{NO, YES, id, nil};
-use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
-use objc::declare::ClassDecl;
-use objc::runtime::{BOOL, Class, Object, Sel};
-use objc::{class, msg_send, sel, sel_impl};
+use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const OVERLAY_SIZE: f64 = 48.0;
@@ -18,67 +18,62 @@ static CLICKED: AtomicBool = AtomicBool::new(false);
 static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 
 pub struct OverlayManager {
-    _window: id,
-    content_view: id,
+    window: Retained<NSWindow>,
+    content_view: Retained<OverlayView>,
 }
-
-unsafe impl Send for OverlayManager {}
 
 impl OverlayManager {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        unsafe {
-            let _pool = NSAutoreleasePool::new(nil);
+        let mtm = MainThreadMarker::new()
+            .ok_or_else(|| "OverlayManager::new must run on the main thread".to_string())?;
 
-            let app = NSApp();
-            let _: () = msg_send![app, setActivationPolicy: 1i64];
+        let app = NSApp(mtm);
+        let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-            let screen: id = msg_send![class!(NSScreen), mainScreen];
-            let screen_frame: NSRect = msg_send![screen, frame];
+        let screen = NSScreen::mainScreen(mtm)
+            .ok_or_else(|| "No main screen available for overlay window".to_string())?;
+        let screen_frame = screen.frame();
 
-            let x = screen_frame.origin.x + screen_frame.size.width - OVERLAY_SIZE - SCREEN_MARGIN;
-            let y = screen_frame.origin.y + SCREEN_MARGIN;
+        let x = screen_frame.origin.x + screen_frame.size.width - OVERLAY_SIZE - SCREEN_MARGIN;
+        let y = screen_frame.origin.y + SCREEN_MARGIN;
+        let window_rect = NSRect::new(NSPoint::new(x, y), NSSize::new(OVERLAY_SIZE, OVERLAY_SIZE));
 
-            let window_rect =
-                NSRect::new(NSPoint::new(x, y), NSSize::new(OVERLAY_SIZE, OVERLAY_SIZE));
-
-            let window = NSWindow::alloc(nil).initWithContentRect_styleMask_backing_defer_(
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
                 window_rect,
-                NSWindowStyleMask::NSBorderlessWindowMask,
-                NSBackingStoreBuffered,
-                NO,
-            );
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
 
-            window.setLevel_(25);
-            let _: () = msg_send![window, setOpaque: NO];
-            window.setBackgroundColor_(NSColor::clearColor(nil));
-            let _: () = msg_send![window, setHasShadow: YES];
-            let _: () = msg_send![window, setMovableByWindowBackground: YES];
-            let _: () = msg_send![window, setIgnoresMouseEvents: NO];
-            let _: () = msg_send![window, setAlphaValue: 0.95f64];
+        window.setLevel(25);
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        window.setHasShadow(true);
+        window.setMovableByWindowBackground(true);
+        window.setIgnoresMouseEvents(false);
+        window.setAlphaValue(0.95);
+        window.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Stationary,
+        );
 
-            window.setCollectionBehavior_(
-                NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
-                    | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary,
-            );
+        let content_view = create_overlay_view(window_rect.size, mtm);
+        window.setContentView(Some(&content_view));
+        window.makeKeyAndOrderFront(None::<&AnyObject>);
+        window.resignKeyWindow();
 
-            let content_view = create_overlay_view(window_rect.size);
-            window.setContentView_(content_view);
-
-            window.makeKeyAndOrderFront_(nil);
-            let _: () = msg_send![window, resignKeyWindow];
-
-            Ok(OverlayManager {
-                _window: window,
-                content_view,
-            })
-        }
+        Ok(Self {
+            window,
+            content_view,
+        })
     }
 
     pub fn set_recording(&mut self, recording: bool) {
         IS_RECORDING.store(recording, Ordering::Relaxed);
-        unsafe {
-            let _: () = msg_send![self.content_view, setNeedsDisplay: YES];
-        }
+        self.content_view.setNeedsDisplay(true);
     }
 
     pub fn check_click(&self) -> bool {
@@ -86,169 +81,153 @@ impl OverlayManager {
     }
 
     pub fn update(&self) {
-        unsafe {
-            let app = NSApp();
-            loop {
-                let event: id = msg_send![app,
-                    nextEventMatchingMask: u64::MAX
-                    untilDate: nil
-                    inMode: NSString::alloc(nil).init_str("kCFRunLoopDefaultMode")
-                    dequeue: YES
-                ];
-                if event == nil {
-                    break;
-                }
-                let _: () = msg_send![app, sendEvent: event];
-            }
+        let mtm = MainThreadMarker::from(&*self.window);
+        let app: Retained<NSApplication> = NSApp(mtm);
+
+        loop {
+            let event = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                NSEventMask::all(),
+                None::<&NSDate>,
+                unsafe { NSDefaultRunLoopMode },
+                true,
+            );
+
+            let Some(event) = event else {
+                break;
+            };
+
+            app.sendEvent(&event);
         }
     }
 }
 
-fn create_overlay_view(size: NSSize) -> id {
-    unsafe {
-        let superclass = Class::get("NSView").unwrap();
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "VWOverlayView"]
+    struct OverlayView;
 
-        if let Some(cls) = Class::get("VWOverlayView") {
-            let view: id = msg_send![cls, alloc];
-            let frame = NSRect::new(NSPoint::new(0.0, 0.0), size);
-            let view: id = msg_send![view, initWithFrame: frame];
-            return view;
+    impl OverlayView {
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty_rect: NSRect) {
+            let bounds = self.bounds();
+            let recording = IS_RECORDING.load(Ordering::Relaxed);
+
+            let bg_color = background_color();
+            let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                bounds,
+                CORNER_RADIUS,
+                CORNER_RADIUS,
+            );
+
+            bg_color.setFill();
+            path.fill();
+
+            draw_mic_icon(bounds, recording);
         }
 
-        let mut decl = ClassDecl::new("VWOverlayView", superclass).unwrap();
-
-        extern "C" fn draw_rect(this: &Object, _sel: Sel, _dirty_rect: NSRect) {
-            unsafe {
-                let bounds: NSRect = msg_send![this, bounds];
-                let recording = IS_RECORDING.load(Ordering::Relaxed);
-
-                let bg_color = if is_dark_mode() {
-                    NSColor::colorWithRed_green_blue_alpha_(nil, 0.2, 0.2, 0.2, 0.9)
-                } else {
-                    NSColor::colorWithRed_green_blue_alpha_(nil, 0.95, 0.95, 0.95, 0.9)
-                };
-
-                let path: id = msg_send![class!(NSBezierPath),
-                    bezierPathWithRoundedRect: bounds
-                    xRadius: CORNER_RADIUS
-                    yRadius: CORNER_RADIUS
-                ];
-
-                let _: () = msg_send![bg_color, setFill];
-                let _: () = msg_send![path, fill];
-
-                draw_mic_icon(bounds, recording);
-            }
-        }
-
-        extern "C" fn mouse_down(_this: &Object, _sel: Sel, _event: id) {
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
             CLICKED.store(true, Ordering::Relaxed);
         }
 
-        extern "C" fn accepts_first_mouse(_this: &Object, _sel: Sel, _event: id) -> BOOL {
-            YES
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
         }
 
-        decl.add_method(
-            sel!(drawRect:),
-            draw_rect as extern "C" fn(&Object, Sel, NSRect),
-        );
-        decl.add_method(
-            sel!(mouseDown:),
-            mouse_down as extern "C" fn(&Object, Sel, id),
-        );
-        decl.add_method(
-            sel!(acceptsFirstMouse:),
-            accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
-        );
-
-        let cls = decl.register();
-
-        let view: id = msg_send![cls, alloc];
-        let frame = NSRect::new(NSPoint::new(0.0, 0.0), size);
-        let view: id = msg_send![view, initWithFrame: frame];
-        view
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> bool {
+            true
+        }
     }
+);
+
+impl OverlayView {
+    extern_methods!(
+        #[unsafe(method(initWithFrame:))]
+        #[unsafe(method_family = init)]
+        fn init_with_frame(this: Allocated<Self>, frame_rect: NSRect) -> Retained<Self>;
+    );
+}
+
+fn create_overlay_view(size: NSSize, mtm: MainThreadMarker) -> Retained<OverlayView> {
+    let frame = NSRect::new(NSPoint::new(0.0, 0.0), size);
+    OverlayView::init_with_frame(OverlayView::alloc(mtm), frame)
 }
 
 fn is_dark_mode() -> bool {
+    let appearance = NSAppearance::currentDrawingAppearance();
+    let name: Retained<NSString> = appearance.name();
+
     unsafe {
-        let app = NSApp();
-        let appearance: id = msg_send![app, effectiveAppearance];
-        if appearance == nil {
-            return false;
-        }
-        let name: id = msg_send![appearance, name];
-        if name == nil {
-            return false;
-        }
-        let dark_name = NSString::alloc(nil).init_str("NSAppearanceNameDarkAqua");
-        let contains: BOOL = msg_send![name, containsString: dark_name];
-        contains == YES
+        name.isEqualToString(NSAppearanceNameDarkAqua)
+            || name.isEqualToString(NSAppearanceNameVibrantDark)
+            || name.isEqualToString(NSAppearanceNameAccessibilityHighContrastDarkAqua)
+    }
+}
+
+fn background_color() -> Retained<NSColor> {
+    if is_dark_mode() {
+        NSColor::colorWithRed_green_blue_alpha(0.2, 0.2, 0.2, 0.9)
+    } else {
+        NSColor::colorWithRed_green_blue_alpha(0.95, 0.95, 0.95, 0.9)
+    }
+}
+
+fn mic_icon_color(recording: bool) -> Retained<NSColor> {
+    if recording {
+        NSColor::colorWithRed_green_blue_alpha(0.9, 0.2, 0.2, 1.0)
+    } else if is_dark_mode() {
+        NSColor::colorWithRed_green_blue_alpha(0.9, 0.9, 0.9, 1.0)
+    } else {
+        NSColor::colorWithRed_green_blue_alpha(0.3, 0.3, 0.3, 1.0)
     }
 }
 
 fn draw_mic_icon(bounds: NSRect, recording: bool) {
-    unsafe {
-        let icon_color = if recording {
-            NSColor::colorWithRed_green_blue_alpha_(nil, 0.9, 0.2, 0.2, 1.0)
-        } else if is_dark_mode() {
-            NSColor::colorWithRed_green_blue_alpha_(nil, 0.9, 0.9, 0.9, 1.0)
-        } else {
-            NSColor::colorWithRed_green_blue_alpha_(nil, 0.3, 0.3, 0.3, 1.0)
-        };
-        let _: () = msg_send![icon_color, setFill];
-        let _: () = msg_send![icon_color, setStroke];
+    let icon_color = mic_icon_color(recording);
+    icon_color.setFill();
+    icon_color.setStroke();
 
-        let cx = bounds.origin.x + bounds.size.width / 2.0;
-        let cy = bounds.origin.y + bounds.size.height / 2.0;
-        let scale = bounds.size.width / 48.0;
+    let cx = bounds.origin.x + bounds.size.width / 2.0;
+    let cy = bounds.origin.y + bounds.size.height / 2.0;
+    let scale = bounds.size.width / 48.0;
 
-        // Microphone body (rounded rectangle)
-        let mic_width = 10.0 * scale;
-        let mic_height = 16.0 * scale;
-        let mic_rect = NSRect::new(
-            NSPoint::new(cx - mic_width / 2.0, cy - 1.0 * scale),
-            NSSize::new(mic_width, mic_height),
-        );
-        let mic_path: id = msg_send![class!(NSBezierPath),
-            bezierPathWithRoundedRect: mic_rect
-            xRadius: mic_width / 2.0
-            yRadius: mic_width / 2.0
-        ];
-        let _: () = msg_send![mic_path, fill];
+    let mic_width = 10.0 * scale;
+    let mic_height = 16.0 * scale;
+    let mic_rect = NSRect::new(
+        NSPoint::new(cx - mic_width / 2.0, cy - 1.0 * scale),
+        NSSize::new(mic_width, mic_height),
+    );
+    let mic_path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+        mic_rect,
+        mic_width / 2.0,
+        mic_width / 2.0,
+    );
+    mic_path.fill();
 
-        // Microphone arc (holder curve)
-        let arc_path: id = msg_send![class!(NSBezierPath), bezierPath];
-        let _: () = msg_send![arc_path, setLineWidth: 2.0 * scale];
-        let _: () = msg_send![arc_path,
-            appendBezierPathWithArcWithCenter: NSPoint::new(cx, cy + 6.0 * scale)
-            radius: 9.0 * scale
-            startAngle: 210.0f64
-            endAngle: 330.0f64
-        ];
-        let _: () = msg_send![arc_path, stroke];
+    let arc_path = NSBezierPath::bezierPath();
+    arc_path.setLineWidth(2.0 * scale);
+    arc_path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle(
+        NSPoint::new(cx, cy + 6.0 * scale),
+        9.0 * scale,
+        210.0,
+        330.0,
+    );
+    arc_path.stroke();
 
-        // Stand (vertical line)
-        let stand_path: id = msg_send![class!(NSBezierPath), bezierPath];
-        let _: () = msg_send![stand_path, setLineWidth: 2.0 * scale];
-        let _: () = msg_send![stand_path, moveToPoint: NSPoint::new(cx, cy - 3.0 * scale)];
-        let _: () = msg_send![stand_path, lineToPoint: NSPoint::new(cx, cy - 8.0 * scale)];
-        let _: () = msg_send![stand_path, stroke];
+    let stand_path = NSBezierPath::bezierPath();
+    stand_path.setLineWidth(2.0 * scale);
+    stand_path.moveToPoint(NSPoint::new(cx, cy - 3.0 * scale));
+    stand_path.lineToPoint(NSPoint::new(cx, cy - 8.0 * scale));
+    stand_path.stroke();
 
-        // Base
-        let base_path: id = msg_send![class!(NSBezierPath), bezierPath];
-        let _: () = msg_send![base_path, setLineWidth: 2.0 * scale];
-        let _: () = msg_send![
-            base_path,
-            moveToPoint: NSPoint::new(cx - 5.0 * scale, cy - 8.0 * scale)
-        ];
-        let _: () = msg_send![
-            base_path,
-            lineToPoint: NSPoint::new(cx + 5.0 * scale, cy - 8.0 * scale)
-        ];
-        let _: () = msg_send![base_path, stroke];
-    }
+    let base_path = NSBezierPath::bezierPath();
+    base_path.setLineWidth(2.0 * scale);
+    base_path.moveToPoint(NSPoint::new(cx - 5.0 * scale, cy - 8.0 * scale));
+    base_path.lineToPoint(NSPoint::new(cx + 5.0 * scale, cy - 8.0 * scale));
+    base_path.stroke();
 }
 
 #[cfg(test)]

@@ -20,5 +20,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.26"
-objc = "0.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSDate", "NSRunLoop", "NSString"] }
+objc2-app-kit = { version = "0.3", features = ["NSAppearance", "NSApplication", "NSBezierPath", "NSColor", "NSEvent", "NSGraphics", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow"] }
