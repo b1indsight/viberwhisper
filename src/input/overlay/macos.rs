@@ -39,6 +39,8 @@ impl OverlayManager {
         let window_rect = NSRect::new(NSPoint::new(x, y), NSSize::new(OVERLAY_SIZE, OVERLAY_SIZE));
 
         let window = unsafe {
+            // SAFETY: This runs on the main thread, allocates a fresh NSWindow,
+            // and passes valid AppKit initialization parameters.
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
                 window_rect,
@@ -88,6 +90,8 @@ impl OverlayManager {
             let event = app.nextEventMatchingMask_untilDate_inMode_dequeue(
                 NSEventMask::all(),
                 None::<&NSDate>,
+                // SAFETY: NSDefaultRunLoopMode is an AppKit-provided immutable
+                // global run loop mode constant.
                 unsafe { NSDefaultRunLoopMode },
                 true,
             );
@@ -161,6 +165,8 @@ fn is_dark_mode() -> bool {
     let name: Retained<NSString> = appearance.name();
 
     unsafe {
+        // SAFETY: These NSAppearanceName values are immutable AppKit-provided
+        // global constants used only for comparison.
         name.isEqualToString(NSAppearanceNameDarkAqua)
             || name.isEqualToString(NSAppearanceNameVibrantDark)
             || name.isEqualToString(NSAppearanceNameAccessibilityHighContrastDarkAqua)
