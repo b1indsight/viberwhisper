@@ -409,6 +409,9 @@ pub enum StopResult {
 mod tests {
     use super::*;
 
+    // These tests touch the real audio stack via `cpal`. On Windows CI they
+    // have been observed to pass and then crash the test process during exit,
+    // so keep them on platforms where teardown is stable.
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn test_audio_recorder_creation() {

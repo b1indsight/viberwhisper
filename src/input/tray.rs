@@ -11,6 +11,9 @@ pub struct TrayManager {
     exit_item_id: tray_icon::menu::MenuId,
 }
 
+// Keep test builds away from the native tray backend on Windows.
+// The real `tray_icon` path is exercised in app runs, while tests only need
+// a lightweight stand-in so CI can validate higher-level logic safely.
 #[cfg(test)]
 pub struct TrayManager;
 
@@ -85,6 +88,8 @@ impl TrayManager {
     }
 }
 
+// Pure RGBA generator shared by tests so they can verify icon data without
+// constructing a platform tray icon handle.
 fn build_icon_rgba(r: u8, g: u8, b: u8, a: u8) -> (Vec<u8>, u32) {
     let size = 32u32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];

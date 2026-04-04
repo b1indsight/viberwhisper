@@ -137,6 +137,8 @@ mod tests {
         assert_eq!(parse_key("invalid"), None);
     }
 
+    // This spins up the real global hotkey listener. Skip it on Windows CI to
+    // avoid native hook teardown crashes that happen after tests finish.
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn test_hotkey_manager_creation() {
