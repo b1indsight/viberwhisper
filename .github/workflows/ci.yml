@@ -8,16 +8,8 @@ on:
 
 jobs:
   build-and-test:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            name: macOS
-          - os: windows-latest
-            name: Windows
-    runs-on: ${{ matrix.os }}
-    name: CI (${{ matrix.name }})
+    runs-on: macos-latest
+    name: CI (macOS)
     steps:
       - uses: actions/checkout@v4
 
@@ -64,4 +56,40 @@ jobs:
           curl -H "Content-Type: application/json" \
             -d "{\"content\": \"🔴 **CI Build Failed** 🔴\n**Branch**: ${BRANCH}\n**Commit**: ${COMMIT} by ${AUTHOR}\n**Link**: ${JOB_URL}\"}" \
             "$DISCORD_WEBHOOK_URL"
-        shell: bash
+
+  check-windows:
+    runs-on: windows-latest
+    name: CI (Windows)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build
+
+      - name: Discord failure alert
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          $BRANCH = "$env:GITHUB_REF_NAME"
+          $COMMIT = "$env:GITHUB_SHA".Substring(0,7)
+          $AUTHOR = "$env:GITHUB_ACTOR"
+          $JOB_URL = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+
+          $body = @{ content = "🔴 **CI Windows Build Failed** 🔴`n**Branch**: $BRANCH`n**Commit**: $COMMIT by $AUTHOR`n**Link**: $JOB_URL" } | ConvertTo-Json
+          Invoke-RestMethod -Uri $env:DISCORD_WEBHOOK_URL -Method Post -ContentType "application/json" -Body $body
+        shell: pwsh
