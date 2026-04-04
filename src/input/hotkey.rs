@@ -65,23 +65,20 @@ impl HotkeyManager {
             let callback = move |event: Event| {
                 match &event.event_type {
                     EventType::KeyPress(key) => {
-                        if let Some(hk) = hold_key {
-                            if *key == hk {
+                        if let Some(hk) = hold_key
+                            && *key == hk {
                                 HOLD_PRESSED.store(true, Ordering::Relaxed);
                             }
-                        }
-                        if let Some(tk) = toggle_key {
-                            if *key == tk {
+                        if let Some(tk) = toggle_key
+                            && *key == tk {
                                 TOGGLE_PRESSED.store(true, Ordering::Relaxed);
                             }
-                        }
                     }
                     EventType::KeyRelease(key) => {
-                        if let Some(hk) = hold_key {
-                            if *key == hk {
+                        if let Some(hk) = hold_key
+                            && *key == hk {
                                 HOLD_RELEASED.store(true, Ordering::Relaxed);
                             }
-                        }
                     }
                     _ => {}
                 }
@@ -97,10 +94,10 @@ impl HotkeyManager {
         // Give the listener a moment to start
         thread::sleep(Duration::from_millis(100));
 
-        if let Some(_) = hold_key {
+        if hold_key.is_some() {
             info!(hotkey = %hold_hotkey, "hold hotkey registered");
         }
-        if let Some(_) = toggle_key {
+        if toggle_key.is_some() {
             info!(hotkey = %toggle_hotkey, "toggle hotkey registered");
         }
 
@@ -140,8 +137,10 @@ mod tests {
         assert_eq!(parse_key("invalid"), None);
     }
 
-    #[cfg(not(target_os = "windows"))]
+    // This spins up the real global hotkey listener. Skip it on Windows CI to
+    // avoid native hook teardown crashes that happen after tests finish.
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn test_hotkey_manager_creation() {
         // Note: rdev listener requires appropriate permissions
         let _ = HotkeyManager::new("F8", "F9");

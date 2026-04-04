@@ -154,18 +154,13 @@ impl ApiTranscriber {
                 Err(e) => {
                     // Extract HTTP status from error message if present.
                     let msg = e.to_string();
-                    if msg.starts_with("API error ") {
-                        // Parse "API error 4XX: ..." — do not retry 4xx.
-                        if let Some(status_str) = msg.strip_prefix("API error ") {
-                            if let Some(code_str) = status_str.split(':').next() {
-                                if let Ok(code) = code_str.trim().parse::<u16>() {
-                                    if !Self::is_retryable_status(code) {
-                                        return Err(e);
-                                    }
-                                }
-                            }
+                    // Parse "API error 4XX: ..." — do not retry 4xx.
+                    if let Some(status_str) = msg.strip_prefix("API error ")
+                        && let Some(code_str) = status_str.split(':').next()
+                        && let Ok(code) = code_str.trim().parse::<u16>()
+                        && !Self::is_retryable_status(code) {
+                            return Err(e);
                         }
-                    }
                     warn!(
                         chunk = chunk_index + 1,
                         total = total_chunks,

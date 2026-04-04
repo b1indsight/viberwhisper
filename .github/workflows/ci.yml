@@ -1,0 +1,98 @@
+name: CI Build & Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    name: CI (macOS)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Discord failure alert
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          COMMIT="${GITHUB_SHA::7}"
+          AUTHOR="${GITHUB_ACTOR}"
+          JOB_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            PR_NUM=$(jq -r .pull_request.number "$GITHUB_EVENT_PATH")
+            BRANCH="PR #${PR_NUM}"
+          fi
+
+          curl -H "Content-Type: application/json" \
+            -d "{\"content\": \"🔴 **CI Build Failed** 🔴\n**Branch**: ${BRANCH}\n**Commit**: ${COMMIT} by ${AUTHOR}\n**Link**: ${JOB_URL}\"}" \
+            "$DISCORD_WEBHOOK_URL"
+
+  check-windows:
+    runs-on: windows-latest
+    name: CI (Windows)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+      - name: Discord failure alert
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          $BRANCH = "$env:GITHUB_REF_NAME"
+          $COMMIT = "$env:GITHUB_SHA".Substring(0,7)
+          $AUTHOR = "$env:GITHUB_ACTOR"
+          $JOB_URL = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+
+          $body = @{ content = "🔴 **CI Windows Build Failed** 🔴`n**Branch**: $BRANCH`n**Commit**: $COMMIT by $AUTHOR`n**Link**: $JOB_URL" } | ConvertTo-Json
+          Invoke-RestMethod -Uri $env:DISCORD_WEBHOOK_URL -Method Post -ContentType "application/json" -Body $body
+        shell: pwsh

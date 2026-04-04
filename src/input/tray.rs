@@ -1,6 +1,9 @@
+#[cfg(not(test))]
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+#[cfg(not(test))]
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
+#[cfg(not(test))]
 pub struct TrayManager {
     tray_icon: TrayIcon,
     icon_idle: Icon,
@@ -8,10 +11,17 @@ pub struct TrayManager {
     exit_item_id: tray_icon::menu::MenuId,
 }
 
+// Keep test builds away from the native tray backend on Windows.
+// The real `tray_icon` path is exercised in app runs, while tests only need
+// a lightweight stand-in so CI can validate higher-level logic safely.
+#[cfg(test)]
+pub struct TrayManager;
+
+#[cfg(not(test))]
 impl TrayManager {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let icon_idle = create_icon(128, 128, 128, 255); // 灰色 — 空闲
-        let icon_recording = create_icon(220, 50, 50, 255); // 红色 — 录音中
+        let icon_idle = create_icon(128, 128, 128, 255);
+        let icon_recording = create_icon(220, 50, 50, 255);
 
         let menu = Menu::new();
         let title_item = MenuItem::new("ViberWhisper", false, None);
@@ -39,7 +49,6 @@ impl TrayManager {
         })
     }
 
-    /// 切换托盘图标状态
     pub fn set_recording(&mut self, recording: bool) {
         let icon = if recording {
             &self.icon_recording
@@ -56,19 +65,32 @@ impl TrayManager {
         let _ = self.tray_icon.set_tooltip(Some(tooltip));
     }
 
-    /// 检查用户是否点击了"退出"菜单
     pub fn check_exit(&self) -> bool {
-        if let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == self.exit_item_id {
-                return true;
-            }
+        if let Ok(event) = MenuEvent::receiver().try_recv()
+            && event.id == self.exit_item_id
+        {
+            return true;
         }
         false
     }
 }
 
-/// 生成一个简单的圆形图标（RGBA）
-fn create_icon(r: u8, g: u8, b: u8, a: u8) -> Icon {
+#[cfg(test)]
+impl TrayManager {
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(TrayManager)
+    }
+
+    pub fn set_recording(&mut self, _recording: bool) {}
+
+    pub fn check_exit(&self) -> bool {
+        false
+    }
+}
+
+// Pure RGBA generator shared by tests so they can verify icon data without
+// constructing a platform tray icon handle.
+fn build_icon_rgba(r: u8, g: u8, b: u8, a: u8) -> (Vec<u8>, u32) {
     let size = 32u32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let center = size as f32 / 2.0;
@@ -90,6 +112,12 @@ fn create_icon(r: u8, g: u8, b: u8, a: u8) -> Icon {
         }
     }
 
+    (rgba, size)
+}
+
+#[cfg(not(test))]
+fn create_icon(r: u8, g: u8, b: u8, a: u8) -> Icon {
+    let (rgba, size) = build_icon_rgba(r, g, b, a);
     Icon::from_rgba(rgba, size, size).expect("Failed to create tray icon")
 }
 
@@ -98,9 +126,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_create_icon() {
-        let icon = create_icon(128, 128, 128, 255);
-        // Icon created successfully — no panic
-        drop(icon);
+    fn test_build_icon_rgba() {
+        let (rgba, size) = build_icon_rgba(128, 128, 128, 255);
+        assert_eq!(size, 32);
+        assert_eq!(rgba.len(), (size * size * 4) as usize);
+        assert_eq!(rgba[3], 0);
+        let center = ((size / 2 * size + size / 2) * 4) as usize;
+        assert_eq!(rgba[center], 128);
+        assert_eq!(rgba[center + 1], 128);
+        assert_eq!(rgba[center + 2], 128);
+        assert_eq!(rgba[center + 3], 255);
     }
 }

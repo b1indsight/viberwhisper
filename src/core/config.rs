@@ -148,11 +148,10 @@ impl AppConfig {
         }
 
         // Env var override: GROQ_API_KEY for backward compat, api_key for new configs
-        if let Ok(key) = std::env::var("GROQ_API_KEY") {
-            if config.api_key.is_none() {
+        if let Ok(key) = std::env::var("GROQ_API_KEY")
+            && config.api_key.is_none() {
                 config.api_key = Some(key);
             }
-        }
         if let Ok(key) = std::env::var("TRANSCRIPTION_API_KEY") {
             config.api_key = Some(key);
         }
@@ -336,11 +335,10 @@ impl AppConfig {
             self.api_key = Some(key.to_string());
         }
         // Backward compat: old groq_api_key maps to api_key
-        if let Some(key) = json["groq_api_key"].as_str() {
-            if self.api_key.is_none() {
+        if let Some(key) = json["groq_api_key"].as_str()
+            && self.api_key.is_none() {
                 self.api_key = Some(key.to_string());
             }
-        }
         if let Some(url) = json["transcription_api_url"].as_str() {
             self.transcription_api_url = url.to_string();
         }

@@ -70,6 +70,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
 
     let hotkey_manager = HotkeyManager::new(&config.hold_hotkey, &config.toggle_hotkey)?;
 
+    #[allow(clippy::arc_with_non_send_sync)]
     let recorder = Arc::new(Mutex::new(AudioRecorder::with_config(
         config.mic_gain,
         config.max_chunk_duration_secs,
@@ -160,11 +161,10 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                     failed_chunks = errors.len(),
                     "Partial transcription failure; typing available text"
                 );
-                if !partial_text.is_empty() {
-                    if let Err(e) = typer.type_text(&partial_text) {
+                if !partial_text.is_empty()
+                    && let Err(e) = typer.type_text(&partial_text) {
                         error!(error = %e, "Failed to type partial text");
                     }
-                }
             }
             Err(SessionError::ConvergenceTimeout {
                 pending_count,
@@ -174,11 +174,10 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
                     pending_count = pending_count,
                     "Convergence timeout; typing available partial text"
                 );
-                if !partial_text.is_empty() {
-                    if let Err(e) = typer.type_text(&partial_text) {
+                if !partial_text.is_empty()
+                    && let Err(e) = typer.type_text(&partial_text) {
                         error!(error = %e, "Failed to type partial text");
                     }
-                }
             }
         }
     };
@@ -321,7 +320,7 @@ fn handle_config(action: ConfigAction) {
 
     match action {
         ConfigAction::List => {
-            println!("{:<25} {}", "Key", "Value");
+            println!("{:<25} Value", "Key");
             println!("{}", "-".repeat(60));
             for key in &[
                 "api_key",
