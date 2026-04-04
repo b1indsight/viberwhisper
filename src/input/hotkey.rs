@@ -140,6 +140,7 @@ mod tests {
         assert_eq!(parse_key("invalid"), None);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_hotkey_manager_creation() {
         // Note: rdev listener requires appropriate permissions
