@@ -31,3 +31,4 @@ icon = ["assets/icon-32x32.png", "assets/icon-128x128.png", "assets/icon-256x256
 copyright = "Copyright (c) 2026 b1indsight"
 osx_minimum_system_version = "11.0"
 short_description = "Voice-to-text input tool"
+osx_info_plist_exts = ["assets/Info.plist.ext"]

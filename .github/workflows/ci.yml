@@ -8,7 +8,16 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+    runs-on: ${{ matrix.os }}
+    name: CI (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v4
 
@@ -55,3 +64,4 @@ jobs:
           curl -H "Content-Type: application/json" \
             -d "{\"content\": \"🔴 **CI Build Failed** 🔴\n**Branch**: ${BRANCH}\n**Commit**: ${COMMIT} by ${AUTHOR}\n**Link**: ${JOB_URL}\"}" \
             "$DISCORD_WEBHOOK_URL"
+        shell: bash

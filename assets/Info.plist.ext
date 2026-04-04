@@ -1,0 +1,4 @@
+<key>NSMicrophoneUsageDescription</key>
+<string>ViberWhisper needs microphone access for voice recording</string>
+<key>LSUIElement</key>
+<true/>
