@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use cocoa::appkit::{
     NSApp, NSBackingStoreBuffered, NSColor, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
