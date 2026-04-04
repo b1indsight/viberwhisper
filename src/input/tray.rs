@@ -58,11 +58,10 @@ impl TrayManager {
 
     /// 检查用户是否点击了"退出"菜单
     pub fn check_exit(&self) -> bool {
-        if let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == self.exit_item_id {
+        if let Ok(event) = MenuEvent::receiver().try_recv()
+            && event.id == self.exit_item_id {
                 return true;
             }
-        }
         false
     }
 }

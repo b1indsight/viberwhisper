@@ -381,11 +381,10 @@ fn classify_error(error_msg: &str) -> TranscribeError {
 /// Try to parse an HTTP status code out of an error message.
 fn extract_http_status(msg: &str) -> Option<u16> {
     for token in msg.split_whitespace() {
-        if let Ok(n) = token.parse::<u16>() {
-            if (100..=599).contains(&n) {
+        if let Ok(n) = token.parse::<u16>()
+            && (100..=599).contains(&n) {
                 return Some(n);
             }
-        }
     }
     None
 }
