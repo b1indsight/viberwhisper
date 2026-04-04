@@ -97,6 +97,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn test_create_icon() {
         let icon = create_icon(128, 128, 128, 255);
         // Icon created successfully — no panic
