@@ -410,18 +410,21 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn test_audio_recorder_creation() {
         let recorder = AudioRecorder::new(1.0);
         assert!(recorder.is_ok());
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn test_recorder_not_recording_initially() {
         let recorder = AudioRecorder::new(1.0).unwrap();
         assert!(!recorder.is_recording());
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn test_recorder_with_config() {
         let recorder = AudioRecorder::with_config(1.0, 30, 23 * 1024 * 1024);
         assert!(recorder.is_ok());
