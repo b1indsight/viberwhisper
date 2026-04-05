@@ -139,8 +139,8 @@ mod tests {
 
     // This spins up the real global hotkey listener. Skip it on Windows CI to
     // avoid native hook teardown crashes that happen after tests finish.
-    #[test]
     #[cfg(not(target_os = "windows"))]
+    #[test]
     fn test_hotkey_manager_creation() {
         // Note: rdev listener requires appropriate permissions
         let _ = HotkeyManager::new("F8", "F9");
