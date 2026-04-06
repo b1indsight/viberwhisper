@@ -15,3 +15,5 @@
 2026-03-31: Refactor audio module: replace Mutex<bool> with AtomicBool, extract shared helper functions, remove dead code
 2026-04-01: Add floating overlay window: always-on-top clickable mic icon, system theme matching, click-to-toggle recording, draggable (macOS)
 2026-04-03: Add packaging & CI: ci.yml (build/test gate with Discord alerts), release.yml (cross-platform release pipeline), cargo-bundle metadata, placeholder app icons
+2026-04-06: Add local Gemma service management: Python FastAPI server under server/, local install/start/stop/status CLI, runtime endpoint overrides, and local backend config fields
+2026-04-06: Move the local Gemma runtime to `server/` and complete local CLI/runtime wiring to the planned FastAPI service

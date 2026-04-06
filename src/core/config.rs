@@ -32,6 +32,14 @@ fn default_post_process_api_format() -> String {
     "openai".to_string()
 }
 
+fn default_local_server_port() -> u16 {
+    17265
+}
+
+fn default_local_quantization() -> String {
+    "int8".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     /// API key for the transcription service.
@@ -98,6 +106,18 @@ pub struct AppConfig {
     /// Temperature for the post-processing LLM. Default: 0.0.
     #[serde(default)]
     pub post_process_temperature: f32,
+    /// If true, use the local Gemma service instead of cloud APIs.
+    #[serde(default)]
+    pub local_mode: bool,
+    /// Directory for the local model weights and Python virtualenv.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_data_dir: Option<String>,
+    /// Port for the local inference server. Default: 17265.
+    #[serde(default = "default_local_server_port")]
+    pub local_server_port: u16,
+    /// Quantization mode for the local service. Default: "int8".
+    #[serde(default = "default_local_quantization")]
+    pub local_quantization: String,
 }
 
 impl Default for AppConfig {
@@ -125,6 +145,10 @@ impl Default for AppConfig {
             post_process_model: None,
             post_process_prompt: None,
             post_process_temperature: 0.0,
+            local_mode: false,
+            local_data_dir: None,
+            local_server_port: default_local_server_port(),
+            local_quantization: default_local_quantization(),
         }
     }
 }
@@ -201,6 +225,10 @@ impl AppConfig {
             "post_process_model" => self.post_process_model.clone(),
             "post_process_prompt" => self.post_process_prompt.clone(),
             "post_process_temperature" => Some(self.post_process_temperature.to_string()),
+            "local_mode" => Some(self.local_mode.to_string()),
+            "local_data_dir" => self.local_data_dir.clone(),
+            "local_server_port" => Some(self.local_server_port.to_string()),
+            "local_quantization" => Some(self.local_quantization.clone()),
             _ => None,
         }
     }
@@ -317,13 +345,34 @@ impl AppConfig {
                 })?;
                 Ok(())
             }
+            "local_mode" => {
+                self.local_mode = value
+                    .parse::<bool>()
+                    .map_err(|_| format!("local_mode must be true/false, got: {}", value))?;
+                Ok(())
+            }
+            "local_data_dir" => {
+                self.local_data_dir = Some(value.to_string());
+                Ok(())
+            }
+            "local_server_port" => {
+                self.local_server_port = value
+                    .parse::<u16>()
+                    .map_err(|_| format!("local_server_port must be a u16, got: {}", value))?;
+                Ok(())
+            }
+            "local_quantization" => {
+                self.local_quantization = value.to_string();
+                Ok(())
+            }
             _ => Err(format!(
                 "Unknown config key: {}. Available: api_key, transcription_api_url, model, \
                  hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain, \
                  max_chunk_duration_secs, max_chunk_size_bytes, max_retries, \
                  convergence_timeout_secs, post_process_enabled, post_process_streaming_enabled, \
                  post_process_api_url, post_process_api_key, post_process_api_format, \
-                 post_process_model, post_process_prompt, post_process_temperature",
+                 post_process_model, post_process_prompt, post_process_temperature, \
+                 local_mode, local_data_dir, local_server_port, local_quantization",
                 key
             )),
         }
@@ -406,6 +455,18 @@ impl AppConfig {
         if let Some(v) = json["post_process_temperature"].as_f64() {
             self.post_process_temperature = v as f32;
         }
+        if let Some(v) = json["local_mode"].as_bool() {
+            self.local_mode = v;
+        }
+        if let Some(v) = json["local_data_dir"].as_str() {
+            self.local_data_dir = Some(v.to_string());
+        }
+        if let Some(v) = json["local_server_port"].as_u64() {
+            self.local_server_port = v as u16;
+        }
+        if let Some(v) = json["local_quantization"].as_str() {
+            self.local_quantization = v.to_string();
+        }
     }
 }
 
@@ -426,6 +487,10 @@ mod tests {
             config.transcription_api_url,
             "https://api.groq.com/openai/v1/audio/transcriptions"
         );
+        assert!(!config.local_mode);
+        assert!(config.local_data_dir.is_none());
+        assert_eq!(config.local_server_port, 17265);
+        assert_eq!(config.local_quantization, "int8");
     }
 
     #[test]
@@ -782,5 +847,45 @@ mod tests {
         assert_eq!(config.post_process_api_format, "openai");
         assert!(config.post_process_api_key.is_none());
         assert!(config.post_process_model.is_none());
+    }
+
+    #[test]
+    fn test_local_config_get_set() {
+        let mut config = AppConfig::default();
+        config.set_field("local_mode", "true").unwrap();
+        config
+            .set_field("local_data_dir", "/tmp/viberwhisper")
+            .unwrap();
+        config.set_field("local_server_port", "9000").unwrap();
+        config.set_field("local_quantization", "bf16").unwrap();
+
+        assert_eq!(config.get_field("local_mode").as_deref(), Some("true"));
+        assert_eq!(
+            config.get_field("local_data_dir").as_deref(),
+            Some("/tmp/viberwhisper")
+        );
+        assert_eq!(config.get_field("local_server_port").as_deref(), Some("9000"));
+        assert_eq!(
+            config.get_field("local_quantization").as_deref(),
+            Some("bf16")
+        );
+    }
+
+    #[test]
+    fn test_apply_json_local_fields() {
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({
+            "local_mode": true,
+            "local_data_dir": "/tmp/local-data",
+            "local_server_port": 9001,
+            "local_quantization": "bf16"
+        });
+
+        config.apply_json(&json);
+
+        assert!(config.local_mode);
+        assert_eq!(config.local_data_dir.as_deref(), Some("/tmp/local-data"));
+        assert_eq!(config.local_server_port, 9001);
+        assert_eq!(config.local_quantization, "bf16");
     }
 }
