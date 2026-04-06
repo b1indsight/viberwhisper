@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The `core` module (`src/core/`) contains three sub-modules: configuration persistence (`config.rs`), CLI argument parsing (`cli.rs`), and session orchestration (`orchestrator.rs`).
+The `core` module (`src/core/`) contains three sub-modules: configuration persistence (`config.rs`), CLI argument parsing (`cli.rs`), and session orchestration (`orchestrator.rs`). It also serves as the boundary where local-mode runtime settings are carried into the main loop.
 
 ---
 
@@ -41,6 +41,12 @@ pub struct AppConfig {
     pub post_process_model: Option<String>,
     pub post_process_prompt: Option<String>,
     pub post_process_temperature: f32,        // default: 0.0
+
+    // --- Local runtime ---
+    pub local_mode: bool,                     // default: false
+    pub local_data_dir: Option<String>,       // default: ~/.viberwhisper
+    pub local_server_port: u16,               // default: 17265
+    pub local_quantization: String,           // default: "int8"
 }
 ```
 
@@ -65,6 +71,9 @@ Serialized to/from `config.json` via `serde_json`. `api_key` and `post_process_a
 | `post_process_streaming_enabled` | `true` |
 | `post_process_api_format` | `"openai"` |
 | `post_process_temperature` | `0.0` |
+| `local_mode` | `false` |
+| `local_server_port` | `17265` |
+| `local_quantization` | `"int8"` |
 
 ### Key Methods
 
@@ -83,17 +92,18 @@ Serializes to pretty-printed JSON. `api_key` and `post_process_api_key` are neve
 
 **`get_field(&self, key: &str) -> Option<String>`**
 
-Returns a string representation of the named field. Supported keys: `api_key`, `groq_api_key`, `transcription_api_url`, `provider`, `model`, `hold_hotkey`, `toggle_hotkey`, `temperature`, `mic_gain`, `language`, `prompt`, `max_chunk_duration_secs`, `max_chunk_size_bytes`, `max_retries`, `convergence_timeout_secs`, `post_process_enabled`, `post_process_streaming_enabled`, `post_process_api_url`, `post_process_api_key`, `post_process_api_format`, `post_process_model`, `post_process_prompt`, `post_process_temperature`. Returns `"*** (set)"` for API key fields if present; `None` for unknown keys.
+Returns a string representation of the named field. Supported keys: `api_key`, `groq_api_key`, `transcription_api_url`, `provider`, `model`, `hold_hotkey`, `toggle_hotkey`, `temperature`, `mic_gain`, `language`, `prompt`, `max_chunk_duration_secs`, `max_chunk_size_bytes`, `max_retries`, `convergence_timeout_secs`, `post_process_enabled`, `post_process_streaming_enabled`, `post_process_api_url`, `post_process_api_key`, `post_process_api_format`, `post_process_model`, `post_process_prompt`, `post_process_temperature`, `local_mode`, `local_data_dir`, `local_server_port`, `local_quantization`. Returns `"*** (set)"` for API key fields if present; `None` for unknown keys.
 
 **`set_field(&mut self, key: &str, value: &str) -> Result<(), String>`**
 
-Sets a field by name with auto type conversion (strings, floats, bools, integers). `groq_api_key` is accepted as an alias for `api_key`.
+Sets a field by name with auto type conversion (strings, floats, bools, integers). `groq_api_key` is accepted as an alias for `api_key`. Local runtime keys can also be mutated from CLI.
 
 **`apply_json(&mut self, json: &Value)`** *(private)*
 
 Applies partial JSON overrides. Backward compatibility:
 - Old `"hotkey"` key maps to `hold_hotkey`
 - Old `"groq_api_key"` key maps to `api_key` (if `api_key` not already set)
+- Local runtime keys (`local_mode`, `local_data_dir`, `local_server_port`, `local_quantization`) are also deserialized from `config.json`
 
 ---
 
@@ -114,6 +124,7 @@ Parsed with `clap::Parser`. No subcommand runs the main recording loop.
 | Variant | Description |
 |---|---|
 | `Config { action: ConfigAction }` | Configuration management subcommand |
+| `Local { action: LocalCommand }` | Local Gemma runtime lifecycle commands |
 | `Convert { input: String, output: Option<String> }` | Transcribe a WAV file to text |
 
 ### `ConfigAction` Enum
@@ -123,6 +134,15 @@ Parsed with `clap::Parser`. No subcommand runs the main recording loop.
 | `List` | Print all config fields and current values |
 | `Get { key: String }` | Print a single field value |
 | `Set { key: String, value: String }` | Update a field and save |
+
+### `LocalCommand` Enum
+
+| Variant | Description |
+|---|---|
+| `Install` | Create venv, install Python dependencies, download model, and verify install |
+| `Start` | Force `local_mode = true`, start local server, then enter the normal listener loop |
+| `Stop` | Stop the persisted local server process |
+| `Status` | Print runtime state, pid, port, memory usage, and `/health` result |
 
 ---
 
@@ -145,3 +165,11 @@ Parsed with `clap::Parser`. No subcommand runs the main recording loop.
 | `NoChunks` | Recording too short to produce any audio |
 | `PartialFailure { partial_text, failures }` | Some chunks succeeded, includes partial text |
 | `ConvergenceTimeout { partial_text, pending }` | Timeout hit, includes what was completed |
+
+## Main Integration Notes
+
+Although the main event loop lives in `src/main.rs`, `core` owns the configuration and CLI abstractions that feed it:
+
+- `run_listener_with_config(config)` is the common entry point for both default mode and `local start`
+- when `config.local_mode` is true, startup first calls into the `local` module to ensure the runtime exists, always rewrites the transcription endpoint, and conditionally rewrites the post-process endpoint when `post_process_enabled` is on
+- the same orchestrator pipeline is reused regardless of whether the backend is Groq/OpenAI-compatible cloud STT or the local Gemma service

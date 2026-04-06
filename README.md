@@ -2,7 +2,7 @@
 
 一个基于 Rust 实现的语音转文字输入工具，按住热键即可将语音实时转录并输入到任意文本框。
 
-灵感来源于 [Typeless](https://typeless.ai/)，默认使用 [Groq Whisper API](https://console.groq.com) 进行语音识别，也可通过配置切换到任何兼容 OpenAI multipart 格式的转写接口。
+灵感来源于 [Typeless](https://typeless.ai/)，默认使用 [Groq Whisper API](https://console.groq.com) 进行语音识别，也可通过配置切换到任何兼容 OpenAI multipart 格式的转写接口；也支持启动本地 Gemma 服务，在本机完成转写与文本整理。
 
 ## 功能特性
 
@@ -10,7 +10,9 @@
 - **AI 语音识别**：通过可配置的 HTTP 转写接口将语音转为文字（默认 Groq Whisper）
 - **长录音自动分片**：超过时长/大小限制的录音自动切分，后台并行转写，结果智能合并
 - **LLM 文本后处理**：可选的 LLM 后处理层，自动补标点、去语气词、清理中断与重复
+- **本地推理模式**：通过内置 `local` 子命令拉起 Python FastAPI 服务，使用 Gemma 4 本地模型提供 `/v1/audio/transcriptions` 与 `/v1/chat/completions`
 - **自动文本输入**：识别结果自动输入到当前光标位置（支持中文等 Unicode 字符）
+- **悬浮录音按钮**：启动后显示可拖拽悬浮窗，点击即可像 Toggle 热键一样开始/停止录音
 - **灵活配置**：支持自定义热键、模型、语言、API 地址、麦克风增益等
 - **自动清理**：自动保留最新 10 条录音，旧文件自动删除
 
@@ -20,6 +22,7 @@
   - macOS：文字输入通过 System Events（osascript）实现，需在「系统设置 → 隐私与安全性 → 辅助功能」中授权终端应用
   - Windows：使用 SendInput API，无需额外权限
 - **Rust**：1.70 及以上版本
+- **Python**：本地模式需要 Python 3.11+（用于 FastAPI + Transformers 服务）
 
 ## 快速开始
 
@@ -69,13 +72,23 @@ cargo build --release
 cargo run --release
 ```
 
+如果要使用本地 Gemma 模式，先执行：
+
+```bash
+cargo run -- local install
+cargo run -- local start
+```
+
+`local install` 会创建虚拟环境、安装 `server/requirements.txt` 中的依赖、下载 `google/gemma-4-E4B-it` 模型并校验安装结果。默认数据目录为 `~/.viberwhisper`，可通过 `local_data_dir` 覆盖；如需 Hugging Face 镜像，可在安装前设置 `HF_ENDPOINT`。
+
 ### 4. 使用
 
 1. 启动程序，系统托盘会出现灰色图标
-2. 将光标定位到任意文本输入框（浏览器、编辑器、聊天框等）
-3. **按住 F8** 开始录音（图标变红），松开后自动转录并输入文字（Hold 模式）
-4. 或按一下 **F9** 开始录音，再按一下停止（Toggle 模式）
-5. 退出：右键点击托盘图标选择「退出」，或按 **Ctrl+C**
+2. 屏幕上会出现一个可拖拽的悬浮录音按钮，点击行为等同于 Toggle 模式
+3. 将光标定位到任意文本输入框（浏览器、编辑器、聊天框等）
+4. **按住 F8** 开始录音（图标变红），松开后自动转录并输入文字（Hold 模式）
+5. 或按一下 **F9** 开始录音，再按一下停止（Toggle 模式）
+6. 退出：右键点击托盘图标选择「退出」，或按 **Ctrl+C**
 
 > macOS 首次运行时，系统会弹出辅助功能授权请求，需要允许才能完成文字输入。
 
@@ -84,6 +97,12 @@ cargo run --release
 ```bash
 # 启动录音监听（默认，无子命令）
 viberwhisper
+
+# 安装 / 启动 / 停止 / 查看本地 Gemma 服务
+viberwhisper local install
+viberwhisper local start
+viberwhisper local stop
+viberwhisper local status
 
 # 查看所有配置
 viberwhisper config list
@@ -145,6 +164,17 @@ viberwhisper convert input.wav --output output.txt
 
 > **注意**：`config.json` 已在 `.gitignore` 中排除，避免误提交真实密钥。`api_key` 和 `post_process_api_key` 不会被程序写回磁盘。
 
+### 本地模式
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `local_mode` | 布尔 | `false` | 是否启用本地 Gemma 服务 |
+| `local_data_dir` | 字符串 | `~/.viberwhisper` | 本地模型、虚拟环境、PID 和日志目录 |
+| `local_server_port` | 数字 | `17265` | 本地 FastAPI 服务端口 |
+| `local_quantization` | 字符串 | `int8` | 量化模式，可选 `int4` / `int8` / `bf16` |
+
+启用 `local_mode` 后，程序会在启动监听前自动确保本地运行时已安装、拉起本地服务，并把转写端点重写为本地服务地址；如果同时启用了 `post_process_enabled`，后处理端点也会改写到本地 `/v1/chat/completions`。当前本地服务固定使用 `gemma-4-E4B-it` 作为模型名。
+
 ### 切换转写服务
 
 只需修改 `transcription_api_url` 和 `api_key` 即可切换到任何兼容 OpenAI Whisper multipart 格式的接口：
@@ -179,6 +209,17 @@ export POST_PROCESS_API_KEY=your_key_here
 
 后处理失败时自动降级为输出原始转写文本，不会导致整次录音失败。
 
+## 本地 Gemma 服务
+
+本地服务位于 [`server/server.py`](server/server.py)，通过 FastAPI 暴露两个 OpenAI 兼容端点：
+
+- `POST /v1/audio/transcriptions`：接收 WAV 音频并调用 Gemma 音频理解能力返回转写结果
+- `POST /v1/chat/completions`：供后处理模块复用，返回整理后的文本
+
+Rust 侧的 `LocalServiceManager` 负责启动、健康检查、PID 记录、日志文件和关闭流程。`viberwhisper local start` 会先拉起服务，再进入正常监听循环；直接把 `local_mode` 设为 `true` 也会在启动主程序时自动做同样的准备。
+
+当前本地服务限制单次音频请求最长 30 秒，因此长录音仍由 Rust 端先分片，再逐片提交给本地端点。
+
 ## 依赖项
 
 - [rdev](https://crates.io/crates/rdev) - 全局热键监听
@@ -197,6 +238,7 @@ export POST_PROCESS_API_KEY=your_key_here
 cargo test     # 运行测试
 cargo clippy   # 代码检查
 cargo fmt      # 代码格式化
+uv run pytest  # 运行 Python server 测试
 ```
 
 ## 许可证

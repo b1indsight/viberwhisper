@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The `input` module (`src/input/`) handles three concerns: global hotkey detection (`hotkey.rs`), text injection into the focused window (`typer.rs`), and system tray UI (`tray.rs`).
+The `input` module (`src/input/`) handles four concerns: global hotkey detection (`hotkey.rs`), text injection into the focused window (`typer.rs`), system tray UI (`tray.rs`), and the floating overlay window (`overlay/`).
 
 ---
 
@@ -110,3 +110,34 @@ Switches icon and tooltip based on recording state.
 **`check_exit(&self) -> bool`**
 
 Non-blocking check of the menu event channel; returns `true` if the exit item was clicked.
+
+---
+
+## Overlay (`src/input/overlay/`)
+
+### Purpose
+
+Provides an always-on-top, draggable recording affordance separate from the tray icon. A click on the overlay acts like the toggle hotkey: start recording when idle, stop when recording.
+
+### Platform Selection
+
+| Target | Implementation |
+|---|---|
+| macOS | `overlay/macos.rs` |
+| Windows | `overlay/windows_impl.rs` |
+| Other | `overlay/stub.rs` |
+
+### Public API
+
+`main.rs` interacts with the overlay through a platform-specific `OverlayManager` with a shared interface:
+
+- `OverlayManager::new() -> Result<Self>`: create window/resources
+- `set_recording(recording: bool)`: update visual state
+- `check_click() -> bool`: poll whether the overlay was clicked since last check
+- `update()`: pump any pending UI work from the main loop
+
+### Main-loop Behavior
+
+- overlay clicks are checked on every tick, after hotkey polling
+- when clicked, the overlay follows the same start/stop flow as toggle mode
+- overlay state is kept in sync with tray state during all record transitions
