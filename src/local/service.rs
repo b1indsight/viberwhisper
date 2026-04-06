@@ -1,12 +1,14 @@
-use crate::local::installer::venv_python_path;
+use crate::local::installer::{find_uv, venv_python_path};
 use reqwest::StatusCode;
-use std::fs::{self, File};
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
-const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const HEALTH_INITIAL_DELAY: Duration = Duration::from_secs(20);
+const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Runtime status for the local inference service.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,9 +50,7 @@ impl LocalServiceManager {
         venv_dir: PathBuf,
         quantization: String,
     ) -> Self {
-        let log_file = model_dir
-            .parent()
-            .map(|dir| dir.join("server.log"));
+        let log_file = model_dir.parent().map(Self::default_log_file_path);
         Self {
             port,
             model_dir,
@@ -64,50 +64,117 @@ impl LocalServiceManager {
 
     /// Spawns the local server process and waits for health.
     pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.cleanup_stale_pid_file();
         if self.is_running()
-            && health_check(&self.base_url(), HEALTH_TIMEOUT, HEALTH_POLL_INTERVAL).is_ok()
+            && health_check(
+                &self.base_url(),
+                HEALTH_TIMEOUT,
+                HEALTH_INITIAL_DELAY,
+                HEALTH_POLL_INTERVAL,
+            )
+            .is_ok()
         {
             return Ok(());
         }
 
-        fs::create_dir_all(self.state_dir())?;
+        fs::create_dir_all(self.state_dir()).map_err(|error| {
+            format!(
+                "failed to create local service state dir {}: {error}",
+                self.state_dir().display()
+            )
+        })?;
 
         let python = venv_python_path(&self.venv_dir);
         if !python.exists() {
             return Err(format!("local Python interpreter not found: {}", python.display()).into());
         }
         if !self.model_dir.exists() {
-            return Err(format!("local model directory not found: {}", self.model_dir.display()).into());
+            return Err(format!(
+                "local model directory not found: {}",
+                self.model_dir.display()
+            )
+            .into());
         }
 
-        let stderr_stdio = match &self.log_file {
-            Some(path) => Stdio::from(File::create(path)?),
-            None => Stdio::null(),
+        let (stdout_stdio, stderr_stdio) = self.log_stdio()?;
+
+        let script_path = self.server_script_path();
+        let child = match find_uv() {
+            Some(uv) => {
+                let mut uv_command = Command::new(&uv);
+                uv_command.args(server_launch_args(
+                    &python,
+                    &script_path,
+                    &self.model_dir,
+                    self.port,
+                    &self.quantization,
+                ));
+                uv_command
+                    .stdin(Stdio::null())
+                    .stdout(stdout_stdio)
+                    .stderr(stderr_stdio);
+
+                match uv_command.spawn() {
+                    Ok(child) => child,
+                    Err(uv_error) => {
+                        let (stdout, stderr) = self.log_stdio()?;
+                        let mut python_command = Command::new(&python);
+                        python_command
+                            .arg(&script_path)
+                            .arg("--model-dir")
+                            .arg(&self.model_dir)
+                            .arg("--port")
+                            .arg(self.port.to_string())
+                            .arg("--quantization")
+                            .arg(&self.quantization)
+                            .stdin(Stdio::null())
+                            .stdout(stdout)
+                            .stderr(stderr);
+                        python_command.spawn().map_err(|python_error| {
+                            format!(
+                                "failed to start local service with uv ({uv_error}) and direct python ({python_error})"
+                            )
+                        })?
+                    }
+                }
+            }
+            None => {
+                let mut python_command = Command::new(&python);
+                python_command
+                    .arg(&script_path)
+                    .arg("--model-dir")
+                    .arg(&self.model_dir)
+                    .arg("--port")
+                    .arg(self.port.to_string())
+                    .arg("--quantization")
+                    .arg(&self.quantization)
+                    .stdin(Stdio::null())
+                    .stdout(stdout_stdio)
+                    .stderr(stderr_stdio);
+                python_command
+                    .spawn()
+                    .map_err(|error| format!("failed to start local service with direct python: {error}"))?
+            }
         };
 
-        let child = Command::new(python)
-            .arg(self.server_script_path())
-            .arg("--model-dir")
-            .arg(&self.model_dir)
-            .arg("--port")
-            .arg(self.port.to_string())
-            .arg("--quantization")
-            .arg(&self.quantization)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(stderr_stdio)
-            .spawn()?;
-
-        fs::write(self.pid_file_path(), child.id().to_string())?;
+        fs::write(self.pid_file_path(), child.id().to_string()).map_err(|error| {
+            format!(
+                "failed to write local service pid file {}: {error}",
+                self.pid_file_path().display()
+            )
+        })?;
         self.process = Some(child);
         self.owned = true;
 
-        if let Err(error) = health_check(&self.base_url(), HEALTH_TIMEOUT, HEALTH_POLL_INTERVAL) {
+        if let Err(error) = health_check(
+            &self.base_url(),
+            HEALTH_TIMEOUT,
+            HEALTH_INITIAL_DELAY,
+            HEALTH_POLL_INTERVAL,
+        )
+        {
             let msg = match &self.log_file {
-                Some(path) => format!(
-                    "{error} (see server log for details: {})",
-                    path.display()
-                ),
+                Some(path) => format!("{error} (see server log for details: {})", path.display()),
                 None => error.to_string(),
             };
             self.stop();
@@ -125,7 +192,9 @@ impl LocalServiceManager {
             self.read_pid()
         };
 
-        if let Some(pid) = pid {
+        if let Some(pid) = pid
+            && is_pid_running(pid)
+        {
             let _ = terminate_pid(pid);
             wait_for_exit_or_kill(pid);
         }
@@ -160,22 +229,31 @@ impl LocalServiceManager {
         format!("http://127.0.0.1:{}", self.port)
     }
 
+    pub fn default_log_file_path(base_dir: &Path) -> PathBuf {
+        base_dir.join("server.log")
+    }
+
     /// Returns the best-effort persisted service status.
     pub fn status(&self) -> Result<LocalServiceStatus, Box<dyn std::error::Error>> {
-        let pid = self.read_pid().or_else(|| self.process.as_ref().map(Child::id));
+        let pid = self
+            .read_pid()
+            .or_else(|| self.process.as_ref().map(Child::id));
         let running = pid.is_some_and(is_pid_running);
+        if pid.is_some() && !running {
+            let _ = fs::remove_file(self.pid_file_path());
+        }
         let health = match health_once(&self.base_url()) {
             Ok(StatusCode::OK) => "ok".to_string(),
             Ok(status) => format!("http {}", status.as_u16()),
             Err(error) => error.to_string(),
         };
-        let memory_usage = pid.and_then(read_memory_usage);
+        let memory_usage = if running { pid.and_then(read_memory_usage) } else { None };
 
         Ok(LocalServiceStatus {
             running,
             port: self.port,
             health,
-            pid,
+            pid: if running { pid } else { None },
             memory_usage,
         })
     }
@@ -200,6 +278,40 @@ impl LocalServiceManager {
             .ok()
             .and_then(|value| value.trim().parse::<u32>().ok())
     }
+
+    fn cleanup_stale_pid_file(&self) {
+        if self.read_pid().is_some_and(|pid| !is_pid_running(pid)) {
+            let _ = fs::remove_file(self.pid_file_path());
+        }
+    }
+
+    fn log_stdio(&self) -> Result<(Stdio, Stdio), Box<dyn std::error::Error>> {
+        let Some(path) = &self.log_file else {
+            return Ok((Stdio::null(), Stdio::null()));
+        };
+
+        File::create(path).map_err(|error| {
+            format!(
+                "failed to create local service log file {}: {error}",
+                path.display()
+            )
+        })?;
+
+        let stdout = OpenOptions::new().append(true).open(path).map_err(|error| {
+            format!(
+                "failed to open local service log file for stdout {}: {error}",
+                path.display()
+            )
+        })?;
+        let stderr = OpenOptions::new().append(true).open(path).map_err(|error| {
+            format!(
+                "failed to open local service log file for stderr {}: {error}",
+                path.display()
+            )
+        })?;
+
+        Ok((Stdio::from(stdout), Stdio::from(stderr)))
+    }
 }
 
 /// Locates a file inside the `server/` directory, trying the packaged location
@@ -220,9 +332,33 @@ fn find_server_file(filename: &str) -> PathBuf {
         .join(filename)
 }
 
+fn server_launch_args(
+    python: &Path,
+    script_path: &Path,
+    model_dir: &Path,
+    port: u16,
+    quantization: &str,
+) -> Vec<OsString> {
+    vec![
+        OsString::from("run"),
+        OsString::from("--python"),
+        python.as_os_str().to_os_string(),
+        OsString::from("--no-project"),
+        python.as_os_str().to_os_string(),
+        script_path.as_os_str().to_os_string(),
+        OsString::from("--model-dir"),
+        model_dir.as_os_str().to_os_string(),
+        OsString::from("--port"),
+        OsString::from(port.to_string()),
+        OsString::from("--quantization"),
+        OsString::from(quantization),
+    ]
+}
+
 fn health_check(
     base_url: &str,
     timeout: Duration,
+    initial_delay: Duration,
     poll_interval: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::blocking::Client::builder()
@@ -231,6 +367,8 @@ fn health_check(
     let deadline = Instant::now() + timeout;
     let url = format!("{base_url}/health");
     let mut last_error = "health check did not start".to_string();
+
+    std::thread::sleep(initial_delay);
 
     while Instant::now() < deadline {
         match client.get(&url).send() {
@@ -310,7 +448,8 @@ fn is_pid_running(pid: u32) -> bool {
             .output()
             .ok()
             .map(|output| {
-                output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+                output.status.success()
+                    && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
             })
             .unwrap_or(false)
     }
@@ -342,7 +481,11 @@ fn read_memory_usage(pid: u32) -> Option<String> {
             .output()
             .ok()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let columns = stdout.trim().trim_matches('"').split("\",\"").collect::<Vec<_>>();
+        let columns = stdout
+            .trim()
+            .trim_matches('"')
+            .split("\",\"")
+            .collect::<Vec<_>>();
         columns.get(4).map(|value| value.to_string())
     }
 
@@ -397,6 +540,7 @@ mod tests {
         let result = health_check(
             &format!("http://127.0.0.1:{port}"),
             Duration::from_secs(1),
+            Duration::from_secs(0),
             Duration::from_millis(25),
         );
         assert!(result.is_ok());
@@ -405,10 +549,15 @@ mod tests {
     #[test]
     fn test_health_check_times_out_on_unhealthy_server() {
         let port = 18766;
-        spawn_health_stub(port, "HTTP/1.1 503 Service Unavailable", "{\"status\":\"loading\"}");
+        spawn_health_stub(
+            port,
+            "HTTP/1.1 503 Service Unavailable",
+            "{\"status\":\"loading\"}",
+        );
         let result = health_check(
             &format!("http://127.0.0.1:{port}"),
             Duration::from_millis(150),
+            Duration::from_secs(0),
             Duration::from_millis(25),
         );
         assert!(result.is_err());
@@ -420,5 +569,57 @@ mod tests {
             pid_file_path(Path::new("/tmp/viberwhisper")),
             PathBuf::from("/tmp/viberwhisper/local_server.pid")
         );
+    }
+
+    #[test]
+    fn test_server_launch_args_uses_uv_run_with_explicit_python() {
+        let args = server_launch_args(
+            Path::new("/tmp/venv/bin/python"),
+            Path::new("/tmp/server.py"),
+            Path::new("/tmp/model"),
+            17265,
+            "int8",
+        );
+        let args: Vec<String> = args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            args,
+            vec![
+                "run",
+                "--python",
+                "/tmp/venv/bin/python",
+                "--no-project",
+                "/tmp/venv/bin/python",
+                "/tmp/server.py",
+                "--model-dir",
+                "/tmp/model",
+                "--port",
+                "17265",
+                "--quantization",
+                "int8",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_status_clears_stale_pid_file() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "viberwhisper-local-service-{}",
+            std::process::id()
+        ));
+        let model_dir = temp_dir.join("model");
+        let venv_dir = temp_dir.join("venv");
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(temp_dir.join("local_server.pid"), "999999").unwrap();
+
+        let manager = LocalServiceManager::new(17265, model_dir, venv_dir);
+        let status = manager.status().unwrap();
+
+        assert!(!status.running);
+        assert_eq!(status.pid, None);
+        assert!(!temp_dir.join("local_server.pid").exists());
     }
 }

@@ -1,9 +1,9 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use rdev::{listen, Event, EventType, Key};
+use rdev::{Event, EventType, Key, listen};
 use tracing::{debug, error, info};
 
 // Thread-safe state for tracking key states
@@ -46,15 +46,15 @@ pub struct HotkeyManager {
 }
 
 impl HotkeyManager {
-    pub fn new(
-        hold_hotkey: &str,
-        toggle_hotkey: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(hold_hotkey: &str, toggle_hotkey: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let hold_key = parse_key(hold_hotkey);
         let toggle_key = parse_key(toggle_hotkey);
 
         if hold_key.is_none() && toggle_key.is_none() {
-            return Err("At least one valid hotkey must be configured (hold_hotkey or toggle_hotkey)".into());
+            return Err(
+                "At least one valid hotkey must be configured (hold_hotkey or toggle_hotkey)"
+                    .into(),
+            );
         }
 
         let running = Arc::new(AtomicBool::new(true));
@@ -62,26 +62,27 @@ impl HotkeyManager {
         thread::spawn(move || {
             debug!("rdev listener thread started");
 
-            let callback = move |event: Event| {
-                match &event.event_type {
-                    EventType::KeyPress(key) => {
-                        if let Some(hk) = hold_key
-                            && *key == hk {
-                                HOLD_PRESSED.store(true, Ordering::Relaxed);
-                            }
-                        if let Some(tk) = toggle_key
-                            && *key == tk {
-                                TOGGLE_PRESSED.store(true, Ordering::Relaxed);
-                            }
+            let callback = move |event: Event| match &event.event_type {
+                EventType::KeyPress(key) => {
+                    if let Some(hk) = hold_key
+                        && *key == hk
+                    {
+                        HOLD_PRESSED.store(true, Ordering::Relaxed);
                     }
-                    EventType::KeyRelease(key) => {
-                        if let Some(hk) = hold_key
-                            && *key == hk {
-                                HOLD_RELEASED.store(true, Ordering::Relaxed);
-                            }
+                    if let Some(tk) = toggle_key
+                        && *key == tk
+                    {
+                        TOGGLE_PRESSED.store(true, Ordering::Relaxed);
                     }
-                    _ => {}
                 }
+                EventType::KeyRelease(key) => {
+                    if let Some(hk) = hold_key
+                        && *key == hk
+                    {
+                        HOLD_RELEASED.store(true, Ordering::Relaxed);
+                    }
+                }
+                _ => {}
             };
 
             if let Err(e) = listen(callback) {

@@ -49,7 +49,14 @@ impl LlmPostProcessor {
     }
 
     fn call_llm(&self, text: &str) -> Result<String, Box<dyn std::error::Error>> {
-        call_llm_impl(&self.api_key, &self.api_url, &self.model, &self.prompt, self.temperature, text)
+        call_llm_impl(
+            &self.api_key,
+            &self.api_url,
+            &self.model,
+            &self.prompt,
+            self.temperature,
+            text,
+        )
     }
 }
 
@@ -298,7 +305,10 @@ impl TextPostProcessorSession for PreheatLlmSession {
         let result = st.latest_result.take().unwrap();
         match result {
             Ok(text) => {
-                info!(result_len = text.len(), "Preheat: LLM post-processing complete");
+                info!(
+                    result_len = text.len(),
+                    "Preheat: LLM post-processing complete"
+                );
                 Ok(text)
             }
             Err(e) => {
@@ -350,8 +360,7 @@ mod tests {
     fn test_from_config_missing_model() {
         let mut config = AppConfig::default();
         config.post_process_api_key = Some("key".to_string());
-        config.post_process_api_url =
-            Some("https://example.com/v1/chat/completions".to_string());
+        config.post_process_api_url = Some("https://example.com/v1/chat/completions".to_string());
         assert!(LlmPostProcessor::from_config(&config).is_err());
     }
 
@@ -363,10 +372,7 @@ mod tests {
         let p = result.unwrap();
         assert_eq!(p.api_key, "test_key");
         assert_eq!(p.model, "gpt-4o-mini");
-        assert_eq!(
-            p.api_url,
-            "https://api.example.com/v1/chat/completions"
-        );
+        assert_eq!(p.api_url, "https://api.example.com/v1/chat/completions");
     }
 
     #[test]

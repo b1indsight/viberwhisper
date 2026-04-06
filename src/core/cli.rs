@@ -100,8 +100,7 @@ mod tests {
 
     #[test]
     fn test_cli_config_set() {
-        let cli =
-            Cli::try_parse_from(["viberwhisper", "config", "set", "hotkey", "F9"]).unwrap();
+        let cli = Cli::try_parse_from(["viberwhisper", "config", "set", "hotkey", "F9"]).unwrap();
         if let Some(Commands::Config {
             action: ConfigAction::Set { key, value },
         }) = cli.command
@@ -126,14 +125,9 @@ mod tests {
 
     #[test]
     fn test_cli_convert_with_output() {
-        let cli = Cli::try_parse_from([
-            "viberwhisper",
-            "convert",
-            "test.wav",
-            "--output",
-            "out.txt",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["viberwhisper", "convert", "test.wav", "--output", "out.txt"])
+                .unwrap();
         if let Some(Commands::Convert { input, output }) = cli.command {
             assert_eq!(input, "test.wav");
             assert_eq!(output, Some("out.txt".to_string()));

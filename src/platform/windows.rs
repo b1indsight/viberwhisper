@@ -28,12 +28,7 @@ impl TextTyper for WindowsTyper {
         };
 
         if sent as usize != inputs.len() {
-            return Err(format!(
-                "SendInput only sent {}/{} events",
-                sent,
-                inputs.len()
-            )
-            .into());
+            return Err(format!("SendInput only sent {}/{} events", sent, inputs.len()).into());
         }
 
         info!(text = %text, "Text typed");

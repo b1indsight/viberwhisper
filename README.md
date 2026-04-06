@@ -22,7 +22,7 @@
   - macOS：文字输入通过 System Events（osascript）实现，需在「系统设置 → 隐私与安全性 → 辅助功能」中授权终端应用
   - Windows：使用 SendInput API，无需额外权限
 - **Rust**：1.70 及以上版本
-- **Python**：本地模式需要 Python 3.11+（用于 FastAPI + Transformers 服务）
+- **Python**：本地模式需要 Python 3.10+；安装时优先使用 `uv`，若未安装则回退到系统 Python（用于 FastAPI + Transformers 服务）
 
 ## 快速开始
 
@@ -79,7 +79,7 @@ cargo run -- local install
 cargo run -- local start
 ```
 
-`local install` 会创建虚拟环境、安装 `server/requirements.txt` 中的依赖、下载 `google/gemma-4-E4B-it` 模型并校验安装结果。默认数据目录为 `~/.viberwhisper`，可通过 `local_data_dir` 覆盖；如需 Hugging Face 镜像，可在安装前设置 `HF_ENDPOINT`。
+`local install` 会先校验本机 Python 版本是否为 3.10 或以上，然后优先使用 `uv` 创建虚拟环境和安装 `server/requirements.txt` 中的依赖；若未安装 `uv`，则回退到系统 Python。随后会下载 `google/gemma-4-E2B-it` 模型并校验安装结果。默认数据目录为 `~/.viberwhisper`，可通过 `local_data_dir` 覆盖；如需 Hugging Face 镜像，可在安装前设置 `HF_ENDPOINT`。
 
 ### 4. 使用
 
@@ -173,7 +173,7 @@ viberwhisper convert input.wav --output output.txt
 | `local_server_port` | 数字 | `17265` | 本地 FastAPI 服务端口 |
 | `local_quantization` | 字符串 | `int8` | 量化模式，可选 `int4` / `int8` / `bf16` |
 
-启用 `local_mode` 后，程序会在启动监听前自动确保本地运行时已安装、拉起本地服务，并把转写端点重写为本地服务地址；如果同时启用了 `post_process_enabled`，后处理端点也会改写到本地 `/v1/chat/completions`。当前本地服务固定使用 `gemma-4-E4B-it` 作为模型名。
+启用 `local_mode` 后，程序会在启动监听前自动确保本地运行时已安装、拉起本地服务，并把转写端点重写为本地服务地址；如果同时启用了 `post_process_enabled`，后处理端点也会改写到本地 `/v1/chat/completions`。当前本地服务固定使用 `gemma-4-E2B-it` 作为模型名。
 
 ### 切换转写服务
 
