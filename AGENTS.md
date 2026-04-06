@@ -1,4 +1,4 @@
-# Agents.md
+# AGENTS.md
 
 This repository uses [CLAUDE.md](./CLAUDE.md) as the primary agent instruction file.
 
