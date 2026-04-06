@@ -7,6 +7,31 @@ on:
     branches: [master]
 
 jobs:
+  python-lint-and-test:
+    runs-on: ubuntu-latest
+    name: Python (ruff + pytest)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python test dependencies
+        run: uv sync --group dev
+
+      - name: Ruff
+        run: uv run ruff check server
+
+      - name: Pytest
+        run: uv run pytest
+
   build-and-test:
     runs-on: macos-latest
     name: CI (macOS)

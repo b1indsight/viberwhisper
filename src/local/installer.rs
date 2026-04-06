@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const DEPENDENCY_CHECK_SCRIPT: &str =
+    "import accelerate, fastapi, huggingface_hub, soundfile, torch, transformers, uvicorn";
+
 /// Creates a Python virtual environment for the local service.
 pub fn setup_venv(venv_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let python = venv_python_path(venv_dir);
@@ -35,13 +38,7 @@ pub fn install_requirements(
 
     run_command(
         python,
-        [
-            "-m",
-            "pip",
-            "install",
-            "-r",
-            &reqs.to_string_lossy(),
-        ],
+        ["-m", "pip", "install", "-r", &reqs.to_string_lossy()],
         None,
     )
 }
@@ -85,10 +82,7 @@ pub fn download_model(
 }
 
 /// Verifies the presence of the virtual environment and model files.
-pub fn verify_install(
-    venv_dir: &Path,
-    model_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn verify_install(venv_dir: &Path, model_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let python = venv_python_path(venv_dir);
     if !python.exists() {
         return Err(format!("virtualenv python not found: {}", python.display()).into());
@@ -121,7 +115,7 @@ pub fn dependencies_installed(venv_dir: &Path) -> bool {
         return false;
     }
     Command::new(python)
-        .args(["-c", "import fastapi, transformers, uvicorn"])
+        .args(["-c", DEPENDENCY_CHECK_SCRIPT])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -230,6 +224,24 @@ mod tests {
             venv_python_path(Path::new("venv")),
             PathBuf::from("venv/bin/python")
         );
+    }
+
+    #[test]
+    fn test_dependency_check_script_covers_required_runtime_packages() {
+        for package in [
+            "accelerate",
+            "fastapi",
+            "huggingface_hub",
+            "soundfile",
+            "torch",
+            "transformers",
+            "uvicorn",
+        ] {
+            assert!(
+                DEPENDENCY_CHECK_SCRIPT.contains(package),
+                "missing package in dependency check: {package}"
+            );
+        }
     }
 
     #[cfg(feature = "integration")]

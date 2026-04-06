@@ -19,6 +19,22 @@ use tracing_subscriber::EnvFilter;
 
 const LOCAL_MODEL_NAME: &str = "gemma-4-E4B-it";
 
+struct LocalServiceGuard(Option<LocalServiceManager>);
+
+impl LocalServiceGuard {
+    fn new(manager: Option<LocalServiceManager>) -> Self {
+        Self(manager)
+    }
+}
+
+impl Drop for LocalServiceGuard {
+    fn drop(&mut self) {
+        if let Some(manager) = self.0.as_mut() {
+            manager.release();
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -62,22 +78,16 @@ fn handle_local(action: LocalCommand) -> Result<(), Box<dyn std::error::Error>> 
         }
         LocalCommand::Stop => {
             let paths = local_paths(&config)?;
-            let mut manager = LocalServiceManager::new(
-                config.local_server_port,
-                paths.model_dir,
-                paths.venv_dir,
-            );
+            let mut manager =
+                LocalServiceManager::new(config.local_server_port, paths.model_dir, paths.venv_dir);
             manager.stop();
             println!("Local Gemma service stopped.");
             Ok(())
         }
         LocalCommand::Status => {
             let paths = local_paths(&config)?;
-            let manager = LocalServiceManager::new(
-                config.local_server_port,
-                paths.model_dir,
-                paths.venv_dir,
-            );
+            let manager =
+                LocalServiceManager::new(config.local_server_port, paths.model_dir, paths.venv_dir);
             let status = manager.status()?;
             println!("running: {}", status.running);
             println!("port: {}", status.port);
@@ -209,9 +219,7 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     run_listener_with_config(AppConfig::load())
 }
 
-fn run_listener_with_config(
-    config: AppConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     use audio::{AudioRecorder, StopResult};
     use core::orchestrator::{SessionError, SessionMode, SessionOrchestrator};
     use input::hotkey::{HotkeyEvent, HotkeyManager, HotkeySource};
@@ -227,7 +235,8 @@ fn run_listener_with_config(
     println!("===================================");
     println!();
 
-    let (config, mut local_manager) = prepare_runtime_config(config)?;
+    let (config, local_manager) = prepare_runtime_config(config)?;
+    let _local_manager = LocalServiceGuard::new(local_manager);
     info!(
         hold_hotkey = %config.hold_hotkey,
         toggle_hotkey = %config.toggle_hotkey,
@@ -336,9 +345,10 @@ fn run_listener_with_config(
                     "Partial transcription failure; typing available text"
                 );
                 if !partial_text.is_empty()
-                    && let Err(e) = typer.type_text(&partial_text) {
-                        error!(error = %e, "Failed to type partial text");
-                    }
+                    && let Err(e) = typer.type_text(&partial_text)
+                {
+                    error!(error = %e, "Failed to type partial text");
+                }
             }
             Err(SessionError::ConvergenceTimeout {
                 pending_count,
@@ -349,15 +359,16 @@ fn run_listener_with_config(
                     "Convergence timeout; typing available partial text"
                 );
                 if !partial_text.is_empty()
-                    && let Err(e) = typer.type_text(&partial_text) {
-                        error!(error = %e, "Failed to type partial text");
-                    }
+                    && let Err(e) = typer.type_text(&partial_text)
+                {
+                    error!(error = %e, "Failed to type partial text");
+                }
             }
         }
     };
 
     let mut counter = 0;
-    let result = loop {
+    loop {
         if let Some(event) = hotkey_manager.check_event() {
             match event {
                 HotkeyEvent::Pressed(HotkeySource::Hold) => {
@@ -484,13 +495,7 @@ fn run_listener_with_config(
 
         overlay.update();
         std::thread::sleep(std::time::Duration::from_millis(10));
-    };
-
-    if let Some(manager) = local_manager.as_mut() {
-        manager.release();
     }
-
-    result
 }
 
 fn handle_config(action: ConfigAction) {
@@ -567,13 +572,14 @@ fn handle_convert(input: &str, output: Option<&str>) {
     println!("Transcribing: {}", input);
 
     let config = AppConfig::load();
-    let (config, _local_manager) = match prepare_runtime_config(config) {
+    let (config, local_manager) = match prepare_runtime_config(config) {
         Ok(result) => result,
         Err(e) => {
             eprintln!("Failed to prepare runtime: {}", e);
             std::process::exit(1);
         }
     };
+    let _local_manager = LocalServiceGuard::new(local_manager);
     let transcriber: Box<dyn Transcriber> = create_transcriber(&config);
     let post_processor = create_post_processor(&config);
 
@@ -611,19 +617,20 @@ fn handle_convert(input: &str, output: Option<&str>) {
 fn apply_local_endpoint_overrides(config: &AppConfig, base_url: &str) -> AppConfig {
     let mut local = config.clone();
     local.api_key = Some("local".to_string());
-    local.post_process_api_key = Some("local".to_string());
     local.transcription_api_url = format!("{base_url}/v1/audio/transcriptions");
-    local.post_process_api_url = Some(format!("{base_url}/v1/chat/completions"));
-    local.post_process_enabled = true;
-    local.post_process_model = Some(LOCAL_MODEL_NAME.to_string());
+    if local.post_process_enabled {
+        local.post_process_api_key = Some("local".to_string());
+        local.post_process_api_url = Some(format!("{base_url}/v1/chat/completions"));
+        local.post_process_model = Some(LOCAL_MODEL_NAME.to_string());
+    }
     local
 }
 
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use audio::AudioRecorder;
     use crate::core::config::AppConfig;
+    use audio::AudioRecorder;
     use transcriber::{MockTranscriber, Transcriber};
 
     #[test]
@@ -674,9 +681,11 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_apply_local_endpoint_overrides_endpoints() {
+    fn test_apply_local_endpoint_overrides_enabled_post_process() {
         let mut config = AppConfig::default();
         config.local_server_port = 17265;
+        config.post_process_enabled = true;
+        config.post_process_model = Some("gpt-4o-mini".to_string());
 
         let local = apply_local_endpoint_overrides(&config, "http://127.0.0.1:17265");
 
@@ -692,5 +701,25 @@ mod integration_tests {
         assert_eq!(local.post_process_model.as_deref(), Some("gemma-4-E4B-it"));
         assert_eq!(local.api_key.as_deref(), Some("local"));
         assert_eq!(local.post_process_api_key.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn test_apply_local_endpoint_overrides_keeps_post_process_disabled() {
+        let mut config = AppConfig::default();
+        config.local_server_port = 17265;
+        config.post_process_enabled = false;
+        config.post_process_model = Some("gpt-4o-mini".to_string());
+
+        let local = apply_local_endpoint_overrides(&config, "http://127.0.0.1:17265");
+
+        assert_eq!(
+            local.transcription_api_url,
+            "http://127.0.0.1:17265/v1/audio/transcriptions"
+        );
+        assert!(!local.post_process_enabled);
+        assert_eq!(local.post_process_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(local.post_process_api_url, None);
+        assert_eq!(local.post_process_api_key, None);
+        assert_eq!(local.api_key.as_deref(), Some("local"));
     }
 }

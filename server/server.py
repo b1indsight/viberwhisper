@@ -8,18 +8,15 @@ import os
 import tempfile
 import threading
 import time
+from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-import soundfile as sf
-import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from transformers import AutoModelForCausalLM, AutoProcessor
 
 LOGGER = logging.getLogger("viberwhisper.local_server")
 MODEL_NAME = "gemma-4-E4B-it"
-HF_MODEL_ID = "google/gemma-4-E4B-it"
 DEFAULT_MAX_NEW_TOKENS = 512
 
 
@@ -68,6 +65,8 @@ class LocalModelRuntime:
                         self.quantization, load_kwargs,
                     )
 
+                from transformers import AutoModelForCausalLM, AutoProcessor
+
                 processor = AutoProcessor.from_pretrained(self.model_dir)
                 model = AutoModelForCausalLM.from_pretrained(
                     self.model_dir, **load_kwargs,
@@ -106,6 +105,8 @@ class LocalModelRuntime:
         prompt: str | None,
     ) -> dict[str, Any]:
         self.ensure_ready()
+
+        import soundfile as sf
 
         samples, sample_rate = sf.read(io.BytesIO(wav_bytes), dtype="float32")
         if len(samples.shape) > 1:
@@ -311,12 +312,16 @@ class LocalModelRuntime:
 
 
 def create_app(runtime: LocalModelRuntime) -> FastAPI:
-    app = FastAPI(title="ViberWhisper Local Gemma Service")
-
-    @app.on_event("startup")
-    def _startup() -> None:
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
         thread = threading.Thread(target=runtime.load, daemon=True)
         thread.start()
+        yield
+
+    app = FastAPI(
+        title="ViberWhisper Local Gemma Service",
+        lifespan=lifespan,
+    )
 
     @app.get("/health")
     def health() -> JSONResponse:
@@ -356,6 +361,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    import uvicorn
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
