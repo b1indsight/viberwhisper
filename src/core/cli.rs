@@ -19,6 +19,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// 本地 Gemma 推理服务管理
+    Local {
+        #[command(subcommand)]
+        action: LocalCommand,
+    },
     /// 转换音频文件为文字
     Convert {
         /// 输入的 WAV 文件路径
@@ -45,6 +50,18 @@ pub enum ConfigAction {
         /// 新值
         value: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LocalCommand {
+    /// 安装本地推理服务依赖与模型
+    Install,
+    /// 启动本地推理服务并运行主监听循环
+    Start,
+    /// 停止本地推理服务
+    Stop,
+    /// 查看本地推理服务状态
+    Status,
 }
 
 #[cfg(test)]
@@ -123,5 +140,27 @@ mod tests {
         } else {
             panic!("Expected convert command");
         }
+    }
+
+    #[test]
+    fn test_cli_local_start() {
+        let cli = Cli::try_parse_from(["viberwhisper", "local", "start"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Local {
+                action: LocalCommand::Start
+            })
+        ));
+    }
+
+    #[test]
+    fn test_cli_local_status() {
+        let cli = Cli::try_parse_from(["viberwhisper", "local", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Local {
+                action: LocalCommand::Status
+            })
+        ));
     }
 }

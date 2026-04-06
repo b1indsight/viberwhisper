@@ -18,5 +18,9 @@
   "post_process_api_url": "https://api.openai.com/v1/chat/completions",
   "post_process_model": "gpt-4o-mini",
   "post_process_api_format": "openai",
-  "post_process_temperature": 0.0
+  "post_process_temperature": 0.0,
+  "local_mode": false,
+  "local_data_dir": "~/.viberwhisper",
+  "local_server_port": 17265,
+  "local_quantization": "int8"
 }
