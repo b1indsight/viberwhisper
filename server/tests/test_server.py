@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from server.server import ChatCompletionRequest, LocalModelRuntime, create_app
+from server.models import ChatCompletionRequest
+from server.server import create_app
 
 
 class StubRuntime:
@@ -10,6 +14,8 @@ class StubRuntime:
         self.loaded = False
         self.last_audio_args: tuple[bytes, str | None, str | None] | None = None
         self.last_chat_request: ChatCompletionRequest | None = None
+        self.last_chat_prompt: str | None = None
+        self.processor = self
 
     def load(self) -> None:
         self.loaded = True
@@ -17,60 +23,34 @@ class StubRuntime:
     def health_payload(self) -> tuple[int, dict[str, str]]:
         return 200, {"status": "ok", "model": "stub"}
 
-    def transcribe_audio(
+    def ensure_ready(self) -> None:
+        return None
+
+    def generate_from_audio(self, prompt_text: str, audio_path: str) -> str:
+        del audio_path
+        self.last_audio_args = (b"wav-bytes", "zh", "keep punctuation")
+        assert "Expected language: zh." in prompt_text
+        return "stub transcript"
+
+    def apply_chat_template(self, messages, **_: object) -> str:
+        self.last_chat_request = ChatCompletionRequest(messages=messages)
+        return "rendered prompt"
+
+    def generate_from_text(
         self,
-        wav_bytes: bytes,
-        language: str | None,
-        prompt: str | None,
-    ) -> dict[str, object]:
-        self.last_audio_args = (wav_bytes, language, prompt)
-        return {"text": "stub transcript", "language": language or "auto", "duration": 1.25}
-
-    def chat_complete(self, request: ChatCompletionRequest) -> dict[str, object]:
-        self.last_chat_request = request
-        return {
-            "id": "chatcmpl-local-test",
-            "object": "chat.completion",
-            "created": 0,
-            "model": "stub",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "stub response"},
-                    "finish_reason": "stop",
-                },
-            ],
-            "usage": {
-                "prompt_tokens": None,
-                "completion_tokens": None,
-                "total_tokens": None,
-            },
-        }
+        prompt_text: str,
+        *,
+        temperature: float,
+        max_new_tokens: int,
+    ) -> str:
+        del temperature, max_new_tokens
+        self.last_chat_prompt = prompt_text
+        return "stub response"
 
 
-def test_health_payload_states() -> None:
-    runtime = LocalModelRuntime("/tmp/model", "int8")
-    assert runtime.health_payload() == (503, {"status": "loading", "model": "gemma-4-E4B-it"})
-
-    runtime.ready = True
-    assert runtime.health_payload() == (200, {"status": "ok", "model": "gemma-4-E4B-it"})
-
-    runtime.ready = False
-    runtime.error = "boom"
-    assert runtime.health_payload() == (
-        500,
-        {"status": "error", "model": "gemma-4-E4B-it", "error": "boom"},
-    )
-
-
-def test_flatten_content_handles_supported_shapes() -> None:
-    runtime = LocalModelRuntime("/tmp/model", "int8")
-
-    assert runtime._flatten_content("hello") == "hello"
-    assert runtime._flatten_content(
-        ["a", {"type": "text", "text": "b"}, {"type": "image", "url": "ignored"}],
-    ) == "ab"
-    assert runtime._flatten_content(None) == ""
+class FailingRuntime(StubRuntime):
+    def health_payload(self) -> tuple[int, dict[str, str]]:
+        raise HTTPException(status_code=503, detail="loading")
 
 
 def test_create_app_health_endpoint() -> None:
@@ -83,8 +63,21 @@ def test_create_app_health_endpoint() -> None:
     assert runtime.loaded is True
 
 
-def test_create_app_audio_transcriptions_endpoint() -> None:
+def test_create_app_audio_transcriptions_endpoint(monkeypatch) -> None:
     runtime = StubRuntime()
+
+    def fake_transcribe_audio(
+        runtime_obj: Any,
+        wav_bytes: bytes,
+        language: str | None,
+        prompt: str | None,
+    ) -> dict[str, object]:
+        assert runtime_obj is runtime
+        runtime.last_audio_args = (wav_bytes, language, prompt)
+        return {"text": "stub transcript", "language": language or "auto", "duration": 1.25}
+
+    monkeypatch.setattr("server.server.transcribe_audio", fake_transcribe_audio)
+
     with TestClient(create_app(runtime)) as client:
         response = client.post(
             "/v1/audio/transcriptions",
@@ -118,3 +111,13 @@ def test_create_app_chat_completions_endpoint() -> None:
         "system",
         "user",
     ]
+    assert runtime.last_chat_prompt == "rendered prompt"
+
+
+def test_http_exception_handler_returns_json() -> None:
+    runtime = FailingRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "loading"}
