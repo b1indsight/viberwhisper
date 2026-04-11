@@ -5,8 +5,7 @@ use tracing::{info, warn};
 const CONFIG_FILE: &str = "config.json";
 
 /// Default transcription API URL (Groq Whisper endpoint).
-const DEFAULT_TRANSCRIPTION_API_URL: &str =
-    "https://api.groq.com/openai/v1/audio/transcriptions";
+const DEFAULT_TRANSCRIPTION_API_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 
 fn default_chunk_duration() -> u32 {
     30
@@ -78,7 +77,6 @@ pub struct AppConfig {
     pub convergence_timeout_secs: u64,
 
     // --- LLM text post-processing ---
-
     /// Enable LLM-based text post-processing after STT. Default: false.
     #[serde(default)]
     pub post_process_enabled: bool,
@@ -173,9 +171,10 @@ impl AppConfig {
 
         // Env var override: GROQ_API_KEY for backward compat, api_key for new configs
         if let Ok(key) = std::env::var("GROQ_API_KEY")
-            && config.api_key.is_none() {
-                config.api_key = Some(key);
-            }
+            && config.api_key.is_none()
+        {
+            config.api_key = Some(key);
+        }
         if let Ok(key) = std::env::var("TRANSCRIPTION_API_KEY") {
             config.api_key = Some(key);
         }
@@ -196,9 +195,7 @@ impl AppConfig {
     /// Get the string value of a config field
     pub fn get_field(&self, key: &str) -> Option<String> {
         match key {
-            "api_key" | "groq_api_key" => {
-                self.api_key.as_ref().map(|_| "*** (set)".to_string())
-            }
+            "api_key" | "groq_api_key" => self.api_key.as_ref().map(|_| "*** (set)".to_string()),
             "transcription_api_url" => Some(self.transcription_api_url.clone()),
             "provider" => self.provider.clone(),
             "model" => Some(self.model.clone()),
@@ -281,9 +278,9 @@ impl AppConfig {
                 Ok(())
             }
             "max_chunk_duration_secs" => {
-                self.max_chunk_duration_secs = value
-                    .parse::<u32>()
-                    .map_err(|_| format!("max_chunk_duration_secs must be a u32, got: {}", value))?;
+                self.max_chunk_duration_secs = value.parse::<u32>().map_err(|_| {
+                    format!("max_chunk_duration_secs must be a u32, got: {}", value)
+                })?;
                 Ok(())
             }
             "max_chunk_size_bytes" => {
@@ -299,15 +296,15 @@ impl AppConfig {
                 Ok(())
             }
             "convergence_timeout_secs" => {
-                self.convergence_timeout_secs = value
-                    .parse::<u64>()
-                    .map_err(|_| format!("convergence_timeout_secs must be a u64, got: {}", value))?;
+                self.convergence_timeout_secs = value.parse::<u64>().map_err(|_| {
+                    format!("convergence_timeout_secs must be a u64, got: {}", value)
+                })?;
                 Ok(())
             }
             "post_process_enabled" => {
-                self.post_process_enabled = value
-                    .parse::<bool>()
-                    .map_err(|_| format!("post_process_enabled must be true/false, got: {}", value))?;
+                self.post_process_enabled = value.parse::<bool>().map_err(|_| {
+                    format!("post_process_enabled must be true/false, got: {}", value)
+                })?;
                 Ok(())
             }
             "post_process_streaming_enabled" => {
@@ -385,9 +382,10 @@ impl AppConfig {
         }
         // Backward compat: old groq_api_key maps to api_key
         if let Some(key) = json["groq_api_key"].as_str()
-            && self.api_key.is_none() {
-                self.api_key = Some(key.to_string());
-            }
+            && self.api_key.is_none()
+        {
+            self.api_key = Some(key.to_string());
+        }
         if let Some(url) = json["transcription_api_url"].as_str() {
             self.transcription_api_url = url.to_string();
         }
@@ -717,13 +715,12 @@ mod tests {
             config.get_field("max_chunk_duration_secs"),
             Some("30".to_string())
         );
-        assert_eq!(
-            config.get_field("max_retries"),
-            Some("3".to_string())
-        );
+        assert_eq!(config.get_field("max_retries"), Some("3".to_string()));
         config.set_field("max_chunk_duration_secs", "45").unwrap();
         assert_eq!(config.max_chunk_duration_secs, 45);
-        config.set_field("max_chunk_size_bytes", "10485760").unwrap();
+        config
+            .set_field("max_chunk_size_bytes", "10485760")
+            .unwrap();
         assert_eq!(config.max_chunk_size_bytes, 10485760);
         config.set_field("max_retries", "5").unwrap();
         assert_eq!(config.max_retries, 5);
@@ -780,10 +777,7 @@ mod tests {
         config
             .set_field("post_process_model", "gpt-4o-mini")
             .unwrap();
-        assert_eq!(
-            config.post_process_model.as_deref(),
-            Some("gpt-4o-mini")
-        );
+        assert_eq!(config.post_process_model.as_deref(), Some("gpt-4o-mini"));
         assert_eq!(
             config.get_field("post_process_model"),
             Some("gpt-4o-mini".to_string())
@@ -796,16 +790,17 @@ mod tests {
         config
             .set_field("post_process_prompt", "custom prompt")
             .unwrap();
-        assert_eq!(config.get_field("post_process_prompt"), Some("custom prompt".to_string()));
+        assert_eq!(
+            config.get_field("post_process_prompt"),
+            Some("custom prompt".to_string())
+        );
     }
 
     #[test]
     fn test_get_set_post_process_api_key_masked() {
         let mut config = AppConfig::default();
         assert_eq!(config.get_field("post_process_api_key"), None);
-        config
-            .set_field("post_process_api_key", "secret")
-            .unwrap();
+        config.set_field("post_process_api_key", "secret").unwrap();
         assert_eq!(config.post_process_api_key.as_deref(), Some("secret"));
         assert_eq!(
             config.get_field("post_process_api_key"),
@@ -864,7 +859,10 @@ mod tests {
             config.get_field("local_data_dir").as_deref(),
             Some("/tmp/viberwhisper")
         );
-        assert_eq!(config.get_field("local_server_port").as_deref(), Some("9000"));
+        assert_eq!(
+            config.get_field("local_server_port").as_deref(),
+            Some("9000")
+        );
         assert_eq!(
             config.get_field("local_quantization").as_deref(),
             Some("bf16")

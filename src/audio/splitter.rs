@@ -85,9 +85,7 @@ pub fn split_wav(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("audio");
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_secs();
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
     std::fs::create_dir_all("./tmp")?;
 
@@ -196,7 +194,11 @@ mod tests {
         // 5 s at 16 kHz = 80 000 samples; 2 s chunks → 3 chunks (32k, 32k, 16k)
         write_test_wav(path, 16000, 80000);
         let chunks = split_wav(path, 2, 0).unwrap();
-        assert_eq!(chunks.len(), 3, "5s audio split into 2s chunks should produce 3 chunks");
+        assert_eq!(
+            chunks.len(),
+            3,
+            "5s audio split into 2s chunks should produce 3 chunks"
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -208,7 +210,11 @@ mod tests {
         assert!(!chunks.is_empty());
         for chunk in &chunks {
             let reader = WavReader::open(&chunk.path);
-            assert!(reader.is_ok(), "Chunk should be a valid WAV: {:?}", chunk.path);
+            assert!(
+                reader.is_ok(),
+                "Chunk should be a valid WAV: {:?}",
+                chunk.path
+            );
         }
         let _ = std::fs::remove_file(path);
     }
@@ -261,7 +267,11 @@ mod tests {
         write_test_wav(path, 16000, 10000);
         let max_bytes: u64 = 44 + 5000 * 2; // exactly 5000 samples per chunk
         let chunks = split_wav(path, 0, max_bytes).unwrap();
-        assert_eq!(chunks.len(), 2, "10 000 samples split into 5 000-sample chunks should give 2 chunks");
+        assert_eq!(
+            chunks.len(),
+            2,
+            "10 000 samples split into 5 000-sample chunks should give 2 chunks"
+        );
         let _ = std::fs::remove_file(path);
     }
 }

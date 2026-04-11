@@ -10,14 +10,14 @@ use clap::Parser;
 use core::cli::{Cli, Commands, ConfigAction, LocalCommand};
 use core::config::AppConfig;
 use local::{
-    LocalServiceManager, dependencies_installed, download_model, install_requirements,
-    model_weights_present, setup_venv, verify_install,
+    LocalServiceManager, PythonRuntime, dependencies_installed, detect_python_runtime,
+    download_model, install_requirements, model_weights_present, setup_venv, verify_install,
 };
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-const LOCAL_MODEL_NAME: &str = "gemma-4-E4B-it";
+const LOCAL_MODEL_NAME: &str = "gemma-4-E2B-it";
 
 struct LocalServiceGuard(Option<LocalServiceManager>);
 
@@ -142,6 +142,9 @@ fn ensure_local_install(
     let paths = local_paths(config)?;
     let hf_endpoint =
         std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string());
+    let runtime = detect_python_runtime()?;
+
+    print_python_runtime(&runtime);
 
     println!("[local] step 1/4 – python venv");
     setup_venv(&paths.venv_dir)?;
@@ -159,7 +162,7 @@ fn ensure_local_install(
     }
 
     if !model_weights_present(&paths.model_dir) {
-        println!("[local] step 3/4 – downloading google/gemma-4-E4B-it");
+        println!("[local] step 3/4 – downloading google/gemma-4-E2B-it");
         println!("[local]   set HF_ENDPOINT env var to use a mirror");
     } else {
         println!("[local] step 3/4 – model already present, skipping download");
@@ -170,6 +173,20 @@ fn ensure_local_install(
     verify_install(&paths.venv_dir, &paths.model_dir)?;
 
     Ok(paths)
+}
+
+fn print_python_runtime(runtime: &PythonRuntime) {
+    let (major, minor) = runtime.version;
+    println!(
+        "[local] python: {} ({}.{}; require >= 3.10)",
+        runtime.python.display(),
+        major,
+        minor
+    );
+    match &runtime.uv {
+        Some(uv) => println!("[local] package runner: uv ({})", uv.display()),
+        None => println!("[local] package runner: system python fallback"),
+    }
 }
 
 fn local_paths(config: &AppConfig) -> Result<LocalPaths, Box<dyn std::error::Error>> {
@@ -698,7 +715,7 @@ mod integration_tests {
             Some("http://127.0.0.1:17265/v1/chat/completions")
         );
         assert!(local.post_process_enabled);
-        assert_eq!(local.post_process_model.as_deref(), Some("gemma-4-E4B-it"));
+        assert_eq!(local.post_process_model.as_deref(), Some("gemma-4-E2B-it"));
         assert_eq!(local.api_key.as_deref(), Some("local"));
         assert_eq!(local.post_process_api_key.as_deref(), Some("local"));
     }

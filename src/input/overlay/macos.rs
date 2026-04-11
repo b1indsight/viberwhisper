@@ -4,8 +4,8 @@ use objc2::{MainThreadMarker, MainThreadOnly, define_class, extern_methods};
 use objc2_app_kit::{
     NSApp, NSAppearance, NSAppearanceNameAccessibilityHighContrastDarkAqua,
     NSAppearanceNameDarkAqua, NSAppearanceNameVibrantDark, NSApplication,
-    NSApplicationActivationPolicy, NSBackingStoreType, NSBezierPath, NSColor, NSEvent,
-    NSEventMask, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSApplicationActivationPolicy, NSBackingStoreType, NSBezierPath, NSColor, NSEvent, NSEventMask,
+    NSScreen, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,8 +58,7 @@ impl OverlayManager {
         window.setIgnoresMouseEvents(false);
         window.setAlphaValue(0.95);
         window.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::Stationary,
+            NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::Stationary,
         );
 
         let content_view = create_overlay_view(window_rect.size, mtm);

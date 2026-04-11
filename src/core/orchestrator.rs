@@ -4,8 +4,8 @@
 //! chunk tracking, background transcription, convergence wait, and result merging.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -98,7 +98,10 @@ enum ChunkState {
     /// Worker is transcribing this chunk.
     /// `attempt` is reserved for future retry logic (see `max_retries` in AppConfig);
     /// retry is not yet implemented — on failure the chunk transitions directly to `Failed`.
-    Uploading { #[allow(dead_code)] attempt: u32 },
+    Uploading {
+        #[allow(dead_code)]
+        attempt: u32,
+    },
     /// Successfully transcribed.
     Transcribed(String),
     /// Transcription failed (all retries exhausted, or timeout).
@@ -178,7 +181,9 @@ impl SessionOrchestrator {
 
         let mut inner = self.inner.lock().unwrap();
         if inner.is_some() {
-            warn!("start_session called while a session is already active; discarding previous session");
+            warn!(
+                "start_session called while a session is already active; discarding previous session"
+            );
         }
         *inner = Some(ActiveSessionInner {
             mode,
@@ -208,15 +213,16 @@ impl SessionOrchestrator {
             state: ChunkState::Flushed,
         });
 
-        if let Err(e) = session
-            .chunk_tx
-            .send(WorkerMsg::Chunk { index, path: path.clone() })
-        {
+        if let Err(e) = session.chunk_tx.send(WorkerMsg::Chunk {
+            index,
+            path: path.clone(),
+        }) {
             error!(path = %path, error = %e, "Failed to enqueue chunk; marking as failed");
             let mut chunks = session.chunks.lock().unwrap();
             if let Some(entry) = chunks.iter_mut().find(|e| e.index == index) {
-                entry.state =
-                    ChunkState::Failed(TranscribeError::Network("worker channel closed".to_string()));
+                entry.state = ChunkState::Failed(TranscribeError::Network(
+                    "worker channel closed".to_string(),
+                ));
             }
         } else {
             info!(index = index, path = %path, "Chunk enqueued for background transcription");
@@ -260,11 +266,7 @@ impl SessionOrchestrator {
         let mut timed_out = false;
 
         loop {
-            let all_terminal = chunks
-                .lock()
-                .unwrap()
-                .iter()
-                .all(|e| e.state.is_terminal());
+            let all_terminal = chunks.lock().unwrap().iter().all(|e| e.state.is_terminal());
             if all_terminal {
                 break;
             }
@@ -382,9 +384,10 @@ fn classify_error(error_msg: &str) -> TranscribeError {
 fn extract_http_status(msg: &str) -> Option<u16> {
     for token in msg.split_whitespace() {
         if let Ok(n) = token.parse::<u16>()
-            && (100..=599).contains(&n) {
-                return Some(n);
-            }
+            && (100..=599).contains(&n)
+        {
+            return Some(n);
+        }
     }
     None
 }

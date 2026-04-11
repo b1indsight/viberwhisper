@@ -192,7 +192,14 @@ impl AudioRecorder {
                                 (avg * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16
                             })
                             .collect();
-                        push_mono_chunk(mono, &buffer, &sample_count, &flush_needed, sample_rate, chunk_max_samples);
+                        push_mono_chunk(
+                            mono,
+                            &buffer,
+                            &sample_count,
+                            &flush_needed,
+                            sample_rate,
+                            chunk_max_samples,
+                        );
                     }
                 },
                 move |err| error!(error = %err, "Stream error"),
@@ -210,7 +217,14 @@ impl AudioRecorder {
                             })
                             .map(|s| s as i16)
                             .collect();
-                        push_mono_chunk(mono, &buffer, &sample_count, &flush_needed, sample_rate, chunk_max_samples);
+                        push_mono_chunk(
+                            mono,
+                            &buffer,
+                            &sample_count,
+                            &flush_needed,
+                            sample_rate,
+                            chunk_max_samples,
+                        );
                     }
                 },
                 move |err| error!(error = %err, "Stream error"),
