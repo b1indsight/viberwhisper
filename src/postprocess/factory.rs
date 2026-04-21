@@ -34,8 +34,10 @@ mod tests {
 
     #[test]
     fn test_enabled_incomplete_config_falls_back_to_noop() {
-        let mut config = AppConfig::default();
-        config.post_process_enabled = true;
+        let config = AppConfig {
+            post_process_enabled: true,
+            ..Default::default()
+        };
         // Missing api_key, api_url, model — should silently fall back to noop.
         let p = create_post_processor(&config);
         assert_eq!(p.process("hello").unwrap(), "hello");
@@ -43,12 +45,13 @@ mod tests {
 
     #[test]
     fn test_enabled_complete_config_returns_llm_processor() {
-        let mut config = AppConfig::default();
-        config.post_process_enabled = true;
-        config.post_process_api_key = Some("key".to_string());
-        config.post_process_api_url =
-            Some("https://api.example.com/v1/chat/completions".to_string());
-        config.post_process_model = Some("gpt-4o-mini".to_string());
+        let config = AppConfig {
+            post_process_enabled: true,
+            post_process_api_key: Some("key".to_string()),
+            post_process_api_url: Some("https://api.example.com/v1/chat/completions".to_string()),
+            post_process_model: Some("gpt-4o-mini".to_string()),
+            ..Default::default()
+        };
         let p = create_post_processor(&config);
         // LlmPostProcessor passes empty text through without a network call.
         assert_eq!(p.process("").unwrap(), "");

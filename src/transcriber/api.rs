@@ -376,8 +376,10 @@ mod tests {
 
     #[test]
     fn test_api_transcriber_from_config_with_key() {
-        let mut config = AppConfig::default();
-        config.api_key = Some("test_key".to_string());
+        let config = AppConfig {
+            api_key: Some("test_key".to_string()),
+            ..Default::default()
+        };
         let result = ApiTranscriber::from_config(&config);
         assert!(result.is_ok());
         let t = result.unwrap();
@@ -394,20 +396,24 @@ mod tests {
 
     #[test]
     fn test_api_transcriber_custom_url() {
-        let mut config = AppConfig::default();
-        config.api_key = Some("key".to_string());
-        config.transcription_api_url = "https://api.openai.com/v1/audio/transcriptions".to_string();
+        let config = AppConfig {
+            api_key: Some("key".to_string()),
+            transcription_api_url: "https://api.openai.com/v1/audio/transcriptions".to_string(),
+            ..Default::default()
+        };
         let t = ApiTranscriber::from_config(&config).unwrap();
         assert_eq!(t.api_url, "https://api.openai.com/v1/audio/transcriptions");
     }
 
     #[test]
     fn test_api_transcriber_chunk_config_from_config() {
-        let mut config = AppConfig::default();
-        config.api_key = Some("key".to_string());
-        config.max_chunk_duration_secs = 60;
-        config.max_chunk_size_bytes = 10_000_000;
-        config.max_retries = 5;
+        let config = AppConfig {
+            api_key: Some("key".to_string()),
+            max_chunk_duration_secs: 60,
+            max_chunk_size_bytes: 10_000_000,
+            max_retries: 5,
+            ..Default::default()
+        };
         let t = ApiTranscriber::from_config(&config).unwrap();
         assert_eq!(t.max_chunk_duration_secs, 60);
         assert_eq!(t.max_chunk_size_bytes, 10_000_000);
@@ -467,8 +473,10 @@ mod tests {
 
     #[test]
     fn test_local_service_diagnostics_enabled_for_local_mode() {
-        let mut config = AppConfig::default();
-        config.local_mode = true;
+        let config = AppConfig {
+            local_mode: true,
+            ..Default::default()
+        };
         let diagnostics = local_service_diagnostics(&config).unwrap();
         assert_eq!(diagnostics.port, 17265);
         assert!(
