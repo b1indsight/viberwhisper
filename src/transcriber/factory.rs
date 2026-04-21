@@ -40,8 +40,10 @@ mod tests {
 
     #[test]
     fn test_create_transcriber_with_key() {
-        let mut config = AppConfig::default();
-        config.api_key = Some("test_key".to_string());
+        let config = AppConfig {
+            api_key: Some("test_key".to_string()),
+            ..Default::default()
+        };
         // Returns ApiTranscriber; won't actually call the API
         let _t = create_transcriber(&config);
     }
@@ -49,8 +51,10 @@ mod tests {
     #[test]
     fn test_create_transcriber_groq_api_key_compat() {
         // Simulate GROQ_API_KEY being set via config compat path
-        let mut config = AppConfig::default();
-        config.api_key = Some("gsk_compat_key".to_string());
+        let config = AppConfig {
+            api_key: Some("gsk_compat_key".to_string()),
+            ..Default::default()
+        };
         let t = create_transcriber(&config);
         // ApiTranscriber: transcribing a nonexistent file fails with IO error, not mock text
         let result = t.transcribe("/nonexistent/path.wav");

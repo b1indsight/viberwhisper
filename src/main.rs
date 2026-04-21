@@ -699,10 +699,12 @@ mod integration_tests {
 
     #[test]
     fn test_apply_local_endpoint_overrides_enabled_post_process() {
-        let mut config = AppConfig::default();
-        config.local_server_port = 17265;
-        config.post_process_enabled = true;
-        config.post_process_model = Some("gpt-4o-mini".to_string());
+        let config = AppConfig {
+            local_server_port: 17265,
+            post_process_enabled: true,
+            post_process_model: Some("gpt-4o-mini".to_string()),
+            ..Default::default()
+        };
 
         let local = apply_local_endpoint_overrides(&config, "http://127.0.0.1:17265");
 
@@ -722,10 +724,12 @@ mod integration_tests {
 
     #[test]
     fn test_apply_local_endpoint_overrides_keeps_post_process_disabled() {
-        let mut config = AppConfig::default();
-        config.local_server_port = 17265;
-        config.post_process_enabled = false;
-        config.post_process_model = Some("gpt-4o-mini".to_string());
+        let config = AppConfig {
+            local_server_port: 17265,
+            post_process_enabled: false,
+            post_process_model: Some("gpt-4o-mini".to_string()),
+            ..Default::default()
+        };
 
         let local = apply_local_endpoint_overrides(&config, "http://127.0.0.1:17265");
 

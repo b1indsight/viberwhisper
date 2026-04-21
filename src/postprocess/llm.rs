@@ -334,13 +334,13 @@ mod tests {
     use crate::core::config::AppConfig;
 
     fn config_with_postprocess() -> AppConfig {
-        let mut config = AppConfig::default();
-        config.post_process_enabled = true;
-        config.post_process_api_key = Some("test_key".to_string());
-        config.post_process_api_url =
-            Some("https://api.example.com/v1/chat/completions".to_string());
-        config.post_process_model = Some("gpt-4o-mini".to_string());
-        config
+        AppConfig {
+            post_process_enabled: true,
+            post_process_api_key: Some("test_key".to_string()),
+            post_process_api_url: Some("https://api.example.com/v1/chat/completions".to_string()),
+            post_process_model: Some("gpt-4o-mini".to_string()),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -351,16 +351,20 @@ mod tests {
 
     #[test]
     fn test_from_config_missing_url() {
-        let mut config = AppConfig::default();
-        config.post_process_api_key = Some("key".to_string());
+        let config = AppConfig {
+            post_process_api_key: Some("key".to_string()),
+            ..Default::default()
+        };
         assert!(LlmPostProcessor::from_config(&config).is_err());
     }
 
     #[test]
     fn test_from_config_missing_model() {
-        let mut config = AppConfig::default();
-        config.post_process_api_key = Some("key".to_string());
-        config.post_process_api_url = Some("https://example.com/v1/chat/completions".to_string());
+        let config = AppConfig {
+            post_process_api_key: Some("key".to_string()),
+            post_process_api_url: Some("https://example.com/v1/chat/completions".to_string()),
+            ..Default::default()
+        };
         assert!(LlmPostProcessor::from_config(&config).is_err());
     }
 
