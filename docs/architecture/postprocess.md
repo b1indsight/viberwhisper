@@ -45,7 +45,7 @@ Passes text through unchanged. Used when post-processing is disabled or as a fal
 
 ### `LlmPostProcessor`
 
-Calls an OpenAI-compatible chat completions API to clean up transcribed text.
+Calls an OpenAI-compatible chat completions API to clean up transcribed text. This is the only supported post-processing API format.
 
 **Construction:** `LlmPostProcessor::from_config(config) -> Result<Self>`
 
@@ -116,6 +116,8 @@ pub fn create_post_processor(config: &AppConfig) -> Box<dyn TextPostProcessor>
 | `post_process_enabled = true`, config invalid | `NoopPostProcessor` (with warning log) |
 
 Ensures the main pipeline is never blocked by a missing or broken LLM setup.
+
+Configuration errors fall back to `NoopPostProcessor` because post-processing is optional. Runtime LLM request failures and empty LLM outputs are returned to the caller, which keeps the original STT text.
 
 ## Dependencies
 

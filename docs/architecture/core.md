@@ -37,7 +37,6 @@ pub struct AppConfig {
     pub post_process_streaming_enabled: bool, // default: true (preheat mode)
     pub post_process_api_url: Option<String>,
     pub post_process_api_key: Option<String>, // not saved to file
-    pub post_process_api_format: String,      // default: "openai"
     pub post_process_model: Option<String>,
     pub post_process_prompt: Option<String>,
     pub post_process_temperature: f32,        // default: 0.0
@@ -69,7 +68,6 @@ Serialized to/from `config.json` via `serde_json`. `api_key` and `post_process_a
 | `convergence_timeout_secs` | `30` |
 | `post_process_enabled` | `false` |
 | `post_process_streaming_enabled` | `true` |
-| `post_process_api_format` | `"openai"` |
 | `post_process_temperature` | `0.0` |
 | `local_mode` | `false` |
 | `local_server_port` | `17265` |
@@ -92,7 +90,7 @@ Serializes to pretty-printed JSON. `api_key` and `post_process_api_key` are neve
 
 **`get_field(&self, key: &str) -> Option<String>`**
 
-Returns a string representation of the named field. Supported keys: `api_key`, `groq_api_key`, `transcription_api_url`, `provider`, `model`, `hold_hotkey`, `toggle_hotkey`, `temperature`, `mic_gain`, `language`, `prompt`, `max_chunk_duration_secs`, `max_chunk_size_bytes`, `max_retries`, `convergence_timeout_secs`, `post_process_enabled`, `post_process_streaming_enabled`, `post_process_api_url`, `post_process_api_key`, `post_process_api_format`, `post_process_model`, `post_process_prompt`, `post_process_temperature`, `local_mode`, `local_data_dir`, `local_server_port`, `local_quantization`. Returns `"*** (set)"` for API key fields if present; `None` for unknown keys.
+Returns a string representation of the named field. Supported keys: `api_key`, `groq_api_key`, `transcription_api_url`, `provider`, `model`, `hold_hotkey`, `toggle_hotkey`, `temperature`, `mic_gain`, `language`, `prompt`, `max_chunk_duration_secs`, `max_chunk_size_bytes`, `max_retries`, `convergence_timeout_secs`, `post_process_enabled`, `post_process_streaming_enabled`, `post_process_api_url`, `post_process_api_key`, `post_process_model`, `post_process_prompt`, `post_process_temperature`, `local_mode`, `local_data_dir`, `local_server_port`, `local_quantization`. Returns `"*** (set)"` for API key fields if present; `None` for unknown keys.
 
 **`set_field(&mut self, key: &str, value: &str) -> Result<(), String>`**
 
