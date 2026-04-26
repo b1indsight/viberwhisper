@@ -1,8 +1,12 @@
 use crate::core::config::AppConfig;
 use crate::postprocess::{TextPostProcessor, TextPostProcessorSession};
+use reqwest::blocking::Client;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
 use tracing::info;
+
+const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 const DEFAULT_PROMPT: &str = "请将下面的语音转写结果整理为适合直接发送的中文文本：\n\
     - 保留原意，不要扩写\n\
@@ -18,6 +22,7 @@ pub struct LlmPostProcessor {
     prompt: String,
     temperature: f32,
     streaming_enabled: bool,
+    client: Client,
 }
 
 impl LlmPostProcessor {
@@ -45,11 +50,13 @@ impl LlmPostProcessor {
             prompt,
             temperature: config.post_process_temperature,
             streaming_enabled: config.post_process_streaming_enabled,
+            client: Client::builder().timeout(LLM_REQUEST_TIMEOUT).build()?,
         })
     }
 
     fn call_llm(&self, text: &str) -> Result<String, Box<dyn std::error::Error>> {
         call_llm_impl(
+            &self.client,
             &self.api_key,
             &self.api_url,
             &self.model,
@@ -61,6 +68,7 @@ impl LlmPostProcessor {
 }
 
 fn call_llm_impl(
+    client: &Client,
     api_key: &str,
     api_url: &str,
     model: &str,
@@ -78,7 +86,6 @@ fn call_llm_impl(
         "stream": false
     });
 
-    let client = reqwest::blocking::Client::new();
     let response = client
         .post(api_url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -126,6 +133,7 @@ impl TextPostProcessor for LlmPostProcessor {
                 self.model.clone(),
                 self.prompt.clone(),
                 self.temperature,
+                self.client.clone(),
             ))
         } else {
             Box::new(ConservativeLlmSession {
@@ -134,6 +142,7 @@ impl TextPostProcessor for LlmPostProcessor {
                 model: self.model.clone(),
                 prompt: self.prompt.clone(),
                 temperature: self.temperature,
+                client: self.client.clone(),
                 chunks: Vec::new(),
             })
         }
@@ -150,6 +159,7 @@ struct ConservativeLlmSession {
     model: String,
     prompt: String,
     temperature: f32,
+    client: Client,
     chunks: Vec<String>,
 }
 
@@ -161,11 +171,14 @@ impl TextPostProcessorSession for ConservativeLlmSession {
     }
 
     fn finish(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+        // Post-processing receives already ordered stable text fragments; joining
+        // without separators preserves the STT layer's chosen spacing/punctuation.
         let combined = self.chunks.join("");
         if combined.is_empty() {
             return Ok(combined);
         }
         call_llm_impl(
+            &self.client,
             &self.api_key,
             &self.api_url,
             &self.model,
@@ -194,6 +207,7 @@ struct PreheatLlmSession {
     model: String,
     prompt: String,
     temperature: f32,
+    client: Client,
     chunks: Vec<String>,
     generation: u64,
     state: Arc<(Mutex<PreheatState>, Condvar)>,
@@ -206,6 +220,7 @@ impl PreheatLlmSession {
         model: String,
         prompt: String,
         temperature: f32,
+        client: Client,
     ) -> Self {
         Self {
             api_key,
@@ -213,6 +228,7 @@ impl PreheatLlmSession {
             model,
             prompt,
             temperature,
+            client,
             chunks: Vec::new(),
             generation: 0,
             state: Arc::new((
@@ -226,6 +242,8 @@ impl PreheatLlmSession {
     }
 
     fn fire_request(&mut self) {
+        // Post-processing accumulates stable text exactly as received; it does
+        // not add separators because upstream text already owns word spacing.
         let combined = self.chunks.join("");
         if combined.is_empty() {
             return;
@@ -246,10 +264,19 @@ impl PreheatLlmSession {
         let model = self.model.clone();
         let prompt = self.prompt.clone();
         let temperature = self.temperature;
+        let client = self.client.clone();
         let state = Arc::clone(&self.state);
 
         thread::spawn(move || {
-            let result = call_llm_impl(&api_key, &api_url, &model, &prompt, temperature, &combined);
+            let result = call_llm_impl(
+                &client,
+                &api_key,
+                &api_url,
+                &model,
+                &prompt,
+                temperature,
+                &combined,
+            );
 
             let (lock, cvar) = &*state;
             let mut st = lock.lock().unwrap();
@@ -277,6 +304,8 @@ impl TextPostProcessorSession for PreheatLlmSession {
     }
 
     fn finish(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+        // Keep post-processing concatenation separator-free; the STT result is
+        // already a display-ready text stream before LLM cleanup.
         let combined = self.chunks.join("");
         if combined.is_empty() {
             return Ok(combined);
@@ -286,6 +315,7 @@ impl TextPostProcessorSession for PreheatLlmSession {
         // with non-empty text, but be safe), fire one now.
         if self.generation == 0 {
             return call_llm_impl(
+                &self.client,
                 &self.api_key,
                 &self.api_url,
                 &self.model,
@@ -316,6 +346,7 @@ impl TextPostProcessorSession for PreheatLlmSession {
                 info!(error = %e, "Preheat: last request failed, retrying with full text");
                 drop(st);
                 call_llm_impl(
+                    &self.client,
                     &self.api_key,
                     &self.api_url,
                     &self.model,
@@ -474,6 +505,10 @@ mod tests {
             "model".to_string(),
             "prompt".to_string(),
             0.0,
+            Client::builder()
+                .timeout(LLM_REQUEST_TIMEOUT)
+                .build()
+                .unwrap(),
         );
         assert_eq!(session.generation, 0);
         // push_stable_chunk fires a request and increments generation.

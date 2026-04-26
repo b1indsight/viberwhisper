@@ -191,7 +191,6 @@ pub post_process_enabled: bool,
 pub post_process_streaming_enabled: bool,
 pub post_process_api_url: Option<String>,
 pub post_process_api_key: Option<String>,
-pub post_process_api_format: String,
 pub post_process_model: Option<String>,
 pub post_process_prompt: Option<String>,
 pub post_process_temperature: f32,
@@ -205,7 +204,6 @@ pub post_process_temperature: f32,
 | `post_process_streaming_enabled` | `true` | 启用后优先采用增量输入 + 流式 LLM 调用 |
 | `post_process_api_url` | `None` | 未启用时不需要 |
 | `post_process_api_key` | `None` | 建议支持环境变量覆盖 |
-| `post_process_api_format` | `"openai"` | 后处理层直接兼容 OpenAI 格式 API |
 | `post_process_model` | `None` | 未启用时不需要 |
 | `post_process_prompt` | 内置默认 prompt 或 `None` | 用户可覆盖 |
 | `post_process_temperature` | `0.0` | 保守输出，降低发散 |
@@ -271,7 +269,7 @@ pub struct LlmPostProcessor {
 
 - STT 层：维持当前接口与 provider 兼容面，不在本期借这个 feature 额外扩张范围
 - 后处理层：优先对接 OpenAI-compatible text generation / streaming API
-- 配置层通过 `post_process_api_url` + `post_process_api_format = "openai"` 保持明确语义
+- 配置层通过 `post_process_api_url` 指向 OpenAI-compatible chat completions 端点
 - 第一阶段先把 OpenAI 格式跑通；其他 provider 如有必要再在此基础上扩展
 
 换句话说，这里不是“顺手重做整套识别协议”，而是“**在现有 STT 边界之外，把后处理层的 OpenAI 兼容流式调用先跑通**”。
