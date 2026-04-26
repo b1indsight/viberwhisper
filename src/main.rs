@@ -319,6 +319,11 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
             StopResult::SingleFile(path) | StopResult::TailChunk(path) => {
                 orchestrator.on_chunk_ready(path);
             }
+            StopResult::ChunkFiles(paths) => {
+                for path in paths {
+                    orchestrator.on_chunk_ready(path);
+                }
+            }
             StopResult::ChunksOnly => {
                 debug!("All audio was flushed to background chunks during recording; no tail");
             }
