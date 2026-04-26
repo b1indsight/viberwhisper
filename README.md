@@ -157,12 +157,12 @@ viberwhisper convert input.wav --output output.txt
 | `post_process_streaming_enabled` | 布尔 | `true` | 是否启用预热模式（录音中提前发送 LLM 请求） |
 | `post_process_api_url` | 字符串 | 无 | LLM chat completions API 地址 |
 | `post_process_api_key` | 字符串 | 无 | LLM API 密钥（不写入配置文件，可通过 `POST_PROCESS_API_KEY` 环境变量设置） |
-| `post_process_api_format` | 字符串 | `openai` | API 格式（目前仅支持 openai） |
 | `post_process_model` | 字符串 | 无 | LLM 模型名（如 `gpt-4o-mini`） |
 | `post_process_prompt` | 字符串 | 内置默认 | 后处理系统提示词 |
 | `post_process_temperature` | 数字 | `0.0` | 后处理温度 |
 
 > **注意**：`config.json` 已在 `.gitignore` 中排除，避免误提交真实密钥。`api_key` 和 `post_process_api_key` 不会被程序写回磁盘。
+> 后处理当前固定使用 OpenAI-compatible chat completions 请求格式。
 
 ### 本地模式
 

@@ -27,10 +27,6 @@ fn default_post_process_streaming_enabled() -> bool {
     true
 }
 
-fn default_post_process_api_format() -> String {
-    "openai".to_string()
-}
-
 fn default_local_server_port() -> u16 {
     17265
 }
@@ -92,9 +88,6 @@ pub struct AppConfig {
     /// `POST_PROCESS_API_KEY` env var.
     #[serde(skip)]
     pub post_process_api_key: Option<String>,
-    /// API format for the post-processor (currently only "openai" is supported).
-    #[serde(default = "default_post_process_api_format")]
-    pub post_process_api_format: String,
     /// LLM model name for post-processing (e.g., "gpt-4o-mini").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_process_model: Option<String>,
@@ -139,7 +132,6 @@ impl Default for AppConfig {
             post_process_streaming_enabled: default_post_process_streaming_enabled(),
             post_process_api_url: None,
             post_process_api_key: None,
-            post_process_api_format: default_post_process_api_format(),
             post_process_model: None,
             post_process_prompt: None,
             post_process_temperature: 0.0,
@@ -218,7 +210,6 @@ impl AppConfig {
                 .post_process_api_key
                 .as_ref()
                 .map(|_| "*** (set)".to_string()),
-            "post_process_api_format" => Some(self.post_process_api_format.clone()),
             "post_process_model" => self.post_process_model.clone(),
             "post_process_prompt" => self.post_process_prompt.clone(),
             "post_process_temperature" => Some(self.post_process_temperature.to_string()),
@@ -324,10 +315,6 @@ impl AppConfig {
                 self.post_process_api_key = Some(value.to_string());
                 Ok(())
             }
-            "post_process_api_format" => {
-                self.post_process_api_format = value.to_string();
-                Ok(())
-            }
             "post_process_model" => {
                 self.post_process_model = Some(value.to_string());
                 Ok(())
@@ -367,8 +354,8 @@ impl AppConfig {
                  hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain, \
                  max_chunk_duration_secs, max_chunk_size_bytes, max_retries, \
                  convergence_timeout_secs, post_process_enabled, post_process_streaming_enabled, \
-                 post_process_api_url, post_process_api_key, post_process_api_format, \
-                 post_process_model, post_process_prompt, post_process_temperature, \
+                 post_process_api_url, post_process_api_key, post_process_model, \
+                 post_process_prompt, post_process_temperature, \
                  local_mode, local_data_dir, local_server_port, local_quantization",
                 key
             )),
@@ -440,9 +427,6 @@ impl AppConfig {
         }
         if let Some(v) = json["post_process_api_key"].as_str() {
             self.post_process_api_key = Some(v.to_string());
-        }
-        if let Some(v) = json["post_process_api_format"].as_str() {
-            self.post_process_api_format = v.to_string();
         }
         if let Some(v) = json["post_process_model"].as_str() {
             self.post_process_model = Some(v.to_string());
@@ -741,12 +725,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_post_process_api_format() {
-        let config = AppConfig::default();
-        assert_eq!(config.post_process_api_format, "openai");
-    }
-
-    #[test]
     fn test_get_set_post_process_enabled() {
         let mut config = AppConfig::default();
         assert_eq!(
@@ -839,7 +817,6 @@ mod tests {
         config.apply_json(&json);
         assert!(!config.post_process_enabled);
         assert!(config.post_process_streaming_enabled);
-        assert_eq!(config.post_process_api_format, "openai");
         assert!(config.post_process_api_key.is_none());
         assert!(config.post_process_model.is_none());
     }

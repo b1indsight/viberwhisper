@@ -336,10 +336,12 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
                     match session.finish() {
                         Ok(processed) if !processed.is_empty() => processed,
                         Ok(_) => {
+                            // Empty post-process output is not useful; keep the STT text.
                             warn!("Post-processing returned empty text, using original STT text");
                             stt_text
                         }
                         Err(e) => {
+                            // Runtime LLM errors should not discard a successful STT result.
                             warn!(error = %e, "Post-processing failed, using original STT text");
                             stt_text
                         }
@@ -542,7 +544,6 @@ fn handle_config(action: ConfigAction) {
                 "post_process_streaming_enabled",
                 "post_process_api_url",
                 "post_process_api_key",
-                "post_process_api_format",
                 "post_process_model",
                 "post_process_prompt",
                 "post_process_temperature",
@@ -611,10 +612,12 @@ fn handle_convert(input: &str, output: Option<&str>) {
             let text = match post_processor.process(&stt_text) {
                 Ok(processed) if !processed.is_empty() => processed,
                 Ok(_) => {
+                    // Empty post-process output is not useful; keep the STT text.
                     warn!("Post-processing returned empty text, using original STT text");
                     stt_text
                 }
                 Err(e) => {
+                    // Runtime LLM errors should not discard a successful STT result.
                     warn!(error = %e, "Post-processing failed, using original STT text");
                     stt_text
                 }
