@@ -278,7 +278,7 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
     )?));
 
     // Build transcriber and wrap in Arc<dyn Transcriber> for orchestrator injection.
-    let transcriber: Arc<dyn Transcriber> = Arc::from(create_transcriber(&config));
+    let transcriber: Arc<dyn Transcriber> = Arc::from(create_transcriber(&config)?);
 
     let post_processor = create_post_processor(&config);
 
@@ -597,7 +597,13 @@ fn handle_convert(input: &str, output: Option<&str>) {
         }
     };
     let _local_manager = LocalServiceGuard::new(local_manager);
-    let transcriber: Box<dyn Transcriber> = create_transcriber(&config);
+    let transcriber: Box<dyn Transcriber> = match create_transcriber(&config) {
+        Ok(transcriber) => transcriber,
+        Err(e) => {
+            eprintln!("Failed to initialize transcriber: {}", e);
+            std::process::exit(1);
+        }
+    };
     let post_processor = create_post_processor(&config);
 
     match transcriber.transcribe(input) {

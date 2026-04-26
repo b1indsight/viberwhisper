@@ -151,9 +151,9 @@ impl LocalServiceManager {
                     .stdin(Stdio::null())
                     .stdout(stdout_stdio)
                     .stderr(stderr_stdio);
-                python_command
-                    .spawn()
-                    .map_err(|error| format!("failed to start local service with direct python: {error}"))?
+                python_command.spawn().map_err(|error| {
+                    format!("failed to start local service with direct python: {error}")
+                })?
             }
         };
 
@@ -171,8 +171,7 @@ impl LocalServiceManager {
             HEALTH_TIMEOUT,
             HEALTH_INITIAL_DELAY,
             HEALTH_POLL_INTERVAL,
-        )
-        {
+        ) {
             let msg = match &self.log_file {
                 Some(path) => format!("{error} (see server log for details: {})", path.display()),
                 None => error.to_string(),
@@ -247,7 +246,11 @@ impl LocalServiceManager {
             Ok(status) => format!("http {}", status.as_u16()),
             Err(error) => error.to_string(),
         };
-        let memory_usage = if running { pid.and_then(read_memory_usage) } else { None };
+        let memory_usage = if running {
+            pid.and_then(read_memory_usage)
+        } else {
+            None
+        };
 
         Ok(LocalServiceStatus {
             running,
@@ -297,18 +300,24 @@ impl LocalServiceManager {
             )
         })?;
 
-        let stdout = OpenOptions::new().append(true).open(path).map_err(|error| {
-            format!(
-                "failed to open local service log file for stdout {}: {error}",
-                path.display()
-            )
-        })?;
-        let stderr = OpenOptions::new().append(true).open(path).map_err(|error| {
-            format!(
-                "failed to open local service log file for stderr {}: {error}",
-                path.display()
-            )
-        })?;
+        let stdout = OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(|error| {
+                format!(
+                    "failed to open local service log file for stdout {}: {error}",
+                    path.display()
+                )
+            })?;
+        let stderr = OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(|error| {
+                format!(
+                    "failed to open local service log file for stderr {}: {error}",
+                    path.display()
+                )
+            })?;
 
         Ok((Stdio::from(stdout), Stdio::from(stderr)))
     }
@@ -606,10 +615,8 @@ mod tests {
 
     #[test]
     fn test_status_clears_stale_pid_file() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "viberwhisper-local-service-{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("viberwhisper-local-service-{}", std::process::id()));
         let model_dir = temp_dir.join("model");
         let venv_dir = temp_dir.join("venv");
         fs::create_dir_all(&model_dir).unwrap();

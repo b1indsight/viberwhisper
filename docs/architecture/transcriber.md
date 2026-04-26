@@ -28,15 +28,16 @@ The single method takes a file path and returns the transcribed text or an error
 ## Factory (`src/transcriber/factory.rs`)
 
 ```rust
-pub fn create_transcriber(config: &AppConfig) -> Box<dyn Transcriber>
+pub fn create_transcriber(config: &AppConfig) -> Result<Box<dyn Transcriber>, Box<dyn std::error::Error>>
 ```
 
-Creates an `ApiTranscriber` from `config.api_key` and `config.transcription_api_url`. Falls back to `MockTranscriber` when no API key is configured.
+Creates an `ApiTranscriber` from `config.api_key` and `config.transcription_api_url`. In debug/test builds, falls back to `MockTranscriber` when no API key is configured. In release builds, returns the initialization error instead of silently using mock transcription.
 
 | Condition | Result |
 |---|---|
 | `config.api_key` is set | `ApiTranscriber` |
-| `config.api_key` is `None` | `MockTranscriber` (with a warning log) |
+| `config.api_key` is `None`, debug/test build | `MockTranscriber` (with a warning log) |
+| `config.api_key` is `None`, release build | Error |
 
 ---
 
@@ -118,7 +119,9 @@ Returns the fixed string `"This is mock transcribed text"` without making any ne
 ```rust
 pub mod api;
 pub mod factory;
-pub use api::{ApiTranscriber, MockTranscriber, Transcriber};
+#[cfg(test)]
+pub use api::MockTranscriber;
+pub use api::Transcriber;
 pub use factory::create_transcriber;
 ```
 
