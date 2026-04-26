@@ -103,7 +103,6 @@ src/
   transcriber/
     api.rs                   — API-backed transcriber implementation
     factory.rs               — create_transcriber factory function
-    groq.rs                  — Groq-specific transcription integration
     mod.rs                   — Transcriber traits and exports
   postprocess/
     mod.rs                   — TextPostProcessor/TextPostProcessorSession traits, NoopPostProcessor

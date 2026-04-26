@@ -1,7 +1,5 @@
 use crate::audio::split_wav;
 use crate::core::config::AppConfig;
-use crate::local::LocalServiceManager;
-use std::path::PathBuf;
 use tracing::{info, instrument, warn};
 
 pub trait Transcriber: Send + Sync {
@@ -41,14 +39,6 @@ pub struct ApiTranscriber {
     max_chunk_size_bytes: u64,
     /// Maximum retry attempts per chunk on transient errors (5xx / network).
     max_retries: u32,
-    local_service: Option<LocalServiceDiagnostics>,
-}
-
-#[derive(Clone)]
-struct LocalServiceDiagnostics {
-    port: u16,
-    log_file: PathBuf,
-    pid_file: PathBuf,
 }
 
 impl ApiTranscriber {
@@ -67,7 +57,6 @@ impl ApiTranscriber {
             max_chunk_duration_secs: config.max_chunk_duration_secs,
             max_chunk_size_bytes: config.max_chunk_size_bytes,
             max_retries: config.max_retries,
-            local_service: local_service_diagnostics(config),
         })
     }
 
@@ -163,25 +152,24 @@ impl ApiTranscriber {
             match self.try_upload(wav_path) {
                 Ok(text) => return Ok(text),
                 Err(e) => {
-                    let enriched_error = self.enrich_error(e);
                     // Extract HTTP status from error message if present.
-                    let msg = enriched_error.to_string();
+                    let msg = e.to_string();
                     // Parse "API error 4XX: ..." — do not retry 4xx.
                     if let Some(status_str) = msg.strip_prefix("API error ")
                         && let Some(code_str) = status_str.split(':').next()
                         && let Ok(code) = code_str.trim().parse::<u16>()
                         && !Self::is_retryable_status(code)
                     {
-                        return Err(enriched_error);
+                        return Err(e);
                     }
                     warn!(
                         chunk = chunk_index + 1,
                         total = total_chunks,
                         attempt = attempt,
-                        error = %enriched_error,
+                        error = %e,
                         "Chunk upload failed"
                     );
-                    last_error = enriched_error;
+                    last_error = e;
                 }
             }
         }
@@ -200,16 +188,6 @@ impl ApiTranscriber {
     fn try_upload(&self, wav_path: &str) -> Result<String, Box<dyn std::error::Error>> {
         self.upload_file(wav_path)
     }
-
-    fn enrich_error(&self, error: Box<dyn std::error::Error>) -> Box<dyn std::error::Error> {
-        let Some(local_service) = &self.local_service else {
-            return error;
-        };
-
-        let base_message = error.to_string();
-        let diagnostics = local_service.describe_failure();
-        format!("{base_message}; {diagnostics}").into()
-    }
 }
 
 /// Merge transcription results from multiple chunks.
@@ -227,97 +205,6 @@ fn merge_texts(texts: &[String], language: Option<&str>) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join(separator)
-}
-
-impl LocalServiceDiagnostics {
-    fn describe_failure(&self) -> String {
-        let running = self
-            .read_pid()
-            .is_some_and(LocalServiceDiagnostics::is_pid_running);
-        let health = self.health();
-        format!(
-            "local service diagnostics: running={running}, port={}, health={}, log_file={}",
-            self.port,
-            health,
-            self.log_file.display()
-        )
-    }
-
-    fn health(&self) -> String {
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(2))
-            .build()
-        {
-            Ok(client) => client,
-            Err(error) => return error.to_string(),
-        };
-
-        match client
-            .get(format!("http://127.0.0.1:{}/health", self.port))
-            .send()
-        {
-            Ok(resp) => format!("http {}", resp.status().as_u16()),
-            Err(error) => error.to_string(),
-        }
-    }
-
-    fn read_pid(&self) -> Option<u32> {
-        std::fs::read_to_string(&self.pid_file)
-            .ok()
-            .and_then(|value| value.trim().parse::<u32>().ok())
-    }
-
-    fn is_pid_running(pid: u32) -> bool {
-        #[cfg(target_os = "windows")]
-        {
-            std::process::Command::new("tasklist")
-                .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-                .output()
-                .ok()
-                .map(|output| {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    stdout.contains(&format!(",\"{pid}\""))
-                })
-                .unwrap_or(false)
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            std::process::Command::new("ps")
-                .args(["-p", &pid.to_string(), "-o", "pid="])
-                .output()
-                .ok()
-                .map(|output| {
-                    output.status.success()
-                        && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
-                })
-                .unwrap_or(false)
-        }
-    }
-}
-
-fn local_service_diagnostics(config: &AppConfig) -> Option<LocalServiceDiagnostics> {
-    let localhost = format!("http://127.0.0.1:{}", config.local_server_port);
-    let using_local_endpoint =
-        config.local_mode || config.transcription_api_url.starts_with(&localhost);
-    if !using_local_endpoint {
-        return None;
-    }
-
-    let data_dir = resolve_local_data_dir(config.local_data_dir.as_deref())?;
-    Some(LocalServiceDiagnostics {
-        port: config.local_server_port,
-        log_file: LocalServiceManager::default_log_file_path(&data_dir),
-        pid_file: data_dir.join("local_server.pid"),
-    })
-}
-
-fn resolve_local_data_dir(configured: Option<&str>) -> Option<PathBuf> {
-    match configured {
-        Some(path) if path.starts_with("~/") => dirs::home_dir().map(|home| home.join(&path[2..])),
-        Some(path) => Some(PathBuf::from(path)),
-        None => dirs::home_dir().map(|home| home.join(".viberwhisper")),
-    }
 }
 
 impl Transcriber for ApiTranscriber {
@@ -357,7 +244,6 @@ impl Transcriber for ApiTranscriber {
 mod tests {
     use super::*;
     use crate::core::config::AppConfig;
-    use std::path::{Path, PathBuf};
 
     #[test]
     fn test_mock_transcriber_returns_text() {
@@ -469,51 +355,5 @@ mod tests {
         assert!(!ApiTranscriber::is_retryable_status(400));
         assert!(!ApiTranscriber::is_retryable_status(404));
         assert!(!ApiTranscriber::is_retryable_status(429));
-    }
-
-    #[test]
-    fn test_local_service_diagnostics_enabled_for_local_mode() {
-        let config = AppConfig {
-            local_mode: true,
-            ..Default::default()
-        };
-        let diagnostics = local_service_diagnostics(&config).unwrap();
-        assert_eq!(diagnostics.port, 17265);
-        assert!(
-            diagnostics
-                .log_file
-                .ends_with(Path::new(".viberwhisper/server.log"))
-        );
-        assert!(
-            diagnostics
-                .pid_file
-                .ends_with(Path::new(".viberwhisper/local_server.pid"))
-        );
-    }
-
-    #[test]
-    fn test_enrich_error_includes_local_service_details() {
-        let transcriber = ApiTranscriber {
-            api_key: "key".to_string(),
-            api_url: "http://127.0.0.1:17265/v1/audio/transcriptions".to_string(),
-            model: "m".to_string(),
-            language: None,
-            prompt: None,
-            temperature: 0.0,
-            max_chunk_duration_secs: 30,
-            max_chunk_size_bytes: 1024,
-            max_retries: 1,
-            local_service: Some(LocalServiceDiagnostics {
-                port: 17265,
-                log_file: PathBuf::from("/tmp/server.log"),
-                pid_file: PathBuf::from("/tmp/local_server.pid"),
-            }),
-        };
-
-        let error = transcriber.enrich_error("boom".to_string().into());
-        let message = error.to_string();
-        assert!(message.contains("boom"));
-        assert!(message.contains("local service diagnostics:"));
-        assert!(message.contains("/tmp/server.log"));
     }
 }

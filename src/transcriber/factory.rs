@@ -5,9 +5,12 @@ use tracing::{info, warn};
 /// Create a transcriber from config.
 ///
 /// Attempts to initialize `ApiTranscriber` using `config.api_key` and
-/// `config.transcription_api_url`. Falls back to `MockTranscriber` when no
-/// API key is configured.
-pub fn create_transcriber(config: &AppConfig) -> Box<dyn Transcriber> {
+/// `config.transcription_api_url`. In debug/test builds, falls back to
+/// `MockTranscriber` when no API key is configured. In release builds, returns
+/// the initialization error so missing transcription configuration is explicit.
+pub fn create_transcriber(
+    config: &AppConfig,
+) -> Result<Box<dyn Transcriber>, Box<dyn std::error::Error>> {
     match ApiTranscriber::from_config(config) {
         Ok(t) => {
             info!(
@@ -15,11 +18,15 @@ pub fn create_transcriber(config: &AppConfig) -> Box<dyn Transcriber> {
                 api_url = %config.transcription_api_url,
                 "Using API transcriber for speech recognition"
             );
-            Box::new(t)
+            Ok(Box::new(t))
         }
         Err(e) => {
-            warn!(error = %e, "Failed to initialize API transcriber, falling back to Mock mode");
-            Box::new(MockTranscriber)
+            if cfg!(any(debug_assertions, test)) {
+                warn!(error = %e, "Failed to initialize API transcriber, falling back to Mock mode");
+                Ok(Box::new(MockTranscriber))
+            } else {
+                Err(e)
+            }
         }
     }
 }
@@ -32,7 +39,7 @@ mod tests {
     #[test]
     fn test_create_transcriber_no_key_falls_back_to_mock() {
         let config = AppConfig::default(); // no api_key
-        let t = create_transcriber(&config);
+        let t = create_transcriber(&config).unwrap();
         // MockTranscriber still returns ok
         let result = t.transcribe("fake.wav");
         assert!(result.is_ok());
@@ -45,7 +52,7 @@ mod tests {
             ..Default::default()
         };
         // Returns ApiTranscriber; won't actually call the API
-        let _t = create_transcriber(&config);
+        let _t = create_transcriber(&config).unwrap();
     }
 
     #[test]
@@ -55,7 +62,7 @@ mod tests {
             api_key: Some("gsk_compat_key".to_string()),
             ..Default::default()
         };
-        let t = create_transcriber(&config);
+        let t = create_transcriber(&config).unwrap();
         // ApiTranscriber: transcribing a nonexistent file fails with IO error, not mock text
         let result = t.transcribe("/nonexistent/path.wav");
         assert!(result.is_err());
