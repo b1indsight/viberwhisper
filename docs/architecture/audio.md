@@ -71,7 +71,7 @@ Creates a recorder with explicit chunk-splitting config. The chunk threshold is 
 
 Polls for a completed chunk during recording. Returns `Some(path)` when a chunk has been flushed to disk. Should be called periodically from the main event loop.
 
-The audio callback updates `ready_chunk_count` as chunk boundaries are crossed. This method compares that count with `flushed_samples`, copies the next complete chunk out of the shared buffer, releases the buffer lock, writes the chunk to `./tmp/chunk_live_NNNN_TIMESTAMP.wav`, advances `flushed_samples`, and returns the path. Repeated calls drain multiple ready chunks without losing boundaries.
+The audio callback updates `ready_chunk_count` as chunk boundaries are crossed. This method compares that count with `flushed_samples`, copies the next complete chunk out of the shared buffer, releases the buffer lock, writes the chunk to a collision-safe temporary WAV path, removes the flushed samples from memory, advances `flushed_samples`, and returns the path. Repeated calls drain multiple ready chunks without losing boundaries or retaining the full recording in memory.
 
 ### `stop_recording(&mut self) -> Result<StopResult>`
 

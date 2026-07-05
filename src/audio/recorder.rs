@@ -4,11 +4,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
 use tracing::{debug, error, info, instrument, warn};
+
+use super::unique_temp_wav_path;
 
 pub struct AudioRecorder {
     recording: Arc<AtomicBool>,
@@ -179,9 +181,6 @@ impl AudioRecorder {
         buffer.lock().unwrap().clear();
         sample_count.store(0, Ordering::Relaxed);
 
-        // Set to true before starting stream to avoid dropping initial frames
-        self.recording.store(true, Ordering::Relaxed);
-
         let stream = match sample_format {
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config.into(),
@@ -207,7 +206,7 @@ impl AudioRecorder {
                 },
                 move |err| error!(error = %err, "Stream error"),
                 None,
-            )?,
+            ),
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -232,14 +231,20 @@ impl AudioRecorder {
                 },
                 move |err| error!(error = %err, "Stream error"),
                 None,
-            )?,
+            ),
             _ => {
                 self.recording.store(false, Ordering::Relaxed);
                 return Err("Unsupported sample format".into());
             }
-        };
+        }?;
 
-        stream.play()?;
+        // Enable callbacks immediately before playback. Roll back the state if
+        // the backend rejects playback so the next start request can retry.
+        self.recording.store(true, Ordering::Relaxed);
+        if let Err(error) = stream.play() {
+            self.recording.store(false, Ordering::Relaxed);
+            return Err(error.into());
+        }
         self.stream = Some(stream);
 
         info!("Recording started");
@@ -268,19 +273,20 @@ impl AudioRecorder {
         let chunk_samples = {
             let buffer = self.buffer.lock().unwrap();
             let total_samples = buffer.len();
-            if total_samples < chunk_end {
+            if total_samples < self.chunk_max_samples {
                 debug!(
                     total_samples = total_samples,
-                    chunk_end = chunk_end,
+                    chunk_size = self.chunk_max_samples,
                     "Chunk count is ahead of buffered samples; retrying later"
                 );
                 return None;
             }
-            buffer[self.flushed_samples..chunk_end].to_vec()
+            buffer[..self.chunk_max_samples].to_vec()
         };
 
         match self.write_chunk(&chunk_samples, chunk_index) {
             Ok(path) => {
+                self.buffer.lock().unwrap().drain(..self.chunk_max_samples);
                 self.flushed_samples = chunk_end;
                 Some(path)
             }
@@ -298,11 +304,7 @@ impl AudioRecorder {
         chunk_index: usize,
     ) -> Result<String, Box<dyn std::error::Error>> {
         std::fs::create_dir_all("./tmp")?;
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let path = PathBuf::from(format!(
-            "./tmp/chunk_live_{:04}_{}.wav",
-            chunk_index, timestamp
-        ));
+        let path = unique_temp_wav_path(&format!("chunk_live_{chunk_index:04}"))?;
 
         write_wav_to_path(&path, samples, self.sample_rate)?;
 
@@ -336,7 +338,7 @@ impl AudioRecorder {
                 return Err("No audio data recorded".into());
             }
 
-            let tail_samples = buffer[self.flushed_samples..].to_vec();
+            let tail_samples = buffer.to_vec();
             let chunk_index = if self.flushed_samples > 0 && self.chunk_max_samples > 0 {
                 self.flushed_samples / self.chunk_max_samples
             } else {
@@ -403,8 +405,7 @@ impl AudioRecorder {
         buffer: &[i16],
     ) -> Result<String, Box<dyn std::error::Error>> {
         std::fs::create_dir_all("./tmp")?;
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let path = PathBuf::from(format!("./tmp/recording_{}.wav", timestamp));
+        let path = unique_temp_wav_path("recording")?;
         let filename = path.to_string_lossy().to_string();
         debug!(path = %filename, "Saving recording");
 
@@ -546,6 +547,23 @@ mod tests {
         assert!(fourth.is_none());
         assert_eq!(recorder.flushed_samples, 30);
         assert_eq!(recorder.current_session_files.len(), 3);
+        assert!(
+            recorder.buffer.lock().unwrap().is_empty(),
+            "flushed samples should be released from memory"
+        );
+
+        for path in recorder.current_session_files {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn test_chunk_paths_are_unique() {
+        let mut recorder = recorder_for_buffer(Vec::new(), 10);
+        let first = recorder.write_chunk(&[1, 2, 3], 0).unwrap();
+        let second = recorder.write_chunk(&[4, 5, 6], 0).unwrap();
+
+        assert_ne!(first, second);
 
         for path in recorder.current_session_files {
             let _ = std::fs::remove_file(path);
