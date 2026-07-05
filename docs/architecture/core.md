@@ -29,8 +29,8 @@ pub struct AppConfig {
     pub mic_gain: f32,
     pub max_chunk_duration_secs: u32,         // max seconds per audio chunk (default: 30)
     pub max_chunk_size_bytes: u64,            // max bytes per chunk incl. WAV header (default: 23 MiB)
-    pub max_retries: u32,                     // max retry attempts per chunk upload (default: 3)
-    pub convergence_timeout_secs: u64,        // session convergence timeout (default: 30)
+    pub max_retries: u32,                     // max retry attempts (default: 3, max: 16)
+    pub convergence_timeout_secs: u64,        // timeout (default: 30s, max: 3600s)
 
     // --- LLM Post-processing ---
     pub post_process_enabled: bool,           // default: false
@@ -86,7 +86,7 @@ Loads config in priority order:
 
 **`save(&self) -> Result<()>`**
 
-Serializes to pretty-printed JSON. `api_key` and `post_process_api_key` are never written to disk.
+Serializes to pretty-printed JSON. Runtime/environment secrets are never introduced into the file. If `api_key`, legacy `groq_api_key`, or `post_process_api_key` already exists in `config.json`, it is preserved when other fields are updated.
 
 **`get_field(&self, key: &str) -> Option<String>`**
 
@@ -94,7 +94,7 @@ Returns a string representation of the named field. Supported keys: `api_key`, `
 
 **`set_field(&mut self, key: &str, value: &str) -> Result<(), String>`**
 
-Sets a field by name with auto type conversion (strings, floats, bools, integers). `groq_api_key` is accepted as an alias for `api_key`. Local runtime keys can also be mutated from CLI.
+Sets a field by name with type conversion and validation. Non-finite floats are rejected, `max_retries` is capped at 16, and `convergence_timeout_secs` is capped at 3600. Secret fields cannot be set through this command; use the documented environment variables or edit `config.json` directly. Local runtime keys can also be mutated from CLI.
 
 **`apply_json(&mut self, json: &Value)`** *(private)*
 
@@ -155,6 +155,8 @@ Parsed with `clap::Parser`. No subcommand runs the main recording loop.
 - **Chunk State Machine**: `Flushed → Uploading → Transcribed / Failed`
 - **Convergence Timeout**: Configurable via `convergence_timeout_secs`; chunks still pending at the deadline are marked `Failed(Timeout)`
 - **Partial Failure**: If some chunks succeed and others fail, returns partial text with an error
+- **Bounded Queue**: Chunk submission is non-blocking. A full queue marks the chunk failed and deletes its temporary file rather than stalling session shutdown.
+- **Cleanup Guarantee**: Processed, rejected, orphaned, timed-out queued, and panicking-transcriber chunk paths are cleaned up by the orchestrator.
 
 ### `SessionError` Enum
 
