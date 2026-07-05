@@ -1,8 +1,10 @@
+use std::io::Read;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use hound::{WavReader, WavSpec, WavWriter};
+use hound::{Sample, WavReader, WavSpec, WavWriter};
 use tracing::{debug, info, warn};
+
+use super::unique_temp_wav_path;
 
 /// A temporary WAV chunk file that deletes itself when dropped.
 pub struct TmpChunk {
@@ -49,7 +51,13 @@ pub fn split_wav(
     let spec = reader.spec();
 
     const WAV_HEADER_BYTES: u64 = 44;
-    let bytes_per_sample = (spec.bits_per_sample / 8) as u64;
+    if max_chunk_size_bytes > 0 && max_chunk_size_bytes <= WAV_HEADER_BYTES {
+        return Err(format!(
+            "max_chunk_size_bytes must be greater than the {WAV_HEADER_BYTES}-byte WAV header"
+        )
+        .into());
+    }
+    let bytes_per_sample = spec.bits_per_sample.div_ceil(8) as u64;
     let channels = spec.channels as u64;
     let sample_rate = spec.sample_rate as u64;
 
@@ -85,8 +93,6 @@ pub fn split_wav(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("audio");
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-
     std::fs::create_dir_all("./tmp")?;
 
     let chunk_spec = WavSpec {
@@ -96,15 +102,32 @@ pub fn split_wav(
         sample_format: spec.sample_format,
     };
 
+    match spec.sample_format {
+        hound::SampleFormat::Float => {
+            split_samples::<_, f32>(&mut reader, chunk_spec, chunk_max_samples, source)
+        }
+        hound::SampleFormat::Int => {
+            split_samples::<_, i32>(&mut reader, chunk_spec, chunk_max_samples, source)
+        }
+    }
+}
+
+fn split_samples<R, S>(
+    reader: &mut WavReader<R>,
+    chunk_spec: WavSpec,
+    chunk_max_samples: u64,
+    source: &str,
+) -> Result<Vec<TmpChunk>, Box<dyn std::error::Error>>
+where
+    R: Read,
+    S: Sample,
+{
     let mut chunks: Vec<TmpChunk> = Vec::new();
-    let mut samples_iter = reader.samples::<i16>();
+    let mut samples_iter = reader.samples::<S>();
     let mut chunk_index: usize = 0;
 
     loop {
-        let chunk_path = PathBuf::from(format!(
-            "./tmp/chunk_{}_{}_{}.wav",
-            source, chunk_index, timestamp
-        ));
+        let chunk_path = unique_temp_wav_path(&format!("chunk_{source}_{chunk_index}"))?;
 
         let mut writer = WavWriter::create(&chunk_path, chunk_spec)?;
         let mut samples_written: u64 = 0;
@@ -175,6 +198,21 @@ mod tests {
         let mut writer = WavWriter::create(path, spec).unwrap();
         for i in 0..num_samples {
             writer.write_sample(i as i16).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    fn write_float_test_wav(path: &str, sample_rate: u32, num_samples: u32) {
+        std::fs::create_dir_all("./tmp").unwrap();
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut writer = WavWriter::create(path, spec).unwrap();
+        for i in 0..num_samples {
+            writer.write_sample(i as f32 / num_samples as f32).unwrap();
         }
         writer.finalize().unwrap();
     }
@@ -272,6 +310,48 @@ mod tests {
             2,
             "10 000 samples split into 5 000-sample chunks should give 2 chunks"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_split_float_wav_preserves_format() {
+        let path = "./tmp/test_split_float.wav";
+        write_float_test_wav(path, 16_000, 32_000);
+
+        let chunks = split_wav(path, 1, 0).unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        for chunk in &chunks {
+            let reader = WavReader::open(&chunk.path).unwrap();
+            assert_eq!(reader.spec().sample_format, hound::SampleFormat::Float);
+            assert_eq!(reader.spec().bits_per_sample, 32);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_too_small_chunk_size_is_rejected() {
+        let path = "./tmp/test_invalid_chunk_size.wav";
+        write_test_wav(path, 16_000, 100);
+
+        let error = match split_wav(path, 0, 44) {
+            Ok(_) => panic!("expected invalid chunk size to fail"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("max_chunk_size_bytes"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_concurrent_splits_use_unique_paths() {
+        let path = "./tmp/test_unique_split.wav";
+        write_test_wav(path, 16_000, 32_000);
+
+        let first = split_wav(path, 1, 0).unwrap();
+        let second = split_wav(path, 1, 0).unwrap();
+
+        assert_ne!(first[0].path, second[0].path);
         let _ = std::fs::remove_file(path);
     }
 }

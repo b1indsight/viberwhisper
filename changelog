@@ -18,3 +18,4 @@
 2026-04-06: Add native Windows floating overlay with click-to-toggle, dragging, always-on-top behavior, and recording-state rendering
 2026-04-06: Add local Gemma service management: Python FastAPI server under server/, local install/start/stop/status CLI, runtime endpoint overrides, and local backend config fields
 2026-04-06: Move the local Gemma runtime to `server/` and complete local CLI/runtime wiring to the planned FastAPI service
+2026-07-05: Fix audio recorder recovery, bounded live-chunk memory, collision-safe temp files, and non-i16 WAV splitting
