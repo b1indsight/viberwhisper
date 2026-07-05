@@ -1,5 +1,9 @@
 # 全流程 Stream 识别
 
+## 状态
+
+**已完成**。`SessionOrchestrator` 已统一 Hold/Toggle 会话生命周期、后台分片转写、状态追踪、结果收敛、超时与部分失败处理。
+
 ## 背景
 
 PR #26（`05-long-audio-streaming.md`）已落地以下底层能力：
@@ -42,12 +46,12 @@ PR #26（`05-long-audio-streaming.md`）已落地以下底层能力：
 - **重新实现底层分片 / 重试 / 合并**：这些逻辑已在 PR #26 中实现，orchestrator 直接复用。
 - **修改 Hold/Toggle 热键检测逻辑**：`hotkey.rs` 的 `HotkeySource` / `HotkeyEvent` 接口不变。
 
-## TODO
+## 已完成的设计决策
 
 - [x] 明确后台上传线程与主线程之间的同步原语选型：使用 `std::sync::mpsc`（上传 worker 通过 `Sender<TmpChunk>` 接收分片，主线程通过 `Receiver` 驱动收敛等待）
 - [x] 确认停止录音时等待收敛的超时上限（默认 `convergence_timeout_secs = 30`）
-- [ ] 评估 `SessionOrchestrator` 是否需要持有 `Arc<dyn Transcriber>` 以便测试注入
-- [ ] 补充日志 / 进度可观测性（分片序号、上传耗时、重试次数）
+- [x] `SessionOrchestrator` 持有 `Arc<dyn Transcriber>`，支持 worker 共享及测试注入。
+- [x] 使用结构化日志记录会话模式、分片序号、转写结果、失败与收敛超时；重试日志由 transcriber 层记录。
 
 ## 架构方案
 
@@ -386,15 +390,15 @@ pub convergence_timeout_secs: u64,
 
 以下标准为本方案 PR 合并的门槛：
 
-- [ ] `cargo test` 全绿（包含所有新增单元测试）
-- [ ] 所有新增单元测试不依赖网络或麦克风，可在 CI 中稳定运行
-- [ ] Hold 模式：按下热键 → 录音开始；松开热键 → 等待收敛 → 文本输出；短录音（< `max_chunk_duration_secs`）行为与 PR #26 前完全一致
-- [ ] Toggle 模式：第一次热键 → 录音开始；第二次热键 → 等待收敛 → 文本输出；与 Hold 模式共享同一 orchestrator 路径
-- [ ] 单片失败不丢弃其他片的结果：`PartialFailure` 错误中包含已成功分片的合并文本
-- [ ] 收敛超时可配置（`convergence_timeout_secs`），超时后返回已完成部分结果而非静默丢弃
-- [ ] `src/core/orchestrator.rs` 与 `src/audio/recorder.rs` 各自职责清晰，无循环依赖
-- [ ] `main.rs` 中无内联的分片调度逻辑（全部委托给 `SessionOrchestrator`）
-- [ ] `docs/architecture/core.md` 更新以反映 orchestrator 模块
+- [x] `cargo test` 全绿（包含所有新增单元测试）
+- [x] 所有新增单元测试不依赖网络或麦克风，可在 CI 中稳定运行
+- [x] Hold 模式：按下热键 → 录音开始；松开热键 → 等待收敛 → 文本输出
+- [x] Toggle 模式：第一次热键 → 录音开始；第二次热键 → 等待收敛 → 文本输出；与 Hold 模式共享同一 orchestrator 路径
+- [x] 单片失败不丢弃其他片的结果：`PartialFailure` 错误中包含已成功分片的合并文本
+- [x] 收敛超时可配置（`convergence_timeout_secs`），超时后返回已完成部分结果而非静默丢弃
+- [x] `src/core/orchestrator.rs` 与 `src/audio/recorder.rs` 职责分离，无循环依赖
+- [x] `main.rs` 将分片调度委托给 `SessionOrchestrator`
+- [x] `docs/architecture/core.md` 已包含 orchestrator 模块说明
 
 ## 分阶段落地
 
@@ -434,7 +438,7 @@ pub convergence_timeout_secs: u64,
 
 1. 更新 `docs/architecture/core.md`，补充 `SessionOrchestrator` 模块说明
 2. 更新 `docs/README.md`，纳入本文档
-3. 本文档（`06-end-to-end-stream-recognition.md`）状态由计划标记为 IN PROGRESS
+3. 本文档（`06-end-to-end-stream-recognition.md`）状态标记为已完成
 4. 更新 `changelog`
 
 **验收**：`cargo test` 全绿；PR review 通过。

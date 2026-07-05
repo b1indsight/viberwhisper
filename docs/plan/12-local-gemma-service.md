@@ -1,5 +1,9 @@
 # Plan 12: Local Gemma 4 E4B Inference Service
 
+## Status
+
+**Implemented.** The Python FastAPI service, Rust process lifecycle management, local CLI commands, runtime endpoint overrides, health diagnostics, tests, and user documentation are present. Migration to llama.cpp remains a future option once upstream audio support is available.
+
 ## Background
 
 ViberWhisper currently relies on cloud APIs (Groq/OpenAI-compatible) for both STT and
