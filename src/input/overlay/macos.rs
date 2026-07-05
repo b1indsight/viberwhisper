@@ -1,5 +1,4 @@
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, extern_methods};
 use objc2_app_kit::{
     NSApp, NSAppearance, NSAppearanceNameAccessibilityHighContrastDarkAqua,
@@ -63,8 +62,9 @@ impl OverlayManager {
 
         let content_view = create_overlay_view(window_rect.size, mtm);
         window.setContentView(Some(&content_view));
-        window.makeKeyAndOrderFront(None::<&AnyObject>);
-        window.resignKeyWindow();
+        // Show the overlay without making it the key window or stealing focus
+        // from the application that will receive transcribed text.
+        window.orderFrontRegardless();
 
         Ok(Self {
             window,

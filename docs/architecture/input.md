@@ -33,27 +33,28 @@ Note: `Released` is only emitted for `Hold` source (toggle mode uses press-only 
 
 ```rust
 pub struct HotkeyManager {
-    running: Arc<AtomicBool>,
+    events: Receiver<HotkeyEvent>,
 }
 ```
 
-Spawns an `rdev::listen` thread that writes to three module-level `AtomicBool` flags (`HOLD_PRESSED`, `HOLD_RELEASED`, `TOGGLE_PRESSED`).
+Spawns an `rdev::listen` thread that maps native events into an ordered channel. Per-binding key-down state suppresses operating-system key-repeat events so one physical toggle press produces one toggle action.
 
 ### Key Methods
 
 **`HotkeyManager::new(hold_hotkey: &str, toggle_hotkey: &str) -> Result<Self>`**
 
 - Parses both hotkey strings via `parse_key()`.
-- Requires at least one valid key; returns an error if both are empty/invalid.
-- Spawns the listener thread and sleeps 100 ms to allow it to start.
+- Treats an empty string as a disabled binding and rejects any non-empty invalid binding.
+- Requires at least one enabled key and rejects assigning the same key to both modes.
+- Spawns the listener thread without blocking application startup.
 
 **`check_event(&self) -> Option<HotkeyEvent>`**
 
-Polls the atomic flags (swap-to-false). Priority order: `HoldPressed` → `HoldReleased` → `TogglePressed`. Called from the main loop on each iteration.
+Non-blockingly receives the oldest pending event. Called from the main loop on each iteration; later events remain queued in their original order.
 
 **`parse_key(s: &str) -> Option<Key>`**
 
-Maps key name strings (`"F1"`–`"F12"`, case-insensitive) to `rdev::Key` variants.
+Maps trimmed key name strings (`"F1"`–`"F12"`, case-insensitive) to `rdev::Key` variants.
 
 ---
 
@@ -84,6 +85,7 @@ pub struct TrayManager {
     tray_icon: TrayIcon,
     icon_idle: Icon,
     icon_recording: Icon,
+    status_item: MenuItem,
     exit_item_id: MenuId,
 }
 ```
@@ -105,7 +107,7 @@ Builds the tray icon with a menu containing: title item, status item, separator,
 
 **`set_recording(&mut self, recording: bool)`**
 
-Switches icon and tooltip based on recording state.
+Switches the icon, tooltip, and menu status text based on recording state. Native icon/tooltip update failures are logged rather than silently discarded.
 
 **`check_exit(&self) -> bool`**
 
