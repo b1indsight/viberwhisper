@@ -146,8 +146,8 @@ viberwhisper convert input.wav --output output.txt
 |------|------|--------|------|
 | `max_chunk_duration_secs` | 数字 | `30` | 每个分片最大秒数（0 = 不限） |
 | `max_chunk_size_bytes` | 数字 | `24117248` | 每个分片最大字节数（0 = 不限） |
-| `max_retries` | 数字 | `3` | 分片上传失败最大重试次数 |
-| `convergence_timeout_secs` | 数字 | `30` | 录音结束后等待所有分片转写完成的超时秒数 |
+| `max_retries` | 数字 | `3` | 分片上传失败最大重试次数（最大 16） |
+| `convergence_timeout_secs` | 数字 | `30` | 录音结束后等待所有分片转写完成的超时秒数（最大 3600） |
 
 ### LLM 后处理
 
@@ -161,7 +161,7 @@ viberwhisper convert input.wav --output output.txt
 | `post_process_prompt` | 字符串 | 内置默认 | 后处理系统提示词 |
 | `post_process_temperature` | 数字 | `0.0` | 后处理温度 |
 
-> **注意**：`config.json` 已在 `.gitignore` 中排除，避免误提交真实密钥。`api_key` 和 `post_process_api_key` 不会被程序写回磁盘。
+> **注意**：`config.json` 已在 `.gitignore` 中排除，避免误提交真实密钥。程序不会把环境变量中的密钥写入磁盘；手工写在 `config.json` 中的密钥会在更新其他配置项时原样保留。
 > 后处理当前固定使用 OpenAI-compatible chat completions 请求格式。
 
 ### 本地模式

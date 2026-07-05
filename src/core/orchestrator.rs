@@ -121,7 +121,6 @@ struct ChunkEntry {
 
 enum WorkerMsg {
     Chunk { index: usize, path: String },
-    Done,
 }
 
 struct ActiveSessionInner {
@@ -203,7 +202,11 @@ impl SessionOrchestrator {
     /// or `None` if no session is active.
     pub fn on_chunk_ready(&self, path: String) -> Option<usize> {
         let mut inner = self.inner.lock().unwrap();
-        let session = inner.as_mut()?;
+        let Some(session) = inner.as_mut() else {
+            warn!(path = %path, "Chunk arrived without an active session; deleting it");
+            remove_chunk_file(&path, "orphan");
+            return None;
+        };
 
         let index = session.next_index;
         session.next_index += 1;
@@ -213,17 +216,20 @@ impl SessionOrchestrator {
             state: ChunkState::Flushed,
         });
 
-        if let Err(e) = session.chunk_tx.send(WorkerMsg::Chunk {
+        if let Err(e) = session.chunk_tx.try_send(WorkerMsg::Chunk {
             index,
             path: path.clone(),
         }) {
-            error!(path = %path, error = %e, "Failed to enqueue chunk; marking as failed");
+            let message = match e {
+                mpsc::TrySendError::Full(_) => "worker queue full",
+                mpsc::TrySendError::Disconnected(_) => "worker channel closed",
+            };
+            error!(path = %path, error = message, "Failed to enqueue chunk; marking as failed");
             let mut chunks = session.chunks.lock().unwrap();
             if let Some(entry) = chunks.iter_mut().find(|e| e.index == index) {
-                entry.state = ChunkState::Failed(TranscribeError::Network(
-                    "worker channel closed".to_string(),
-                ));
+                entry.state = ChunkState::Failed(TranscribeError::Network(message.to_string()));
             }
+            remove_chunk_file(&path, "rejected");
         } else {
             info!(index = index, path = %path, "Chunk enqueued for background transcription");
         }
@@ -250,16 +256,16 @@ impl SessionOrchestrator {
         };
 
         if session.next_index == 0 {
-            // No chunks were ever submitted; signal worker to exit and return early.
-            let _ = session.chunk_tx.send(WorkerMsg::Done);
-            drop(session.worker); // let it clean up in background
+            // Closing the channel lets the idle worker exit immediately.
+            drop(session.chunk_tx);
+            let _ = session.worker.join();
             return Err(SessionError::NoChunks);
         }
 
-        // Signal the worker to stop after draining the current queue.
-        if let Err(e) = session.chunk_tx.send(WorkerMsg::Done) {
-            warn!(error = %e, "Failed to send Done to worker (already exited?)");
-        }
+        // Closing the sender is non-blocking. The receiver still drains every
+        // queued chunk before its iterator ends, so the convergence deadline
+        // covers the entire shutdown rather than starting after a blocking send.
+        drop(session.chunk_tx);
 
         let chunks = Arc::clone(&session.chunks);
         let deadline = Instant::now() + self.convergence_timeout;
@@ -325,45 +331,37 @@ fn worker_loop(
 ) {
     for msg in rx {
         match msg {
-            WorkerMsg::Done => {
-                debug!("Worker received Done signal, exiting");
-                break;
-            }
             WorkerMsg::Chunk { index, path } => {
                 // Transition to Uploading.
                 {
                     let mut locked = chunks.lock().unwrap();
-                    if let Some(entry) = locked.iter_mut().find(|e| e.index == index) {
-                        entry.state = ChunkState::Uploading { attempt: 1 };
+                    if let Some(entry) = locked.iter_mut().find(|e| e.index == index)
+                        && !begin_upload(entry)
+                    {
+                        drop(locked);
+                        remove_chunk_file(&path, "skipped");
+                        continue;
                     }
                 }
 
                 debug!(index = index, path = %path, "Worker transcribing chunk");
-                let result = transcriber.transcribe(&path);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    transcriber.transcribe(&path)
+                }))
+                .unwrap_or_else(|_| Err("transcriber panicked".to_string().into()));
 
                 // Clean up the chunk file (ignore errors — file may already be gone).
-                if let Err(e) = std::fs::remove_file(&path) {
-                    debug!(path = %path, error = %e, "Could not delete chunk file");
-                }
+                remove_chunk_file(&path, "processed");
 
                 // Record outcome.
                 let mut locked = chunks.lock().unwrap();
                 if let Some(entry) = locked.iter_mut().find(|e| e.index == index) {
-                    entry.state = match result {
-                        Ok(text) => {
-                            info!(index = index, "Chunk transcribed successfully");
-                            ChunkState::Transcribed(text)
-                        }
-                        Err(e) => {
-                            let msg = e.to_string();
-                            error!(index = index, error = %msg, "Chunk transcription failed");
-                            ChunkState::Failed(classify_error(&msg))
-                        }
-                    };
+                    record_worker_result(entry, result);
                 }
             }
         }
     }
+    debug!("Worker channel closed, exiting");
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -380,13 +378,64 @@ fn classify_error(error_msg: &str) -> TranscribeError {
     }
 }
 
+fn record_worker_result(
+    entry: &mut ChunkEntry,
+    result: Result<String, Box<dyn std::error::Error>>,
+) {
+    // A convergence timeout is terminal from the caller's perspective. A late
+    // HTTP response must not rewrite the snapshot used for the timeout result.
+    if entry.state.is_terminal() {
+        debug!(
+            index = entry.index,
+            "Ignoring late result for terminal chunk"
+        );
+        return;
+    }
+
+    entry.state = match result {
+        Ok(text) => {
+            info!(index = entry.index, "Chunk transcribed successfully");
+            ChunkState::Transcribed(text)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            error!(index = entry.index, error = %msg, "Chunk transcription failed");
+            ChunkState::Failed(classify_error(&msg))
+        }
+    };
+}
+
+fn begin_upload(entry: &mut ChunkEntry) -> bool {
+    if !matches!(entry.state, ChunkState::Flushed) {
+        debug!(
+            index = entry.index,
+            "Skipping upload for chunk that is no longer flushed"
+        );
+        return false;
+    }
+    entry.state = ChunkState::Uploading { attempt: 1 };
+    true
+}
+
+fn remove_chunk_file(path: &str, reason: &str) {
+    if let Err(e) = std::fs::remove_file(path) {
+        debug!(path, reason, error = %e, "Could not delete chunk file");
+    }
+}
+
 /// Try to parse an HTTP status code out of an error message.
 fn extract_http_status(msg: &str) -> Option<u16> {
-    for token in msg.split_whitespace() {
-        if let Ok(n) = token.parse::<u16>()
-            && (100..=599).contains(&n)
-        {
-            return Some(n);
+    for marker in ["API error ", "HTTP ", "status "] {
+        if let Some(tail) = msg.split_once(marker).map(|(_, tail)| tail) {
+            let digits: String = tail
+                .chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect();
+            if let Ok(status) = digits.parse::<u16>()
+                && (100..=599).contains(&status)
+            {
+                return Some(status);
+            }
         }
     }
     None
@@ -459,6 +508,7 @@ fn collect_results(chunks: &[ChunkEntry], language: Option<&str>) -> Result<Stri
 mod tests {
     use super::*;
     use crate::transcriber::MockTranscriber;
+    use std::sync::Condvar;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn make_orchestrator_with_timeout(
@@ -512,6 +562,21 @@ mod tests {
     /// Sleeps for `delay` before returning.
     struct SlowTranscriber {
         delay: Duration,
+    }
+
+    struct GateTranscriber {
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl Transcriber for GateTranscriber {
+        fn transcribe(&self, _path: &str) -> Result<String, Box<dyn std::error::Error>> {
+            let (lock, condvar) = &*self.release;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = condvar.wait(released).unwrap();
+            }
+            Ok("released".to_string())
+        }
     }
 
     impl Transcriber for SlowTranscriber {
@@ -588,6 +653,22 @@ mod tests {
     }
 
     #[test]
+    fn test_chunk_without_active_session_is_deleted() {
+        let path = std::env::temp_dir().join(format!(
+            "viberwhisper-orphan-chunk-{}-{:?}.wav",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"orphan chunk").unwrap();
+        let orch = default_orchestrator(Arc::new(MockTranscriber));
+
+        let result = orch.on_chunk_ready(path.to_string_lossy().into_owned());
+
+        assert!(result.is_none());
+        assert!(!path.exists(), "orphan chunk file was not deleted");
+    }
+
+    #[test]
     fn test_partial_failure_returns_error_with_partial_text() {
         let t = Arc::new(ScriptedTranscriber::new(vec![
             Ok("good chunk".to_string()),
@@ -634,6 +715,56 @@ mod tests {
             }
             other => panic!("Expected ConvergenceTimeout, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_timed_out_chunk_cannot_be_overwritten_by_late_worker_result() {
+        let mut entry = ChunkEntry {
+            index: 0,
+            state: ChunkState::Failed(TranscribeError::Timeout),
+        };
+
+        assert!(!begin_upload(&mut entry));
+        record_worker_result(&mut entry, Ok("late result".to_string()));
+
+        assert!(matches!(
+            entry.state,
+            ChunkState::Failed(TranscribeError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn test_full_worker_queue_marks_chunk_failed_without_blocking() {
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let t = Arc::new(GateTranscriber {
+            release: Arc::clone(&release),
+        });
+        let orch = default_orchestrator(t);
+        orch.start_session(SessionMode::Hold);
+
+        let started = Instant::now();
+        for index in 0..100 {
+            orch.on_chunk_ready(format!("queue-{index}.wav"));
+        }
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "enqueueing blocked on a full worker queue"
+        );
+        let inner = orch.inner.lock().unwrap();
+        let chunks = inner.as_ref().unwrap().chunks.lock().unwrap();
+        assert!(chunks.iter().any(|entry| matches!(
+            entry.state,
+            ChunkState::Failed(TranscribeError::Network(ref message))
+                if message == "worker queue full"
+        )));
+        drop(chunks);
+        drop(inner);
+
+        let (lock, condvar) = &*release;
+        *lock.lock().unwrap() = true;
+        condvar.notify_all();
+        let _ = orch.stop_session();
     }
 
     #[test]
@@ -695,6 +826,25 @@ mod tests {
     }
 
     #[test]
+    fn test_worker_panic_removes_chunk_file_and_reports_failure() {
+        let path = std::env::temp_dir().join(format!(
+            "viberwhisper-panic-chunk-{}-{:?}.wav",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"test chunk").unwrap();
+        let t = Arc::new(PanicTranscriber);
+        let orch = default_orchestrator(t);
+
+        orch.start_session(SessionMode::Hold);
+        orch.on_chunk_ready(path.to_string_lossy().into_owned());
+        let result = orch.stop_session();
+
+        assert!(matches!(result, Err(SessionError::PartialFailure { .. })));
+        assert!(!path.exists(), "panicking worker leaked chunk file");
+    }
+
+    #[test]
     fn test_merge_texts_zh() {
         let texts = vec!["你好".to_string(), "世界".to_string()];
         assert_eq!(merge_texts(&texts, Some("zh")), "你好世界");
@@ -716,6 +866,12 @@ mod tests {
     fn test_classify_error_api() {
         let e = classify_error("HTTP 400 bad request");
         assert!(matches!(e, TranscribeError::Api { status: 400, .. }));
+
+        let e = classify_error("API error 429: too many requests");
+        assert!(matches!(e, TranscribeError::Api { status: 429, .. }));
+
+        let e = classify_error("chunk 1/1 failed after 4 attempts: API error 500: unavailable");
+        assert!(matches!(e, TranscribeError::Api { status: 500, .. }));
     }
 
     #[test]
@@ -729,5 +885,10 @@ mod tests {
         assert_eq!(extract_http_status("status 500 internal"), Some(500));
         assert_eq!(extract_http_status("connection refused"), None);
         assert_eq!(extract_http_status("HTTP 429 too many requests"), Some(429));
+        assert_eq!(
+            extract_http_status("API error 400: invalid request"),
+            Some(400)
+        );
+        assert_eq!(extract_http_status("received 500 bytes"), None);
     }
 }

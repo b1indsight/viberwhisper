@@ -3,6 +3,8 @@ use std::fs;
 use tracing::{info, warn};
 
 const CONFIG_FILE: &str = "config.json";
+const MAX_RETRIES: u32 = 16;
+const MAX_CONVERGENCE_TIMEOUT_SECS: u64 = 60 * 60;
 
 /// Default transcription API URL (Groq Whisper endpoint).
 const DEFAULT_TRANSCRIPTION_API_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
@@ -33,6 +35,26 @@ fn default_local_server_port() -> u16 {
 
 fn default_local_quantization() -> String {
     "int8".to_string()
+}
+
+fn parse_finite_f32(key: &str, value: &str) -> Result<f32, String> {
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("{key} must be a float, got: {value}"))?;
+    if !parsed.is_finite() {
+        return Err(format!("{key} must be finite, got: {value}"));
+    }
+    Ok(parsed)
+}
+
+fn finite_f32_from_json(key: &str, value: f64) -> Option<f32> {
+    let narrowed = value as f32;
+    if narrowed.is_finite() {
+        Some(narrowed)
+    } else {
+        warn!(key, value, "Ignoring non-finite or out-of-range float");
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,9 +201,33 @@ impl AppConfig {
 
     /// Save config to config.json (excludes api_key — never persisted)
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let json = serde_json::to_string_pretty(self)?;
+        let existing = fs::read_to_string(CONFIG_FILE)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok());
+        let value = self.json_for_save(existing.as_ref())?;
+        let json = serde_json::to_string_pretty(&value)?;
         fs::write(CONFIG_FILE, json)?;
         Ok(())
+    }
+
+    /// Build the serialized config while retaining secrets that were already
+    /// present on disk. Runtime/env secrets are deliberately never introduced.
+    fn json_for_save(
+        &self,
+        existing: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value, serde_json::Error> {
+        let mut value = serde_json::to_value(self)?;
+        if let (Some(output), Some(existing)) = (value.as_object_mut(), existing) {
+            for key in ["api_key", "groq_api_key", "post_process_api_key"] {
+                if let Some(secret) = existing.get(key).and_then(serde_json::Value::as_str) {
+                    output.insert(
+                        key.to_string(),
+                        serde_json::Value::String(secret.to_string()),
+                    );
+                }
+            }
+        }
+        Ok(value)
     }
 
     /// Get the string value of a config field
@@ -224,10 +270,10 @@ impl AppConfig {
     /// Set a config field value (accepts string, auto-converts types)
     pub fn set_field(&mut self, key: &str, value: &str) -> Result<(), String> {
         match key {
-            "api_key" | "groq_api_key" => {
-                self.api_key = Some(value.to_string());
-                Ok(())
-            }
+            "api_key" | "groq_api_key" => Err(
+                "api_key cannot be saved by the config command; use the TRANSCRIPTION_API_KEY environment variable or edit config.json manually"
+                    .to_string(),
+            ),
             "transcription_api_url" => {
                 self.transcription_api_url = value.to_string();
                 Ok(())
@@ -257,15 +303,11 @@ impl AppConfig {
                 Ok(())
             }
             "temperature" => {
-                self.temperature = value
-                    .parse::<f32>()
-                    .map_err(|_| format!("temperature must be a float, got: {}", value))?;
+                self.temperature = parse_finite_f32("temperature", value)?;
                 Ok(())
             }
             "mic_gain" => {
-                self.mic_gain = value
-                    .parse::<f32>()
-                    .map_err(|_| format!("mic_gain must be a float, got: {}", value))?;
+                self.mic_gain = parse_finite_f32("mic_gain", value)?;
                 Ok(())
             }
             "max_chunk_duration_secs" => {
@@ -281,15 +323,25 @@ impl AppConfig {
                 Ok(())
             }
             "max_retries" => {
-                self.max_retries = value
+                let parsed = value
                     .parse::<u32>()
                     .map_err(|_| format!("max_retries must be a u32, got: {}", value))?;
+                if parsed > MAX_RETRIES {
+                    return Err(format!("max_retries must be <= {MAX_RETRIES}, got: {value}"));
+                }
+                self.max_retries = parsed;
                 Ok(())
             }
             "convergence_timeout_secs" => {
-                self.convergence_timeout_secs = value.parse::<u64>().map_err(|_| {
+                let parsed = value.parse::<u64>().map_err(|_| {
                     format!("convergence_timeout_secs must be a u64, got: {}", value)
                 })?;
+                if parsed > MAX_CONVERGENCE_TIMEOUT_SECS {
+                    return Err(format!(
+                        "convergence_timeout_secs must be <= {MAX_CONVERGENCE_TIMEOUT_SECS}, got: {value}"
+                    ));
+                }
+                self.convergence_timeout_secs = parsed;
                 Ok(())
             }
             "post_process_enabled" => {
@@ -311,10 +363,10 @@ impl AppConfig {
                 self.post_process_api_url = Some(value.to_string());
                 Ok(())
             }
-            "post_process_api_key" => {
-                self.post_process_api_key = Some(value.to_string());
-                Ok(())
-            }
+            "post_process_api_key" => Err(
+                "post_process_api_key cannot be saved by the config command; use the POST_PROCESS_API_KEY environment variable or edit config.json manually"
+                    .to_string(),
+            ),
             "post_process_model" => {
                 self.post_process_model = Some(value.to_string());
                 Ok(())
@@ -324,9 +376,8 @@ impl AppConfig {
                 Ok(())
             }
             "post_process_temperature" => {
-                self.post_process_temperature = value.parse::<f32>().map_err(|_| {
-                    format!("post_process_temperature must be a float, got: {}", value)
-                })?;
+                self.post_process_temperature =
+                    parse_finite_f32("post_process_temperature", value)?;
                 Ok(())
             }
             "local_mode" => {
@@ -385,8 +436,10 @@ impl AppConfig {
         if let Some(lang) = json["language"].as_str() {
             self.language = Some(lang.to_string());
         }
-        if let Some(temp) = json["temperature"].as_f64() {
-            self.temperature = temp as f32;
+        if let Some(temp) = json["temperature"].as_f64()
+            && let Some(value) = finite_f32_from_json("temperature", temp)
+        {
+            self.temperature = value;
         }
         // Backward compat: old hotkey field maps to hold_hotkey
         if let Some(hotkey) = json["hotkey"].as_str() {
@@ -398,23 +451,44 @@ impl AppConfig {
         if let Some(hotkey) = json["toggle_hotkey"].as_str() {
             self.toggle_hotkey = hotkey.to_string();
         }
-        if let Some(gain) = json["mic_gain"].as_f64() {
-            self.mic_gain = gain as f32;
+        if let Some(gain) = json["mic_gain"].as_f64()
+            && let Some(value) = finite_f32_from_json("mic_gain", gain)
+        {
+            self.mic_gain = value;
         }
         if let Some(prompt) = json["prompt"].as_str() {
             self.prompt = Some(prompt.to_string());
         }
         if let Some(v) = json["max_chunk_duration_secs"].as_u64() {
-            self.max_chunk_duration_secs = v as u32;
+            match u32::try_from(v) {
+                Ok(value) => self.max_chunk_duration_secs = value,
+                Err(_) => warn!(value = v, "Ignoring out-of-range max_chunk_duration_secs"),
+            }
         }
         if let Some(v) = json["max_chunk_size_bytes"].as_u64() {
             self.max_chunk_size_bytes = v;
         }
         if let Some(v) = json["max_retries"].as_u64() {
-            self.max_retries = v as u32;
+            match u32::try_from(v) {
+                Ok(value) if value <= MAX_RETRIES => self.max_retries = value,
+                Ok(value) => warn!(
+                    value,
+                    max = MAX_RETRIES,
+                    "Ignoring max_retries above supported limit"
+                ),
+                Err(_) => warn!(value = v, "Ignoring out-of-range max_retries"),
+            }
         }
         if let Some(v) = json["convergence_timeout_secs"].as_u64() {
-            self.convergence_timeout_secs = v;
+            if v <= MAX_CONVERGENCE_TIMEOUT_SECS {
+                self.convergence_timeout_secs = v;
+            } else {
+                warn!(
+                    value = v,
+                    max = MAX_CONVERGENCE_TIMEOUT_SECS,
+                    "Ignoring convergence_timeout_secs above supported limit"
+                );
+            }
         }
         if let Some(v) = json["post_process_enabled"].as_bool() {
             self.post_process_enabled = v;
@@ -434,8 +508,10 @@ impl AppConfig {
         if let Some(v) = json["post_process_prompt"].as_str() {
             self.post_process_prompt = Some(v.to_string());
         }
-        if let Some(v) = json["post_process_temperature"].as_f64() {
-            self.post_process_temperature = v as f32;
+        if let Some(v) = json["post_process_temperature"].as_f64()
+            && let Some(value) = finite_f32_from_json("post_process_temperature", v)
+        {
+            self.post_process_temperature = value;
         }
         if let Some(v) = json["local_mode"].as_bool() {
             self.local_mode = v;
@@ -444,7 +520,10 @@ impl AppConfig {
             self.local_data_dir = Some(v.to_string());
         }
         if let Some(v) = json["local_server_port"].as_u64() {
-            self.local_server_port = v as u16;
+            match u16::try_from(v) {
+                Ok(value) => self.local_server_port = value,
+                Err(_) => warn!(value = v, "Ignoring out-of-range local_server_port"),
+            }
         }
         if let Some(v) = json["local_quantization"].as_str() {
             self.local_quantization = v.to_string();
@@ -479,21 +558,18 @@ mod tests {
     fn test_api_key_get_set() {
         let mut config = AppConfig::default();
         assert_eq!(config.get_field("api_key"), None);
-        config.set_field("api_key", "mykey").unwrap();
-        assert_eq!(config.api_key.as_deref(), Some("mykey"));
-        assert_eq!(config.get_field("api_key"), Some("*** (set)".to_string()));
+        let error = config.set_field("api_key", "mykey").unwrap_err();
+        assert!(error.contains("environment variable"));
+        assert!(config.api_key.is_none());
     }
 
     #[test]
     fn test_groq_api_key_alias() {
-        // groq_api_key is an alias for api_key in get/set
+        // groq_api_key is an alias for api_key when reading, but secrets cannot
+        // be persisted through the config CLI.
         let mut config = AppConfig::default();
-        config.set_field("groq_api_key", "legacykey").unwrap();
-        assert_eq!(config.api_key.as_deref(), Some("legacykey"));
-        assert_eq!(
-            config.get_field("groq_api_key"),
-            Some("*** (set)".to_string())
-        );
+        assert!(config.set_field("groq_api_key", "legacykey").is_err());
+        assert!(config.api_key.is_none());
     }
 
     #[test]
@@ -615,6 +691,66 @@ mod tests {
     }
 
     #[test]
+    fn test_set_field_rejects_non_finite_floats() {
+        let mut config = AppConfig::default();
+
+        for (key, value) in [
+            ("temperature", "NaN"),
+            ("mic_gain", "inf"),
+            ("post_process_temperature", "-inf"),
+        ] {
+            assert!(
+                config.set_field(key, value).is_err(),
+                "accepted {key}={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_json_rejects_floats_that_overflow_f32() {
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({
+            "temperature": 1e300,
+            "mic_gain": -1e300,
+            "post_process_temperature": 1e300
+        });
+
+        config.apply_json(&json);
+
+        assert_eq!(config.temperature, 0.0);
+        assert_eq!(config.mic_gain, 1.0);
+        assert_eq!(config.post_process_temperature, 0.0);
+    }
+
+    #[test]
+    fn test_retry_and_timeout_limits_are_enforced() {
+        let mut config = AppConfig::default();
+        assert!(
+            config
+                .set_field("max_retries", &(u64::from(MAX_RETRIES) + 1).to_string())
+                .is_err()
+        );
+        assert!(
+            config
+                .set_field(
+                    "convergence_timeout_secs",
+                    &(MAX_CONVERGENCE_TIMEOUT_SECS + 1).to_string(),
+                )
+                .is_err()
+        );
+
+        config.apply_json(&serde_json::json!({
+            "max_retries": u64::from(MAX_RETRIES) + 1,
+            "convergence_timeout_secs": MAX_CONVERGENCE_TIMEOUT_SECS + 1
+        }));
+        assert_eq!(config.max_retries, default_retries());
+        assert_eq!(
+            config.convergence_timeout_secs,
+            default_convergence_timeout()
+        );
+    }
+
+    #[test]
     fn test_set_field_unknown_key() {
         let mut config = AppConfig::default();
         let result = config.set_field("nonexistent", "value");
@@ -641,6 +777,22 @@ mod tests {
         assert_eq!(config.max_chunk_duration_secs, 60);
         assert_eq!(config.max_chunk_size_bytes, 10485760);
         assert_eq!(config.max_retries, 5);
+    }
+
+    #[test]
+    fn test_apply_json_rejects_out_of_range_narrow_integers() {
+        let mut config = AppConfig::default();
+        let json = serde_json::json!({
+            "max_chunk_duration_secs": u64::from(u32::MAX) + 1,
+            "max_retries": u64::from(u32::MAX) + 1,
+            "local_server_port": u64::from(u16::MAX) + 1
+        });
+
+        config.apply_json(&json);
+
+        assert_eq!(config.max_chunk_duration_secs, default_chunk_duration());
+        assert_eq!(config.max_retries, default_retries());
+        assert_eq!(config.local_server_port, default_local_server_port());
     }
 
     #[test]
@@ -778,12 +930,30 @@ mod tests {
     fn test_get_set_post_process_api_key_masked() {
         let mut config = AppConfig::default();
         assert_eq!(config.get_field("post_process_api_key"), None);
-        config.set_field("post_process_api_key", "secret").unwrap();
-        assert_eq!(config.post_process_api_key.as_deref(), Some("secret"));
-        assert_eq!(
-            config.get_field("post_process_api_key"),
-            Some("*** (set)".to_string())
-        );
+        let error = config
+            .set_field("post_process_api_key", "secret")
+            .unwrap_err();
+        assert!(error.contains("environment variable"));
+        assert!(config.post_process_api_key.is_none());
+    }
+
+    #[test]
+    fn test_save_json_preserves_existing_secret_fields() {
+        let config = AppConfig {
+            model: "updated-model".to_string(),
+            ..AppConfig::default()
+        };
+        let existing = serde_json::json!({
+            "api_key": "transcription-secret",
+            "post_process_api_key": "post-process-secret",
+            "model": "old-model"
+        });
+
+        let saved = config.json_for_save(Some(&existing)).unwrap();
+
+        assert_eq!(saved["api_key"], "transcription-secret");
+        assert_eq!(saved["post_process_api_key"], "post-process-secret");
+        assert_eq!(saved["model"], "updated-model");
     }
 
     #[test]
