@@ -1,5 +1,9 @@
 # 11 - Packaging & CI Releases
 
+## Status
+
+**Implemented.** CI runs cross-platform build and test gates, while version tags trigger macOS DMG and Windows MSI packaging plus GitHub Release publication. No release tag has been published yet.
+
 ## Goal
 
 Package ViberWhisper as proper desktop applications (macOS `.app`/`.dmg`, Windows `.msi`) and automate cross-platform builds via GitHub Actions CI. Addresses issue #42.

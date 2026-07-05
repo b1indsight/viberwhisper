@@ -1,5 +1,9 @@
 # 长音频自动分片转写
 
+## 状态
+
+**已完成**。PR #26 落地了录音中封片、离线 WAV 分片、指数退避重试和语言感知文本合并；后续音频健壮性修改进一步补充了临时文件唯一命名、输入格式校验和实时分片内存释放。
+
 ## 背景
 
 当前 `ApiTranscriber::transcribe` 将整段录音作为单个 multipart 请求上传到转写 API。大多数 OpenAI 兼容端点（包括 Groq）对单次请求的音频文件有硬性上限：
@@ -38,11 +42,11 @@ Toggle 模式录音长度无上限，用户进行 5 分钟以上的会议记录�
 - **非 WAV 格式支持**：分片输入和输出均维持 WAV，保持与现有 `ApiTranscriber` 接口的一致性。
 - **修改 `Transcriber` trait**：调用接口不变。
 
-## TODO
+## 已完成的设计决策
 
-- [ ] 明确录音线程、临时文件落盘、后台上传队列之间的同步模型
-- [ ] 补充分片上传与结果收敛过程的可观测性（日志/进度）
-- [ ] 评估该方案是否需要独立工作线程或异步运行时
+- [x] 录音回调负责累积样本和封片落盘，`SessionOrchestrator` 通过 `mpsc` 队列交给独立 worker 转写。
+- [x] 分片序号、路径、重试和收敛结果通过结构化日志记录。
+- [x] 使用独立同步工作线程；当前 `reqwest::blocking` 链路不引入异步运行时。
 
 ## 架构方案
 
@@ -364,7 +368,7 @@ pub max_retries: u32,              // fn default_retries() -> u32 { 3 }
 1. 更新 `docs/architecture/transcriber.md`：说明双路径分片流程、新字段、`upload_file` 私有方法
 2. 更新 `docs/architecture/audio.md`：说明 `splitter` 模块、录音封片与后台队列
 3. 更新根 `README.md` 配置表格，加入三个新字段
-4. 本文档（`05-long-audio-streaming.md`）状态标记为 IMPLEMENTED
+4. 本文档（`05-long-audio-streaming.md`）状态标记为已完成
 
 **验收**：`cargo test` 全绿；PR review 通过。
 
