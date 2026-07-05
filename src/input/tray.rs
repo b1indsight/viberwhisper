@@ -1,4 +1,6 @@
 #[cfg(not(test))]
+use tracing::warn;
+#[cfg(not(test))]
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 #[cfg(not(test))]
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -8,6 +10,7 @@ pub struct TrayManager {
     tray_icon: TrayIcon,
     icon_idle: Icon,
     icon_recording: Icon,
+    status_item: MenuItem,
     exit_item_id: tray_icon::menu::MenuId,
 }
 
@@ -20,8 +23,8 @@ pub struct TrayManager;
 #[cfg(not(test))]
 impl TrayManager {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let icon_idle = create_icon(128, 128, 128, 255);
-        let icon_recording = create_icon(220, 50, 50, 255);
+        let icon_idle = create_icon(128, 128, 128, 255)?;
+        let icon_recording = create_icon(220, 50, 50, 255)?;
 
         let menu = Menu::new();
         let title_item = MenuItem::new("ViberWhisper", false, None);
@@ -45,6 +48,7 @@ impl TrayManager {
             tray_icon,
             icon_idle,
             icon_recording,
+            status_item,
             exit_item_id: exit_id,
         })
     }
@@ -61,8 +65,17 @@ impl TrayManager {
             "ViberWhisper - 空闲"
         };
 
-        let _ = self.tray_icon.set_icon(Some(icon.clone()));
-        let _ = self.tray_icon.set_tooltip(Some(tooltip));
+        self.status_item.set_text(if recording {
+            "状态：录音中"
+        } else {
+            "状态：空闲"
+        });
+        if let Err(err) = self.tray_icon.set_icon(Some(icon.clone())) {
+            warn!(error = ?err, "failed to update tray icon");
+        }
+        if let Err(err) = self.tray_icon.set_tooltip(Some(tooltip)) {
+            warn!(error = ?err, "failed to update tray tooltip");
+        }
     }
 
     pub fn check_exit(&self) -> bool {
@@ -116,9 +129,9 @@ fn build_icon_rgba(r: u8, g: u8, b: u8, a: u8) -> (Vec<u8>, u32) {
 }
 
 #[cfg(not(test))]
-fn create_icon(r: u8, g: u8, b: u8, a: u8) -> Icon {
+fn create_icon(r: u8, g: u8, b: u8, a: u8) -> Result<Icon, tray_icon::BadIcon> {
     let (rgba, size) = build_icon_rgba(r, g, b, a);
-    Icon::from_rgba(rgba, size, size).expect("Failed to create tray icon")
+    Icon::from_rgba(rgba, size, size)
 }
 
 #[cfg(test)]

@@ -20,3 +20,4 @@
 2026-04-06: Move the local Gemma runtime to `server/` and complete local CLI/runtime wiring to the planned FastAPI service
 2026-07-05: Fix audio recorder recovery, bounded live-chunk memory, collision-safe temp files, and non-i16 WAV splitting
 2026-07-05: Harden core configuration persistence, validation, session shutdown, chunk cleanup, and transcription failure handling
+2026-07-05: Harden input hotkey ordering and validation, tray state updates, and overlay focus and Windows state ownership

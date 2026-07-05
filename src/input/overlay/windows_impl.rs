@@ -22,13 +22,10 @@ impl OverlayManager {
         register_window_class()?;
 
         let (x, y) = overlay_origin()?;
-        let state = Box::new(WindowState::default());
-        let state_ptr = Box::into_raw(state);
-
         let hwnd = unsafe {
             // SAFETY: The class has been registered, the title/class pointers are
             // valid NUL-terminated UTF-16 buffers for the duration of the call,
-            // and the lpParam carries ownership of a Box<WindowState>.
+            // and this call does not transfer any application-owned pointer.
             ffi::CreateWindowExW(
                 ffi::WS_EX_TOOLWINDOW
                     | ffi::WS_EX_TOPMOST
@@ -44,21 +41,18 @@ impl OverlayManager {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ffi::GetModuleHandleW(ptr::null()),
-                state_ptr.cast(),
+                ptr::null_mut(),
             )
         };
 
         if hwnd.is_null() {
-            unsafe {
-                // SAFETY: state_ptr came from Box::into_raw above and window
-                // creation failed, so ownership needs to be reclaimed here.
-                drop(Box::from_raw(state_ptr));
-            }
             return Err(last_os_error("CreateWindowExW failed").into());
         }
 
         unsafe {
             // SAFETY: hwnd is a valid layered popup window we just created.
+            let state_ptr = Box::into_raw(Box::new(WindowState::default()));
+            ffi::SetWindowLongPtrW(hwnd, ffi::GWLP_USERDATA, state_ptr as isize);
             ffi::SetLayeredWindowAttributes(hwnd, 0, WINDOW_ALPHA, ffi::LWA_ALPHA);
             ffi::ShowWindow(hwnd, ffi::SW_SHOWNOACTIVATE);
             ffi::UpdateWindow(hwnd);
@@ -193,30 +187,21 @@ unsafe extern "system" fn window_proc(
 ) -> ffi::LRESULT {
     match msg {
         ffi::WM_NCCREATE => {
-            let create_struct = lparam as *const ffi::CREATESTRUCTW;
-            if !create_struct.is_null() {
-                let state_ptr = unsafe { (*create_struct).lpCreateParams as *mut WindowState };
+            let region = unsafe {
+                // SAFETY: Creates a valid rounded region for the fixed overlay size.
+                ffi::CreateRoundRectRgn(
+                    0,
+                    0,
+                    OVERLAY_SIZE + 1,
+                    OVERLAY_SIZE + 1,
+                    CORNER_RADIUS,
+                    CORNER_RADIUS,
+                )
+            };
+            if !region.is_null() {
                 unsafe {
-                    // SAFETY: During WM_NCCREATE the lpCreateParams is our Box pointer.
-                    ffi::SetWindowLongPtrW(hwnd, ffi::GWLP_USERDATA, state_ptr as isize);
-                }
-
-                let region = unsafe {
-                    // SAFETY: Creates a valid rounded region for the fixed overlay size.
-                    ffi::CreateRoundRectRgn(
-                        0,
-                        0,
-                        OVERLAY_SIZE + 1,
-                        OVERLAY_SIZE + 1,
-                        CORNER_RADIUS,
-                        CORNER_RADIUS,
-                    )
-                };
-                if !region.is_null() {
-                    unsafe {
-                        // SAFETY: The OS takes ownership of the region on success.
-                        ffi::SetWindowRgn(hwnd, region, 1);
-                    }
+                    // SAFETY: The OS takes ownership of the region on success.
+                    ffi::SetWindowRgn(hwnd, region, 1);
                 }
             }
             1
@@ -435,9 +420,9 @@ fn read_apps_use_light_theme() -> Option<bool> {
 }
 
 fn perceived_luminance(color: u32) -> u8 {
-    let r = (color & 0xFF) as u32;
-    let g = ((color >> 8) & 0xFF) as u32;
-    let b = ((color >> 16) & 0xFF) as u32;
+    let r = color & 0xFF;
+    let g = (color >> 8) & 0xFF;
+    let b = (color >> 16) & 0xFF;
     ((r * 299 + g * 587 + b * 114) / 1000) as u8
 }
 
@@ -623,22 +608,6 @@ mod ffi {
         pub rgbReserved: [u8; 32],
     }
 
-    #[repr(C)]
-    pub struct CreateStructW {
-        pub lpCreateParams: *mut c_void,
-        pub hInstance: HINSTANCE,
-        pub hMenu: HMENU,
-        pub hwndParent: HWND,
-        pub cy: i32,
-        pub cx: i32,
-        pub y: i32,
-        pub x: i32,
-        pub style: i32,
-        pub lpszName: LPCWSTR,
-        pub lpszClass: LPCWSTR,
-        pub dwExStyle: DWORD,
-    }
-
     pub type Wndproc = Option<unsafe extern "system" fn(HWND, UINT, WPARAM, LPARAM) -> LRESULT>;
 
     #[repr(C)]
@@ -655,7 +624,6 @@ mod ffi {
         pub lpszClassName: LPCWSTR,
     }
 
-    pub use CreateStructW as CREATESTRUCTW;
     pub use Msg as MSG;
     pub use PaintStruct as PAINTSTRUCT;
     pub use Point as POINT;

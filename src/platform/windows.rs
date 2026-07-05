@@ -36,6 +36,7 @@ impl TextTyper for WindowsTyper {
     }
 }
 
+#[allow(clippy::upper_case_acronyms)]
 mod ffi {
     use std::mem::ManuallyDrop;
 
