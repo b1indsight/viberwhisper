@@ -9,6 +9,9 @@ use tracing::{info, instrument, warn};
 /// the convergence timeout only stops the caller from waiting, not the worker.
 const STT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Bounded concurrency for offline multi-chunk uploads (`convert` path).
+const PARALLEL_UPLOADS: usize = 3;
+
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError>;
 }
@@ -241,10 +244,36 @@ impl Transcriber for ApiTranscriber {
         let total = chunks.len();
         info!(chunks = total, "Audio split into chunks for transcription");
 
+        // Upload chunks in parallel (bounded), then merge in chunk order.
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let results: Vec<std::sync::Mutex<Option<Result<String, TranscribeError>>>> =
+            (0..total).map(|_| std::sync::Mutex::new(None)).collect();
+
+        std::thread::scope(|scope| {
+            for _ in 0..PARALLEL_UPLOADS.min(total) {
+                scope.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let Some(chunk) = chunks.get(i) else { break };
+                        let result =
+                            self.upload_file_with_retry(chunk.path_str(), chunk.index, total);
+                        *results[i].lock().unwrap() = Some(result);
+                    }
+                });
+            }
+        });
+
         let mut texts: Vec<String> = Vec::with_capacity(total);
-        for chunk in &chunks {
-            let text = self.upload_file_with_retry(chunk.path_str(), chunk.index, total)?;
-            texts.push(text);
+        for cell in results {
+            match cell.into_inner().unwrap() {
+                Some(Ok(text)) => texts.push(text),
+                Some(Err(e)) => return Err(e),
+                None => {
+                    return Err(TranscribeError::Network(
+                        "chunk upload did not complete".to_string(),
+                    ));
+                }
+            }
         }
 
         let result = merge_texts(&texts, self.language.as_deref());
@@ -477,6 +506,42 @@ mod tests {
         // Initial attempt + one retry.
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn test_multi_chunk_transcription_uploads_all_chunks_and_merges_in_order() {
+        let (port, requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\":\"hi\"}");
+        let config = AppConfig {
+            api_key: Some("test_key".to_string()),
+            transcription_api_url: format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
+            max_chunk_duration_secs: 1,
+            language: None,
+            ..Default::default()
+        };
+        let t = ApiTranscriber::from_config(&config).unwrap();
+
+        // 3 seconds at 16 kHz split into 1-second chunks → 3 uploads.
+        let path = std::env::temp_dir().join(format!(
+            "viberwhisper-api-test-{}-multichunk.wav",
+            std::process::id()
+        ));
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..48_000 {
+            writer.write_sample((i % 100) as i16).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let result = t.transcribe(path.to_str().unwrap());
+
+        assert_eq!(result.unwrap(), "hi hi hi");
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

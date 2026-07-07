@@ -107,9 +107,15 @@ struct ActiveSessionInner {
     mode: SessionMode,
     chunks: Arc<Mutex<Vec<ChunkEntry>>>,
     chunk_tx: mpsc::SyncSender<WorkerMsg>,
-    worker: thread::JoinHandle<()>,
+    workers: Vec<thread::JoinHandle<()>>,
     next_index: usize,
 }
+
+/// Number of background transcription workers per session. Long recordings
+/// produce chunks faster than one upload round-trip completes; a few parallel
+/// uploads keep the convergence wait short while results are still merged in
+/// submission order via chunk indices.
+const WORKER_THREADS: usize = 3;
 
 // ─── SessionOrchestrator ──────────────────────────────────────────────────────
 
@@ -150,12 +156,15 @@ impl SessionOrchestrator {
         let chunks: Arc<Mutex<Vec<ChunkEntry>>> = Arc::new(Mutex::new(Vec::new()));
         let (chunk_tx, chunk_rx) = mpsc::sync_channel::<WorkerMsg>(64);
 
-        let worker_chunks = Arc::clone(&chunks);
-        let transcriber = Arc::clone(&self.transcriber);
-
-        let worker = thread::spawn(move || {
-            worker_loop(chunk_rx, worker_chunks, transcriber);
-        });
+        let shared_rx = Arc::new(Mutex::new(chunk_rx));
+        let workers = (0..WORKER_THREADS)
+            .map(|_| {
+                let rx = Arc::clone(&shared_rx);
+                let worker_chunks = Arc::clone(&chunks);
+                let transcriber = Arc::clone(&self.transcriber);
+                thread::spawn(move || worker_loop(rx, worker_chunks, transcriber))
+            })
+            .collect();
 
         let mut inner = self.inner.lock().unwrap();
         if inner.is_some() {
@@ -167,7 +176,7 @@ impl SessionOrchestrator {
             mode,
             chunks,
             chunk_tx,
-            worker,
+            workers,
             next_index: 0,
         });
 
@@ -235,9 +244,11 @@ impl SessionOrchestrator {
         };
 
         if session.next_index == 0 {
-            // Closing the channel lets the idle worker exit immediately.
+            // Closing the channel lets the idle workers exit immediately.
             drop(session.chunk_tx);
-            let _ = session.worker.join();
+            for worker in session.workers {
+                let _ = worker.join();
+            }
             return Err(SessionError::NoChunks);
         }
 
@@ -274,13 +285,15 @@ impl SessionOrchestrator {
         }
 
         if !timed_out {
-            // Worker should have processed Done and exited; join to clean up.
-            let _ = session.worker.join();
+            // Workers should have drained the queue and exited; join to clean up.
+            for worker in session.workers {
+                let _ = worker.join();
+            }
         } else {
-            // Drop the handle without joining — the worker may still be mid-request.
-            // It will finish naturally; its Arc<Mutex<Vec<ChunkEntry>>> clone keeps
-            // the data valid until the thread exits.
-            drop(session.worker);
+            // Drop the handles without joining — workers may still be mid-request.
+            // They finish naturally; their Arc<Mutex<Vec<ChunkEntry>>> clones keep
+            // the data valid until each thread exits.
+            drop(session.workers);
         }
 
         let locked = chunks.lock().unwrap();
@@ -304,13 +317,17 @@ impl SessionOrchestrator {
 // ─── Worker ───────────────────────────────────────────────────────────────────
 
 fn worker_loop(
-    rx: mpsc::Receiver<WorkerMsg>,
+    rx: Arc<Mutex<mpsc::Receiver<WorkerMsg>>>,
     chunks: Arc<Mutex<Vec<ChunkEntry>>>,
     transcriber: Arc<dyn Transcriber>,
 ) {
-    for msg in rx {
+    loop {
+        // Take the receiver lock only for the blocking recv itself; workers
+        // waiting on this mutex are exactly the idle ones.
+        let msg = rx.lock().unwrap().recv();
         match msg {
-            WorkerMsg::Chunk { index, path } => {
+            Err(_) => break,
+            Ok(WorkerMsg::Chunk { index, path }) => {
                 // Transition to Uploading.
                 {
                     let mut locked = chunks.lock().unwrap();
@@ -480,29 +497,30 @@ mod tests {
         }
     }
 
-    /// Returns pre-configured results in call order.
+    /// Returns pre-configured results keyed by chunk path. Path-keyed rather
+    /// than call-ordered because parallel workers pick up chunks in a
+    /// nondeterministic order.
     struct ScriptedTranscriber {
-        results: Vec<Result<String, TranscribeError>>,
-        call_count: AtomicUsize,
+        results: std::collections::HashMap<String, Result<String, TranscribeError>>,
     }
 
     impl ScriptedTranscriber {
-        fn new(results: Vec<Result<String, TranscribeError>>) -> Self {
+        fn new<const N: usize>(results: [(&str, Result<String, TranscribeError>); N]) -> Self {
             Self {
-                results,
-                call_count: AtomicUsize::new(0),
+                results: results
+                    .into_iter()
+                    .map(|(path, result)| (path.to_string(), result))
+                    .collect(),
             }
         }
     }
 
     impl Transcriber for ScriptedTranscriber {
-        fn transcribe(&self, _path: &str) -> Result<String, TranscribeError> {
-            let i = self.call_count.fetch_add(1, Ordering::SeqCst);
-            match self.results.get(i) {
-                Some(Ok(s)) => Ok(s.clone()),
-                Some(Err(e)) => Err(e.clone()),
-                None => Ok("extra".to_string()),
-            }
+        fn transcribe(&self, path: &str) -> Result<String, TranscribeError> {
+            self.results
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| Ok("extra".to_string()))
         }
     }
 
@@ -559,11 +577,10 @@ mod tests {
 
     #[test]
     fn test_multi_chunk_ordered_merge() {
-        // Three chunks whose transcriptions arrive in-order.
-        let t = Arc::new(ScriptedTranscriber::new(vec![
-            Ok("one".to_string()),
-            Ok("two".to_string()),
-            Ok("three".to_string()),
+        let t = Arc::new(ScriptedTranscriber::new([
+            ("c0.wav", Ok("one".to_string())),
+            ("c1.wav", Ok("two".to_string())),
+            ("c2.wav", Ok("three".to_string())),
         ]));
         let orch = default_orchestrator(t);
 
@@ -617,13 +634,16 @@ mod tests {
 
     #[test]
     fn test_partial_failure_returns_error_with_partial_text() {
-        let t = Arc::new(ScriptedTranscriber::new(vec![
-            Ok("good chunk".to_string()),
-            Err(TranscribeError::Api {
-                status: 500,
-                body: "server error".to_string(),
-            }),
-            Ok("another good".to_string()),
+        let t = Arc::new(ScriptedTranscriber::new([
+            ("c0.wav", Ok("good chunk".to_string())),
+            (
+                "c1.wav",
+                Err(TranscribeError::Api {
+                    status: 500,
+                    body: "server error".to_string(),
+                }),
+            ),
+            ("c2.wav", Ok("another good".to_string())),
         ]));
         let orch = default_orchestrator(t);
 
