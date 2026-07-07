@@ -57,6 +57,255 @@ fn default_local_quantization() -> String {
     "int8".to_string()
 }
 
+/// One user-facing config field: its key plus string-based accessors.
+/// `get_field`, `set_field`, and the CLI `config list` all derive from this
+/// single table, so adding a field means adding exactly one entry here.
+struct FieldSpec {
+    key: &'static str,
+    get: fn(&AppConfig) -> Option<String>,
+    set: fn(&mut AppConfig, &str) -> Result<(), String>,
+}
+
+/// Map legacy aliases onto their canonical key.
+fn canonical_key(key: &str) -> &str {
+    if key == "groq_api_key" {
+        "api_key"
+    } else {
+        key
+    }
+}
+
+fn parse_bool(key: &str, value: &str) -> Result<bool, String> {
+    value
+        .parse::<bool>()
+        .map_err(|_| format!("{key} must be true/false, got: {value}"))
+}
+
+const FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        key: "api_key",
+        get: |c| c.api_key.as_ref().map(|_| "*** (set)".to_string()),
+        set: |_, _| {
+            Err("api_key cannot be saved by the config command; use the TRANSCRIPTION_API_KEY environment variable or edit config.json manually".to_string())
+        },
+    },
+    FieldSpec {
+        key: "transcription_api_url",
+        get: |c| Some(c.transcription_api_url.clone()),
+        set: |c, v| {
+            c.transcription_api_url = v.to_string();
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "provider",
+        get: |c| c.provider.clone(),
+        set: |c, v| {
+            c.provider = Some(v.to_string());
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "model",
+        get: |c| Some(c.model.clone()),
+        set: |c, v| {
+            c.model = v.to_string();
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "hold_hotkey",
+        get: |c| Some(c.hold_hotkey.clone()),
+        set: |c, v| {
+            c.hold_hotkey = v.to_string();
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "toggle_hotkey",
+        get: |c| Some(c.toggle_hotkey.clone()),
+        set: |c, v| {
+            c.toggle_hotkey = v.to_string();
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "language",
+        get: |c| c.language.clone(),
+        set: |c, v| {
+            c.language = Some(v.to_string());
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "prompt",
+        get: |c| c.prompt.clone(),
+        set: |c, v| {
+            c.prompt = Some(v.to_string());
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "temperature",
+        get: |c| Some(c.temperature.to_string()),
+        set: |c, v| {
+            c.temperature = parse_finite_f32("temperature", v)?;
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "mic_gain",
+        get: |c| Some(c.mic_gain.to_string()),
+        set: |c, v| {
+            c.mic_gain = parse_finite_f32("mic_gain", v)?;
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "max_chunk_duration_secs",
+        get: |c| Some(c.max_chunk_duration_secs.to_string()),
+        set: |c, v| {
+            c.max_chunk_duration_secs = v
+                .parse::<u32>()
+                .map_err(|_| format!("max_chunk_duration_secs must be a u32, got: {v}"))?;
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "max_chunk_size_bytes",
+        get: |c| Some(c.max_chunk_size_bytes.to_string()),
+        set: |c, v| {
+            c.max_chunk_size_bytes = v
+                .parse::<u64>()
+                .map_err(|_| format!("max_chunk_size_bytes must be a u64, got: {v}"))?;
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "max_retries",
+        get: |c| Some(c.max_retries.to_string()),
+        set: |c, v| {
+            let parsed = v
+                .parse::<u32>()
+                .map_err(|_| format!("max_retries must be a u32, got: {v}"))?;
+            if parsed > MAX_RETRIES {
+                return Err(format!("max_retries must be <= {MAX_RETRIES}, got: {v}"));
+            }
+            c.max_retries = parsed;
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "convergence_timeout_secs",
+        get: |c| Some(c.convergence_timeout_secs.to_string()),
+        set: |c, v| {
+            let parsed = v
+                .parse::<u64>()
+                .map_err(|_| format!("convergence_timeout_secs must be a u64, got: {v}"))?;
+            if parsed > MAX_CONVERGENCE_TIMEOUT_SECS {
+                return Err(format!(
+                    "convergence_timeout_secs must be <= {MAX_CONVERGENCE_TIMEOUT_SECS}, got: {v}"
+                ));
+            }
+            c.convergence_timeout_secs = parsed;
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "post_process_enabled",
+        get: |c| Some(c.post_process_enabled.to_string()),
+        set: |c, v| {
+            c.post_process_enabled = parse_bool("post_process_enabled", v)?;
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "post_process_streaming_enabled",
+        get: |c| Some(c.post_process_streaming_enabled.to_string()),
+        set: |c, v| {
+            c.post_process_streaming_enabled = parse_bool("post_process_streaming_enabled", v)?;
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "post_process_api_url",
+        get: |c| c.post_process_api_url.clone(),
+        set: |c, v| {
+            c.post_process_api_url = Some(v.to_string());
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "post_process_api_key",
+        get: |c| {
+            c.post_process_api_key
+                .as_ref()
+                .map(|_| "*** (set)".to_string())
+        },
+        set: |_, _| {
+            Err("post_process_api_key cannot be saved by the config command; use the POST_PROCESS_API_KEY environment variable or edit config.json manually".to_string())
+        },
+    },
+    FieldSpec {
+        key: "post_process_model",
+        get: |c| c.post_process_model.clone(),
+        set: |c, v| {
+            c.post_process_model = Some(v.to_string());
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "post_process_prompt",
+        get: |c| c.post_process_prompt.clone(),
+        set: |c, v| {
+            c.post_process_prompt = Some(v.to_string());
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "post_process_temperature",
+        get: |c| Some(c.post_process_temperature.to_string()),
+        set: |c, v| {
+            c.post_process_temperature = parse_finite_f32("post_process_temperature", v)?;
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "local_mode",
+        get: |c| Some(c.local_mode.to_string()),
+        set: |c, v| {
+            c.local_mode = parse_bool("local_mode", v)?;
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "local_data_dir",
+        get: |c| c.local_data_dir.clone(),
+        set: |c, v| {
+            c.local_data_dir = Some(v.to_string());
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "local_server_port",
+        get: |c| Some(c.local_server_port.to_string()),
+        set: |c, v| {
+            c.local_server_port = v
+                .parse::<u16>()
+                .map_err(|_| format!("local_server_port must be a u16, got: {v}"))?;
+            Ok(())
+        },
+    },
+    FieldSpec {
+        key: "local_quantization",
+        get: |c| Some(c.local_quantization.clone()),
+        set: |c, v| {
+            c.local_quantization = v.to_string();
+            Ok(())
+        },
+    },
+];
+
 fn parse_finite_f32(key: &str, value: &str) -> Result<f32, String> {
     let parsed = value
         .parse::<f32>()
@@ -259,185 +508,29 @@ impl AppConfig {
 
     /// Get the string value of a config field
     pub fn get_field(&self, key: &str) -> Option<String> {
-        match key {
-            "api_key" | "groq_api_key" => self.api_key.as_ref().map(|_| "*** (set)".to_string()),
-            "transcription_api_url" => Some(self.transcription_api_url.clone()),
-            "provider" => self.provider.clone(),
-            "model" => Some(self.model.clone()),
-            "hold_hotkey" => Some(self.hold_hotkey.clone()),
-            "toggle_hotkey" => Some(self.toggle_hotkey.clone()),
-            "temperature" => Some(self.temperature.to_string()),
-            "mic_gain" => Some(self.mic_gain.to_string()),
-            "language" => self.language.clone(),
-            "prompt" => self.prompt.clone(),
-            "max_chunk_duration_secs" => Some(self.max_chunk_duration_secs.to_string()),
-            "max_chunk_size_bytes" => Some(self.max_chunk_size_bytes.to_string()),
-            "max_retries" => Some(self.max_retries.to_string()),
-            "convergence_timeout_secs" => Some(self.convergence_timeout_secs.to_string()),
-            "post_process_enabled" => Some(self.post_process_enabled.to_string()),
-            "post_process_streaming_enabled" => {
-                Some(self.post_process_streaming_enabled.to_string())
-            }
-            "post_process_api_url" => self.post_process_api_url.clone(),
-            "post_process_api_key" => self
-                .post_process_api_key
-                .as_ref()
-                .map(|_| "*** (set)".to_string()),
-            "post_process_model" => self.post_process_model.clone(),
-            "post_process_prompt" => self.post_process_prompt.clone(),
-            "post_process_temperature" => Some(self.post_process_temperature.to_string()),
-            "local_mode" => Some(self.local_mode.to_string()),
-            "local_data_dir" => self.local_data_dir.clone(),
-            "local_server_port" => Some(self.local_server_port.to_string()),
-            "local_quantization" => Some(self.local_quantization.clone()),
-            _ => None,
-        }
+        let key = canonical_key(key);
+        FIELDS
+            .iter()
+            .find(|field| field.key == key)
+            .and_then(|field| (field.get)(self))
     }
 
     /// Set a config field value (accepts string, auto-converts types)
     pub fn set_field(&mut self, key: &str, value: &str) -> Result<(), String> {
-        match key {
-            "api_key" | "groq_api_key" => Err(
-                "api_key cannot be saved by the config command; use the TRANSCRIPTION_API_KEY environment variable or edit config.json manually"
-                    .to_string(),
-            ),
-            "transcription_api_url" => {
-                self.transcription_api_url = value.to_string();
-                Ok(())
-            }
-            "provider" => {
-                self.provider = Some(value.to_string());
-                Ok(())
-            }
-            "model" => {
-                self.model = value.to_string();
-                Ok(())
-            }
-            "hold_hotkey" => {
-                self.hold_hotkey = value.to_string();
-                Ok(())
-            }
-            "toggle_hotkey" => {
-                self.toggle_hotkey = value.to_string();
-                Ok(())
-            }
-            "language" => {
-                self.language = Some(value.to_string());
-                Ok(())
-            }
-            "prompt" => {
-                self.prompt = Some(value.to_string());
-                Ok(())
-            }
-            "temperature" => {
-                self.temperature = parse_finite_f32("temperature", value)?;
-                Ok(())
-            }
-            "mic_gain" => {
-                self.mic_gain = parse_finite_f32("mic_gain", value)?;
-                Ok(())
-            }
-            "max_chunk_duration_secs" => {
-                self.max_chunk_duration_secs = value.parse::<u32>().map_err(|_| {
-                    format!("max_chunk_duration_secs must be a u32, got: {}", value)
-                })?;
-                Ok(())
-            }
-            "max_chunk_size_bytes" => {
-                self.max_chunk_size_bytes = value
-                    .parse::<u64>()
-                    .map_err(|_| format!("max_chunk_size_bytes must be a u64, got: {}", value))?;
-                Ok(())
-            }
-            "max_retries" => {
-                let parsed = value
-                    .parse::<u32>()
-                    .map_err(|_| format!("max_retries must be a u32, got: {}", value))?;
-                if parsed > MAX_RETRIES {
-                    return Err(format!("max_retries must be <= {MAX_RETRIES}, got: {value}"));
-                }
-                self.max_retries = parsed;
-                Ok(())
-            }
-            "convergence_timeout_secs" => {
-                let parsed = value.parse::<u64>().map_err(|_| {
-                    format!("convergence_timeout_secs must be a u64, got: {}", value)
-                })?;
-                if parsed > MAX_CONVERGENCE_TIMEOUT_SECS {
-                    return Err(format!(
-                        "convergence_timeout_secs must be <= {MAX_CONVERGENCE_TIMEOUT_SECS}, got: {value}"
-                    ));
-                }
-                self.convergence_timeout_secs = parsed;
-                Ok(())
-            }
-            "post_process_enabled" => {
-                self.post_process_enabled = value.parse::<bool>().map_err(|_| {
-                    format!("post_process_enabled must be true/false, got: {}", value)
-                })?;
-                Ok(())
-            }
-            "post_process_streaming_enabled" => {
-                self.post_process_streaming_enabled = value.parse::<bool>().map_err(|_| {
-                    format!(
-                        "post_process_streaming_enabled must be true/false, got: {}",
-                        value
-                    )
-                })?;
-                Ok(())
-            }
-            "post_process_api_url" => {
-                self.post_process_api_url = Some(value.to_string());
-                Ok(())
-            }
-            "post_process_api_key" => Err(
-                "post_process_api_key cannot be saved by the config command; use the POST_PROCESS_API_KEY environment variable or edit config.json manually"
-                    .to_string(),
-            ),
-            "post_process_model" => {
-                self.post_process_model = Some(value.to_string());
-                Ok(())
-            }
-            "post_process_prompt" => {
-                self.post_process_prompt = Some(value.to_string());
-                Ok(())
-            }
-            "post_process_temperature" => {
-                self.post_process_temperature =
-                    parse_finite_f32("post_process_temperature", value)?;
-                Ok(())
-            }
-            "local_mode" => {
-                self.local_mode = value
-                    .parse::<bool>()
-                    .map_err(|_| format!("local_mode must be true/false, got: {}", value))?;
-                Ok(())
-            }
-            "local_data_dir" => {
-                self.local_data_dir = Some(value.to_string());
-                Ok(())
-            }
-            "local_server_port" => {
-                self.local_server_port = value
-                    .parse::<u16>()
-                    .map_err(|_| format!("local_server_port must be a u16, got: {}", value))?;
-                Ok(())
-            }
-            "local_quantization" => {
-                self.local_quantization = value.to_string();
-                Ok(())
-            }
-            _ => Err(format!(
-                "Unknown config key: {}. Available: api_key, transcription_api_url, model, \
-                 hold_hotkey, toggle_hotkey, language, prompt, temperature, mic_gain, \
-                 max_chunk_duration_secs, max_chunk_size_bytes, max_retries, \
-                 convergence_timeout_secs, post_process_enabled, post_process_streaming_enabled, \
-                 post_process_api_url, post_process_api_key, post_process_model, \
-                 post_process_prompt, post_process_temperature, \
-                 local_mode, local_data_dir, local_server_port, local_quantization",
-                key
+        let canonical = canonical_key(key);
+        match FIELDS.iter().find(|field| field.key == canonical) {
+            Some(field) => (field.set)(self, value),
+            None => Err(format!(
+                "Unknown config key: {}. Available: {}",
+                key,
+                Self::field_keys().collect::<Vec<_>>().join(", ")
             )),
         }
+    }
+
+    /// Ordered list of user-facing config keys (drives `config list`).
+    pub fn field_keys() -> impl Iterator<Item = &'static str> {
+        FIELDS.iter().map(|field| field.key)
     }
 
     fn apply_json(&mut self, json: &serde_json::Value) {

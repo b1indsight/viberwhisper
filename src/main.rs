@@ -487,32 +487,7 @@ fn handle_config(action: ConfigAction) {
         ConfigAction::List => {
             println!("{:<25} Value", "Key");
             println!("{}", "-".repeat(60));
-            for key in &[
-                "api_key",
-                "transcription_api_url",
-                "model",
-                "hold_hotkey",
-                "toggle_hotkey",
-                "language",
-                "prompt",
-                "temperature",
-                "mic_gain",
-                "max_chunk_duration_secs",
-                "max_chunk_size_bytes",
-                "max_retries",
-                "convergence_timeout_secs",
-                "post_process_enabled",
-                "post_process_streaming_enabled",
-                "post_process_api_url",
-                "post_process_api_key",
-                "post_process_model",
-                "post_process_prompt",
-                "post_process_temperature",
-                "local_mode",
-                "local_data_dir",
-                "local_server_port",
-                "local_quantization",
-            ] {
+            for key in AppConfig::field_keys() {
                 let value = config
                     .get_field(key)
                     .unwrap_or_else(|| "(not set)".to_string());
