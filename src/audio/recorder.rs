@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -14,7 +14,13 @@ use super::unique_temp_wav_path;
 
 pub struct AudioRecorder {
     recording: Arc<AtomicBool>,
-    buffer: Arc<Mutex<Vec<i16>>>,
+    /// Receives sample blocks from the audio callback. The callback only does a
+    /// non-blocking channel send, so it can never stall on the consumer holding
+    /// a lock during large chunk copies.
+    capture_rx: Option<mpsc::Receiver<Vec<i16>>>,
+    /// Samples drained from the channel that have not been flushed to disk yet.
+    /// Owned by the consumer side; no lock needed.
+    pending: Vec<i16>,
     stream: Option<cpal::Stream>,
     sample_count: Arc<AtomicUsize>,
     gain: f32,
@@ -33,18 +39,20 @@ pub struct AudioRecorder {
     max_chunk_size_bytes: u64,
 }
 
-/// Shared logic for both I16 and F32 audio callbacks: append mono samples to the
-/// buffer and signal a flush when the chunk threshold is crossed.
+/// Shared logic for both I16 and F32 audio callbacks: hand mono samples to the
+/// consumer via the channel and signal a flush when the chunk threshold is crossed.
 fn push_mono_chunk(
     mono: Vec<i16>,
-    buffer: &Mutex<Vec<i16>>,
+    capture_tx: &mpsc::Sender<Vec<i16>>,
     sample_count: &AtomicUsize,
     ready_chunk_count: &AtomicUsize,
     sample_rate: u32,
     chunk_max_samples: usize,
 ) {
     let len = mono.len();
-    buffer.lock().unwrap().extend_from_slice(&mono);
+    // A send only fails when the receiver is gone (recorder stopped/dropped);
+    // the samples are irrelevant then.
+    let _ = capture_tx.send(mono);
     let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
     if total % (sample_rate as usize / 2) < len {
         debug!(
@@ -116,7 +124,8 @@ impl AudioRecorder {
 
         Ok(AudioRecorder {
             recording: Arc::new(AtomicBool::new(false)),
-            buffer: Arc::new(Mutex::new(Vec::new())),
+            capture_rx: None,
+            pending: Vec::new(),
             stream: None,
             sample_count: Arc::new(AtomicUsize::new(0)),
             gain,
@@ -172,13 +181,14 @@ impl AudioRecorder {
         self.chunk_max_samples = max_by_duration.min(max_by_size);
 
         let recording = Arc::clone(&self.recording);
-        let buffer = Arc::clone(&self.buffer);
         let sample_count = Arc::clone(&self.sample_count);
         let ready_chunk_count = Arc::clone(&self.ready_chunk_count);
         let chunk_max_samples = self.chunk_max_samples;
         let gain = self.gain;
 
-        buffer.lock().unwrap().clear();
+        let (capture_tx, capture_rx) = mpsc::channel::<Vec<i16>>();
+        self.capture_rx = Some(capture_rx);
+        self.pending.clear();
         sample_count.store(0, Ordering::Relaxed);
 
         let stream = match sample_format {
@@ -196,7 +206,7 @@ impl AudioRecorder {
                             .collect();
                         push_mono_chunk(
                             mono,
-                            &buffer,
+                            &capture_tx,
                             &sample_count,
                             &ready_chunk_count,
                             sample_rate,
@@ -221,7 +231,7 @@ impl AudioRecorder {
                             .collect();
                         push_mono_chunk(
                             mono,
-                            &buffer,
+                            &capture_tx,
                             &sample_count,
                             &ready_chunk_count,
                             sample_rate,
@@ -268,25 +278,23 @@ impl AudioRecorder {
             return None;
         }
 
+        self.drain_captured_samples();
+
         let chunk_end = self.flushed_samples + self.chunk_max_samples;
         let chunk_index = flushed_chunk_count;
-        let chunk_samples = {
-            let buffer = self.buffer.lock().unwrap();
-            let total_samples = buffer.len();
-            if total_samples < self.chunk_max_samples {
-                debug!(
-                    total_samples = total_samples,
-                    chunk_size = self.chunk_max_samples,
-                    "Chunk count is ahead of buffered samples; retrying later"
-                );
-                return None;
-            }
-            buffer[..self.chunk_max_samples].to_vec()
-        };
+        if self.pending.len() < self.chunk_max_samples {
+            debug!(
+                total_samples = self.pending.len(),
+                chunk_size = self.chunk_max_samples,
+                "Chunk count is ahead of buffered samples; retrying later"
+            );
+            return None;
+        }
+        let chunk_samples = self.pending[..self.chunk_max_samples].to_vec();
 
         match self.write_chunk(&chunk_samples, chunk_index) {
             Ok(path) => {
-                self.buffer.lock().unwrap().drain(..self.chunk_max_samples);
+                self.pending.drain(..self.chunk_max_samples);
                 self.flushed_samples = chunk_end;
                 Some(path)
             }
@@ -330,18 +338,19 @@ impl AudioRecorder {
         drop(self.stream.take());
         debug!("Stream stopped");
 
-        let (tail_samples, chunk_index, wrote_live_chunks) = {
-            let buffer = self.buffer.lock().unwrap();
-            debug!(samples = buffer.len(), "Buffer size");
+        // Collect everything the callback produced; then close the channel so a
+        // late callback (should not happen after the stream drop) sends into void.
+        self.drain_captured_samples();
+        self.capture_rx = None;
 
-            let tail_samples = buffer.to_vec();
-            let chunk_index = if self.flushed_samples > 0 && self.chunk_max_samples > 0 {
-                self.flushed_samples / self.chunk_max_samples
-            } else {
-                0
-            };
-            (tail_samples, chunk_index, self.flushed_samples > 0)
+        let tail_samples = std::mem::take(&mut self.pending);
+        debug!(samples = tail_samples.len(), "Buffer size");
+        let chunk_index = if self.flushed_samples > 0 && self.chunk_max_samples > 0 {
+            self.flushed_samples / self.chunk_max_samples
+        } else {
+            0
         };
+        let wrote_live_chunks = self.flushed_samples > 0;
 
         if tail_samples.is_empty() {
             if wrote_live_chunks {
@@ -375,6 +384,16 @@ impl AudioRecorder {
             Ok(StopResult::SingleFile(path))
         } else {
             Ok(StopResult::TailChunk(path))
+        }
+    }
+
+    /// Move every sample block the audio callback has produced so far into the
+    /// local pending buffer. Non-blocking.
+    fn drain_captured_samples(&mut self) {
+        if let Some(rx) = &self.capture_rx {
+            while let Ok(block) = rx.try_recv() {
+                self.pending.extend_from_slice(&block);
+            }
         }
     }
 
@@ -507,7 +526,8 @@ mod tests {
     fn recorder_for_buffer(samples: Vec<i16>, chunk_max_samples: usize) -> AudioRecorder {
         AudioRecorder {
             recording: Arc::new(AtomicBool::new(true)),
-            buffer: Arc::new(Mutex::new(samples)),
+            capture_rx: None,
+            pending: samples,
             stream: None,
             sample_count: Arc::new(AtomicUsize::new(0)),
             gain: 1.0,
@@ -539,9 +559,37 @@ mod tests {
         assert_eq!(recorder.flushed_samples, 30);
         assert_eq!(recorder.current_session_files.len(), 3);
         assert!(
-            recorder.buffer.lock().unwrap().is_empty(),
+            recorder.pending.is_empty(),
             "flushed samples should be released from memory"
         );
+
+        for path in recorder.current_session_files {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn test_take_ready_chunk_drains_callback_channel() {
+        // Samples arrive through the channel exactly as the audio callback
+        // would deliver them, in several small blocks.
+        let mut recorder = recorder_for_buffer(Vec::new(), 10);
+        let (tx, rx) = mpsc::channel::<Vec<i16>>();
+        recorder.capture_rx = Some(rx);
+        for block in [
+            (0..4).collect::<Vec<i16>>(),
+            (4..10).collect(),
+            (10..12).collect(),
+        ] {
+            tx.send(block).unwrap();
+        }
+        recorder.ready_chunk_count.store(1, Ordering::Release);
+
+        let path = recorder.take_ready_chunk();
+
+        assert!(path.is_some());
+        assert_eq!(recorder.flushed_samples, 10);
+        // The partial second chunk stays pending.
+        assert_eq!(recorder.pending, vec![10, 11]);
 
         for path in recorder.current_session_files {
             let _ = std::fs::remove_file(path);
