@@ -819,5 +819,4 @@ mod tests {
         assert!(matches!(result, Err(SessionError::PartialFailure { .. })));
         assert!(!path.exists(), "panicking worker leaked chunk file");
     }
-
 }
