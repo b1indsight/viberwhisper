@@ -1,6 +1,12 @@
 use crate::audio::split_wav;
 use crate::core::config::AppConfig;
+use std::time::Duration;
 use tracing::{info, instrument, warn};
+
+/// Total per-request timeout for one chunk upload (connect + send + response).
+/// Without it, a hung request would pin the orchestrator worker thread forever;
+/// the convergence timeout only stops the caller from waiting, not the worker.
+const STT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, wav_path: &str) -> Result<String, Box<dyn std::error::Error>>;
@@ -39,6 +45,8 @@ pub struct ApiTranscriber {
     max_chunk_size_bytes: u64,
     /// Maximum retry attempts per chunk on transient errors (5xx / network).
     max_retries: u32,
+    /// Shared HTTP client (connection reuse + request timeout).
+    client: reqwest::blocking::Client,
 }
 
 impl ApiTranscriber {
@@ -57,6 +65,9 @@ impl ApiTranscriber {
             max_chunk_duration_secs: config.max_chunk_duration_secs,
             max_chunk_size_bytes: config.max_chunk_size_bytes,
             max_retries: config.max_retries,
+            client: reqwest::blocking::Client::builder()
+                .timeout(STT_REQUEST_TIMEOUT)
+                .build()?,
         })
     }
 
@@ -86,8 +97,8 @@ impl ApiTranscriber {
             form = form.text("prompt", prompt.clone());
         }
 
-        let client = reqwest::blocking::Client::new();
-        let response = client
+        let response = self
+            .client
             .post(&self.api_url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .multipart(form)
