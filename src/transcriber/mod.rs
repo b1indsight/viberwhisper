@@ -36,3 +36,48 @@ impl fmt::Display for TranscribeError {
 }
 
 impl std::error::Error for TranscribeError {}
+
+/// Merge transcription results from multiple chunks, in order.
+///
+/// Chinese text (zh, zh-CN, zh-TW) is concatenated without a separator.
+/// All other languages use a single space as separator. Empty fragments
+/// are dropped so a failed or silent chunk never produces double separators.
+pub fn merge_texts(texts: &[String], language: Option<&str>) -> String {
+    let separator = match language {
+        Some(lang) if lang.starts_with("zh") => "",
+        _ => " ",
+    };
+    texts
+        .iter()
+        .filter(|t| !t.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_texts;
+
+    #[test]
+    fn test_merge_texts_zh_variants_concatenate_without_separator() {
+        let texts = vec!["你好".to_string(), "世界".to_string()];
+        assert_eq!(merge_texts(&texts, Some("zh")), "你好世界");
+        assert_eq!(merge_texts(&texts, Some("zh-CN")), "你好世界");
+        assert_eq!(merge_texts(&texts, Some("zh-TW")), "你好世界");
+    }
+
+    #[test]
+    fn test_merge_texts_other_languages_use_space() {
+        let texts = vec!["hello".to_string(), "world".to_string()];
+        assert_eq!(merge_texts(&texts, Some("en")), "hello world");
+        assert_eq!(merge_texts(&texts, None), "hello world");
+    }
+
+    #[test]
+    fn test_merge_texts_filters_empty_fragments() {
+        let texts = vec!["a".to_string(), String::new(), "b".to_string()];
+        assert_eq!(merge_texts(&texts, Some("en")), "a b");
+        assert_eq!(merge_texts(&[String::new(), String::new()], Some("en")), "");
+    }
+}

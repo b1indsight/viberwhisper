@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info, warn};
 
-use crate::transcriber::Transcriber;
+use crate::transcriber::{Transcriber, merge_texts};
 // Re-exported so callers can keep using `core::orchestrator::TranscribeError`.
 pub use crate::transcriber::TranscribeError;
 
@@ -422,21 +422,6 @@ fn remove_chunk_file(path: &str, reason: &str) {
     }
 }
 
-/// Language-aware text merging (duplicated from `transcriber::api` to avoid
-/// cross-module coupling; kept intentionally minimal).
-fn merge_texts(texts: &[String], language: Option<&str>) -> String {
-    let sep = match language {
-        Some(lang) if lang.starts_with("zh") => "",
-        _ => " ",
-    };
-    texts
-        .iter()
-        .filter(|s| !s.is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(sep)
-}
-
 fn collect_transcribed_texts(chunks: &[ChunkEntry]) -> Vec<String> {
     let mut ordered: Vec<&ChunkEntry> = chunks.iter().collect();
     ordered.sort_by_key(|e| e.index);
@@ -835,21 +820,4 @@ mod tests {
         assert!(!path.exists(), "panicking worker leaked chunk file");
     }
 
-    #[test]
-    fn test_merge_texts_zh() {
-        let texts = vec!["你好".to_string(), "世界".to_string()];
-        assert_eq!(merge_texts(&texts, Some("zh")), "你好世界");
-    }
-
-    #[test]
-    fn test_merge_texts_en() {
-        let texts = vec!["hello".to_string(), "world".to_string()];
-        assert_eq!(merge_texts(&texts, Some("en")), "hello world");
-    }
-
-    #[test]
-    fn test_merge_texts_empty_filtered() {
-        let texts = vec!["a".to_string(), "".to_string(), "b".to_string()];
-        assert_eq!(merge_texts(&texts, None), "a b");
-    }
 }

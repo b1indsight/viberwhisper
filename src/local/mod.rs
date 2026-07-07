@@ -6,3 +6,4 @@ pub use installer::{
     install_requirements, model_weights_present, setup_venv, verify_install,
 };
 pub use service::LocalServiceManager;
+pub(crate) use service::find_server_file;

@@ -1,6 +1,6 @@
 use crate::audio::split_wav;
 use crate::core::config::AppConfig;
-use crate::transcriber::TranscribeError;
+use crate::transcriber::{TranscribeError, merge_texts};
 use std::time::Duration;
 use tracing::{info, instrument, warn};
 
@@ -205,23 +205,6 @@ impl ApiTranscriber {
     }
 }
 
-/// Merge transcription results from multiple chunks.
-///
-/// Chinese text (zh, zh-CN, zh-TW) is concatenated without a separator.
-/// All other languages use a single space as separator.
-fn merge_texts(texts: &[String], language: Option<&str>) -> String {
-    let separator = match language {
-        Some(lang) if lang.starts_with("zh") => "",
-        _ => " ",
-    };
-    texts
-        .iter()
-        .filter(|t| !t.is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(separator)
-}
-
 impl Transcriber for ApiTranscriber {
     #[instrument(name = "api_stt", skip(self), fields(path = %wav_path))]
     fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError> {
@@ -346,48 +329,6 @@ mod tests {
         assert_eq!(t.max_chunk_duration_secs, 60);
         assert_eq!(t.max_chunk_size_bytes, 10_000_000);
         assert_eq!(t.max_retries, 5);
-    }
-
-    #[test]
-    fn test_merge_texts_zh() {
-        let texts = vec!["你好".to_string(), "世界".to_string()];
-        let merged = merge_texts(&texts, Some("zh"));
-        assert_eq!(merged, "你好世界");
-    }
-
-    #[test]
-    fn test_merge_texts_zh_cn() {
-        let texts = vec!["你好".to_string(), "世界".to_string()];
-        let merged = merge_texts(&texts, Some("zh-CN"));
-        assert_eq!(merged, "你好世界");
-    }
-
-    #[test]
-    fn test_merge_texts_en() {
-        let texts = vec!["hello".to_string(), "world".to_string()];
-        let merged = merge_texts(&texts, Some("en"));
-        assert_eq!(merged, "hello world");
-    }
-
-    #[test]
-    fn test_merge_texts_no_language() {
-        let texts = vec!["hello".to_string(), "world".to_string()];
-        let merged = merge_texts(&texts, None);
-        assert_eq!(merged, "hello world");
-    }
-
-    #[test]
-    fn test_merge_texts_empty_segments_filtered() {
-        let texts = vec!["hello".to_string(), "".to_string(), "world".to_string()];
-        let merged = merge_texts(&texts, Some("en"));
-        assert_eq!(merged, "hello world");
-    }
-
-    #[test]
-    fn test_merge_texts_all_empty() {
-        let texts = vec!["".to_string(), "".to_string()];
-        let merged = merge_texts(&texts, Some("en"));
-        assert_eq!(merged, "");
     }
 
     #[test]

@@ -105,14 +105,14 @@ impl LocalServiceManager {
         let child = match find_uv() {
             Some(uv) => {
                 let mut uv_command = Command::new(&uv);
-                uv_command.args(server_launch_args(
-                    &python,
-                    &script_path,
-                    &self.model_dir,
-                    self.port,
-                    &self.quantization,
-                ));
                 uv_command
+                    .args(server_launch_args(
+                        &python,
+                        &script_path,
+                        &self.model_dir,
+                        self.port,
+                        &self.quantization,
+                    ))
                     .stdin(Stdio::null())
                     .stdout(stdout_stdio)
                     .stderr(stderr_stdio);
@@ -121,43 +121,26 @@ impl LocalServiceManager {
                     Ok(child) => child,
                     Err(uv_error) => {
                         let (stdout, stderr) = self.log_stdio()?;
-                        let mut python_command = Command::new(&python);
-                        python_command
-                            .arg(&script_path)
-                            .arg("--model-dir")
-                            .arg(&self.model_dir)
-                            .arg("--port")
-                            .arg(self.port.to_string())
-                            .arg("--quantization")
-                            .arg(&self.quantization)
-                            .stdin(Stdio::null())
+                        self.python_launch_command(&python, &script_path)
                             .stdout(stdout)
-                            .stderr(stderr);
-                        python_command.spawn().map_err(|python_error| {
-                            format!(
-                                "failed to start local service with uv ({uv_error}) and direct python ({python_error})"
-                            )
-                        })?
+                            .stderr(stderr)
+                            .spawn()
+                            .map_err(|python_error| {
+                                format!(
+                                    "failed to start local service with uv ({uv_error}) and direct python ({python_error})"
+                                )
+                            })?
                     }
                 }
             }
-            None => {
-                let mut python_command = Command::new(&python);
-                python_command
-                    .arg(&script_path)
-                    .arg("--model-dir")
-                    .arg(&self.model_dir)
-                    .arg("--port")
-                    .arg(self.port.to_string())
-                    .arg("--quantization")
-                    .arg(&self.quantization)
-                    .stdin(Stdio::null())
-                    .stdout(stdout_stdio)
-                    .stderr(stderr_stdio);
-                python_command.spawn().map_err(|error| {
+            None => self
+                .python_launch_command(&python, &script_path)
+                .stdout(stdout_stdio)
+                .stderr(stderr_stdio)
+                .spawn()
+                .map_err(|error| {
                     format!("failed to start local service with direct python: {error}")
-                })?
-            }
+                })?,
         };
 
         fs::write(self.pid_file_path(), child.id().to_string()).map_err(|error| {
@@ -279,6 +262,21 @@ impl LocalServiceManager {
         find_server_file("server.py")
     }
 
+    /// Direct-python launch command, used when uv is unavailable or failed.
+    fn python_launch_command(&self, python: &Path, script_path: &Path) -> Command {
+        let mut command = Command::new(python);
+        command
+            .arg(script_path)
+            .arg("--model-dir")
+            .arg(&self.model_dir)
+            .arg("--port")
+            .arg(self.port.to_string())
+            .arg("--quantization")
+            .arg(&self.quantization)
+            .stdin(Stdio::null());
+        command
+    }
+
     fn read_pid(&self) -> Option<u32> {
         fs::read_to_string(self.pid_file_path())
             .ok()
@@ -328,7 +326,7 @@ impl LocalServiceManager {
 
 /// Locates a file inside the `server/` directory, trying the packaged location
 /// (next to the executable) first, then falling back to the development source tree.
-fn find_server_file(filename: &str) -> PathBuf {
+pub(crate) fn find_server_file(filename: &str) -> PathBuf {
     if let Ok(exe) = std::env::current_exe()
         && let Some(exe_dir) = exe.parent()
     {
@@ -605,6 +603,38 @@ mod tests {
                 "/tmp/venv/bin/python",
                 "--no-project",
                 "/tmp/venv/bin/python",
+                "/tmp/server.py",
+                "--model-dir",
+                "/tmp/model",
+                "--port",
+                "17265",
+                "--quantization",
+                "int8",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_python_launch_command_arguments() {
+        let manager = LocalServiceManager::with_quantization(
+            17265,
+            PathBuf::from("/tmp/model"),
+            PathBuf::from("/tmp/venv"),
+            "int8".to_string(),
+        );
+        let command = manager.python_launch_command(
+            Path::new("/tmp/venv/bin/python"),
+            Path::new("/tmp/server.py"),
+        );
+
+        assert_eq!(command.get_program(), "/tmp/venv/bin/python");
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
                 "/tmp/server.py",
                 "--model-dir",
                 "/tmp/model",

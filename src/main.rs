@@ -11,7 +11,8 @@ use core::cli::{Cli, Commands, ConfigAction, LocalCommand};
 use core::config::AppConfig;
 use local::{
     LocalServiceManager, PythonRuntime, dependencies_installed, detect_python_runtime,
-    download_model, install_requirements, model_weights_present, setup_venv, verify_install,
+    download_model, find_server_file, install_requirements, model_weights_present, setup_venv,
+    verify_install,
 };
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
@@ -212,24 +213,6 @@ fn default_local_data_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
 
 fn local_requirements_path() -> PathBuf {
     find_server_file("requirements.txt")
-}
-
-/// Locates a file inside the `server/` directory, trying the packaged location
-/// (next to the executable) first, then falling back to the development source tree.
-fn find_server_file(filename: &str) -> PathBuf {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(exe_dir) = exe.parent()
-    {
-        let candidate = exe_dir.join("server").join(filename);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-
-    // Fallback: compile-time source tree (works with `cargo run`).
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("server")
-        .join(filename)
 }
 
 fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
