@@ -5,7 +5,7 @@
 
 use std::fmt;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -102,10 +102,15 @@ enum WorkerMsg {
     Chunk { index: usize, path: String },
 }
 
+/// Chunk store shared between the session and its workers. The condvar is
+/// signalled whenever a chunk reaches a terminal state so `stop_session` can
+/// wait for convergence without polling.
+type ChunkStore = Arc<(Mutex<Vec<ChunkEntry>>, Condvar)>;
+
 struct ActiveSessionInner {
     #[allow(dead_code)]
     mode: SessionMode,
-    chunks: Arc<Mutex<Vec<ChunkEntry>>>,
+    chunks: ChunkStore,
     chunk_tx: mpsc::SyncSender<WorkerMsg>,
     workers: Vec<thread::JoinHandle<()>>,
     next_index: usize,
@@ -153,7 +158,7 @@ impl SessionOrchestrator {
     /// worker will finish its current transcription and then exit cleanly when
     /// the channel is dropped).
     pub fn start_session(&self, mode: SessionMode) {
-        let chunks: Arc<Mutex<Vec<ChunkEntry>>> = Arc::new(Mutex::new(Vec::new()));
+        let chunks: ChunkStore = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
         let (chunk_tx, chunk_rx) = mpsc::sync_channel::<WorkerMsg>(64);
 
         let shared_rx = Arc::new(Mutex::new(chunk_rx));
@@ -199,7 +204,7 @@ impl SessionOrchestrator {
         let index = session.next_index;
         session.next_index += 1;
 
-        session.chunks.lock().unwrap().push(ChunkEntry {
+        session.chunks.0.lock().unwrap().push(ChunkEntry {
             index,
             state: ChunkState::Flushed,
         });
@@ -213,10 +218,13 @@ impl SessionOrchestrator {
                 mpsc::TrySendError::Disconnected(_) => "worker channel closed",
             };
             error!(path = %path, error = message, "Failed to enqueue chunk; marking as failed");
-            let mut chunks = session.chunks.lock().unwrap();
-            if let Some(entry) = chunks.iter_mut().find(|e| e.index == index) {
-                entry.state = ChunkState::Failed(TranscribeError::Network(message.to_string()));
+            {
+                let mut chunks = session.chunks.0.lock().unwrap();
+                if let Some(entry) = chunks.iter_mut().find(|e| e.index == index) {
+                    entry.state = ChunkState::Failed(TranscribeError::Network(message.to_string()));
+                }
             }
+            session.chunks.1.notify_all();
             remove_chunk_file(&path, "rejected");
         } else {
             info!(index = index, path = %path, "Chunk enqueued for background transcription");
@@ -261,27 +269,33 @@ impl SessionOrchestrator {
         let deadline = Instant::now() + self.convergence_timeout;
         let mut timed_out = false;
 
-        loop {
-            let all_terminal = chunks.lock().unwrap().iter().all(|e| e.state.is_terminal());
-            if all_terminal {
-                break;
-            }
-            if Instant::now() >= deadline {
-                timed_out = true;
-                let mut locked = chunks.lock().unwrap();
-                let pending_count = locked.iter().filter(|e| !e.state.is_terminal()).count();
-                warn!(
-                    pending_count = pending_count,
-                    "Convergence timeout; marking pending chunks as Failed(Timeout)"
-                );
-                for entry in locked.iter_mut() {
-                    if !entry.state.is_terminal() {
-                        entry.state = ChunkState::Failed(TranscribeError::Timeout);
-                    }
+        {
+            let (lock, cvar) = &*chunks;
+            let mut locked = lock.lock().unwrap();
+            loop {
+                if locked.iter().all(|e| e.state.is_terminal()) {
+                    break;
                 }
-                break;
+                let now = Instant::now();
+                if now >= deadline {
+                    timed_out = true;
+                    let pending_count = locked.iter().filter(|e| !e.state.is_terminal()).count();
+                    warn!(
+                        pending_count = pending_count,
+                        "Convergence timeout; marking pending chunks as Failed(Timeout)"
+                    );
+                    for entry in locked.iter_mut() {
+                        if !entry.state.is_terminal() {
+                            entry.state = ChunkState::Failed(TranscribeError::Timeout);
+                        }
+                    }
+                    break;
+                }
+                // Woken by workers on every terminal state transition; the
+                // timeout bound also covers a worker dying without notifying.
+                let (guard, _) = cvar.wait_timeout(locked, deadline - now).unwrap();
+                locked = guard;
             }
-            thread::sleep(Duration::from_millis(100));
         }
 
         if !timed_out {
@@ -291,12 +305,12 @@ impl SessionOrchestrator {
             }
         } else {
             // Drop the handles without joining — workers may still be mid-request.
-            // They finish naturally; their Arc<Mutex<Vec<ChunkEntry>>> clones keep
-            // the data valid until each thread exits.
+            // They finish naturally; their ChunkStore clones keep the data valid
+            // until each thread exits.
             drop(session.workers);
         }
 
-        let locked = chunks.lock().unwrap();
+        let locked = chunks.0.lock().unwrap();
 
         if timed_out {
             let texts = collect_transcribed_texts(&locked);
@@ -318,7 +332,7 @@ impl SessionOrchestrator {
 
 fn worker_loop(
     rx: Arc<Mutex<mpsc::Receiver<WorkerMsg>>>,
-    chunks: Arc<Mutex<Vec<ChunkEntry>>>,
+    chunks: ChunkStore,
     transcriber: Arc<dyn Transcriber>,
 ) {
     loop {
@@ -330,7 +344,7 @@ fn worker_loop(
             Ok(WorkerMsg::Chunk { index, path }) => {
                 // Transition to Uploading.
                 {
-                    let mut locked = chunks.lock().unwrap();
+                    let mut locked = chunks.0.lock().unwrap();
                     if let Some(entry) = locked.iter_mut().find(|e| e.index == index)
                         && !begin_upload(entry)
                     {
@@ -351,11 +365,14 @@ fn worker_loop(
                 // Clean up the chunk file (ignore errors — file may already be gone).
                 remove_chunk_file(&path, "processed");
 
-                // Record outcome.
-                let mut locked = chunks.lock().unwrap();
-                if let Some(entry) = locked.iter_mut().find(|e| e.index == index) {
-                    record_worker_result(entry, result);
+                // Record outcome and wake the convergence waiter.
+                {
+                    let mut locked = chunks.0.lock().unwrap();
+                    if let Some(entry) = locked.iter_mut().find(|e| e.index == index) {
+                        record_worker_result(entry, result);
+                    }
                 }
+                chunks.1.notify_all();
             }
         }
     }
@@ -473,7 +490,6 @@ mod tests {
     use super::*;
     use crate::transcriber::MockTranscriber;
     use std::sync::Condvar;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn make_orchestrator_with_timeout(
         transcriber: Arc<dyn Transcriber>,
@@ -727,7 +743,7 @@ mod tests {
             "enqueueing blocked on a full worker queue"
         );
         let inner = orch.inner.lock().unwrap();
-        let chunks = inner.as_ref().unwrap().chunks.lock().unwrap();
+        let chunks = inner.as_ref().unwrap().chunks.0.lock().unwrap();
         assert!(chunks.iter().any(|entry| matches!(
             entry.state,
             ChunkState::Failed(TranscribeError::Network(ref message))
