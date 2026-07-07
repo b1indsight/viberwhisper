@@ -529,8 +529,10 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
             break Ok(());
         }
 
-        counter += 1;
-        if counter % 300 == 0 {
+        // Wraps every ~3s tick window; a plain increment would overflow an
+        // i32 (panicking in debug builds) after ~248 days of uptime.
+        counter = (counter + 1) % 300;
+        if counter == 0 {
             let status = if recorder.lock().unwrap().is_recording() {
                 "recording"
             } else {
