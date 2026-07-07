@@ -24,6 +24,18 @@ pub enum SessionMode {
     Toggle,
 }
 
+/// Successful result of `SessionOrchestrator::stop_session`.
+#[derive(Debug)]
+pub struct SessionOutput {
+    /// Language-aware merge of every transcribed chunk in the session.
+    pub full_text: String,
+    /// Merge of only the chunks that were never handed out through
+    /// `take_stable_texts`. Equals `full_text` when streaming consumption was
+    /// not used. An incremental post-process session that already received
+    /// the consumed prefix only needs this remainder before `finish()`.
+    pub unconsumed_text: String,
+}
+
 /// Error returned by `SessionOrchestrator::stop_session`.
 #[derive(Debug)]
 pub enum SessionError {
@@ -114,6 +126,8 @@ struct ActiveSessionInner {
     chunk_tx: mpsc::SyncSender<WorkerMsg>,
     workers: Vec<thread::JoinHandle<()>>,
     next_index: usize,
+    /// Index of the first chunk not yet handed out via `take_stable_texts`.
+    stable_consumed: usize,
 }
 
 /// Number of background transcription workers per session. Long recordings
@@ -183,6 +197,7 @@ impl SessionOrchestrator {
             chunk_tx,
             workers,
             next_index: 0,
+            stable_consumed: 0,
         });
 
         info!(mode = ?mode, "Session started");
@@ -233,15 +248,54 @@ impl SessionOrchestrator {
         Some(index)
     }
 
+    /// Hand out the texts of chunks that became "stable" since the last call:
+    /// the maximal prefix (in submission order) whose chunks have all reached
+    /// a terminal state. Each text is returned exactly once. Failed chunks
+    /// contribute no text but still advance the prefix, matching how
+    /// `stop_session` merges results.
+    ///
+    /// The main loop calls this while recording to feed the LLM post-process
+    /// preheat session (see `postprocess::llm` for the compatibility notes on
+    /// the non-streaming chat API). Returns an empty vec when no session is
+    /// active or nothing new is stable yet.
+    pub fn take_stable_texts(&self) -> Vec<String> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(session) = inner.as_mut() else {
+            return Vec::new();
+        };
+
+        let chunks = session.chunks.0.lock().unwrap();
+        let mut texts = Vec::new();
+        loop {
+            let next_index = session.stable_consumed;
+            let Some(entry) = chunks.iter().find(|e| e.index == next_index) else {
+                break;
+            };
+            match &entry.state {
+                ChunkState::Transcribed(text) => {
+                    if !text.is_empty() {
+                        texts.push(text.clone());
+                    }
+                }
+                ChunkState::Failed(_) => {}
+                // Prefix is not stable yet — stop here and retry next poll.
+                _ => break,
+            }
+            session.stable_consumed += 1;
+        }
+        texts
+    }
+
     /// Stop the current session and block until all chunks reach a terminal state
     /// (or `convergence_timeout` elapses).
     ///
     /// Returns:
-    /// - `Ok(text)` — all chunks succeeded; `text` is the language-aware merge.
+    /// - `Ok(SessionOutput)` — all chunks succeeded; carries the full merge and
+    ///   the not-yet-consumed remainder (see `SessionOutput`).
     /// - `Err(SessionError::NoChunks)` — recording produced no chunks.
     /// - `Err(SessionError::PartialFailure { … })` — some chunks failed; partial text included.
     /// - `Err(SessionError::ConvergenceTimeout { … })` — timeout hit; partial text included.
-    pub fn stop_session(&self) -> Result<String, SessionError> {
+    pub fn stop_session(&self) -> Result<SessionOutput, SessionError> {
         let active = {
             let mut inner = self.inner.lock().unwrap();
             inner.take()
@@ -266,6 +320,7 @@ impl SessionOrchestrator {
         drop(session.chunk_tx);
 
         let chunks = Arc::clone(&session.chunks);
+        let stable_consumed = session.stable_consumed;
         let deadline = Instant::now() + self.convergence_timeout;
         let mut timed_out = false;
 
@@ -324,7 +379,7 @@ impl SessionOrchestrator {
             });
         }
 
-        collect_results(&locked, self.language.as_deref())
+        collect_results(&locked, stable_consumed, self.language.as_deref())
     }
 }
 
@@ -437,16 +492,26 @@ fn collect_transcribed_texts(chunks: &[ChunkEntry]) -> Vec<String> {
         .collect()
 }
 
-fn collect_results(chunks: &[ChunkEntry], language: Option<&str>) -> Result<String, SessionError> {
+fn collect_results(
+    chunks: &[ChunkEntry],
+    stable_consumed: usize,
+    language: Option<&str>,
+) -> Result<SessionOutput, SessionError> {
     let mut ordered: Vec<&ChunkEntry> = chunks.iter().collect();
     ordered.sort_by_key(|e| e.index);
 
     let mut texts: Vec<String> = Vec::new();
+    let mut unconsumed: Vec<String> = Vec::new();
     let mut errors: Vec<(usize, TranscribeError)> = Vec::new();
 
     for entry in ordered {
         match &entry.state {
-            ChunkState::Transcribed(t) => texts.push(t.clone()),
+            ChunkState::Transcribed(t) => {
+                texts.push(t.clone());
+                if entry.index >= stable_consumed {
+                    unconsumed.push(t.clone());
+                }
+            }
             ChunkState::Failed(e) => errors.push((entry.index, e.clone())),
             _ => {
                 // Should not happen after convergence completes.
@@ -459,7 +524,10 @@ fn collect_results(chunks: &[ChunkEntry], language: Option<&str>) -> Result<Stri
     }
 
     if errors.is_empty() {
-        Ok(merge_texts(&texts, language))
+        Ok(SessionOutput {
+            full_text: merge_texts(&texts, language),
+            unconsumed_text: merge_texts(&unconsumed, language),
+        })
     } else {
         Err(SessionError::PartialFailure {
             errors,
@@ -573,7 +641,7 @@ mod tests {
         let result = orch.stop_session();
 
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
-        assert_eq!(result.unwrap(), "hello world");
+        assert_eq!(result.unwrap().full_text, "hello world");
     }
 
     #[test]
@@ -593,7 +661,92 @@ mod tests {
 
         assert!(result.is_ok());
         // Chunks must be joined in submission order, not completion order.
-        assert_eq!(result.unwrap(), "one two three");
+        let output = result.unwrap();
+        assert_eq!(output.full_text, "one two three");
+        // take_stable_texts was never called, so nothing was consumed.
+        assert_eq!(output.unconsumed_text, "one two three");
+    }
+
+    #[test]
+    fn test_take_stable_texts_streams_prefix_in_order_once() {
+        let t = Arc::new(ScriptedTranscriber::new([
+            ("c0.wav", Ok("one".to_string())),
+            ("c1.wav", Ok("two".to_string())),
+        ]));
+        let orch = default_orchestrator(t);
+
+        orch.start_session(SessionMode::Hold);
+        orch.on_chunk_ready("c0.wav".to_string());
+        orch.on_chunk_ready("c1.wav".to_string());
+
+        // Workers run in the background; poll until both chunks are stable.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut collected: Vec<String> = Vec::new();
+        while collected.len() < 2 && Instant::now() < deadline {
+            collected.extend(orch.take_stable_texts());
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(collected, vec!["one".to_string(), "two".to_string()]);
+        // Consumed texts are handed out exactly once.
+        assert!(orch.take_stable_texts().is_empty());
+
+        let output = orch.stop_session().unwrap();
+        assert_eq!(output.full_text, "one two");
+        assert_eq!(output.unconsumed_text, "");
+    }
+
+    #[test]
+    fn test_take_stable_texts_waits_for_prefix_completion() {
+        // c0 is gated; c1 completes immediately. Nothing may be handed out
+        // until c0 lands, because the merge order must match submission order.
+        struct PrefixGateTranscriber {
+            release: Arc<(Mutex<bool>, Condvar)>,
+        }
+        impl Transcriber for PrefixGateTranscriber {
+            fn transcribe(&self, path: &str) -> Result<String, TranscribeError> {
+                if path == "c0.wav" {
+                    let (lock, condvar) = &*self.release;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = condvar.wait(released).unwrap();
+                    }
+                    Ok("first".to_string())
+                } else {
+                    Ok("second".to_string())
+                }
+            }
+        }
+
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let t = Arc::new(PrefixGateTranscriber {
+            release: Arc::clone(&release),
+        });
+        let orch = default_orchestrator(t);
+
+        orch.start_session(SessionMode::Hold);
+        orch.on_chunk_ready("c0.wav".to_string());
+        orch.on_chunk_ready("c1.wav".to_string());
+
+        // Give c1 time to finish; the prefix is still blocked on c0.
+        thread::sleep(Duration::from_millis(200));
+        assert!(orch.take_stable_texts().is_empty());
+
+        let (lock, condvar) = &*release;
+        *lock.lock().unwrap() = true;
+        condvar.notify_all();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut collected: Vec<String> = Vec::new();
+        while collected.len() < 2 && Instant::now() < deadline {
+            collected.extend(orch.take_stable_texts());
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(collected, vec!["first".to_string(), "second".to_string()]);
+        let output = orch.stop_session().unwrap();
+        assert_eq!(output.full_text, "first second");
+        assert_eq!(output.unconsumed_text, "");
     }
 
     #[test]
@@ -755,7 +908,7 @@ mod tests {
             let result = orch.stop_session();
 
             assert!(result.is_ok(), "Mode {:?} failed: {:?}", mode, result);
-            assert_eq!(result.unwrap(), "text");
+            assert_eq!(result.unwrap().full_text, "text");
         }
     }
 
@@ -776,7 +929,7 @@ mod tests {
 
         // Only the new session's chunk should appear.
         assert!(result.is_ok(), "{:?}", result);
-        assert_eq!(result.unwrap(), "new session");
+        assert_eq!(result.unwrap().full_text, "new session");
     }
 
     #[test]

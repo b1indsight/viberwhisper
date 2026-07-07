@@ -37,16 +37,23 @@ impl fmt::Display for TranscribeError {
 
 impl std::error::Error for TranscribeError {}
 
-/// Merge transcription results from multiple chunks, in order.
+/// Separator inserted between merged chunk texts for a given language.
 ///
-/// Chinese text (zh, zh-CN, zh-TW) is concatenated without a separator.
-/// All other languages use a single space as separator. Empty fragments
-/// are dropped so a failed or silent chunk never produces double separators.
-pub fn merge_texts(texts: &[String], language: Option<&str>) -> String {
-    let separator = match language {
+/// Chinese text (zh, zh-CN, zh-TW) is concatenated without a separator;
+/// all other languages use a single space.
+pub fn merge_separator(language: Option<&str>) -> &'static str {
+    match language {
         Some(lang) if lang.starts_with("zh") => "",
         _ => " ",
-    };
+    }
+}
+
+/// Merge transcription results from multiple chunks, in order.
+///
+/// Empty fragments are dropped so a failed or silent chunk never produces
+/// double separators.
+pub fn merge_texts(texts: &[String], language: Option<&str>) -> String {
+    let separator = merge_separator(language);
     texts
         .iter()
         .filter(|t| !t.is_empty())

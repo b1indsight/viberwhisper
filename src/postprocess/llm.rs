@@ -197,6 +197,18 @@ impl TextPostProcessorSession for ConservativeLlmSession {
 
 // ---------------------------------------------------------------------------
 // Preheat session (streaming_enabled = true): fire LLM on every chunk arrival.
+//
+// Compatibility note: the chat-completions endpoint is a whole-request /
+// whole-response API — there is no incremental input channel to append text
+// to. "Streaming" therefore means: every time a stable chunk arrives, fire a
+// fresh request carrying ALL accumulated text and let the newest generation
+// win; results of superseded generations are silently dropped. This trades
+// redundant tokens for latency: by the time the user stops recording, the
+// request covering (most of) the session text is already in flight, so
+// `finish()` usually only waits for that last round-trip instead of starting
+// from zero. If the backend ever exposes a true incremental interface, only
+// this session type needs replacing — the `TextPostProcessorSession` contract
+// and the main-loop feeding stay the same.
 // ---------------------------------------------------------------------------
 
 /// Shared state between the session and its background LLM threads.

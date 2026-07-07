@@ -238,6 +238,49 @@ fn resolve_post_processed_text(
     }
 }
 
+/// Feeds stable STT text fragments to a post-process session.
+///
+/// Sessions concatenate pushed fragments verbatim, so this feeder owns the
+/// language-appropriate separator and prepends it to every fragment after the
+/// first. Opened when recording starts; while the recording continues, stable
+/// chunk texts are pushed as they arrive so a preheat LLM session already has
+/// the cleanup request in flight by the time the user stops.
+struct PostFeed {
+    session: Box<dyn postprocess::TextPostProcessorSession>,
+    separator: &'static str,
+    pushed_any: bool,
+}
+
+impl PostFeed {
+    fn new(
+        session: Box<dyn postprocess::TextPostProcessorSession>,
+        separator: &'static str,
+    ) -> Self {
+        Self {
+            session,
+            separator,
+            pushed_any: false,
+        }
+    }
+
+    fn push(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.pushed_any && !self.separator.is_empty() {
+            self.session
+                .push_stable_chunk(&format!("{}{}", self.separator, text));
+        } else {
+            self.session.push_stable_chunk(text);
+        }
+        self.pushed_any = true;
+    }
+
+    fn finish(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+        self.session.finish()
+    }
+}
+
 fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     use audio::{AudioRecorder, StopResult};
     use core::orchestrator::{SessionError, SessionMode, SessionOrchestrator};
@@ -317,6 +360,14 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
     println!("Press Ctrl+C to exit.");
     println!();
 
+    // Streaming post-process feed: opened at recording start, fed stable
+    // chunk texts while recording, and finished in `finalize`. With the
+    // preheat session this keeps the cleanup request warm during recording;
+    // with the conservative/noop sessions it simply accumulates.
+    let stream_separator = transcriber::merge_separator(config.language.as_deref());
+    let post_feed: RefCell<Option<PostFeed>> = RefCell::new(None);
+    let new_post_feed = || PostFeed::new(post_processor.start_session(), stream_separator);
+
     // Finalize a stopped recording: submit the tail chunk (if any) to the orchestrator,
     // then wait for convergence and type (or log) the result.
     let finalize = |stop_result: StopResult| {
@@ -334,18 +385,20 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
             }
         }
 
+        // The feed (if any) already received the stable prefix during
+        // recording; on success only the unconsumed remainder is pushed.
+        // On failure it is discarded — the raw partial text is typed as-is.
+        let feed = post_feed.borrow_mut().take();
+
         match orchestrator.stop_session() {
-            Ok(stt_text) => {
-                if stt_text.is_empty() {
+            Ok(output) => {
+                if output.full_text.is_empty() {
                     info!("Transcription returned empty text");
                     return;
                 }
-                let text = {
-                    let mut session = post_processor.start_session();
-                    session.push_stable_chunk(&stt_text);
-                    let result = session.finish();
-                    resolve_post_processed_text(result, stt_text)
-                };
+                let mut feed = feed.unwrap_or_else(&new_post_feed);
+                feed.push(&output.unconsumed_text);
+                let text = resolve_post_processed_text(feed.finish(), output.full_text);
                 info!(text = %text, "Typing transcribed text");
                 if let Err(e) = typer.type_text(&text) {
                     error!(error = %e, "Failed to type text");
@@ -397,6 +450,7 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
         match rec.start_recording() {
             Ok(()) => {
                 orchestrator.start_session(mode);
+                *post_feed.borrow_mut() = Some(new_post_feed());
                 info!(trigger = trigger, mode = ?mode, "Recording started");
                 set_recording_ui(true);
             }
@@ -450,6 +504,23 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
             if let Some(path) = chunk_path {
                 info!(path = %path, "Ready chunk detected, forwarding to orchestrator");
                 orchestrator.on_chunk_ready(path);
+            }
+        }
+
+        // Feed newly stable chunk texts to the post-process session so a
+        // preheat LLM request is already in flight before recording stops.
+        {
+            let stable_texts = orchestrator.take_stable_texts();
+            if !stable_texts.is_empty()
+                && let Some(feed) = post_feed.borrow_mut().as_mut()
+            {
+                for text in &stable_texts {
+                    debug!(
+                        text_len = text.len(),
+                        "Feeding stable chunk text to post-processor"
+                    );
+                    feed.push(text);
+                }
             }
         }
 
@@ -602,6 +673,27 @@ mod integration_tests {
     }
 
     #[test]
+    fn test_post_feed_inserts_separator_between_fragments() {
+        use postprocess::{NoopPostProcessor, TextPostProcessor};
+
+        let mut feed = PostFeed::new(NoopPostProcessor.start_session(), " ");
+        feed.push("hello");
+        feed.push("");
+        feed.push("world");
+        assert_eq!(feed.finish().unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_post_feed_zh_concatenates_without_separator() {
+        use postprocess::{NoopPostProcessor, TextPostProcessor};
+
+        let mut feed = PostFeed::new(NoopPostProcessor.start_session(), "");
+        feed.push("你好");
+        feed.push("世界");
+        assert_eq!(feed.finish().unwrap(), "你好世界");
+    }
+
+    #[test]
     fn test_audio_module_loads() {
         let audio_result = AudioRecorder::new(1.0);
         assert!(audio_result.is_ok());
@@ -631,7 +723,7 @@ mod integration_tests {
         let result = orch.stop_session();
 
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
-        assert!(!result.unwrap().is_empty());
+        assert!(!result.unwrap().full_text.is_empty());
     }
 
     #[test]

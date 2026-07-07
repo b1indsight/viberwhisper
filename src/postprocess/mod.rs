@@ -15,8 +15,13 @@ pub trait TextPostProcessor: Send + Sync {
 
 /// Incremental post-processing session.
 ///
-/// Stable STT text chunks are pushed via `push_stable_chunk`; `finish` returns the
-/// final processed text once the recording session is complete.
+/// Stable STT text chunks are pushed via `push_stable_chunk` while the
+/// recording is still running; `finish` returns the final processed text once
+/// the recording session is complete.
+///
+/// Fragments are concatenated verbatim — the caller includes any inter-chunk
+/// separators in the pushed text (see `PostFeed` in `main.rs`), so sessions
+/// never have to guess about language-specific spacing.
 pub trait TextPostProcessorSession: Send {
     fn push_stable_chunk(&mut self, text: &str);
     fn finish(&mut self) -> Result<String, Box<dyn std::error::Error>>;

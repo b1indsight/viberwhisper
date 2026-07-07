@@ -439,3 +439,11 @@ match LlmPostProcessor::from_config(config) {
    - 再补 README / `config.example.json` / architecture 文档
 
 这样 review 边界清楚，也避免再把“音频识别后端”和“文本后处理层”混成一锅。
+
+## 实现状态（2026-07-08 更新）
+
+Phase 1–3 已落地。此前 `run_listener` 是在 `stop_session()` 之后才创建后处理 session 并一次性推入全文，preheat 模式实际等价于 conservative 模式；现已补全"录音进行中增量接入"：
+
+- `SessionOrchestrator::take_stable_texts()`：按提交序交付已到达终态的稳定前缀文本，每段只交付一次；`stop_session` 返回 `SessionOutput { full_text, unconsumed_text }`，session 只需补齐未消费的余量。
+- `main.rs` 的 `PostFeed`：录音开始即创建后处理 session，主循环每个 tick 把新稳定的 chunk 文本（带语言相关分隔符）推给 session；结束时推余量并 `finish()`。
+- **流式调用的兼容性实现**：当前 chat-completions API 没有增量输入通道，`PreheatLlmSession` 的"流式"是每个稳定 chunk 到达时携带全部累计文本重新发起一次非流式请求，最新一代获胜、旧结果丢弃（见 `src/postprocess/llm.rs` 的 Compatibility note）。将来后端提供真正的增量接口时，只需替换该 session 实现，`TextPostProcessorSession` 契约与主循环喂料方式不变。

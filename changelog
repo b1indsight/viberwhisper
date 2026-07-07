@@ -25,3 +25,4 @@
 2026-07-08: Fix stop-time ChunksOnly reporting, reused local-service startup delay, preheat finish() unbounded wait, and cwd-dependent config/temp paths
 2026-07-08: Optimize audio pipeline: lock-free capture channel, 16 kHz upload downsampling, parallel chunk transcription workers, condvar-driven convergence wait
 2026-07-08: Deduplicate recording start/stop control, post-process fallback, merge_texts, server file lookup, and python launch command; table-driven config fields; restore macOS clipboard after paste-typing
+2026-07-08: Wire streaming post-process end-to-end: orchestrator take_stable_texts + SessionOutput remainder, main-loop PostFeed, preheat compatibility notes for the non-streaming chat API
