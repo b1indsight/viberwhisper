@@ -72,10 +72,13 @@ impl TextTyper for MacTyper {
             return Err(format!("osascript failed: {}", stderr).into());
         }
 
-        // Let the target app read the clipboard before putting the old
-        // content back.
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        restore("after paste");
+        // Let the target app read the clipboard before putting the old content
+        // back. This runs on the main loop thread, so skip the delay entirely
+        // when there is nothing to restore.
+        if previous_clipboard.is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            restore("after paste");
+        }
 
         info!(text = %text, "Text typed");
         Ok(())
