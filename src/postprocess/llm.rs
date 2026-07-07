@@ -3,10 +3,16 @@ use crate::postprocess::{TextPostProcessor, TextPostProcessorSession};
 use reqwest::blocking::Client;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::info;
 
 const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Margin over the HTTP client timeout before `finish()` stops waiting for the
+/// background preheat thread and retries synchronously. The background request
+/// should always resolve within `LLM_REQUEST_TIMEOUT`; this bound protects
+/// against a panicked or wedged thread never signalling the condvar.
+const PREHEAT_WAIT_MARGIN: Duration = Duration::from_secs(10);
 
 const DEFAULT_PROMPT: &str = "请将下面的语音转写结果整理为适合直接发送的中文文本：\n\
     - 保留原意，不要扩写\n\
@@ -210,6 +216,7 @@ struct PreheatLlmSession {
     client: Client,
     chunks: Vec<String>,
     generation: u64,
+    finish_wait_timeout: Duration,
     state: Arc<(Mutex<PreheatState>, Condvar)>,
 }
 
@@ -231,6 +238,7 @@ impl PreheatLlmSession {
             client,
             chunks: Vec::new(),
             generation: 0,
+            finish_wait_timeout: LLM_REQUEST_TIMEOUT + PREHEAT_WAIT_MARGIN,
             state: Arc::new((
                 Mutex::new(PreheatState {
                     latest_generation: 0,
@@ -325,25 +333,48 @@ impl TextPostProcessorSession for PreheatLlmSession {
             );
         }
 
-        // Wait for the latest generation's result.
+        // Wait for the latest generation's result, but never forever: a wedged
+        // or panicked background thread must not hang the whole session.
         let (lock, cvar) = &*self.state;
         let mut st = lock.lock().unwrap();
+        let deadline = Instant::now() + self.finish_wait_timeout;
         while st.latest_result.is_none() {
-            st = cvar.wait(st).unwrap();
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let (guard, _) = cvar.wait_timeout(st, deadline - now).unwrap();
+            st = guard;
         }
 
-        let result = st.latest_result.take().unwrap();
-        match result {
-            Ok(text) => {
+        match st.latest_result.take() {
+            Some(Ok(text)) => {
                 info!(
                     result_len = text.len(),
                     "Preheat: LLM post-processing complete"
                 );
                 Ok(text)
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 // Preheat request failed — retry once with full text as fallback.
                 info!(error = %e, "Preheat: last request failed, retrying with full text");
+                drop(st);
+                call_llm_impl(
+                    &self.client,
+                    &self.api_key,
+                    &self.api_url,
+                    &self.model,
+                    &self.prompt,
+                    self.temperature,
+                    &combined,
+                )
+            }
+            None => {
+                // Timed out waiting for the background thread — fall back to a
+                // synchronous request with the full accumulated text.
+                info!(
+                    "Preheat: background request did not complete in time, retrying with full text"
+                );
                 drop(st);
                 call_llm_impl(
                     &self.client,
@@ -495,6 +526,36 @@ mod tests {
         let result = session.finish();
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn test_preheat_finish_does_not_hang_when_no_result_ever_arrives() {
+        // Simulate a fired request whose background thread never reports back
+        // (e.g. it panicked): generation > 0 but no thread will signal the
+        // condvar. finish() must give up after finish_wait_timeout and fall
+        // back to a synchronous call (which fails fast against localhost:1).
+        let mut session = PreheatLlmSession::new(
+            "key".to_string(),
+            "http://localhost:1/v1/chat/completions".to_string(),
+            "model".to_string(),
+            "prompt".to_string(),
+            0.0,
+            Client::builder()
+                .timeout(LLM_REQUEST_TIMEOUT)
+                .build()
+                .unwrap(),
+        );
+        session.chunks.push("hello".to_string());
+        session.generation = 1;
+        session.finish_wait_timeout = Duration::from_millis(100);
+
+        let started = Instant::now();
+        let result = session.finish();
+
+        // The synchronous fallback hits an unreachable port, so we expect Err,
+        // and crucially we expect to get here at all (no infinite wait).
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
