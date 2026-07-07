@@ -1,8 +1,28 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::PathBuf;
 use tracing::{info, warn};
 
 const CONFIG_FILE: &str = "config.json";
+
+/// Resolve where the config file lives.
+///
+/// A `config.json` in the current working directory takes precedence so
+/// existing setups and `cargo run` keep working. Otherwise fall back to the
+/// per-user config directory, which is what a bundled app launched from
+/// Finder/Explorer needs (its cwd is not the project directory).
+fn config_file_path() -> PathBuf {
+    resolve_config_path(PathBuf::from(CONFIG_FILE), dirs::config_dir())
+}
+
+fn resolve_config_path(cwd_candidate: PathBuf, config_dir: Option<PathBuf>) -> PathBuf {
+    if cwd_candidate.exists() {
+        return cwd_candidate;
+    }
+    config_dir
+        .map(|dir| dir.join("viberwhisper").join(CONFIG_FILE))
+        .unwrap_or(cwd_candidate)
+}
 const MAX_RETRIES: u32 = 16;
 const MAX_CONVERGENCE_TIMEOUT_SECS: u64 = 60 * 60;
 
@@ -169,18 +189,19 @@ impl AppConfig {
     pub fn load() -> Self {
         let mut config = AppConfig::default();
 
-        if let Ok(content) = fs::read_to_string(CONFIG_FILE) {
+        let path = config_file_path();
+        if let Ok(content) = fs::read_to_string(&path) {
             match serde_json::from_str::<serde_json::Value>(&content) {
                 Ok(json) => {
                     config.apply_json(&json);
-                    info!(file = %CONFIG_FILE, "Config loaded successfully");
+                    info!(file = %path.display(), "Config loaded successfully");
                 }
                 Err(e) => {
-                    warn!(file = %CONFIG_FILE, error = %e, "Failed to parse config, using defaults")
+                    warn!(file = %path.display(), error = %e, "Failed to parse config, using defaults")
                 }
             }
         } else {
-            info!(file = %CONFIG_FILE, "Config file not found, using defaults");
+            info!(file = %path.display(), "Config file not found, using defaults");
         }
 
         // Env var override: GROQ_API_KEY for backward compat, api_key for new configs
@@ -201,12 +222,18 @@ impl AppConfig {
 
     /// Save config to config.json (excludes api_key — never persisted)
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let existing = fs::read_to_string(CONFIG_FILE)
+        let path = config_file_path();
+        let existing = fs::read_to_string(&path)
             .ok()
             .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok());
         let value = self.json_for_save(existing.as_ref())?;
         let json = serde_json::to_string_pretty(&value)?;
-        fs::write(CONFIG_FILE, json)?;
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, json)?;
         Ok(())
     }
 
@@ -534,6 +561,32 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_config_path_prefers_existing_cwd_file() {
+        let dir =
+            std::env::temp_dir().join(format!("viberwhisper-config-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd_file = dir.join(CONFIG_FILE);
+        std::fs::write(&cwd_file, "{}").unwrap();
+
+        let resolved = resolve_config_path(cwd_file.clone(), Some(PathBuf::from("/cfg")));
+        assert_eq!(resolved, cwd_file);
+
+        let _ = std::fs::remove_file(&cwd_file);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_resolve_config_path_falls_back_to_user_config_dir() {
+        let missing = PathBuf::from("/nonexistent-dir/config.json");
+        let resolved = resolve_config_path(missing.clone(), Some(PathBuf::from("/cfg")));
+        assert_eq!(resolved, PathBuf::from("/cfg/viberwhisper/config.json"));
+
+        // Without a config dir, keep the cwd candidate as a last resort.
+        let resolved = resolve_config_path(missing.clone(), None);
+        assert_eq!(resolved, missing);
+    }
 
     #[test]
     fn test_default_config() {

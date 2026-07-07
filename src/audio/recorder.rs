@@ -297,13 +297,13 @@ impl AudioRecorder {
         }
     }
 
-    /// Write PCM samples to a WAV file under ./tmp/ and return the path.
+    /// Write PCM samples to a WAV file under the app temp dir and return the path.
     fn write_chunk(
         &mut self,
         samples: &[i16],
         chunk_index: usize,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        std::fs::create_dir_all("./tmp")?;
+        std::fs::create_dir_all(super::temp_dir())?;
         let path = unique_temp_wav_path(&format!("chunk_live_{chunk_index:04}"))?;
 
         write_wav_to_path(&path, samples, self.sample_rate)?;
@@ -347,7 +347,7 @@ impl AudioRecorder {
             if wrote_live_chunks {
                 // All audio was already flushed to live chunks; there is no tail
                 // to write, but the session still has transcribable chunks.
-                self.cleanup_old_recordings("./tmp", 10);
+                self.cleanup_old_recordings(&super::temp_dir(), 10);
                 return Ok(StopResult::ChunksOnly);
             }
             return Err("No audio data recorded".into());
@@ -357,7 +357,7 @@ impl AudioRecorder {
         // writing every complete chunk before the final tail.
         if self.chunk_max_samples > 0 && tail_samples.len() >= self.chunk_max_samples {
             let paths = self.write_chunk_sequence(&tail_samples, chunk_index)?;
-            self.cleanup_old_recordings("./tmp", 10);
+            self.cleanup_old_recordings(&super::temp_dir(), 10);
             return Ok(StopResult::ChunkFiles(paths));
         }
 
@@ -369,7 +369,7 @@ impl AudioRecorder {
             self.write_chunk(&tail_samples, chunk_index)?
         };
 
-        self.cleanup_old_recordings("./tmp", 10);
+        self.cleanup_old_recordings(&super::temp_dir(), 10);
 
         if !wrote_live_chunks {
             Ok(StopResult::SingleFile(path))
@@ -395,7 +395,7 @@ impl AudioRecorder {
         &mut self,
         buffer: &[i16],
     ) -> Result<String, Box<dyn std::error::Error>> {
-        std::fs::create_dir_all("./tmp")?;
+        std::fs::create_dir_all(super::temp_dir())?;
         let path = unique_temp_wav_path("recording")?;
         let filename = path.to_string_lossy().to_string();
         debug!(path = %filename, "Saving recording");
@@ -407,7 +407,7 @@ impl AudioRecorder {
         Ok(filename)
     }
 
-    fn cleanup_old_recordings(&self, dir: &str, keep: usize) {
+    fn cleanup_old_recordings(&self, dir: &std::path::Path, keep: usize) {
         let current_files: HashSet<OsString> = self
             .current_session_files
             .iter()
@@ -573,7 +573,7 @@ mod tests {
 
         let mut recorder = recorder_for_buffer(Vec::new(), 10);
         recorder.current_session_files.push(current.clone());
-        recorder.cleanup_old_recordings(dir.to_str().unwrap(), 0);
+        recorder.cleanup_old_recordings(&dir, 0);
 
         assert!(current.exists());
         assert!(!old.exists());

@@ -93,7 +93,7 @@ pub fn split_wav(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("audio");
-    std::fs::create_dir_all("./tmp")?;
+    std::fs::create_dir_all(super::temp_dir())?;
 
     let chunk_spec = WavSpec {
         channels: spec.channels,
