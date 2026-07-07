@@ -66,6 +66,52 @@ fn push_mono_chunk(
     }
 }
 
+/// Sample rate used for WAV files written for STT upload.
+///
+/// Whisper-style backends operate on 16 kHz mono internally, so uploading
+/// device-rate audio (44.1/48 kHz) only inflates the transfer ~3x.
+const TARGET_UPLOAD_SAMPLE_RATE: u32 = 16_000;
+
+/// Downsample mono PCM with linear interpolation.
+///
+/// Linear interpolation is adequate for speech: the aliasing it admits sits
+/// above 8 kHz where speech carries little energy, and the STT model discards
+/// that band anyway.
+fn resample_linear(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16> {
+    if from_rate == to_rate || samples.is_empty() {
+        return samples.to_vec();
+    }
+    let ratio = from_rate as f64 / to_rate as f64;
+    let out_len = (samples.len() as f64 / ratio).floor() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let pos = i as f64 * ratio;
+        let idx = pos as usize;
+        let frac = pos - idx as f64;
+        let a = samples[idx] as f64;
+        let b = samples[(idx + 1).min(samples.len() - 1)] as f64;
+        out.push((a + (b - a) * frac).round() as i16);
+    }
+    out
+}
+
+/// Downsample to the upload rate when the device rate is higher; lower device
+/// rates are kept as-is (upsampling adds bytes without adding information).
+fn prepare_upload_samples(samples: &[i16], sample_rate: u32) -> (std::borrow::Cow<'_, [i16]>, u32) {
+    if sample_rate > TARGET_UPLOAD_SAMPLE_RATE {
+        (
+            std::borrow::Cow::Owned(resample_linear(
+                samples,
+                sample_rate,
+                TARGET_UPLOAD_SAMPLE_RATE,
+            )),
+            TARGET_UPLOAD_SAMPLE_RATE,
+        )
+    } else {
+        (std::borrow::Cow::Borrowed(samples), sample_rate)
+    }
+}
+
 /// Write `samples` as a 16-bit mono WAV file to `path`.
 fn write_wav_to_path(
     path: &PathBuf,
@@ -314,10 +360,11 @@ impl AudioRecorder {
         std::fs::create_dir_all(super::temp_dir())?;
         let path = unique_temp_wav_path(&format!("chunk_live_{chunk_index:04}"))?;
 
-        write_wav_to_path(&path, samples, self.sample_rate)?;
+        let (upload_samples, upload_rate) = prepare_upload_samples(samples, self.sample_rate);
+        write_wav_to_path(&path, &upload_samples, upload_rate)?;
 
         let path_str = path.to_string_lossy().to_string();
-        info!(path = %path_str, index = chunk_index, samples = samples.len(), "Live chunk written");
+        info!(path = %path_str, index = chunk_index, samples = upload_samples.len(), sample_rate = upload_rate, "Live chunk written");
         self.current_session_files.push(path);
         Ok(path_str)
     }
@@ -419,7 +466,8 @@ impl AudioRecorder {
         let filename = path.to_string_lossy().to_string();
         debug!(path = %filename, "Saving recording");
 
-        write_wav_to_path(&path, buffer, self.sample_rate)?;
+        let (upload_samples, upload_rate) = prepare_upload_samples(buffer, self.sample_rate);
+        write_wav_to_path(&path, &upload_samples, upload_rate)?;
 
         info!(path = %filename, "Recording saved");
         self.current_session_files.push(path);
@@ -562,6 +610,51 @@ mod tests {
             recorder.pending.is_empty(),
             "flushed samples should be released from memory"
         );
+
+        for path in recorder.current_session_files {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn test_resample_linear_scales_length() {
+        let samples: Vec<i16> = vec![0; 44_100];
+        let out = resample_linear(&samples, 44_100, 16_000);
+        assert_eq!(out.len(), 16_000);
+    }
+
+    #[test]
+    fn test_resample_linear_preserves_constant_signal() {
+        let samples: Vec<i16> = vec![1234; 4_410];
+        let out = resample_linear(&samples, 44_100, 16_000);
+        assert!(out.iter().all(|&s| s == 1234));
+    }
+
+    #[test]
+    fn test_resample_linear_same_rate_is_identity() {
+        let samples: Vec<i16> = (0..100).collect();
+        assert_eq!(resample_linear(&samples, 16_000, 16_000), samples);
+    }
+
+    #[test]
+    fn test_prepare_upload_samples_keeps_low_rates() {
+        let samples: Vec<i16> = (0..100).collect();
+        let (out, rate) = prepare_upload_samples(&samples, 8_000);
+        assert_eq!(rate, 8_000);
+        assert_eq!(out.as_ref(), samples.as_slice());
+    }
+
+    #[test]
+    fn test_write_chunk_downsamples_high_rate_audio() {
+        let mut recorder = recorder_for_buffer(Vec::new(), 0);
+        recorder.sample_rate = 44_100;
+
+        let samples: Vec<i16> = vec![0; 44_100]; // 1 second at device rate
+        let path = recorder.write_chunk(&samples, 0).unwrap();
+
+        let reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.spec().sample_rate, 16_000);
+        assert_eq!(reader.len(), 16_000); // still ~1 second at the upload rate
 
         for path in recorder.current_session_files {
             let _ = std::fs::remove_file(path);
