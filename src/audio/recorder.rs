@@ -330,13 +330,9 @@ impl AudioRecorder {
         drop(self.stream.take());
         debug!("Stream stopped");
 
-        let (buffer_len, tail_samples, chunk_index, wrote_live_chunks) = {
+        let (tail_samples, chunk_index, wrote_live_chunks) = {
             let buffer = self.buffer.lock().unwrap();
             debug!(samples = buffer.len(), "Buffer size");
-
-            if buffer.is_empty() {
-                return Err("No audio data recorded".into());
-            }
 
             let tail_samples = buffer.to_vec();
             let chunk_index = if self.flushed_samples > 0 && self.chunk_max_samples > 0 {
@@ -344,26 +340,21 @@ impl AudioRecorder {
             } else {
                 0
             };
-            (
-                buffer.len(),
-                tail_samples,
-                chunk_index,
-                self.flushed_samples > 0,
-            )
+            (tail_samples, chunk_index, self.flushed_samples > 0)
         };
 
-        if buffer_len == 0 {
+        if tail_samples.is_empty() {
+            if wrote_live_chunks {
+                // All audio was already flushed to live chunks; there is no tail
+                // to write, but the session still has transcribable chunks.
+                self.cleanup_old_recordings("./tmp", 10);
+                return Ok(StopResult::ChunksOnly);
+            }
             return Err("No audio data recorded".into());
         }
 
         // If chunking is enabled and enough unflushed audio remains, catch up by
         // writing every complete chunk before the final tail.
-        if tail_samples.is_empty() {
-            // All audio was already flushed to chunks; nothing left.
-            self.cleanup_old_recordings("./tmp", 10);
-            return Ok(StopResult::ChunksOnly);
-        }
-
         if self.chunk_max_samples > 0 && tail_samples.len() >= self.chunk_max_samples {
             let paths = self.write_chunk_sequence(&tail_samples, chunk_index)?;
             self.cleanup_old_recordings("./tmp", 10);
@@ -609,6 +600,25 @@ mod tests {
         for path in recorder.current_session_files {
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    #[test]
+    fn test_stop_recording_all_audio_flushed_returns_chunks_only() {
+        // Everything was already written as live chunks; the buffer is empty.
+        let mut recorder = recorder_for_buffer(Vec::new(), 10);
+        recorder.flushed_samples = 30;
+
+        let result = recorder.stop_recording().unwrap();
+
+        assert!(matches!(result, StopResult::ChunksOnly));
+    }
+
+    #[test]
+    fn test_stop_recording_no_audio_at_all_is_an_error() {
+        // Nothing was flushed and nothing is buffered — a genuinely empty recording.
+        let mut recorder = recorder_for_buffer(Vec::new(), 10);
+
+        assert!(recorder.stop_recording().is_err());
     }
 
     #[test]
