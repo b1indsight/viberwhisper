@@ -236,6 +236,25 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     run_listener_with_config(AppConfig::load())
 }
 
+/// Keep the raw STT text when post-processing yields nothing or fails —
+/// a cleanup step must never lose a successful transcription.
+fn resolve_post_processed_text(
+    result: Result<String, Box<dyn std::error::Error>>,
+    stt_text: String,
+) -> String {
+    match result {
+        Ok(processed) if !processed.is_empty() => processed,
+        Ok(_) => {
+            warn!("Post-processing returned empty text, using original STT text");
+            stt_text
+        }
+        Err(e) => {
+            warn!(error = %e, "Post-processing failed, using original STT text");
+            stt_text
+        }
+    }
+}
+
 fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     use audio::{AudioRecorder, StopResult};
     use core::orchestrator::{SessionError, SessionMode, SessionOrchestrator};
@@ -244,6 +263,7 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
     use input::tray::TrayManager;
     use input::typer::TextTyper;
     use postprocess::create_post_processor;
+    use std::cell::RefCell;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use transcriber::{Transcriber, create_transcriber};
@@ -295,10 +315,12 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let typer = input::typer::MockTyper;
 
-    let mut tray = TrayManager::new()?;
+    // RefCell so the start/stop closures below and the main loop can share
+    // the UI handles on this single thread.
+    let tray = RefCell::new(TrayManager::new()?);
     info!("System tray icon started");
 
-    let mut overlay = OverlayManager::new()?;
+    let overlay = RefCell::new(OverlayManager::new()?);
     info!("Floating overlay window started");
 
     println!(
@@ -338,19 +360,8 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
                 let text = {
                     let mut session = post_processor.start_session();
                     session.push_stable_chunk(&stt_text);
-                    match session.finish() {
-                        Ok(processed) if !processed.is_empty() => processed,
-                        Ok(_) => {
-                            // Empty post-process output is not useful; keep the STT text.
-                            warn!("Post-processing returned empty text, using original STT text");
-                            stt_text
-                        }
-                        Err(e) => {
-                            // Runtime LLM errors should not discard a successful STT result.
-                            warn!(error = %e, "Post-processing failed, using original STT text");
-                            stt_text
-                        }
-                    }
+                    let result = session.finish();
+                    resolve_post_processed_text(result, stt_text)
                 };
                 info!(text = %text, "Typing transcribed text");
                 if let Err(e) = typer.type_text(&text) {
@@ -391,66 +402,50 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
         }
     };
 
+    // Shared start/stop paths for the hold hotkey, toggle hotkey, and overlay
+    // click. UI state (tray + overlay) always tracks the recorder state.
+    let set_recording_ui = |on: bool| {
+        tray.borrow_mut().set_recording(on);
+        overlay.borrow_mut().set_recording(on);
+    };
+
+    let start_recording = |mode: SessionMode, trigger: &str| {
+        let mut rec = recorder.lock().unwrap();
+        match rec.start_recording() {
+            Ok(()) => {
+                orchestrator.start_session(mode);
+                info!(trigger = trigger, mode = ?mode, "Recording started");
+                set_recording_ui(true);
+            }
+            Err(e) => error!(error = %e, "Failed to start recording"),
+        }
+    };
+
+    let stop_recording = |trigger: &str| {
+        info!(trigger = trigger, "Stopping recording");
+        let stop_result = recorder.lock().unwrap().stop_recording();
+        set_recording_ui(false);
+        match stop_result {
+            Ok(result) => finalize(result),
+            Err(e) => error!(error = %e, "Failed to stop recording"),
+        }
+    };
+
     let mut counter = 0;
     loop {
         if let Some(event) = hotkey_manager.check_event() {
             match event {
                 HotkeyEvent::Pressed(HotkeySource::Hold) => {
-                    info!(hotkey = %config.hold_hotkey, "Hold key pressed, starting recording");
-                    let mut rec = recorder.lock().unwrap();
-                    match rec.start_recording() {
-                        Ok(()) => {
-                            orchestrator.start_session(SessionMode::Hold);
-                            info!("Recording started (hold mode)");
-                            tray.set_recording(true);
-                            overlay.set_recording(true);
-                        }
-                        Err(e) => error!(error = %e, "Failed to start recording"),
-                    }
+                    start_recording(SessionMode::Hold, "hold-press");
                 }
                 HotkeyEvent::Released(HotkeySource::Hold) => {
-                    info!(hotkey = %config.hold_hotkey, "Hold key released, stopping recording");
-                    let mut rec = recorder.lock().unwrap();
-                    match rec.stop_recording() {
-                        Ok(stop_result) => {
-                            tray.set_recording(false);
-                            overlay.set_recording(false);
-                            finalize(stop_result);
-                        }
-                        Err(e) => {
-                            error!(error = %e, "Failed to stop recording");
-                            tray.set_recording(false);
-                            overlay.set_recording(false);
-                        }
-                    }
+                    stop_recording("hold-release");
                 }
                 HotkeyEvent::Pressed(HotkeySource::Toggle) => {
-                    let mut rec = recorder.lock().unwrap();
-                    if rec.is_recording() {
-                        info!(hotkey = %config.toggle_hotkey, "Toggle key pressed, stopping recording");
-                        match rec.stop_recording() {
-                            Ok(stop_result) => {
-                                tray.set_recording(false);
-                                overlay.set_recording(false);
-                                finalize(stop_result);
-                            }
-                            Err(e) => {
-                                error!(error = %e, "Failed to stop recording");
-                                tray.set_recording(false);
-                                overlay.set_recording(false);
-                            }
-                        }
+                    if recorder.lock().unwrap().is_recording() {
+                        stop_recording("toggle-press");
                     } else {
-                        info!(hotkey = %config.toggle_hotkey, "Toggle key pressed, starting recording");
-                        match rec.start_recording() {
-                            Ok(()) => {
-                                orchestrator.start_session(SessionMode::Toggle);
-                                info!("Recording started (toggle mode)");
-                                tray.set_recording(true);
-                                overlay.set_recording(true);
-                            }
-                            Err(e) => error!(error = %e, "Failed to start recording"),
-                        }
+                        start_recording(SessionMode::Toggle, "toggle-press");
                     }
                 }
                 HotkeyEvent::Released(HotkeySource::Toggle) => {}
@@ -458,33 +453,11 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
         }
 
         // Check overlay click (acts like toggle hotkey)
-        if overlay.check_click() {
-            let mut rec = recorder.lock().unwrap();
-            if rec.is_recording() {
-                info!("Overlay clicked, stopping recording");
-                match rec.stop_recording() {
-                    Ok(stop_result) => {
-                        tray.set_recording(false);
-                        overlay.set_recording(false);
-                        finalize(stop_result);
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Failed to stop recording");
-                        tray.set_recording(false);
-                        overlay.set_recording(false);
-                    }
-                }
+        if overlay.borrow_mut().check_click() {
+            if recorder.lock().unwrap().is_recording() {
+                stop_recording("overlay-click");
             } else {
-                info!("Overlay clicked, starting recording");
-                match rec.start_recording() {
-                    Ok(()) => {
-                        orchestrator.start_session(SessionMode::Toggle);
-                        info!("Recording started (overlay toggle)");
-                        tray.set_recording(true);
-                        overlay.set_recording(true);
-                    }
-                    Err(e) => error!(error = %e, "Failed to start recording"),
-                }
+                start_recording(SessionMode::Toggle, "overlay-click");
             }
         }
 
@@ -497,7 +470,7 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
             }
         }
 
-        if tray.check_exit() {
+        if tray.borrow().check_exit() {
             info!("User clicked exit from tray");
             break Ok(());
         }
@@ -517,7 +490,7 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
             );
         }
 
-        overlay.update();
+        overlay.borrow_mut().update();
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
@@ -614,19 +587,7 @@ fn handle_convert(input: &str, output: Option<&str>) {
 
     match transcriber.transcribe(input) {
         Ok(stt_text) => {
-            let text = match post_processor.process(&stt_text) {
-                Ok(processed) if !processed.is_empty() => processed,
-                Ok(_) => {
-                    // Empty post-process output is not useful; keep the STT text.
-                    warn!("Post-processing returned empty text, using original STT text");
-                    stt_text
-                }
-                Err(e) => {
-                    // Runtime LLM errors should not discard a successful STT result.
-                    warn!(error = %e, "Post-processing failed, using original STT text");
-                    stt_text
-                }
-            };
+            let text = resolve_post_processed_text(post_processor.process(&stt_text), stt_text);
             match output {
                 Some(path) => {
                     if let Err(e) = std::fs::write(path, &text) {
@@ -663,6 +624,24 @@ mod integration_tests {
     use crate::core::config::AppConfig;
     use audio::AudioRecorder;
     use transcriber::{MockTranscriber, Transcriber};
+
+    #[test]
+    fn test_resolve_post_processed_text_prefers_non_empty_result() {
+        let text = resolve_post_processed_text(Ok("cleaned".to_string()), "raw".to_string());
+        assert_eq!(text, "cleaned");
+    }
+
+    #[test]
+    fn test_resolve_post_processed_text_keeps_stt_on_empty_result() {
+        let text = resolve_post_processed_text(Ok(String::new()), "raw".to_string());
+        assert_eq!(text, "raw");
+    }
+
+    #[test]
+    fn test_resolve_post_processed_text_keeps_stt_on_error() {
+        let text = resolve_post_processed_text(Err("llm down".into()), "raw".to_string());
+        assert_eq!(text, "raw");
+    }
 
     #[test]
     fn test_audio_module_loads() {
