@@ -65,11 +65,14 @@ impl LocalServiceManager {
     /// Spawns the local server process and waits for health.
     pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.cleanup_stale_pid_file();
+        // A server that is already running needs no spawn warm-up: probe it
+        // immediately and poll while it finishes loading. The 20s initial
+        // delay only makes sense for a freshly spawned process.
         if self.is_running()
             && health_check(
                 &self.base_url(),
                 HEALTH_TIMEOUT,
-                HEALTH_INITIAL_DELAY,
+                Duration::ZERO,
                 HEALTH_POLL_INTERVAL,
             )
             .is_ok()
@@ -611,6 +614,35 @@ mod tests {
                 "int8",
             ]
         );
+    }
+
+    #[test]
+    fn test_start_reuses_healthy_server_without_spawn_delay() {
+        let port = 18767;
+        spawn_health_stub(port, "HTTP/1.1 200 OK", "{\"status\":\"ok\"}");
+        let temp_dir =
+            std::env::temp_dir().join(format!("viberwhisper-local-reuse-{}", std::process::id()));
+        let model_dir = temp_dir.join("model");
+        fs::create_dir_all(&model_dir).unwrap();
+        // Point the pid file at this test process so is_running() is true.
+        fs::write(
+            temp_dir.join("local_server.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+
+        let mut manager = LocalServiceManager::new(port, model_dir, temp_dir.join("venv"));
+        let started = Instant::now();
+        let result = manager.start();
+
+        // The reuse path must succeed via the immediate health probe. If start()
+        // tried to spawn, it would fail (no venv python) — and the old code
+        // would have slept 20s before probing.
+        assert!(result.is_ok(), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        let _ = fs::remove_file(temp_dir.join("local_server.pid"));
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]
