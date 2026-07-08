@@ -125,11 +125,12 @@ struct ActiveSessionInner {
     stable_consumed: usize,
 }
 
-/// Number of background transcription workers per session. Long recordings
-/// produce chunks faster than one upload round-trip completes; a few parallel
-/// uploads keep the convergence wait short while results are still merged in
-/// submission order via chunk indices.
-const WORKER_THREADS: usize = 3;
+/// Default number of background transcription workers per session. Long
+/// recordings produce chunks faster than one upload round-trip completes; a
+/// few parallel uploads keep the convergence wait short while results are
+/// still merged in submission order via chunk indices. Overridable via the
+/// `max_parallel_transcriptions` config through `with_worker_threads`.
+const DEFAULT_WORKER_THREADS: usize = 3;
 
 // ─── SessionOrchestrator ──────────────────────────────────────────────────────
 
@@ -139,6 +140,7 @@ pub struct SessionOrchestrator {
     transcriber: Arc<dyn Transcriber>,
     language: Option<String>,
     convergence_timeout: Duration,
+    worker_threads: usize,
     inner: Mutex<Option<ActiveSessionInner>>,
 }
 
@@ -157,8 +159,15 @@ impl SessionOrchestrator {
             transcriber,
             language,
             convergence_timeout,
+            worker_threads: DEFAULT_WORKER_THREADS,
             inner: Mutex::new(None),
         }
+    }
+
+    /// Override the number of transcription workers per session (at least 1).
+    pub fn with_worker_threads(mut self, workers: usize) -> Self {
+        self.worker_threads = workers.max(1);
+        self
     }
 
     /// Start a new recording session.
@@ -171,7 +180,7 @@ impl SessionOrchestrator {
         let (chunk_tx, chunk_rx) = mpsc::sync_channel::<WorkerMsg>(64);
 
         let shared_rx = Arc::new(Mutex::new(chunk_rx));
-        let workers = (0..WORKER_THREADS)
+        let workers = (0..self.worker_threads)
             .map(|_| {
                 let rx = Arc::clone(&shared_rx);
                 let worker_chunks = Arc::clone(&chunks);
@@ -741,6 +750,21 @@ mod tests {
         let output = orch.stop_session().unwrap();
         assert_eq!(output.full_text, "first second");
         assert_eq!(output.unconsumed_text, "");
+    }
+
+    #[test]
+    fn test_single_worker_still_processes_all_chunks() {
+        let t = Arc::new(ScriptedTranscriber::new([
+            ("c0.wav", Ok("one".to_string())),
+            ("c1.wav", Ok("two".to_string())),
+        ]));
+        let orch = default_orchestrator(t).with_worker_threads(1);
+
+        orch.start_session(SessionMode::Hold);
+        orch.on_chunk_ready("c0.wav".to_string());
+        orch.on_chunk_ready("c1.wav".to_string());
+
+        assert_eq!(orch.stop_session().unwrap().full_text, "one two");
     }
 
     #[test]

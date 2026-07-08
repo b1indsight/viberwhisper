@@ -332,7 +332,8 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
         Arc::clone(&transcriber),
         config.language.clone(),
         Duration::from_secs(config.convergence_timeout_secs),
-    );
+    )
+    .with_worker_threads(config.max_parallel_transcriptions as usize);
 
     #[cfg(target_os = "macos")]
     let typer = platform::macos::MacTyper;

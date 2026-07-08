@@ -9,9 +9,6 @@ use tracing::{info, instrument, warn};
 /// the convergence timeout only stops the caller from waiting, not the worker.
 const STT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Bounded concurrency for offline multi-chunk uploads (`convert` path).
-const PARALLEL_UPLOADS: usize = 3;
-
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError>;
 }
@@ -49,6 +46,8 @@ pub struct ApiTranscriber {
     max_chunk_size_bytes: u64,
     /// Maximum retry attempts per chunk on transient errors (5xx / network).
     max_retries: u32,
+    /// Bounded concurrency for offline multi-chunk uploads (`convert` path).
+    parallel_uploads: usize,
     /// Shared HTTP client (connection reuse + request timeout).
     client: reqwest::blocking::Client,
 }
@@ -69,6 +68,7 @@ impl ApiTranscriber {
             max_chunk_duration_secs: config.max_chunk_duration_secs,
             max_chunk_size_bytes: config.max_chunk_size_bytes,
             max_retries: config.max_retries,
+            parallel_uploads: config.max_parallel_transcriptions.max(1) as usize,
             client: reqwest::blocking::Client::builder()
                 .timeout(STT_REQUEST_TIMEOUT)
                 .build()?,
@@ -233,7 +233,7 @@ impl Transcriber for ApiTranscriber {
             (0..total).map(|_| std::sync::Mutex::new(None)).collect();
 
         std::thread::scope(|scope| {
-            for _ in 0..PARALLEL_UPLOADS.min(total) {
+            for _ in 0..self.parallel_uploads.min(total) {
                 scope.spawn(|| {
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

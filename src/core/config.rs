@@ -57,6 +57,13 @@ fn default_local_quantization() -> String {
     "int8".to_string()
 }
 
+fn default_max_parallel_transcriptions() -> u32 {
+    3
+}
+
+/// Upper bound for `max_parallel_transcriptions` (thread count per session).
+const MAX_PARALLEL_TRANSCRIPTIONS: u32 = 16;
+
 /// One user-facing config field: its key plus string-based accessors.
 /// `get_field`, `set_field`, `apply_json` (config.json loading), and the CLI
 /// `config list` all derive from this single table, so adding a field means
@@ -343,6 +350,23 @@ const FIELDS: &[FieldSpec] = &[
         },
         apply: None,
     },
+    FieldSpec {
+        key: "max_parallel_transcriptions",
+        get: |c| Some(c.max_parallel_transcriptions.to_string()),
+        set: |c, v| {
+            let parsed = v
+                .parse::<u32>()
+                .map_err(|_| format!("max_parallel_transcriptions must be a u32, got: {v}"))?;
+            if parsed == 0 || parsed > MAX_PARALLEL_TRANSCRIPTIONS {
+                return Err(format!(
+                    "max_parallel_transcriptions must be between 1 and {MAX_PARALLEL_TRANSCRIPTIONS}, got: {v}"
+                ));
+            }
+            c.max_parallel_transcriptions = parsed;
+            Ok(())
+        },
+        apply: None,
+    },
 ];
 
 fn parse_finite_f32(key: &str, value: &str) -> Result<f32, String> {
@@ -429,6 +453,10 @@ pub struct AppConfig {
     /// Quantization mode for the local service. Default: "int8".
     #[serde(default = "default_local_quantization")]
     pub local_quantization: String,
+    /// Concurrent chunk transcriptions: worker threads per recording session
+    /// and parallel uploads for the offline `convert` path. Default: 3.
+    #[serde(default = "default_max_parallel_transcriptions")]
+    pub max_parallel_transcriptions: u32,
 }
 
 impl Default for AppConfig {
@@ -459,6 +487,7 @@ impl Default for AppConfig {
             local_data_dir: None,
             local_server_port: default_local_server_port(),
             local_quantization: default_local_quantization(),
+            max_parallel_transcriptions: default_max_parallel_transcriptions(),
         }
     }
 }
@@ -1110,6 +1139,36 @@ mod tests {
             config.get_field("local_quantization").as_deref(),
             Some("bf16")
         );
+    }
+
+    #[test]
+    fn test_max_parallel_transcriptions_get_set_and_limits() {
+        let mut config = AppConfig::default();
+        assert_eq!(
+            config.get_field("max_parallel_transcriptions"),
+            Some("3".to_string())
+        );
+        config
+            .set_field("max_parallel_transcriptions", "5")
+            .unwrap();
+        assert_eq!(config.max_parallel_transcriptions, 5);
+
+        assert!(
+            config
+                .set_field("max_parallel_transcriptions", "0")
+                .is_err()
+        );
+        assert!(
+            config
+                .set_field("max_parallel_transcriptions", "17")
+                .is_err()
+        );
+
+        // Out-of-range file values warn and keep the current value.
+        config.apply_json(&serde_json::json!({ "max_parallel_transcriptions": 0 }));
+        assert_eq!(config.max_parallel_transcriptions, 5);
+        config.apply_json(&serde_json::json!({ "max_parallel_transcriptions": 2 }));
+        assert_eq!(config.max_parallel_transcriptions, 2);
     }
 
     #[test]
