@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::transcriber::Transcriber;
+// Re-exported so callers can keep using `core::orchestrator::TranscribeError`.
+pub use crate::transcriber::TranscribeError;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -20,29 +22,6 @@ use crate::transcriber::Transcriber;
 pub enum SessionMode {
     Hold,
     Toggle,
-}
-
-/// Reason a single chunk transcription failed.
-#[derive(Debug, Clone)]
-pub enum TranscribeError {
-    /// The API returned an HTTP error (4xx or 5xx).
-    Api { status: u16, body: String },
-    /// A network or I/O error occurred (retriable errors exhausted).
-    Network(String),
-    /// The chunk did not reach a terminal state before convergence timeout.
-    Timeout,
-}
-
-impl fmt::Display for TranscribeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TranscribeError::Api { status, body } => {
-                write!(f, "API error {}: {}", status, body)
-            }
-            TranscribeError::Network(msg) => write!(f, "Network error: {}", msg),
-            TranscribeError::Timeout => write!(f, "Convergence timeout"),
-        }
-    }
 }
 
 /// Error returned by `SessionOrchestrator::stop_session`.
@@ -348,7 +327,9 @@ fn worker_loop(
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     transcriber.transcribe(&path)
                 }))
-                .unwrap_or_else(|_| Err("transcriber panicked".to_string().into()));
+                .unwrap_or_else(|_| {
+                    Err(TranscribeError::Network("transcriber panicked".to_string()))
+                });
 
                 // Clean up the chunk file (ignore errors — file may already be gone).
                 remove_chunk_file(&path, "processed");
@@ -366,22 +347,7 @@ fn worker_loop(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Classify a transcription error string into a `TranscribeError` variant.
-fn classify_error(error_msg: &str) -> TranscribeError {
-    if let Some(status) = extract_http_status(error_msg) {
-        TranscribeError::Api {
-            status,
-            body: error_msg.to_string(),
-        }
-    } else {
-        TranscribeError::Network(error_msg.to_string())
-    }
-}
-
-fn record_worker_result(
-    entry: &mut ChunkEntry,
-    result: Result<String, Box<dyn std::error::Error>>,
-) {
+fn record_worker_result(entry: &mut ChunkEntry, result: Result<String, TranscribeError>) {
     // A convergence timeout is terminal from the caller's perspective. A late
     // HTTP response must not rewrite the snapshot used for the timeout result.
     if entry.state.is_terminal() {
@@ -398,9 +364,8 @@ fn record_worker_result(
             ChunkState::Transcribed(text)
         }
         Err(e) => {
-            let msg = e.to_string();
-            error!(index = entry.index, error = %msg, "Chunk transcription failed");
-            ChunkState::Failed(classify_error(&msg))
+            error!(index = entry.index, error = %e, "Chunk transcription failed");
+            ChunkState::Failed(e)
         }
     };
 }
@@ -421,24 +386,6 @@ fn remove_chunk_file(path: &str, reason: &str) {
     if let Err(e) = std::fs::remove_file(path) {
         debug!(path, reason, error = %e, "Could not delete chunk file");
     }
-}
-
-/// Try to parse an HTTP status code out of an error message.
-fn extract_http_status(msg: &str) -> Option<u16> {
-    for marker in ["API error ", "HTTP ", "status "] {
-        if let Some(tail) = msg.split_once(marker).map(|(_, tail)| tail) {
-            let digits: String = tail
-                .chars()
-                .take_while(|character| character.is_ascii_digit())
-                .collect();
-            if let Ok(status) = digits.parse::<u16>()
-                && (100..=599).contains(&status)
-            {
-                return Some(status);
-            }
-        }
-    }
-    None
 }
 
 /// Language-aware text merging (duplicated from `transcriber::api` to avoid
@@ -528,19 +475,19 @@ mod tests {
     struct FixedTranscriber(String);
 
     impl Transcriber for FixedTranscriber {
-        fn transcribe(&self, _path: &str) -> Result<String, Box<dyn std::error::Error>> {
+        fn transcribe(&self, _path: &str) -> Result<String, TranscribeError> {
             Ok(self.0.clone())
         }
     }
 
     /// Returns pre-configured results in call order.
     struct ScriptedTranscriber {
-        results: Vec<Result<String, String>>,
+        results: Vec<Result<String, TranscribeError>>,
         call_count: AtomicUsize,
     }
 
     impl ScriptedTranscriber {
-        fn new(results: Vec<Result<String, String>>) -> Self {
+        fn new(results: Vec<Result<String, TranscribeError>>) -> Self {
             Self {
                 results,
                 call_count: AtomicUsize::new(0),
@@ -549,11 +496,11 @@ mod tests {
     }
 
     impl Transcriber for ScriptedTranscriber {
-        fn transcribe(&self, _path: &str) -> Result<String, Box<dyn std::error::Error>> {
+        fn transcribe(&self, _path: &str) -> Result<String, TranscribeError> {
             let i = self.call_count.fetch_add(1, Ordering::SeqCst);
             match self.results.get(i) {
                 Some(Ok(s)) => Ok(s.clone()),
-                Some(Err(e)) => Err(e.clone().into()),
+                Some(Err(e)) => Err(e.clone()),
                 None => Ok("extra".to_string()),
             }
         }
@@ -569,7 +516,7 @@ mod tests {
     }
 
     impl Transcriber for GateTranscriber {
-        fn transcribe(&self, _path: &str) -> Result<String, Box<dyn std::error::Error>> {
+        fn transcribe(&self, _path: &str) -> Result<String, TranscribeError> {
             let (lock, condvar) = &*self.release;
             let mut released = lock.lock().unwrap();
             while !*released {
@@ -580,7 +527,7 @@ mod tests {
     }
 
     impl Transcriber for SlowTranscriber {
-        fn transcribe(&self, _path: &str) -> Result<String, Box<dyn std::error::Error>> {
+        fn transcribe(&self, _path: &str) -> Result<String, TranscribeError> {
             thread::sleep(self.delay);
             Ok("slow".to_string())
         }
@@ -590,7 +537,7 @@ mod tests {
     struct PanicTranscriber;
 
     impl Transcriber for PanicTranscriber {
-        fn transcribe(&self, _path: &str) -> Result<String, Box<dyn std::error::Error>> {
+        fn transcribe(&self, _path: &str) -> Result<String, TranscribeError> {
             panic!("intentional transcriber panic for testing");
         }
     }
@@ -672,7 +619,10 @@ mod tests {
     fn test_partial_failure_returns_error_with_partial_text() {
         let t = Arc::new(ScriptedTranscriber::new(vec![
             Ok("good chunk".to_string()),
-            Err("HTTP 500 server error".to_string()),
+            Err(TranscribeError::Api {
+                status: 500,
+                body: "server error".to_string(),
+            }),
             Ok("another good".to_string()),
         ]));
         let orch = default_orchestrator(t);
@@ -690,6 +640,11 @@ mod tests {
             }) => {
                 assert_eq!(errors.len(), 1);
                 assert_eq!(errors[0].0, 1); // chunk index 1 failed
+                // The structured error variant survives end-to-end (no string parsing).
+                assert!(matches!(
+                    errors[0].1,
+                    TranscribeError::Api { status: 500, .. }
+                ));
                 // partial_text contains only the successful chunks in order.
                 assert_eq!(partial_text, "good chunk another good");
             }
@@ -860,35 +815,5 @@ mod tests {
     fn test_merge_texts_empty_filtered() {
         let texts = vec!["a".to_string(), "".to_string(), "b".to_string()];
         assert_eq!(merge_texts(&texts, None), "a b");
-    }
-
-    #[test]
-    fn test_classify_error_api() {
-        let e = classify_error("HTTP 400 bad request");
-        assert!(matches!(e, TranscribeError::Api { status: 400, .. }));
-
-        let e = classify_error("API error 429: too many requests");
-        assert!(matches!(e, TranscribeError::Api { status: 429, .. }));
-
-        let e = classify_error("chunk 1/1 failed after 4 attempts: API error 500: unavailable");
-        assert!(matches!(e, TranscribeError::Api { status: 500, .. }));
-    }
-
-    #[test]
-    fn test_classify_error_network() {
-        let e = classify_error("connection refused");
-        assert!(matches!(e, TranscribeError::Network(_)));
-    }
-
-    #[test]
-    fn test_extract_http_status() {
-        assert_eq!(extract_http_status("status 500 internal"), Some(500));
-        assert_eq!(extract_http_status("connection refused"), None);
-        assert_eq!(extract_http_status("HTTP 429 too many requests"), Some(429));
-        assert_eq!(
-            extract_http_status("API error 400: invalid request"),
-            Some(400)
-        );
-        assert_eq!(extract_http_status("received 500 bytes"), None);
     }
 }
