@@ -1,12 +1,16 @@
 use crate::core::config::AppConfig;
 use crate::postprocess::{TextPostProcessor, TextPostProcessorSession};
 use reqwest::blocking::Client;
+use std::fmt;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{info, warn};
 
 const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wait before the single retry of a transient LLM failure.
+const LLM_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 /// Margin over the HTTP client timeout before `finish()` stops waiting for the
 /// background preheat thread and retries synchronously. The background request
@@ -73,6 +77,42 @@ impl LlmPostProcessor {
     }
 }
 
+/// Internal LLM call failure, classified so the retry decision does not have
+/// to parse error strings (mirrors `transcriber::TranscribeError`).
+#[derive(Debug)]
+enum LlmCallError {
+    /// HTTP error response from the API.
+    Api { status: u16, body: String },
+    /// Network / connection failure.
+    Network(String),
+    /// Response arrived but could not be used (bad JSON, missing or empty content).
+    BadResponse(String),
+}
+
+impl LlmCallError {
+    /// Transient failures worth one retry: network errors and server-side 5xx.
+    fn is_transient(&self) -> bool {
+        match self {
+            LlmCallError::Network(_) => true,
+            LlmCallError::Api { status, .. } => *status >= 500,
+            LlmCallError::BadResponse(_) => false,
+        }
+    }
+}
+
+impl fmt::Display for LlmCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LlmCallError::Api { status, body } => write!(f, "LLM API error {}: {}", status, body),
+            LlmCallError::Network(msg) => write!(f, "{}", msg),
+            LlmCallError::BadResponse(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+/// One LLM call with a single retry on transient failures (network / 5xx).
+/// Client errors and malformed responses are returned immediately — the
+/// caller's fallback (keep the raw STT text) handles those.
 fn call_llm_impl(
     client: &Client,
     api_key: &str,
@@ -82,6 +122,27 @@ fn call_llm_impl(
     temperature: f32,
     text: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    match call_llm_once(client, api_key, api_url, model, prompt, temperature, text) {
+        Ok(content) => Ok(content),
+        Err(e) if e.is_transient() => {
+            warn!(error = %e, "LLM request failed; retrying once");
+            thread::sleep(LLM_RETRY_DELAY);
+            call_llm_once(client, api_key, api_url, model, prompt, temperature, text)
+                .map_err(|e| e.to_string().into())
+        }
+        Err(e) => Err(e.to_string().into()),
+    }
+}
+
+fn call_llm_once(
+    client: &Client,
+    api_key: &str,
+    api_url: &str,
+    model: &str,
+    prompt: &str,
+    temperature: f32,
+    text: &str,
+) -> Result<String, LlmCallError> {
     let request_body = serde_json::json!({
         "model": model,
         "messages": [
@@ -97,24 +158,35 @@ fn call_llm_impl(
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&request_body)
-        .send()?;
+        .send()
+        .map_err(|e| LlmCallError::Network(e.to_string()))?;
 
     let status = response.status();
-    let body = response.text()?;
+    let body = response
+        .text()
+        .map_err(|e| LlmCallError::Network(e.to_string()))?;
 
     if !status.is_success() {
-        return Err(format!("LLM API error {}: {}", status, body).into());
+        return Err(LlmCallError::Api {
+            status: status.as_u16(),
+            body,
+        });
     }
 
-    let json: serde_json::Value = serde_json::from_str(&body)?;
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| LlmCallError::BadResponse(format!("invalid JSON in LLM response: {e}")))?;
     let content = json["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or("content field not found in LLM response")?
+        .ok_or_else(|| {
+            LlmCallError::BadResponse("content field not found in LLM response".to_string())
+        })?
         .trim()
         .to_string();
 
     if content.is_empty() {
-        return Err("LLM returned empty content".into());
+        return Err(LlmCallError::BadResponse(
+            "LLM returned empty content".to_string(),
+        ));
     }
 
     Ok(content)
@@ -538,6 +610,80 @@ mod tests {
         let result = session.finish();
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
+    }
+
+    // --- retry behavior against a local HTTP stub ---
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn spawn_llm_stub(status_line: &'static str, body: &'static str) -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut stream = stream;
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                let mut buf = [0u8; 8192];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                let response = format!(
+                    "{status_line}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (port, requests)
+    }
+
+    fn processor_for_port(port: u16) -> LlmPostProcessor {
+        let mut config = config_with_postprocess();
+        config.post_process_api_url = Some(format!("http://127.0.0.1:{port}/v1/chat/completions"));
+        LlmPostProcessor::from_config(&config).unwrap()
+    }
+
+    #[test]
+    fn test_llm_success_returns_content() {
+        let (port, requests) = spawn_llm_stub(
+            "HTTP/1.1 200 OK",
+            "{\"choices\":[{\"message\":{\"content\":\" cleaned \"}}]}",
+        );
+        let p = processor_for_port(port);
+
+        assert_eq!(p.process("raw").unwrap(), "cleaned");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_llm_client_error_is_not_retried() {
+        let (port, requests) =
+            spawn_llm_stub("HTTP/1.1 400 Bad Request", "{\"error\":\"bad model\"}");
+        let p = processor_for_port(port);
+
+        let error = p.process("raw").unwrap_err().to_string();
+        assert!(error.contains("LLM API error 400"), "{error}");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_llm_server_error_is_retried_once() {
+        let (port, requests) =
+            spawn_llm_stub("HTTP/1.1 503 Service Unavailable", "{\"error\":\"busy\"}");
+        let p = processor_for_port(port);
+
+        let error = p.process("raw").unwrap_err().to_string();
+        assert!(error.contains("LLM API error 503"), "{error}");
+        // Initial attempt + one retry, then give up.
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
     #[test]
