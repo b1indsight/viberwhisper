@@ -17,12 +17,10 @@ pub struct MacTyper;
 Uses the clipboard-paste approach to avoid osascript keystroke length limits and special character issues:
 
 1. Sleeps 100 ms to let the target window regain focus.
-2. Escapes backslashes and double quotes in the text.
-3. Constructs an AppleScript that:
-   - Sets the clipboard to the escaped text.
-   - Simulates `Cmd+V` via `System Events`.
-4. Runs the script via `osascript -e`.
-5. Returns an error if the process exits non-zero.
+2. Captures the current text clipboard via `pbpaste` (best effort; non-text content such as images cannot be captured).
+3. Sets the clipboard to the transcribed text via `pbcopy` (no AppleScript escaping needed).
+4. Simulates `Cmd+V` via `osascript` / `System Events`; on failure the previous clipboard is restored before returning the error.
+5. If a previous text clipboard was captured, waits 300 ms for the target app to read the pasteboard, then restores it.
 
 **Requirements:** macOS Accessibility permission must be granted to the running process in System Preferences → Privacy & Security → Accessibility.
 

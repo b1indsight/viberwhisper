@@ -63,8 +63,8 @@ pub struct LocalServiceManager {
 
 ### Key Behaviors
 
-- `start()`: 如果已有健康服务则直接复用，否则启动 Python 进程并轮询 `/health`
-- `stop()`: 读取当前子进程或 PID 文件，对目标进程发送终止信号；超时后升级为强制 kill
+- `start()`: 如果已有健康服务则直接复用（复用路径立即探测 `/health`，无启动预热延迟）；否则启动 Python 进程，等待 20 秒预热后轮询 `/health`
+- `stop()`: 读取当前子进程或 PID 文件，对目标进程发送终止信号；超时后升级为强制 kill。来自 PID 文件的进程在 kill 前会校验命令行包含 `server.py`（PID 复用防护），不匹配时只清理陈旧 PID 文件
 - `release()`: 仅在当前 manager 自己启动了服务时才停止，避免误杀复用中的后台进程
 - `status()`: 返回 `running`、`pid`、`memory_usage` 和最近一次健康检查结果
 - `base_url()`: 统一生成 `http://127.0.0.1:<port>`
@@ -74,7 +74,7 @@ pub struct LocalServiceManager {
 - PID 会写入 `local_server.pid`
 - 非 Windows 平台通过 `ps` / `kill` 检查和结束进程
 - Windows 通过 `tasklist` / `taskkill`
-- 健康检查超时时间为 120 秒，轮询间隔 500 ms
+- 健康检查超时时间为 120 秒，轮询间隔 10 秒（新进程另有 20 秒初始预热延迟）
 
 ## FastAPI Server (`server/server.py`)
 

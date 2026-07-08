@@ -26,3 +26,5 @@
 2026-07-08: Optimize audio pipeline: lock-free capture channel, 16 kHz upload downsampling, parallel chunk transcription workers, condvar-driven convergence wait
 2026-07-08: Deduplicate recording start/stop control, post-process fallback, merge_texts, server file lookup, and python launch command; table-driven config fields; restore macOS clipboard after paste-typing
 2026-07-08: Wire streaming post-process end-to-end: orchestrator take_stable_texts + SessionOutput remainder, main-loop PostFeed, preheat compatibility notes for the non-streaming chat API
+2026-07-08: Wire the streaming post-process feed end-to-end and document the non-streaming chat API compatibility approach for preheat
+2026-07-08: Harden round two: clipboard-restore delay only when needed, pid-file ownership check before kill, LLM transient-error retry, heartbeat wrap, batched WAV writes, table-driven config.json loading, configurable transcription parallelism, architecture docs sync

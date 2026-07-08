@@ -453,7 +453,8 @@ fn window_top_left(hwnd: ffi::HWND) -> ffi::POINT {
 
 fn window_state_mut(hwnd: ffi::HWND) -> Option<&'static mut WindowState> {
     let ptr = unsafe {
-        // SAFETY: Retrieves the Box<WindowState> pointer associated in WM_NCCREATE.
+        // SAFETY: Retrieves the Box<WindowState> pointer attached via
+        // SetWindowLongPtrW in OverlayManager::new; null until then.
         ffi::GetWindowLongPtrW(hwnd, ffi::GWLP_USERDATA) as *mut WindowState
     };
 

@@ -35,7 +35,9 @@ pub trait TextPostProcessorSession: Send {
 }
 ```
 
-Designed for incremental input: stable STT chunks are pushed as they become available; `finish` returns the final processed text.
+Designed for incremental input: stable STT chunks are pushed as they become available; `finish` returns the final processed text. Fragments are concatenated verbatim — the caller includes inter-chunk separators (`PostFeed` in `main.rs` owns the language-specific spacing).
+
+**Main-loop wiring:** the session is opened when recording starts. While recording continues, the main loop polls `SessionOrchestrator::take_stable_texts()` and pushes each newly stable chunk text; after `stop_session()`, only the unconsumed remainder (`SessionOutput::unconsumed_text`) is pushed before `finish()`.
 
 ## Implementations
 
@@ -52,6 +54,8 @@ Calls an OpenAI-compatible chat completions API to clean up transcribed text. Th
 Requires `post_process_api_key`, `post_process_api_url`, and `post_process_model` to be configured. Returns an error if any are missing.
 
 **`process` method:** Sends a single blocking request to the LLM API. Empty text is returned immediately without a network call.
+
+**Retry:** every LLM call retries once on transient failures (network errors, HTTP 5xx) after a short delay; 4xx and malformed responses fail immediately (the caller's fallback keeps the raw STT text). Classification uses an internal structured `LlmCallError`, not string parsing.
 
 **Session modes (controlled by `post_process_streaming_enabled`):**
 
@@ -71,9 +75,10 @@ Reduces perceived latency by pre-firing LLM requests during recording:
 - Each `push_stable_chunk` spawns a `std::thread` that sends a new LLM request with ALL accumulated text so far
 - A generation counter (`u64`) tracks request freshness; only the latest generation's result is kept
 - Shared state via `Arc<(Mutex<PreheatState>, Condvar)>`
-- `finish()` blocks on the `Condvar` until the latest generation completes
-- If the latest request fails, retries once with the full accumulated text (graceful degradation)
+- `finish()` waits on the `Condvar` with a bounded timeout (client timeout + margin); on timeout or failure it falls back to a synchronous full-text request
 - Stale thread results (from superseded generations) are silently dropped
+
+**Compatibility note:** the chat-completions endpoint has no incremental input channel, so "streaming" here means re-sending the full accumulated text per stable chunk and letting the newest generation win. If the backend ever exposes a true incremental interface, only this session type needs replacing — the trait contract and main-loop feeding stay the same.
 
 **Trade-off:** Intermediate requests waste tokens, but `finish()` returns near-instantly if the last request completed before recording stopped.
 

@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
 const HEALTH_INITIAL_DELAY: Duration = Duration::from_secs(20);

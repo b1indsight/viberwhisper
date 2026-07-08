@@ -46,10 +46,15 @@ pub struct AppConfig {
     pub local_data_dir: Option<String>,       // default: ~/.viberwhisper
     pub local_server_port: u16,               // default: 17265
     pub local_quantization: String,           // default: "int8"
+
+    // --- Concurrency ---
+    pub max_parallel_transcriptions: u32,     // default: 3, range 1..=16
 }
 ```
 
 Serialized to/from `config.json` via `serde_json`. `api_key` and `post_process_api_key` are excluded from the saved file (`#[serde(skip)]`).
+
+**File location:** a `config.json` in the current working directory takes precedence (developer workflow / existing setups); otherwise the per-user config directory `<config_dir>/viberwhisper/config.json` is used, so a bundled app launched from Finder/Explorer (cwd = `/`) still finds its config. `save()` writes to the same resolved path and creates the directory if needed.
 
 **Defaults:**
 
@@ -72,6 +77,7 @@ Serialized to/from `config.json` via `serde_json`. `api_key` and `post_process_a
 | `local_mode` | `false` |
 | `local_server_port` | `17265` |
 | `local_quantization` | `"int8"` |
+| `max_parallel_transcriptions` | `3` |
 
 ### Key Methods
 
@@ -88,20 +94,13 @@ Loads config in priority order:
 
 Serializes to pretty-printed JSON. Runtime/environment secrets are never introduced into the file. If `api_key`, legacy `groq_api_key`, or `post_process_api_key` already exists in `config.json`, it is preserved when other fields are updated.
 
-**`get_field(&self, key: &str) -> Option<String>`**
+**Field table (`FieldSpec`)**
 
-Returns a string representation of the named field. Supported keys: `api_key`, `groq_api_key`, `transcription_api_url`, `provider`, `model`, `hold_hotkey`, `toggle_hotkey`, `temperature`, `mic_gain`, `language`, `prompt`, `max_chunk_duration_secs`, `max_chunk_size_bytes`, `max_retries`, `convergence_timeout_secs`, `post_process_enabled`, `post_process_streaming_enabled`, `post_process_api_url`, `post_process_api_key`, `post_process_model`, `post_process_prompt`, `post_process_temperature`, `local_mode`, `local_data_dir`, `local_server_port`, `local_quantization`. Returns `"*** (set)"` for API key fields if present; `None` for unknown keys.
+All user-facing config access is driven by one `FIELDS` table: `get_field`, `set_field`, the lenient `apply_json` loader, and the CLI `config list` (via `AppConfig::field_keys()`) derive from it, so adding a config field means adding exactly one table entry (plus the struct field itself).
 
-**`set_field(&mut self, key: &str, value: &str) -> Result<(), String>`**
-
-Sets a field by name with type conversion and validation. Non-finite floats are rejected, `max_retries` is capped at 16, and `convergence_timeout_secs` is capped at 3600. Secret fields cannot be set through this command; use the documented environment variables or edit `config.json` directly. Local runtime keys can also be mutated from CLI.
-
-**`apply_json(&mut self, json: &Value)`** *(private)*
-
-Applies partial JSON overrides. Backward compatibility:
-- Old `"hotkey"` key maps to `hold_hotkey`
-- Old `"groq_api_key"` key maps to `api_key` (if `api_key` not already set)
-- Local runtime keys (`local_mode`, `local_data_dir`, `local_server_port`, `local_quantization`) are also deserialized from `config.json`
+- `get_field(key)` returns a string representation; `"*** (set)"` for secret fields; `None` for unknown keys. `groq_api_key` is a read alias for `api_key`.
+- `set_field(key, value)` converts and validates: non-finite floats are rejected, `max_retries` ≤ 16, `convergence_timeout_secs` ≤ 3600, `max_parallel_transcriptions` in 1..=16. Secret fields cannot be set through the CLI; use the documented environment variables or edit `config.json` directly.
+- `apply_json(json)` *(private)* loads `config.json` leniently: each present field is applied through the same setters, and an invalid or out-of-range value warns and keeps the default rather than discarding the whole file. Secrets have loader overrides (readable from the file even though the CLI setter rejects them). Backward compatibility: `"hotkey"` maps to `hold_hotkey`; `"groq_api_key"` maps to `api_key` (canonical keys win when both are present).
 
 ---
 
@@ -153,7 +152,10 @@ Parsed with `clap::Parser`. No subcommand runs the main recording loop.
 ### Key Concepts
 
 - **Chunk State Machine**: `Flushed → Uploading → Transcribed / Failed`
-- **Convergence Timeout**: Configurable via `convergence_timeout_secs`; chunks still pending at the deadline are marked `Failed(Timeout)`
+- **Parallel Workers**: Each session runs `max_parallel_transcriptions` (default 3) worker threads sharing one bounded queue; results are merged in submission order via chunk indices regardless of completion order.
+- **Convergence Wait**: `stop_session` waits on a condvar signalled at every terminal chunk transition (no polling); chunks still pending at the `convergence_timeout_secs` deadline are marked `Failed(Timeout)`.
+- **Streaming Consumption**: `take_stable_texts()` hands out, exactly once and in submission order, the texts of the maximal terminal chunk prefix — the main loop feeds these to the LLM post-process preheat while recording. `stop_session` returns `SessionOutput { full_text, unconsumed_text }` so an incremental session only needs the remainder.
+- **Structured Errors**: Workers record the transcriber's `TranscribeError` (`Api { status, body }` / `Network` / `Timeout`) directly; no error-string parsing.
 - **Partial Failure**: If some chunks succeed and others fail, returns partial text with an error
 - **Bounded Queue**: Chunk submission is non-blocking. A full queue marks the chunk failed and deletes its temporary file rather than stalling session shutdown.
 - **Cleanup Guarantee**: Processed, rejected, orphaned, timed-out queued, and panicking-transcriber chunk paths are cleaned up by the orchestrator.

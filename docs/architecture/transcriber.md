@@ -16,12 +16,30 @@ src/transcriber/
 ## `Transcriber` Trait (`src/transcriber/api.rs`)
 
 ```rust
-pub trait Transcriber {
-    fn transcribe(&self, wav_path: &str) -> Result<String, Box<dyn std::error::Error>>;
+pub trait Transcriber: Send + Sync {
+    fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError>;
 }
 ```
 
-The single method takes a file path and returns the transcribed text or an error.
+The single method takes a file path and returns the transcribed text or a structured error.
+
+## `TranscribeError` (`src/transcriber/mod.rs`)
+
+```rust
+pub enum TranscribeError {
+    Api { status: u16, body: String }, // HTTP error response (4xx / 5xx)
+    Network(String),                   // network, I/O, or response-parsing failure
+    Timeout,                           // convergence timeout (set by the orchestrator only)
+}
+```
+
+Producers construct the variant at the failure site, so downstream layers (retry
+logic, the session orchestrator) match on it directly instead of parsing error
+strings. `core::orchestrator` re-exports it.
+
+`mod.rs` also owns the shared text-merging helpers: `merge_texts(texts, language)`
+and `merge_separator(language)` (used by the orchestrator, `ApiTranscriber`, and
+the main loop's post-process feeder).
 
 ---
 
@@ -54,10 +72,12 @@ pub struct ApiTranscriber {
     max_chunk_duration_secs: u32,
     max_chunk_size_bytes: u64,
     max_retries: u32,
+    parallel_uploads: usize,           // from max_parallel_transcriptions
+    client: reqwest::blocking::Client, // shared; 120s per-request timeout
 }
 ```
 
-A generic HTTP transcriber compatible with OpenAI-style multipart audio endpoints. All connection details come from config.
+A generic HTTP transcriber compatible with OpenAI-style multipart audio endpoints. All connection details come from config. The HTTP client is built once in `from_config` with a 120 s per-request timeout, so a hung request can never pin a worker thread forever, and connections are reused across chunk uploads.
 
 ### Construction
 
@@ -77,8 +97,8 @@ Reads `config.api_key` (required), `config.transcription_api_url`, transcription
 When a WAV file exceeds `max_chunk_duration_secs` or `max_chunk_size_bytes`:
 
 1. The file is split into chunks using `audio::splitter::split_wav()`.
-2. Each chunk is transcribed independently.
-3. Results are merged with `merge_texts()`.
+2. Chunks are uploaded in parallel with bounded concurrency (`parallel_uploads`, default 3).
+3. Results are merged with `merge_texts()` in chunk order; the first error (by index) is returned if any chunk fails.
 
 ### Retry with Exponential Backoff
 
