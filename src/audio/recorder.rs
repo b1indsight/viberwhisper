@@ -125,9 +125,12 @@ fn write_wav_to_path(
         sample_format: hound::SampleFormat::Int,
     };
     let mut writer = WavWriter::create(path, spec)?;
+    // Batch writer: one buffered pass instead of a per-sample Result check.
+    let mut sample_writer = writer.get_i16_writer(samples.len() as u32);
     for &sample in samples {
-        writer.write_sample(sample)?;
+        sample_writer.write_sample(sample);
     }
+    sample_writer.flush()?;
     writer.finalize()?;
     Ok(())
 }
