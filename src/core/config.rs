@@ -58,12 +58,18 @@ fn default_local_quantization() -> String {
 }
 
 /// One user-facing config field: its key plus string-based accessors.
-/// `get_field`, `set_field`, and the CLI `config list` all derive from this
-/// single table, so adding a field means adding exactly one entry here.
+/// `get_field`, `set_field`, `apply_json` (config.json loading), and the CLI
+/// `config list` all derive from this single table, so adding a field means
+/// adding exactly one entry here.
 struct FieldSpec {
     key: &'static str,
     get: fn(&AppConfig) -> Option<String>,
     set: fn(&mut AppConfig, &str) -> Result<(), String>,
+    /// Optional loader override for values coming from config.json. `None`
+    /// reuses `set` leniently (invalid values warn and keep the default).
+    /// Only needed where loading differs from CLI mutation — secrets are
+    /// loadable from the file but rejected by the CLI setter.
+    apply: Option<fn(&mut AppConfig, &serde_json::Value)>,
 }
 
 /// Map legacy aliases onto their canonical key.
@@ -88,6 +94,11 @@ const FIELDS: &[FieldSpec] = &[
         set: |_, _| {
             Err("api_key cannot be saved by the config command; use the TRANSCRIPTION_API_KEY environment variable or edit config.json manually".to_string())
         },
+        apply: Some(|c, v| {
+            if let Some(key) = v.as_str() {
+                c.api_key = Some(key.to_string());
+            }
+        }),
     },
     FieldSpec {
         key: "transcription_api_url",
@@ -96,6 +107,7 @@ const FIELDS: &[FieldSpec] = &[
             c.transcription_api_url = v.to_string();
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "provider",
@@ -104,6 +116,7 @@ const FIELDS: &[FieldSpec] = &[
             c.provider = Some(v.to_string());
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "model",
@@ -112,6 +125,7 @@ const FIELDS: &[FieldSpec] = &[
             c.model = v.to_string();
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "hold_hotkey",
@@ -120,6 +134,7 @@ const FIELDS: &[FieldSpec] = &[
             c.hold_hotkey = v.to_string();
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "toggle_hotkey",
@@ -128,6 +143,7 @@ const FIELDS: &[FieldSpec] = &[
             c.toggle_hotkey = v.to_string();
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "language",
@@ -136,6 +152,7 @@ const FIELDS: &[FieldSpec] = &[
             c.language = Some(v.to_string());
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "prompt",
@@ -144,6 +161,7 @@ const FIELDS: &[FieldSpec] = &[
             c.prompt = Some(v.to_string());
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "temperature",
@@ -152,6 +170,7 @@ const FIELDS: &[FieldSpec] = &[
             c.temperature = parse_finite_f32("temperature", v)?;
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "mic_gain",
@@ -160,6 +179,7 @@ const FIELDS: &[FieldSpec] = &[
             c.mic_gain = parse_finite_f32("mic_gain", v)?;
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "max_chunk_duration_secs",
@@ -170,6 +190,7 @@ const FIELDS: &[FieldSpec] = &[
                 .map_err(|_| format!("max_chunk_duration_secs must be a u32, got: {v}"))?;
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "max_chunk_size_bytes",
@@ -180,6 +201,7 @@ const FIELDS: &[FieldSpec] = &[
                 .map_err(|_| format!("max_chunk_size_bytes must be a u64, got: {v}"))?;
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "max_retries",
@@ -194,6 +216,7 @@ const FIELDS: &[FieldSpec] = &[
             c.max_retries = parsed;
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "convergence_timeout_secs",
@@ -210,6 +233,7 @@ const FIELDS: &[FieldSpec] = &[
             c.convergence_timeout_secs = parsed;
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "post_process_enabled",
@@ -218,6 +242,7 @@ const FIELDS: &[FieldSpec] = &[
             c.post_process_enabled = parse_bool("post_process_enabled", v)?;
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "post_process_streaming_enabled",
@@ -226,6 +251,7 @@ const FIELDS: &[FieldSpec] = &[
             c.post_process_streaming_enabled = parse_bool("post_process_streaming_enabled", v)?;
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "post_process_api_url",
@@ -234,6 +260,7 @@ const FIELDS: &[FieldSpec] = &[
             c.post_process_api_url = Some(v.to_string());
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "post_process_api_key",
@@ -245,6 +272,11 @@ const FIELDS: &[FieldSpec] = &[
         set: |_, _| {
             Err("post_process_api_key cannot be saved by the config command; use the POST_PROCESS_API_KEY environment variable or edit config.json manually".to_string())
         },
+        apply: Some(|c, v| {
+            if let Some(key) = v.as_str() {
+                c.post_process_api_key = Some(key.to_string());
+            }
+        }),
     },
     FieldSpec {
         key: "post_process_model",
@@ -253,6 +285,7 @@ const FIELDS: &[FieldSpec] = &[
             c.post_process_model = Some(v.to_string());
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "post_process_prompt",
@@ -261,6 +294,7 @@ const FIELDS: &[FieldSpec] = &[
             c.post_process_prompt = Some(v.to_string());
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "post_process_temperature",
@@ -269,6 +303,7 @@ const FIELDS: &[FieldSpec] = &[
             c.post_process_temperature = parse_finite_f32("post_process_temperature", v)?;
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "local_mode",
@@ -277,6 +312,7 @@ const FIELDS: &[FieldSpec] = &[
             c.local_mode = parse_bool("local_mode", v)?;
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "local_data_dir",
@@ -285,6 +321,7 @@ const FIELDS: &[FieldSpec] = &[
             c.local_data_dir = Some(v.to_string());
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "local_server_port",
@@ -295,6 +332,7 @@ const FIELDS: &[FieldSpec] = &[
                 .map_err(|_| format!("local_server_port must be a u16, got: {v}"))?;
             Ok(())
         },
+        apply: None,
     },
     FieldSpec {
         key: "local_quantization",
@@ -303,6 +341,7 @@ const FIELDS: &[FieldSpec] = &[
             c.local_quantization = v.to_string();
             Ok(())
         },
+        apply: None,
     },
 ];
 
@@ -314,16 +353,6 @@ fn parse_finite_f32(key: &str, value: &str) -> Result<f32, String> {
         return Err(format!("{key} must be finite, got: {value}"));
     }
     Ok(parsed)
-}
-
-fn finite_f32_from_json(key: &str, value: f64) -> Option<f32> {
-    let narrowed = value as f32;
-    if narrowed.is_finite() {
-        Some(narrowed)
-    } else {
-        warn!(key, value, "Ignoring non-finite or out-of-range float");
-        None
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -533,120 +562,41 @@ impl AppConfig {
         FIELDS.iter().map(|field| field.key)
     }
 
+    /// Lenient loader for config.json: every present field is applied
+    /// individually; an invalid or out-of-range value warns and keeps the
+    /// default instead of discarding the whole file.
     fn apply_json(&mut self, json: &serde_json::Value) {
-        // New canonical field
-        if let Some(key) = json["api_key"].as_str() {
+        // Legacy aliases first so the canonical keys win when both are present.
+        if let Some(key) = json["groq_api_key"].as_str() {
             self.api_key = Some(key.to_string());
         }
-        // Backward compat: old groq_api_key maps to api_key
-        if let Some(key) = json["groq_api_key"].as_str()
-            && self.api_key.is_none()
-        {
-            self.api_key = Some(key.to_string());
-        }
-        if let Some(url) = json["transcription_api_url"].as_str() {
-            self.transcription_api_url = url.to_string();
-        }
-        if let Some(provider) = json["provider"].as_str() {
-            self.provider = Some(provider.to_string());
-        }
-        if let Some(model) = json["model"].as_str() {
-            self.model = model.to_string();
-        }
-        if let Some(lang) = json["language"].as_str() {
-            self.language = Some(lang.to_string());
-        }
-        if let Some(temp) = json["temperature"].as_f64()
-            && let Some(value) = finite_f32_from_json("temperature", temp)
-        {
-            self.temperature = value;
-        }
-        // Backward compat: old hotkey field maps to hold_hotkey
         if let Some(hotkey) = json["hotkey"].as_str() {
             self.hold_hotkey = hotkey.to_string();
         }
-        if let Some(hotkey) = json["hold_hotkey"].as_str() {
-            self.hold_hotkey = hotkey.to_string();
-        }
-        if let Some(hotkey) = json["toggle_hotkey"].as_str() {
-            self.toggle_hotkey = hotkey.to_string();
-        }
-        if let Some(gain) = json["mic_gain"].as_f64()
-            && let Some(value) = finite_f32_from_json("mic_gain", gain)
-        {
-            self.mic_gain = value;
-        }
-        if let Some(prompt) = json["prompt"].as_str() {
-            self.prompt = Some(prompt.to_string());
-        }
-        if let Some(v) = json["max_chunk_duration_secs"].as_u64() {
-            match u32::try_from(v) {
-                Ok(value) => self.max_chunk_duration_secs = value,
-                Err(_) => warn!(value = v, "Ignoring out-of-range max_chunk_duration_secs"),
+
+        for field in FIELDS {
+            let value = &json[field.key];
+            if value.is_null() {
+                continue;
             }
-        }
-        if let Some(v) = json["max_chunk_size_bytes"].as_u64() {
-            self.max_chunk_size_bytes = v;
-        }
-        if let Some(v) = json["max_retries"].as_u64() {
-            match u32::try_from(v) {
-                Ok(value) if value <= MAX_RETRIES => self.max_retries = value,
-                Ok(value) => warn!(
-                    value,
-                    max = MAX_RETRIES,
-                    "Ignoring max_retries above supported limit"
-                ),
-                Err(_) => warn!(value = v, "Ignoring out-of-range max_retries"),
+            if let Some(apply) = field.apply {
+                apply(self, value);
+                continue;
             }
-        }
-        if let Some(v) = json["convergence_timeout_secs"].as_u64() {
-            if v <= MAX_CONVERGENCE_TIMEOUT_SECS {
-                self.convergence_timeout_secs = v;
-            } else {
-                warn!(
-                    value = v,
-                    max = MAX_CONVERGENCE_TIMEOUT_SECS,
-                    "Ignoring convergence_timeout_secs above supported limit"
-                );
+            // Generic path: render the JSON scalar as the string form the CLI
+            // setter accepts and reuse its parsing/validation.
+            let rendered = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => {
+                    warn!(key = field.key, "Ignoring non-scalar config value");
+                    continue;
+                }
+            };
+            if let Err(error) = (field.set)(self, &rendered) {
+                warn!(key = field.key, error = %error, "Ignoring invalid config value");
             }
-        }
-        if let Some(v) = json["post_process_enabled"].as_bool() {
-            self.post_process_enabled = v;
-        }
-        if let Some(v) = json["post_process_streaming_enabled"].as_bool() {
-            self.post_process_streaming_enabled = v;
-        }
-        if let Some(v) = json["post_process_api_url"].as_str() {
-            self.post_process_api_url = Some(v.to_string());
-        }
-        if let Some(v) = json["post_process_api_key"].as_str() {
-            self.post_process_api_key = Some(v.to_string());
-        }
-        if let Some(v) = json["post_process_model"].as_str() {
-            self.post_process_model = Some(v.to_string());
-        }
-        if let Some(v) = json["post_process_prompt"].as_str() {
-            self.post_process_prompt = Some(v.to_string());
-        }
-        if let Some(v) = json["post_process_temperature"].as_f64()
-            && let Some(value) = finite_f32_from_json("post_process_temperature", v)
-        {
-            self.post_process_temperature = value;
-        }
-        if let Some(v) = json["local_mode"].as_bool() {
-            self.local_mode = v;
-        }
-        if let Some(v) = json["local_data_dir"].as_str() {
-            self.local_data_dir = Some(v.to_string());
-        }
-        if let Some(v) = json["local_server_port"].as_u64() {
-            match u16::try_from(v) {
-                Ok(value) => self.local_server_port = value,
-                Err(_) => warn!(value = v, "Ignoring out-of-range local_server_port"),
-            }
-        }
-        if let Some(v) = json["local_quantization"].as_str() {
-            self.local_quantization = v.to_string();
         }
     }
 }
