@@ -171,17 +171,26 @@ impl LocalServiceManager {
 
     /// Stops the managed local server process.
     pub fn stop(&mut self) {
-        let pid = if let Some(child) = self.process.as_ref() {
-            Some(child.id())
-        } else {
-            self.read_pid()
+        // A pid recovered from the pid file may have been recycled by the OS
+        // (e.g. after a reboot); only a pid from our own child handle is
+        // trusted unconditionally.
+        let (pid, trusted) = match self.process.as_ref() {
+            Some(child) => (Some(child.id()), true),
+            None => (self.read_pid(), false),
         };
 
         if let Some(pid) = pid
             && is_pid_running(pid)
         {
-            let _ = terminate_pid(pid);
-            wait_for_exit_or_kill(pid);
+            if trusted || pid_matches_local_server(pid) {
+                let _ = terminate_pid(pid);
+                wait_for_exit_or_kill(pid);
+            } else {
+                warn!(
+                    pid,
+                    "pid file points at an unrelated process; removing the stale file without killing it"
+                );
+            }
         }
 
         if let Some(child) = self.process.as_mut() {
@@ -465,6 +474,37 @@ fn is_pid_running(pid: u32) -> bool {
     }
 }
 
+/// Best-effort check that a pid recovered from the pid file still belongs to
+/// our Python inference server and not to an unrelated process after pid reuse.
+fn pid_matches_local_server(pid: u32) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // tasklist cannot show the command line; match on the image name.
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .ok()
+            .map(|output| {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+                stdout.contains("python") || stdout.contains("uv")
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .ok()
+            .map(|output| {
+                let command = String::from_utf8_lossy(&output.stdout);
+                command.contains("server.py")
+            })
+            .unwrap_or(false)
+    }
+}
+
 fn terminate_pid(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "windows")]
     let status = Command::new("taskkill")
@@ -521,9 +561,12 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
-    fn spawn_health_stub(port: u16, status_line: &'static str, body: &'static str) {
+    /// Binds an OS-assigned port (avoids collisions between parallel test
+    /// runs) and returns it; the stub serves a single request.
+    fn spawn_health_stub(status_line: &'static str, body: &'static str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         thread::spawn(move || {
-            let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut buffer = [0_u8; 1024];
                 let _ = stream.read(&mut buffer);
@@ -534,6 +577,7 @@ mod tests {
                 stream.write_all(response.as_bytes()).unwrap();
             }
         });
+        port
     }
 
     #[test]
@@ -545,8 +589,7 @@ mod tests {
 
     #[test]
     fn test_health_check_accepts_ok_response() {
-        let port = 18765;
-        spawn_health_stub(port, "HTTP/1.1 200 OK", "{\"status\":\"ok\"}");
+        let port = spawn_health_stub("HTTP/1.1 200 OK", "{\"status\":\"ok\"}");
         let result = health_check(
             &format!("http://127.0.0.1:{port}"),
             Duration::from_secs(1),
@@ -558,9 +601,7 @@ mod tests {
 
     #[test]
     fn test_health_check_times_out_on_unhealthy_server() {
-        let port = 18766;
-        spawn_health_stub(
-            port,
+        let port = spawn_health_stub(
             "HTTP/1.1 503 Service Unavailable",
             "{\"status\":\"loading\"}",
         );
@@ -648,8 +689,7 @@ mod tests {
 
     #[test]
     fn test_start_reuses_healthy_server_without_spawn_delay() {
-        let port = 18767;
-        spawn_health_stub(port, "HTTP/1.1 200 OK", "{\"status\":\"ok\"}");
+        let port = spawn_health_stub("HTTP/1.1 200 OK", "{\"status\":\"ok\"}");
         let temp_dir =
             std::env::temp_dir().join(format!("viberwhisper-local-reuse-{}", std::process::id()));
         let model_dir = temp_dir.join("model");
@@ -672,6 +712,31 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
 
         let _ = fs::remove_file(temp_dir.join("local_server.pid"));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_stop_does_not_kill_unrelated_process_from_pid_file() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "viberwhisper-local-pid-guard-{}",
+            std::process::id()
+        ));
+        let model_dir = temp_dir.join("model");
+        fs::create_dir_all(&model_dir).unwrap();
+        // Point the pid file at this test process: alive, but its command line
+        // is the test binary, not our Python server.
+        fs::write(
+            temp_dir.join("local_server.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+
+        let mut manager = LocalServiceManager::new(17265, model_dir, temp_dir.join("venv"));
+        manager.stop();
+
+        // If stop() had killed the pid, this test would never get here. The
+        // stale pid file must still be cleaned up.
+        assert!(!temp_dir.join("local_server.pid").exists());
         let _ = fs::remove_dir_all(temp_dir);
     }
 
