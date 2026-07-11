@@ -281,7 +281,10 @@ impl AudioRecorder {
     ///
     /// This should be called periodically from the main event loop while recording.
     pub fn take_ready_chunk(&mut self) -> Option<ReadyChunk> {
-        if self.chunk_max_samples == 0 {
+        if !self.recording.load(Ordering::Relaxed)
+            || self.active_session_id.is_none()
+            || self.chunk_max_samples == 0
+        {
             return None;
         }
 
@@ -368,6 +371,7 @@ impl AudioRecorder {
                 for path in &chunks {
                     self.relinquish_path(path);
                 }
+                self.reset_chunk_bookkeeping();
                 self.active_session_id = None;
                 self.session_dir = None;
                 RecorderStopOutcome::Stopped {
@@ -388,6 +392,7 @@ impl AudioRecorder {
                     .drain(..)
                     .map(|path| path.to_string_lossy().into_owned())
                     .collect();
+                self.reset_chunk_bookkeeping();
                 self.active_session_id = None;
                 self.session_dir = None;
                 RecorderStopOutcome::Stopped {
@@ -560,10 +565,7 @@ impl AudioRecorder {
 
         self.recording.store(false, Ordering::Relaxed);
         drop(self.stream.take());
-        self.buffer.lock().unwrap().clear();
-        self.sample_count.store(0, Ordering::Relaxed);
-        self.ready_chunk_count.store(0, Ordering::Release);
-        self.flushed_samples = 0;
+        self.reset_chunk_bookkeeping();
         for path in self.current_session_files.drain(..) {
             let _ = remove_temp_audio_file(path);
         }
@@ -572,6 +574,14 @@ impl AudioRecorder {
         }
         self.active_session_id = None;
         RecorderCancelOutcome::Cancelled
+    }
+
+    fn reset_chunk_bookkeeping(&mut self) {
+        self.buffer.lock().unwrap().clear();
+        self.sample_count.store(0, Ordering::Relaxed);
+        self.ready_chunk_count.store(0, Ordering::Release);
+        self.flushed_samples = 0;
+        self.chunk_max_samples = 0;
     }
 
     fn ensure_session_dir(&mut self) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -843,6 +853,29 @@ mod tests {
                 }
             }
             _ => panic!("expected stop-time chunk catch-up"),
+        }
+    }
+
+    #[test]
+    fn stop_time_chunk_catch_up_clears_readiness_and_stops_polling() {
+        let samples: Vec<i16> = (0..25).collect();
+        let mut recorder = recorder_for_buffer(samples, 10);
+        recorder.ready_chunk_count.store(2, Ordering::Release);
+
+        let result = recorder.stop_recording(SessionId(1));
+
+        let RecorderStopOutcome::Stopped { chunks, .. } = result else {
+            panic!("expected stop-time chunk catch-up");
+        };
+        assert_eq!(chunks.len(), 3);
+        assert!(recorder.buffer.lock().unwrap().is_empty());
+        assert_eq!(recorder.ready_chunk_count.load(Ordering::Acquire), 0);
+        assert_eq!(recorder.flushed_samples, 0);
+        assert_eq!(recorder.chunk_max_samples, 0);
+        assert!(recorder.take_ready_chunk().is_none());
+
+        for path in chunks {
+            let _ = remove_temp_audio_file(path);
         }
     }
 

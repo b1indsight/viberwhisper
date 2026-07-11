@@ -185,6 +185,8 @@ Audio-file cleanup follows explicit ownership transfer. The recorder owns buffer
 
 All recorder-generated paths are grouped under a unique `SessionId`-scoped directory. Recorder history cleanup does not recurse into these directories, so transferring a chunk out of the recorder's local ownership set cannot expose a queued or in-flight orchestrator file to age-based deletion. Every deletion path also attempts to remove the session directory after its last file is released.
 
+Once stop-time catch-up has serialized the remaining buffer, the recorder clears its buffer, readiness counters, flushed-sample position, and chunk threshold. `take_ready_chunk()` also requires an active recording session, preventing the idle event loop from retrying stale chunk state after stop.
+
 #### End-to-end session identity
 
 `SessionId` is a monotonically increasing newtype owned by the session domain. It must travel through every session-specific API and effect, not only final completion events:

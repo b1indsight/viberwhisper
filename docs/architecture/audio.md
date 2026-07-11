@@ -80,6 +80,7 @@ The audio callback updates `ready_chunk_count` as chunk boundaries are crossed. 
 2. Drops the stream.
 3. Writes remaining samples into the active session directory. If chunking is enabled and complete unflushed chunks remain, writes them as chunk files before the final tail instead of collapsing them into one large tail file.
 4. Cleans up legacy root-level WAV files while the session directory keeps every recorder- or orchestrator-owned chunk outside that cleanup scope.
+5. Clears the in-memory buffer and chunk readiness counters so idle-loop polling cannot retry stop-time chunks after the session ends.
 
 ### `StopResult` Enum
 
