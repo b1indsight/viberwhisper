@@ -10,10 +10,12 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
 use tracing::{debug, error, info, instrument, warn};
 
-use super::unique_temp_wav_path;
+use super::{remove_temp_audio_file, unique_temp_session_dir, unique_temp_wav_path_in};
+use crate::core::recording_session::SessionId;
 
 pub struct AudioRecorder {
     recording: Arc<AtomicBool>,
+    active_session_id: Option<SessionId>,
     buffer: Arc<Mutex<Vec<i16>>>,
     stream: Option<cpal::Stream>,
     sample_count: Arc<AtomicUsize>,
@@ -25,6 +27,8 @@ pub struct AudioRecorder {
     ready_chunk_count: Arc<AtomicUsize>,
     /// WAV files generated during the current recording session.
     current_session_files: Vec<PathBuf>,
+    /// Session-scoped directory containing recorder-generated WAV files.
+    session_dir: Option<PathBuf>,
     /// Maximum samples per chunk (0 = unlimited). Computed from config at start_recording.
     chunk_max_samples: usize,
     /// Config: max chunk duration in seconds.
@@ -116,6 +120,7 @@ impl AudioRecorder {
 
         Ok(AudioRecorder {
             recording: Arc::new(AtomicBool::new(false)),
+            active_session_id: None,
             buffer: Arc::new(Mutex::new(Vec::new())),
             stream: None,
             sample_count: Arc::new(AtomicUsize::new(0)),
@@ -124,19 +129,35 @@ impl AudioRecorder {
             flushed_samples: 0,
             ready_chunk_count: Arc::new(AtomicUsize::new(0)),
             current_session_files: Vec::new(),
+            session_dir: None,
             chunk_max_samples: 0,
             max_chunk_duration_secs,
             max_chunk_size_bytes,
         })
     }
 
-    #[instrument(skip(self))]
-    pub fn start_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn start_recording(&mut self, session_id: SessionId) -> RecorderStartOutcome {
         if self.recording.load(Ordering::Relaxed) {
-            debug!("Already recording, ignoring duplicate start request");
-            return Ok(());
+            return RecorderStartOutcome::AlreadyRecording {
+                requested_session_id: session_id,
+                active_session_id: self.active_session_id.unwrap_or(session_id),
+            };
         }
 
+        match self.try_start_recording(session_id) {
+            Ok(()) => RecorderStartOutcome::Started { session_id },
+            Err(error) => RecorderStartOutcome::Failed {
+                session_id,
+                error: error.to_string(),
+            },
+        }
+    }
+
+    #[instrument(skip(self))]
+    fn try_start_recording(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -152,6 +173,7 @@ impl AudioRecorder {
         self.sample_rate = sample_rate;
         self.flushed_samples = 0;
         self.current_session_files.clear();
+        self.session_dir = Some(unique_temp_session_dir(session_id.0)?);
         self.ready_chunk_count.store(0, Ordering::Release);
 
         // Compute max samples per chunk from config.
@@ -246,6 +268,7 @@ impl AudioRecorder {
             return Err(error.into());
         }
         self.stream = Some(stream);
+        self.active_session_id = Some(session_id);
 
         info!("Recording started");
         Ok(())
@@ -257,7 +280,7 @@ impl AudioRecorder {
     /// for background transcription. Returns `None` when no chunk is ready yet.
     ///
     /// This should be called periodically from the main event loop while recording.
-    pub fn take_ready_chunk(&mut self) -> Option<String> {
+    pub fn take_ready_chunk(&mut self) -> Option<ReadyChunk> {
         if self.chunk_max_samples == 0 {
             return None;
         }
@@ -288,7 +311,11 @@ impl AudioRecorder {
             Ok(path) => {
                 self.buffer.lock().unwrap().drain(..self.chunk_max_samples);
                 self.flushed_samples = chunk_end;
-                Some(path)
+                self.relinquish_path(&path);
+                Some(ReadyChunk {
+                    session_id: self.active_session_id?,
+                    path,
+                })
             }
             Err(e) => {
                 warn!(error = %e, "Failed to write in-recording chunk; will retry next cycle");
@@ -297,16 +324,19 @@ impl AudioRecorder {
         }
     }
 
-    /// Write PCM samples to a WAV file under ./tmp/ and return the path.
+    /// Write PCM samples to a WAV file in the active session directory.
     fn write_chunk(
         &mut self,
         samples: &[i16],
         chunk_index: usize,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        std::fs::create_dir_all("./tmp")?;
-        let path = unique_temp_wav_path(&format!("chunk_live_{chunk_index:04}"))?;
+        let session_dir = self.ensure_session_dir()?;
+        let path = unique_temp_wav_path_in(&session_dir, &format!("chunk_live_{chunk_index:04}"))?;
 
-        write_wav_to_path(&path, samples, self.sample_rate)?;
+        if let Err(error) = write_wav_to_path(&path, samples, self.sample_rate) {
+            let _ = remove_temp_audio_file(&path);
+            return Err(error);
+        }
 
         let path_str = path.to_string_lossy().to_string();
         info!(path = %path_str, index = chunk_index, samples = samples.len(), "Live chunk written");
@@ -315,7 +345,62 @@ impl AudioRecorder {
     }
 
     #[instrument(skip(self))]
-    pub fn stop_recording(&mut self) -> Result<StopResult, Box<dyn std::error::Error>> {
+    pub fn stop_recording(&mut self, session_id: SessionId) -> RecorderStopOutcome {
+        if !self.recording.load(Ordering::Relaxed) {
+            return RecorderStopOutcome::NotRecording {
+                requested_session_id: session_id,
+            };
+        }
+        let active_session_id = self.active_session_id.unwrap_or(session_id);
+        if active_session_id != session_id {
+            return RecorderStopOutcome::StillRecording {
+                session_id: active_session_id,
+                error: format!(
+                    "stop requested for session {}, active session is {}",
+                    session_id.0, active_session_id.0
+                ),
+            };
+        }
+
+        match self.try_stop_recording() {
+            Ok(result) => {
+                let chunks = result.into_paths();
+                for path in &chunks {
+                    self.relinquish_path(path);
+                }
+                self.active_session_id = None;
+                self.session_dir = None;
+                RecorderStopOutcome::Stopped {
+                    session_id,
+                    chunks,
+                    warning: None,
+                }
+            }
+            Err(error) if self.recording.load(Ordering::Relaxed) => {
+                RecorderStopOutcome::StillRecording {
+                    session_id,
+                    error: error.to_string(),
+                }
+            }
+            Err(error) => {
+                let chunks = self
+                    .current_session_files
+                    .drain(..)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect();
+                self.active_session_id = None;
+                self.session_dir = None;
+                RecorderStopOutcome::Stopped {
+                    session_id,
+                    chunks,
+                    warning: Some(error.to_string()),
+                }
+            }
+        }
+    }
+
+    #[instrument(skip(self))]
+    fn try_stop_recording(&mut self) -> Result<StopResult, Box<dyn std::error::Error>> {
         if !self.recording.load(Ordering::Relaxed) {
             debug!("Not recording, ignoring stop request");
             return Err("Not currently recording".into());
@@ -399,17 +484,20 @@ impl AudioRecorder {
         Ok(paths)
     }
 
-    /// Write the entire buffer as a single WAV file (legacy path, no chunking).
+    /// Write the entire buffer as a single WAV file when no chunking occurred.
     fn write_full_recording(
         &mut self,
         buffer: &[i16],
     ) -> Result<String, Box<dyn std::error::Error>> {
-        std::fs::create_dir_all("./tmp")?;
-        let path = unique_temp_wav_path("recording")?;
+        let session_dir = self.ensure_session_dir()?;
+        let path = unique_temp_wav_path_in(&session_dir, "recording")?;
         let filename = path.to_string_lossy().to_string();
         debug!(path = %filename, "Saving recording");
 
-        write_wav_to_path(&path, buffer, self.sample_rate)?;
+        if let Err(error) = write_wav_to_path(&path, buffer, self.sample_rate) {
+            let _ = remove_temp_audio_file(&path);
+            return Err(error);
+        }
 
         info!(path = %filename, "Recording saved");
         self.current_session_files.push(path);
@@ -456,12 +544,60 @@ impl AudioRecorder {
         }
     }
 
+    #[cfg(test)]
     pub fn is_recording(&self) -> bool {
         self.recording.load(Ordering::Relaxed)
+    }
+
+    pub fn cancel_recording(&mut self, session_id: SessionId) -> RecorderCancelOutcome {
+        if !self.recording.load(Ordering::Relaxed) {
+            return RecorderCancelOutcome::NotRecording;
+        }
+        let active_session_id = self.active_session_id.unwrap_or(session_id);
+        if active_session_id != session_id {
+            return RecorderCancelOutcome::SessionMismatch { active_session_id };
+        }
+
+        self.recording.store(false, Ordering::Relaxed);
+        drop(self.stream.take());
+        self.buffer.lock().unwrap().clear();
+        self.sample_count.store(0, Ordering::Relaxed);
+        self.ready_chunk_count.store(0, Ordering::Release);
+        self.flushed_samples = 0;
+        for path in self.current_session_files.drain(..) {
+            let _ = remove_temp_audio_file(path);
+        }
+        if let Some(session_dir) = self.session_dir.take() {
+            let _ = std::fs::remove_dir(session_dir);
+        }
+        self.active_session_id = None;
+        RecorderCancelOutcome::Cancelled
+    }
+
+    fn ensure_session_dir(&mut self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let session_dir = match &self.session_dir {
+            Some(path) => path.clone(),
+            None => {
+                let session_id = self
+                    .active_session_id
+                    .ok_or("No active recording session")?;
+                let path = unique_temp_session_dir(session_id.0)?;
+                self.session_dir = Some(path.clone());
+                path
+            }
+        };
+        std::fs::create_dir_all(&session_dir)?;
+        Ok(session_dir)
+    }
+
+    fn relinquish_path(&mut self, path: &str) {
+        self.current_session_files
+            .retain(|owned| owned.to_string_lossy() != path);
     }
 }
 
 /// Result returned by `stop_recording`.
+#[derive(Debug)]
 pub enum StopResult {
     /// No chunking occurred; the entire recording is in this single WAV file.
     SingleFile(String),
@@ -471,6 +607,60 @@ pub enum StopResult {
     ChunkFiles(Vec<String>),
     /// All audio was flushed to chunks during recording; no tail remains.
     ChunksOnly,
+}
+
+impl StopResult {
+    fn into_paths(self) -> Vec<String> {
+        match self {
+            Self::SingleFile(path) | Self::TailChunk(path) => vec![path],
+            Self::ChunkFiles(paths) => paths,
+            Self::ChunksOnly => Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyChunk {
+    pub session_id: SessionId,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecorderStartOutcome {
+    Started {
+        session_id: SessionId,
+    },
+    AlreadyRecording {
+        requested_session_id: SessionId,
+        active_session_id: SessionId,
+    },
+    Failed {
+        session_id: SessionId,
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecorderStopOutcome {
+    Stopped {
+        session_id: SessionId,
+        chunks: Vec<String>,
+        warning: Option<String>,
+    },
+    StillRecording {
+        session_id: SessionId,
+        error: String,
+    },
+    NotRecording {
+        requested_session_id: SessionId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecorderCancelOutcome {
+    Cancelled,
+    NotRecording,
+    SessionMismatch { active_session_id: SessionId },
 }
 
 #[cfg(test)]
@@ -516,6 +706,7 @@ mod tests {
     fn recorder_for_buffer(samples: Vec<i16>, chunk_max_samples: usize) -> AudioRecorder {
         AudioRecorder {
             recording: Arc::new(AtomicBool::new(true)),
+            active_session_id: Some(SessionId(1)),
             buffer: Arc::new(Mutex::new(samples)),
             stream: None,
             sample_count: Arc::new(AtomicUsize::new(0)),
@@ -524,6 +715,7 @@ mod tests {
             flushed_samples: 0,
             ready_chunk_count: Arc::new(AtomicUsize::new(0)),
             current_session_files: Vec::new(),
+            session_dir: None,
             chunk_max_samples,
             max_chunk_duration_secs: 0,
             max_chunk_size_bytes: 0,
@@ -546,14 +738,14 @@ mod tests {
         assert!(third.is_some());
         assert!(fourth.is_none());
         assert_eq!(recorder.flushed_samples, 30);
-        assert_eq!(recorder.current_session_files.len(), 3);
+        assert_eq!(recorder.current_session_files.len(), 0);
         assert!(
             recorder.buffer.lock().unwrap().is_empty(),
             "flushed samples should be released from memory"
         );
 
-        for path in recorder.current_session_files {
-            let _ = std::fs::remove_file(path);
+        for chunk in [first, second, third].into_iter().flatten() {
+            let _ = remove_temp_audio_file(chunk.path);
         }
     }
 
@@ -566,8 +758,52 @@ mod tests {
         assert_ne!(first, second);
 
         for path in recorder.current_session_files {
+            let _ = remove_temp_audio_file(path);
+        }
+    }
+
+    #[test]
+    fn test_chunk_paths_include_session_directory() {
+        let mut recorder = recorder_for_buffer(Vec::new(), 10);
+        let path = PathBuf::from(recorder.write_chunk(&[1, 2, 3], 0).unwrap());
+
+        let parent_name = path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap();
+        assert!(parent_name.starts_with("viberwhisper-session-1-"));
+
+        let _ = remove_temp_audio_file(&path);
+    }
+
+    #[test]
+    fn test_cleanup_keeps_chunks_in_session_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "viberwhisper-session-cleanup-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let session_dir = root.join("viberwhisper-session-1-test");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let paths: Vec<PathBuf> = (0..11)
+            .map(|index| {
+                let path = session_dir.join(format!("chunk-{index}.wav"));
+                std::fs::write(&path, b"chunk").unwrap();
+                path
+            })
+            .collect();
+        let recorder = recorder_for_buffer(Vec::new(), 10);
+
+        recorder.cleanup_old_recordings(root.to_str().unwrap(), 10);
+
+        assert!(paths.iter().all(|path| path.exists()));
+
+        for path in &paths {
             let _ = std::fs::remove_file(path);
         }
+        let _ = std::fs::remove_dir(session_dir);
+        let _ = std::fs::remove_dir(root);
     }
 
     #[test]
@@ -596,18 +832,17 @@ mod tests {
         let samples: Vec<i16> = (0..25).collect();
         let mut recorder = recorder_for_buffer(samples, 10);
 
-        let result = recorder.stop_recording().unwrap();
+        let result = recorder.stop_recording(SessionId(1));
 
         match result {
-            StopResult::ChunkFiles(paths) => {
+            RecorderStopOutcome::Stopped { chunks: paths, .. } => {
                 assert_eq!(paths.len(), 3);
-                assert_eq!(recorder.current_session_files.len(), 3);
+                assert_eq!(recorder.current_session_files.len(), 0);
+                for path in paths {
+                    let _ = remove_temp_audio_file(path);
+                }
             }
             _ => panic!("expected stop-time chunk catch-up"),
-        }
-
-        for path in recorder.current_session_files {
-            let _ = std::fs::remove_file(path);
         }
     }
 
@@ -620,18 +855,67 @@ mod tests {
         let first = recorder.take_ready_chunk();
         assert!(first.is_some());
 
-        let result = recorder.stop_recording().unwrap();
+        let first_path = first.unwrap().path;
+        let result = recorder.stop_recording(SessionId(1));
 
         match result {
-            StopResult::ChunkFiles(paths) => {
+            RecorderStopOutcome::Stopped { chunks: paths, .. } => {
                 assert_eq!(paths.len(), 3);
-                assert_eq!(recorder.current_session_files.len(), 4);
+                assert_eq!(recorder.current_session_files.len(), 0);
+                for path in paths {
+                    let _ = remove_temp_audio_file(path);
+                }
             }
             _ => panic!("expected remaining audio to be chunked"),
         }
+        let _ = remove_temp_audio_file(first_path);
+    }
 
-        for path in recorder.current_session_files {
-            let _ = std::fs::remove_file(path);
-        }
+    #[test]
+    fn stop_result_reports_not_recording_without_guessing() {
+        let mut recorder = recorder_for_buffer(Vec::new(), 10);
+        recorder.recording.store(false, Ordering::Relaxed);
+        recorder.active_session_id = None;
+
+        assert_eq!(
+            recorder.stop_recording(SessionId(7)),
+            RecorderStopOutcome::NotRecording {
+                requested_session_id: SessionId(7)
+            }
+        );
+    }
+
+    #[test]
+    fn mismatched_stop_does_not_stop_active_recording() {
+        let mut recorder = recorder_for_buffer(vec![1, 2, 3], 10);
+
+        assert!(matches!(
+            recorder.stop_recording(SessionId(2)),
+            RecorderStopOutcome::StillRecording {
+                session_id: SessionId(1),
+                ..
+            }
+        ));
+        assert!(recorder.is_recording());
+    }
+
+    #[test]
+    fn cancel_clears_owned_files_and_recorder_state() {
+        let mut recorder = recorder_for_buffer(vec![1, 2, 3], 10);
+        let path = std::env::temp_dir().join(format!(
+            "viberwhisper-cancel-{}-{:?}.wav",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"owned").unwrap();
+        recorder.current_session_files.push(path.clone());
+
+        assert_eq!(
+            recorder.cancel_recording(SessionId(1)),
+            RecorderCancelOutcome::Cancelled
+        );
+        assert!(!recorder.is_recording());
+        assert!(recorder.buffer.lock().unwrap().is_empty());
+        assert!(!path.exists());
     }
 }

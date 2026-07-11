@@ -22,3 +22,4 @@
 2026-07-05: Harden core configuration persistence, validation, session shutdown, chunk cleanup, and transcription failure handling
 2026-07-05: Harden input hotkey ordering and validation, tray state updates, and overlay focus and Windows state ownership
 2026-07-07: Add STT upload timeout with a shared HTTP client, and replace error-string parsing with a structured TranscribeError across transcriber and orchestrator
+2026-07-11: Remove the floating overlay; add debounced tray click recording control, an input-independent recording state machine, strict SessionId routing, session-scoped audio paths, and state-aware shutdown cleanup

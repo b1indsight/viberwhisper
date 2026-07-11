@@ -35,7 +35,8 @@ Implementation plans and technical specs for each feature.
 | [05-long-audio-streaming.md](plan/05-long-audio-streaming.md) | Done | Long audio chunking, offline split, retry with exponential backoff, and text merge |
 | [06-end-to-end-stream-recognition.md](plan/06-end-to-end-stream-recognition.md) | Done | Session orchestrator: unified Hold/Toggle lifecycle, chunk state machine, convergence |
 | [08-llm-post-processing.md](plan/08-llm-post-processing.md) | Done | LLM text post-processing: punctuation, filler removal, preheat/conservative modes |
-| [09-floating-window.md](plan/09-floating-window.md) | Done | Cross-platform floating overlay: draggable always-on-top mic overlay with click-to-toggle |
-| [10-objc2-overlay-migration.md](plan/10-objc2-overlay-migration.md) | Done | Migrate the macOS overlay from deprecated `cocoa` / `objc` to the `objc2` ecosystem |
+| [09-floating-window.md](plan/09-floating-window.md) | Superseded | Historical cross-platform floating overlay design, removed by plan 14 |
+| [10-objc2-overlay-migration.md](plan/10-objc2-overlay-migration.md) | Historical | Historical macOS overlay binding migration |
 | [11-packaging-and-ci.md](plan/11-packaging-and-ci.md) | Done | Cross-platform CI plus tag-triggered macOS DMG and Windows MSI release packaging |
 | [12-local-gemma-service.md](plan/12-local-gemma-service.md) | Done | Local Gemma inference service, lifecycle management, and CLI integration |
+| [14-tray-recording-control.md](plan/14-tray-recording-control.md) | Done | Tray-only control, input-independent recording state, and strict SessionId routing |

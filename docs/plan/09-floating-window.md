@@ -2,7 +2,7 @@
 
 ## Status
 
-**Implemented on macOS and Windows.** The initial macOS implementation was followed by the objc2 migration in plan 10 and a native Win32 overlay in PR #47.
+**Superseded by plan 14.** The overlay was implemented on macOS and Windows, then removed in favor of tray-only recording control. This document remains as historical design context.
 
 ## Goal
 

@@ -24,8 +24,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSDate", "NSRunLoop", "NSString"] }
-objc2-app-kit = { version = "0.3", features = ["NSAppearance", "NSApplication", "NSBezierPath", "NSColor", "NSEvent", "NSGraphics", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSEvent"] }
 
 [package.metadata.bundle]
 name = "ViberWhisper"

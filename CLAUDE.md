@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Rust 2024 desktop utility named "viberwhisper". It runs as a background voice-to-text input app with global hotkeys, tray/overlay UI, chunked transcription, optional LLM cleanup, and cross-platform text injection.
+This is a Rust 2024 desktop utility named "viberwhisper". It runs as a background voice-to-text input app with global hotkeys, tray UI, chunked transcription, optional LLM cleanup, and cross-platform text injection.
 
 ### Project Background
 
@@ -15,7 +15,7 @@ ViberWhisper is a local-first voice-to-text typing tool. The app lets the user t
 This is a **cross-platform (macOS + Windows)** project:
 - **macOS**: Text injection via osascript + clipboard (requires Accessibility permission)
 - **Windows**: Text injection via Win32 SendInput API
-- **Desktop UI**: System tray integration plus floating overlay window support
+- **Desktop UI**: System tray/status-bar integration with click-to-toggle recording
 - **Packaging**: GitHub Actions build CI plus release packaging for macOS and Windows
 
 ### Core Functionality
@@ -26,7 +26,7 @@ This is a **cross-platform (macOS + Windows)** project:
 4. **Session Orchestrator**: Background transcription with convergence timeout and partial failure handling
 5. **LLM Post-processing**: Optional text cleanup via LLM (punctuation, filler removal, interruption cleanup)
 6. **Text Injection**: Output recognized text at the current cursor position on macOS and Windows
-7. **System Tray and Overlay UI**: Status indicator (idle/recording) with tray menu and floating overlay window support
+7. **System Tray UI**: Status indicator (idle/recording), left-click recording toggle, and right-click exit menu
 8. **CLI Utilities**: Config management and offline WAV transcription commands
 9. **Packaging and Release Automation**: CI workflows plus app bundle / installer release support
 
@@ -95,8 +95,7 @@ src/
   input/
     hotkey.rs                — HotkeyManager with rdev
     typer.rs                 — TextTyper trait + MockTyper
-    tray.rs                  — TrayManager for system tray icon
-    overlay/                 — Floating overlay abstractions and platform implementations
+    tray.rs                  — TrayManager for system tray icon and recording control
   platform/
     macos.rs                 — MacTyper (osascript + clipboard)
     windows.rs               — WindowsTyper (SendInput API)
