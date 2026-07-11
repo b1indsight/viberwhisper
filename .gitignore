@@ -15,6 +15,7 @@
 .idea/
 .vscode/
 .claude/
+/.agents/
 *.swp
 *.swo
 
