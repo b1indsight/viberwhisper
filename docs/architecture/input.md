@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The `input` module (`src/input/`) handles four concerns: global hotkey detection (`hotkey.rs`), text injection into the focused window (`typer.rs`), system tray UI (`tray.rs`), and the floating overlay window (`overlay/`).
+The `input` module (`src/input/`) handles three concerns: global hotkey detection (`hotkey.rs`), text injection into the focused window (`typer.rs`), and system tray UI (`tray.rs`). Input adapters report user intent; recording lifecycle decisions belong to `core::recording_session`.
 
 ---
 
@@ -87,6 +87,7 @@ pub struct TrayManager {
     icon_recording: Icon,
     status_item: MenuItem,
     exit_item_id: MenuId,
+    click_debounce: ClickDebounce,
 }
 ```
 
@@ -103,43 +104,24 @@ Icons are 32×32 RGBA bitmaps generated at runtime as filled circles.
 
 **`TrayManager::new() -> Result<Self>`**
 
-Builds the tray icon with a menu containing: title item, status item, separator, and exit item.
+Builds the tray icon with a menu containing: title item, status item, separator, and exit item. Left-click menu opening is disabled so left click can toggle recording; right click retains the native context menu.
 
 **`set_recording(&mut self, recording: bool)`**
 
 Switches the icon, tooltip, and menu status text based on recording state. Native icon/tooltip update failures are logged rather than silently discarded.
 
-**`check_exit(&self) -> bool`**
+**`check_action(&mut self) -> Option<TrayAction>`**
 
-Non-blocking check of the menu event channel; returns `true` if the exit item was clicked.
+Drains menu events before icon events so Exit has priority. A matching left-button-up event produces `ToggleRecording`; unrelated icon IDs and mouse phases are discarded. Events are drained as one batch using a shared handling timestamp.
 
----
+**`update(&self)`**
 
-## Overlay (`src/input/overlay/`)
+Pumps pending AppKit or Win32 events without creating a window. On macOS tray setup also enforces Accessory activation policy. This event pump is required for right-click menu and icon event delivery.
 
-### Purpose
+### Click Protection
 
-Provides an always-on-top, draggable recording affordance separate from the tray icon. A click on the overlay acts like the toggle hotkey: start recording when idle, stop when recording.
-
-### Platform Selection
-
-| Target | Implementation |
-|---|---|
-| macOS | `overlay/macos.rs` |
-| Windows | `overlay/windows_impl.rs` |
-| Other | `overlay/stub.rs` |
-
-### Public API
-
-`main.rs` interacts with the overlay through a platform-specific `OverlayManager` with a shared interface:
-
-- `OverlayManager::new() -> Result<Self>`: create window/resources
-- `set_recording(recording: bool)`: update visual state
-- `check_click() -> bool`: poll whether the overlay was clicked since last check
-- `update()`: pump any pending UI work from the main loop
-
-### Main-loop Behavior
-
-- overlay clicks are checked on every tick, after hotkey polling
-- when clicked, the overlay follows the same start/stop flow as toggle mode
-- overlay state is kept in sync with tray state during all record transitions
+- effective debounce window is `max(300 ms, platform double-click interval)`
+- macOS reads `NSEvent::doubleClickInterval()`
+- Windows reads `GetDoubleClickTime()` and suppresses the button-up following a native `DoubleClick`
+- the suppression is one-shot; ordinary ignored clicks do not extend the window
+- debounce applies only to tray recording toggles, never Exit or hotkeys

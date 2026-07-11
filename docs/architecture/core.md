@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The `core` module (`src/core/`) contains three sub-modules: configuration persistence (`config.rs`), CLI argument parsing (`cli.rs`), and session orchestration (`orchestrator.rs`). It also serves as the boundary where local-mode runtime settings are carried into the main loop.
+The `core` module (`src/core/`) contains configuration persistence (`config.rs`), CLI argument parsing (`cli.rs`), recording lifecycle state (`recording_session.rs`), and transcription orchestration (`orchestrator.rs`). It also serves as the boundary where local-mode runtime settings are carried into the main loop.
 
 ---
 
@@ -157,6 +157,7 @@ Parsed with `clap::Parser`. No subcommand runs the main recording loop.
 - **Partial Failure**: If some chunks succeed and others fail, returns partial text with an error
 - **Bounded Queue**: Chunk submission is non-blocking. A full queue marks the chunk failed and deletes its temporary file rather than stalling session shutdown.
 - **Cleanup Guarantee**: Processed, rejected, orphaned, timed-out queued, and panicking-transcriber chunk paths are cleaned up by the orchestrator.
+- **Strict Session Routing**: start, chunk, finish, and abort operations carry `SessionId`; duplicate starts and mismatched IDs are rejected without replacing active work.
 
 ### `SessionError` Enum
 
@@ -165,6 +166,29 @@ Parsed with `clap::Parser`. No subcommand runs the main recording loop.
 | `NoChunks` | Recording too short to produce any audio |
 | `PartialFailure { partial_text, failures }` | Some chunks succeeded, includes partial text |
 | `ConvergenceTimeout { partial_text, pending }` | Timeout hit, includes what was completed |
+
+---
+
+## Recording Session (`src/core/recording_session.rs`)
+
+`RecordingSessionMachine` is the sole authority for recording lifecycle transitions. Tray and hotkey adapters emit source-tagged `ControlEvent`s and never inspect recorder state directly.
+
+### States
+
+- `Idle`
+- `Starting`: recorder/orchestrator startup is in progress
+- `Recording`: one session is accepting audio chunks
+- `Stopping`: recorder stop or orchestrator convergence is in progress
+- `Recovering`: an inconsistent lower-layer state is being cancelled
+- `ShuttingDown`: new controls are ignored while cleanup effects run
+
+Every accepted start receives a monotonically increasing `SessionId`. The ID is propagated through recorder operations, ready chunks, orchestrator routing, effects, and completion events. Stale chunks are deleted and stale completions cannot mutate the current session.
+
+### Event/Effect Boundary
+
+The machine consumes external controls plus structured recorder/orchestrator outcomes and emits declarative effects. `main.rs` executes those effects and feeds results back as internal events. Tray state changes only after successful lifecycle transitions.
+
+Exit is represented as `ShutdownRequested`. It cancels recorder/orchestrator work, resets tray state, suppresses final text injection, and exits only after `ReadyToExit` is emitted.
 
 ## Main Integration Notes
 

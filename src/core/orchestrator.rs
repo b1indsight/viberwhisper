@@ -4,6 +4,7 @@
 //! chunk tracking, background transcription, convergence wait, and result merging.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -11,22 +12,70 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info, warn};
 
+use crate::audio::remove_temp_audio_file;
+
+use crate::core::recording_session::SessionId;
+pub use crate::core::recording_session::SessionMode;
 use crate::transcriber::Transcriber;
 // Re-exported so callers can keep using `core::orchestrator::TranscribeError`.
 pub use crate::transcriber::TranscribeError;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
-/// Which hotkey mode initiated the recording session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionMode {
-    Hold,
-    Toggle,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionStartError {
+    ActiveSession {
+        requested: SessionId,
+        active: SessionId,
+    },
 }
 
-/// Error returned by `SessionOrchestrator::stop_session`.
+impl fmt::Display for SessionStartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ActiveSession { requested, active } => write!(
+                f,
+                "cannot start session {} while session {} is active",
+                requested.0, active.0
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionStartError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionRoutingError {
+    NoActiveSession {
+        requested: SessionId,
+    },
+    SessionMismatch {
+        requested: SessionId,
+        active: SessionId,
+    },
+}
+
+impl fmt::Display for SessionRoutingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoActiveSession { requested } => {
+                write!(f, "no active session for request {}", requested.0)
+            }
+            Self::SessionMismatch { requested, active } => write!(
+                f,
+                "request for session {} does not match active session {}",
+                requested.0, active.0
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionRoutingError {}
+
+/// Error returned by `SessionOrchestrator::finish_session`.
 #[derive(Debug)]
 pub enum SessionError {
+    Routing(SessionRoutingError),
     /// No chunks were recorded (recording was too short to produce any chunk).
     NoChunks,
     /// Some chunks failed but others succeeded; `partial_text` contains
@@ -46,6 +95,7 @@ pub enum SessionError {
 impl fmt::Display for SessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            SessionError::Routing(error) => write!(f, "{error}"),
             SessionError::NoChunks => write!(f, "No audio chunks recorded"),
             SessionError::PartialFailure {
                 errors,
@@ -103,12 +153,14 @@ enum WorkerMsg {
 }
 
 struct ActiveSessionInner {
+    session_id: SessionId,
     #[allow(dead_code)]
     mode: SessionMode,
     chunks: Arc<Mutex<Vec<ChunkEntry>>>,
     chunk_tx: mpsc::SyncSender<WorkerMsg>,
     worker: thread::JoinHandle<()>,
     next_index: usize,
+    cancelled: Arc<AtomicBool>,
 }
 
 // ─── SessionOrchestrator ──────────────────────────────────────────────────────
@@ -127,7 +179,7 @@ impl SessionOrchestrator {
     ///
     /// - `transcriber`: injected for testability (use `MockTranscriber` in tests).
     /// - `language`: passed to `merge_texts` for separator selection.
-    /// - `convergence_timeout`: how long `stop_session` waits for background chunks.
+    /// - `convergence_timeout`: how long `finish_session` waits for background chunks.
     pub fn new(
         transcriber: Arc<dyn Transcriber>,
         language: Option<String>,
@@ -143,35 +195,44 @@ impl SessionOrchestrator {
 
     /// Start a new recording session.
     ///
-    /// If a previous session is still active it is discarded (its background
-    /// worker will finish its current transcription and then exit cleanly when
-    /// the channel is dropped).
-    pub fn start_session(&self, mode: SessionMode) {
+    /// Returns an error without replacing an existing active session.
+    pub fn start_session(
+        &self,
+        session_id: SessionId,
+        mode: SessionMode,
+    ) -> Result<(), SessionStartError> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(active) = inner.as_ref() {
+            return Err(SessionStartError::ActiveSession {
+                requested: session_id,
+                active: active.session_id,
+            });
+        }
+
         let chunks: Arc<Mutex<Vec<ChunkEntry>>> = Arc::new(Mutex::new(Vec::new()));
         let (chunk_tx, chunk_rx) = mpsc::sync_channel::<WorkerMsg>(64);
+        let cancelled = Arc::new(AtomicBool::new(false));
 
         let worker_chunks = Arc::clone(&chunks);
         let transcriber = Arc::clone(&self.transcriber);
+        let worker_cancelled = Arc::clone(&cancelled);
 
         let worker = thread::spawn(move || {
-            worker_loop(chunk_rx, worker_chunks, transcriber);
+            worker_loop(chunk_rx, worker_chunks, transcriber, worker_cancelled);
         });
 
-        let mut inner = self.inner.lock().unwrap();
-        if inner.is_some() {
-            warn!(
-                "start_session called while a session is already active; discarding previous session"
-            );
-        }
         *inner = Some(ActiveSessionInner {
+            session_id,
             mode,
             chunks,
             chunk_tx,
             worker,
             next_index: 0,
+            cancelled,
         });
 
-        info!(mode = ?mode, "Session started");
+        info!(session_id = session_id.0, mode = ?mode, "Session started");
+        Ok(())
     }
 
     /// Submit a chunk file path for background transcription.
@@ -179,13 +240,28 @@ impl SessionOrchestrator {
     /// The worker thread will call `transcriber.transcribe(&path)` and delete the
     /// file after processing (success or failure). Returns the assigned chunk index,
     /// or `None` if no session is active.
-    pub fn on_chunk_ready(&self, path: String) -> Option<usize> {
+    pub fn on_chunk_ready(
+        &self,
+        session_id: SessionId,
+        path: String,
+    ) -> Result<usize, SessionRoutingError> {
         let mut inner = self.inner.lock().unwrap();
         let Some(session) = inner.as_mut() else {
             warn!(path = %path, "Chunk arrived without an active session; deleting it");
             remove_chunk_file(&path, "orphan");
-            return None;
+            return Err(SessionRoutingError::NoActiveSession {
+                requested: session_id,
+            });
         };
+        if session.session_id != session_id {
+            let active = session.session_id;
+            warn!(path = %path, requested = session_id.0, active = active.0, "Rejecting stale chunk");
+            remove_chunk_file(&path, "stale");
+            return Err(SessionRoutingError::SessionMismatch {
+                requested: session_id,
+                active,
+            });
+        }
 
         let index = session.next_index;
         session.next_index += 1;
@@ -213,7 +289,7 @@ impl SessionOrchestrator {
             info!(index = index, path = %path, "Chunk enqueued for background transcription");
         }
 
-        Some(index)
+        Ok(index)
     }
 
     /// Stop the current session and block until all chunks reach a terminal state
@@ -224,15 +300,28 @@ impl SessionOrchestrator {
     /// - `Err(SessionError::NoChunks)` — recording produced no chunks.
     /// - `Err(SessionError::PartialFailure { … })` — some chunks failed; partial text included.
     /// - `Err(SessionError::ConvergenceTimeout { … })` — timeout hit; partial text included.
-    pub fn stop_session(&self) -> Result<String, SessionError> {
+    pub fn finish_session(&self, session_id: SessionId) -> Result<String, SessionError> {
         let active = {
             let mut inner = self.inner.lock().unwrap();
+            let Some(active) = inner.as_ref() else {
+                return Err(SessionError::Routing(
+                    SessionRoutingError::NoActiveSession {
+                        requested: session_id,
+                    },
+                ));
+            };
+            if active.session_id != session_id {
+                return Err(SessionError::Routing(
+                    SessionRoutingError::SessionMismatch {
+                        requested: session_id,
+                        active: active.session_id,
+                    },
+                ));
+            }
             inner.take()
         };
 
-        let Some(session) = active else {
-            return Err(SessionError::NoChunks);
-        };
+        let session = active.expect("active session checked before take");
 
         if session.next_index == 0 {
             // Closing the channel lets the idle worker exit immediately.
@@ -299,6 +388,30 @@ impl SessionOrchestrator {
 
         collect_results(&locked, self.language.as_deref())
     }
+
+    pub fn abort_session(&self, session_id: SessionId) -> Result<(), SessionRoutingError> {
+        let session = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(active) = inner.as_ref() else {
+                return Err(SessionRoutingError::NoActiveSession {
+                    requested: session_id,
+                });
+            };
+            if active.session_id != session_id {
+                return Err(SessionRoutingError::SessionMismatch {
+                    requested: session_id,
+                    active: active.session_id,
+                });
+            }
+            inner.take().expect("active session checked before take")
+        };
+
+        session.cancelled.store(true, Ordering::Release);
+        drop(session.chunk_tx);
+        drop(session.worker);
+        info!(session_id = session_id.0, "Session aborted");
+        Ok(())
+    }
 }
 
 // ─── Worker ───────────────────────────────────────────────────────────────────
@@ -307,10 +420,15 @@ fn worker_loop(
     rx: mpsc::Receiver<WorkerMsg>,
     chunks: Arc<Mutex<Vec<ChunkEntry>>>,
     transcriber: Arc<dyn Transcriber>,
+    cancelled: Arc<AtomicBool>,
 ) {
     for msg in rx {
         match msg {
             WorkerMsg::Chunk { index, path } => {
+                if cancelled.load(Ordering::Acquire) {
+                    remove_chunk_file(&path, "cancelled");
+                    continue;
+                }
                 // Transition to Uploading.
                 {
                     let mut locked = chunks.lock().unwrap();
@@ -383,7 +501,7 @@ fn begin_upload(entry: &mut ChunkEntry) -> bool {
 }
 
 fn remove_chunk_file(path: &str, reason: &str) {
-    if let Err(e) = std::fs::remove_file(path) {
+    if let Err(e) = remove_temp_audio_file(path) {
         debug!(path, reason, error = %e, "Could not delete chunk file");
     }
 }
@@ -549,12 +667,33 @@ mod tests {
         let t = Arc::new(FixedTranscriber("hello world".to_string()));
         let orch = default_orchestrator(t);
 
-        orch.start_session(SessionMode::Hold);
-        orch.on_chunk_ready("chunk0.wav".to_string());
-        let result = orch.stop_session();
+        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        let _ = orch.on_chunk_ready(SessionId(1), "chunk0.wav".to_string());
+        let result = orch.finish_session(SessionId(1));
 
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
         assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[test]
+    fn processed_chunk_removes_empty_session_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "viberwhisper-session-1-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chunk.wav");
+        std::fs::write(&path, b"chunk").unwrap();
+        let orch = default_orchestrator(Arc::new(FixedTranscriber("done".to_string())));
+
+        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        orch.on_chunk_ready(SessionId(1), path.to_string_lossy().into_owned())
+            .unwrap();
+        assert_eq!(orch.finish_session(SessionId(1)).unwrap(), "done");
+
+        assert!(!path.exists());
+        assert!(!dir.exists());
     }
 
     #[test]
@@ -567,11 +706,11 @@ mod tests {
         ]));
         let orch = default_orchestrator(t);
 
-        orch.start_session(SessionMode::Hold);
-        orch.on_chunk_ready("c0.wav".to_string()); // index 0
-        orch.on_chunk_ready("c1.wav".to_string()); // index 1
-        orch.on_chunk_ready("c2.wav".to_string()); // index 2
-        let result = orch.stop_session();
+        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        let _ = orch.on_chunk_ready(SessionId(1), "c0.wav".to_string()); // index 0
+        let _ = orch.on_chunk_ready(SessionId(1), "c1.wav".to_string()); // index 1
+        let _ = orch.on_chunk_ready(SessionId(1), "c2.wav".to_string()); // index 2
+        let result = orch.finish_session(SessionId(1));
 
         assert!(result.is_ok());
         // Chunks must be joined in submission order, not completion order.
@@ -583,8 +722,9 @@ mod tests {
         let t = Arc::new(MockTranscriber);
         let orch = default_orchestrator(t);
 
-        orch.start_session(SessionMode::Toggle);
-        let result = orch.stop_session();
+        orch.start_session(SessionId(1), SessionMode::Toggle)
+            .unwrap();
+        let result = orch.finish_session(SessionId(1));
 
         assert!(matches!(result, Err(SessionError::NoChunks)));
     }
@@ -595,8 +735,8 @@ mod tests {
         let orch = default_orchestrator(t);
 
         // stop_session called without a prior start_session.
-        let result = orch.stop_session();
-        assert!(matches!(result, Err(SessionError::NoChunks)));
+        let result = orch.finish_session(SessionId(1));
+        assert!(matches!(result, Err(SessionError::Routing(_))));
     }
 
     #[test]
@@ -609,9 +749,12 @@ mod tests {
         std::fs::write(&path, b"orphan chunk").unwrap();
         let orch = default_orchestrator(Arc::new(MockTranscriber));
 
-        let result = orch.on_chunk_ready(path.to_string_lossy().into_owned());
+        let result = orch.on_chunk_ready(SessionId(1), path.to_string_lossy().into_owned());
 
-        assert!(result.is_none());
+        assert!(matches!(
+            result,
+            Err(SessionRoutingError::NoActiveSession { .. })
+        ));
         assert!(!path.exists(), "orphan chunk file was not deleted");
     }
 
@@ -627,11 +770,11 @@ mod tests {
         ]));
         let orch = default_orchestrator(t);
 
-        orch.start_session(SessionMode::Hold);
-        orch.on_chunk_ready("c0.wav".to_string());
-        orch.on_chunk_ready("c1.wav".to_string());
-        orch.on_chunk_ready("c2.wav".to_string());
-        let result = orch.stop_session();
+        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        let _ = orch.on_chunk_ready(SessionId(1), "c0.wav".to_string());
+        let _ = orch.on_chunk_ready(SessionId(1), "c1.wav".to_string());
+        let _ = orch.on_chunk_ready(SessionId(1), "c2.wav".to_string());
+        let result = orch.finish_session(SessionId(1));
 
         match result {
             Err(SessionError::PartialFailure {
@@ -660,9 +803,9 @@ mod tests {
         });
         let orch = make_orchestrator_with_timeout(t, Duration::from_millis(100));
 
-        orch.start_session(SessionMode::Hold);
-        orch.on_chunk_ready("slow.wav".to_string());
-        let result = orch.stop_session();
+        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        let _ = orch.on_chunk_ready(SessionId(1), "slow.wav".to_string());
+        let result = orch.finish_session(SessionId(1));
 
         match result {
             Err(SessionError::ConvergenceTimeout { pending_count, .. }) => {
@@ -695,11 +838,11 @@ mod tests {
             release: Arc::clone(&release),
         });
         let orch = default_orchestrator(t);
-        orch.start_session(SessionMode::Hold);
+        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
 
         let started = Instant::now();
         for index in 0..100 {
-            orch.on_chunk_ready(format!("queue-{index}.wav"));
+            let _ = orch.on_chunk_ready(SessionId(1), format!("queue-{index}.wav"));
         }
 
         assert!(
@@ -719,7 +862,7 @@ mod tests {
         let (lock, condvar) = &*release;
         *lock.lock().unwrap() = true;
         condvar.notify_all();
-        let _ = orch.stop_session();
+        let _ = orch.finish_session(SessionId(1));
     }
 
     #[test]
@@ -729,9 +872,9 @@ mod tests {
             let t = Arc::new(FixedTranscriber("text".to_string()));
             let orch = default_orchestrator(t);
 
-            orch.start_session(mode);
-            orch.on_chunk_ready("chunk.wav".to_string());
-            let result = orch.stop_session();
+            orch.start_session(SessionId(1), mode).unwrap();
+            let _ = orch.on_chunk_ready(SessionId(1), "chunk.wav".to_string());
+            let result = orch.finish_session(SessionId(1));
 
             assert!(result.is_ok(), "Mode {:?} failed: {:?}", mode, result);
             assert_eq!(result.unwrap(), "text");
@@ -739,23 +882,68 @@ mod tests {
     }
 
     #[test]
-    fn test_session_reentry_starts_fresh() {
-        // start_session while a previous session exists should start fresh.
+    fn test_session_reentry_is_rejected_without_replacing_active_session() {
         let t = Arc::new(FixedTranscriber("new session".to_string()));
         let orch = default_orchestrator(t);
 
-        // First session: submit a chunk but do NOT call stop_session.
-        orch.start_session(SessionMode::Hold);
-        orch.on_chunk_ready("old_chunk.wav".to_string());
+        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        let _ = orch.on_chunk_ready(SessionId(1), "old_chunk.wav".to_string());
 
-        // Second session: replaces the first.
-        orch.start_session(SessionMode::Toggle);
-        orch.on_chunk_ready("new_chunk.wav".to_string());
-        let result = orch.stop_session();
+        let error = orch
+            .start_session(SessionId(2), SessionMode::Toggle)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            SessionStartError::ActiveSession {
+                requested: SessionId(2),
+                active: SessionId(1),
+            }
+        );
+        let result = orch.finish_session(SessionId(1));
 
-        // Only the new session's chunk should appear.
         assert!(result.is_ok(), "{:?}", result);
         assert_eq!(result.unwrap(), "new session");
+    }
+
+    #[test]
+    fn mismatched_chunk_and_finish_do_not_mutate_active_session() {
+        let path = std::env::temp_dir().join(format!(
+            "viberwhisper-stale-chunk-{}-{:?}.wav",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"stale").unwrap();
+        let orch = default_orchestrator(Arc::new(FixedTranscriber("active".into())));
+        orch.start_session(SessionId(1), SessionMode::Toggle)
+            .unwrap();
+
+        assert!(matches!(
+            orch.on_chunk_ready(SessionId(2), path.to_string_lossy().into_owned()),
+            Err(SessionRoutingError::SessionMismatch { .. })
+        ));
+        assert!(!path.exists());
+        assert!(matches!(
+            orch.finish_session(SessionId(2)),
+            Err(SessionError::Routing(
+                SessionRoutingError::SessionMismatch { .. }
+            ))
+        ));
+        assert!(matches!(
+            orch.finish_session(SessionId(1)),
+            Err(SessionError::NoChunks)
+        ));
+    }
+
+    #[test]
+    fn abort_rejects_wrong_id_and_preserves_active_session() {
+        let orch = default_orchestrator(Arc::new(MockTranscriber));
+        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+
+        assert!(matches!(
+            orch.abort_session(SessionId(2)),
+            Err(SessionRoutingError::SessionMismatch { .. })
+        ));
+        assert!(orch.abort_session(SessionId(1)).is_ok());
     }
 
     #[test]
@@ -764,9 +952,9 @@ mod tests {
         let t = Arc::new(PanicTranscriber);
         let orch = make_orchestrator_with_timeout(t, Duration::from_millis(200));
 
-        orch.start_session(SessionMode::Hold);
-        orch.on_chunk_ready("panic.wav".to_string());
-        let result = orch.stop_session();
+        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        let _ = orch.on_chunk_ready(SessionId(1), "panic.wav".to_string());
+        let result = orch.finish_session(SessionId(1));
 
         // Worker panicked → chunk never reaches terminal state → ConvergenceTimeout.
         assert!(
@@ -791,9 +979,9 @@ mod tests {
         let t = Arc::new(PanicTranscriber);
         let orch = default_orchestrator(t);
 
-        orch.start_session(SessionMode::Hold);
-        orch.on_chunk_ready(path.to_string_lossy().into_owned());
-        let result = orch.stop_session();
+        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        let _ = orch.on_chunk_ready(SessionId(1), path.to_string_lossy().into_owned());
+        let result = orch.finish_session(SessionId(1));
 
         assert!(matches!(result, Err(SessionError::PartialFailure { .. })));
         assert!(!path.exists(), "panicking worker leaked chunk file");

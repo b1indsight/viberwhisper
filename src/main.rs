@@ -237,14 +237,16 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
-    use audio::{AudioRecorder, StopResult};
-    use core::orchestrator::{SessionError, SessionMode, SessionOrchestrator};
+    use audio::AudioRecorder;
+    use core::orchestrator::SessionOrchestrator;
+    use core::recording_session::{
+        ControlAction, ControlEvent, ControlSource, RecordingSessionMachine, SessionEvent,
+        SessionMode,
+    };
     use input::hotkey::{HotkeyEvent, HotkeyManager, HotkeySource};
-    use input::overlay::OverlayManager;
-    use input::tray::TrayManager;
-    use input::typer::TextTyper;
+    use input::tray::{TrayAction, TrayManager};
     use postprocess::create_post_processor;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
     use transcriber::{Transcriber, create_transcriber};
 
@@ -270,12 +272,11 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
 
     let hotkey_manager = HotkeyManager::new(&config.hold_hotkey, &config.toggle_hotkey)?;
 
-    #[allow(clippy::arc_with_non_send_sync)]
-    let recorder = Arc::new(Mutex::new(AudioRecorder::with_config(
+    let mut recorder = AudioRecorder::with_config(
         config.mic_gain,
         config.max_chunk_duration_secs,
         config.max_chunk_size_bytes,
-    )?));
+    )?;
 
     // Build transcriber and wrap in Arc<dyn Transcriber> for orchestrator injection.
     let transcriber: Arc<dyn Transcriber> = Arc::from(create_transcriber(&config)?);
@@ -297,9 +298,7 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
 
     let mut tray = TrayManager::new()?;
     info!("System tray icon started");
-
-    let mut overlay = OverlayManager::new()?;
-    info!("Floating overlay window started");
+    let mut session_machine = RecordingSessionMachine::new();
 
     println!(
         "Hold {} to record, release to transcribe.",
@@ -312,213 +311,283 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
     println!("Press Ctrl+C to exit.");
     println!();
 
-    // Finalize a stopped recording: submit the tail chunk (if any) to the orchestrator,
-    // then wait for convergence and type (or log) the result.
-    let finalize = |stop_result: StopResult| {
-        match stop_result {
-            StopResult::SingleFile(path) | StopResult::TailChunk(path) => {
-                orchestrator.on_chunk_ready(path);
-            }
-            StopResult::ChunkFiles(paths) => {
-                for path in paths {
-                    orchestrator.on_chunk_ready(path);
-                }
-            }
-            StopResult::ChunksOnly => {
-                debug!("All audio was flushed to background chunks during recording; no tail");
-            }
-        }
-
-        match orchestrator.stop_session() {
-            Ok(stt_text) => {
-                if stt_text.is_empty() {
-                    info!("Transcription returned empty text");
-                    return;
-                }
-                let text = {
-                    let mut session = post_processor.start_session();
-                    session.push_stable_chunk(&stt_text);
-                    match session.finish() {
-                        Ok(processed) if !processed.is_empty() => processed,
-                        Ok(_) => {
-                            // Empty post-process output is not useful; keep the STT text.
-                            warn!("Post-processing returned empty text, using original STT text");
-                            stt_text
-                        }
-                        Err(e) => {
-                            // Runtime LLM errors should not discard a successful STT result.
-                            warn!(error = %e, "Post-processing failed, using original STT text");
-                            stt_text
-                        }
-                    }
-                };
-                info!(text = %text, "Typing transcribed text");
-                if let Err(e) = typer.type_text(&text) {
-                    error!(error = %e, "Failed to type text");
-                }
-            }
-            Err(SessionError::NoChunks) => {
-                warn!("No audio chunks to transcribe (recording too short?)");
-            }
-            Err(SessionError::PartialFailure {
-                errors,
-                partial_text,
-            }) => {
-                error!(
-                    failed_chunks = errors.len(),
-                    "Partial transcription failure; typing available text"
-                );
-                if !partial_text.is_empty()
-                    && let Err(e) = typer.type_text(&partial_text)
-                {
-                    error!(error = %e, "Failed to type partial text");
-                }
-            }
-            Err(SessionError::ConvergenceTimeout {
-                pending_count,
-                partial_text,
-            }) => {
-                warn!(
-                    pending_count = pending_count,
-                    "Convergence timeout; typing available partial text"
-                );
-                if !partial_text.is_empty()
-                    && let Err(e) = typer.type_text(&partial_text)
-                {
-                    error!(error = %e, "Failed to type partial text");
-                }
-            }
-        }
-    };
-
     let mut counter = 0;
     loop {
+        tray.update();
+
+        if let Some(action) = tray.check_action() {
+            let event = match action {
+                TrayAction::Exit => SessionEvent::ShutdownRequested,
+                TrayAction::ToggleRecording => SessionEvent::Control(ControlEvent {
+                    source: ControlSource::Tray,
+                    action: ControlAction::Toggle(SessionMode::Toggle),
+                }),
+            };
+            if drive_session(
+                &mut session_machine,
+                event,
+                &mut recorder,
+                &orchestrator,
+                &mut tray,
+                post_processor.as_ref(),
+                &typer,
+            ) {
+                break Ok(());
+            }
+        }
+
         if let Some(event) = hotkey_manager.check_event() {
-            match event {
-                HotkeyEvent::Pressed(HotkeySource::Hold) => {
-                    info!(hotkey = %config.hold_hotkey, "Hold key pressed, starting recording");
-                    let mut rec = recorder.lock().unwrap();
-                    match rec.start_recording() {
-                        Ok(()) => {
-                            orchestrator.start_session(SessionMode::Hold);
-                            info!("Recording started (hold mode)");
-                            tray.set_recording(true);
-                            overlay.set_recording(true);
-                        }
-                        Err(e) => error!(error = %e, "Failed to start recording"),
-                    }
-                }
-                HotkeyEvent::Released(HotkeySource::Hold) => {
-                    info!(hotkey = %config.hold_hotkey, "Hold key released, stopping recording");
-                    let mut rec = recorder.lock().unwrap();
-                    match rec.stop_recording() {
-                        Ok(stop_result) => {
-                            tray.set_recording(false);
-                            overlay.set_recording(false);
-                            finalize(stop_result);
-                        }
-                        Err(e) => {
-                            error!(error = %e, "Failed to stop recording");
-                            tray.set_recording(false);
-                            overlay.set_recording(false);
-                        }
-                    }
-                }
-                HotkeyEvent::Pressed(HotkeySource::Toggle) => {
-                    let mut rec = recorder.lock().unwrap();
-                    if rec.is_recording() {
-                        info!(hotkey = %config.toggle_hotkey, "Toggle key pressed, stopping recording");
-                        match rec.stop_recording() {
-                            Ok(stop_result) => {
-                                tray.set_recording(false);
-                                overlay.set_recording(false);
-                                finalize(stop_result);
-                            }
-                            Err(e) => {
-                                error!(error = %e, "Failed to stop recording");
-                                tray.set_recording(false);
-                                overlay.set_recording(false);
-                            }
-                        }
-                    } else {
-                        info!(hotkey = %config.toggle_hotkey, "Toggle key pressed, starting recording");
-                        match rec.start_recording() {
-                            Ok(()) => {
-                                orchestrator.start_session(SessionMode::Toggle);
-                                info!("Recording started (toggle mode)");
-                                tray.set_recording(true);
-                                overlay.set_recording(true);
-                            }
-                            Err(e) => error!(error = %e, "Failed to start recording"),
-                        }
-                    }
-                }
-                HotkeyEvent::Released(HotkeySource::Toggle) => {}
+            let control = match event {
+                HotkeyEvent::Pressed(HotkeySource::Hold) => Some(ControlEvent {
+                    source: ControlSource::HoldHotkey,
+                    action: ControlAction::Start(SessionMode::Hold),
+                }),
+                HotkeyEvent::Released(HotkeySource::Hold) => Some(ControlEvent {
+                    source: ControlSource::HoldHotkey,
+                    action: ControlAction::Stop,
+                }),
+                HotkeyEvent::Pressed(HotkeySource::Toggle) => Some(ControlEvent {
+                    source: ControlSource::ToggleHotkey,
+                    action: ControlAction::Toggle(SessionMode::Toggle),
+                }),
+                HotkeyEvent::Released(HotkeySource::Toggle) => None,
+            };
+            if let Some(control) = control {
+                let _ = drive_session(
+                    &mut session_machine,
+                    SessionEvent::Control(control),
+                    &mut recorder,
+                    &orchestrator,
+                    &mut tray,
+                    post_processor.as_ref(),
+                    &typer,
+                );
             }
         }
 
-        // Check overlay click (acts like toggle hotkey)
-        if overlay.check_click() {
-            let mut rec = recorder.lock().unwrap();
-            if rec.is_recording() {
-                info!("Overlay clicked, stopping recording");
-                match rec.stop_recording() {
-                    Ok(stop_result) => {
-                        tray.set_recording(false);
-                        overlay.set_recording(false);
-                        finalize(stop_result);
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Failed to stop recording");
-                        tray.set_recording(false);
-                        overlay.set_recording(false);
-                    }
-                }
-            } else {
-                info!("Overlay clicked, starting recording");
-                match rec.start_recording() {
-                    Ok(()) => {
-                        orchestrator.start_session(SessionMode::Toggle);
-                        info!("Recording started (overlay toggle)");
-                        tray.set_recording(true);
-                        overlay.set_recording(true);
-                    }
-                    Err(e) => error!(error = %e, "Failed to start recording"),
-                }
-            }
-        }
-
-        // Poll for in-recording chunks from the recorder and forward to the orchestrator.
-        {
-            let chunk_path = recorder.lock().unwrap().take_ready_chunk();
-            if let Some(path) = chunk_path {
-                info!(path = %path, "Ready chunk detected, forwarding to orchestrator");
-                orchestrator.on_chunk_ready(path);
-            }
-        }
-
-        if tray.check_exit() {
-            info!("User clicked exit from tray");
-            break Ok(());
+        if let Some(chunk) = recorder.take_ready_chunk() {
+            let _ = drive_session(
+                &mut session_machine,
+                SessionEvent::ChunkReady {
+                    session_id: chunk.session_id,
+                    path: chunk.path,
+                },
+                &mut recorder,
+                &orchestrator,
+                &mut tray,
+                post_processor.as_ref(),
+                &typer,
+            );
         }
 
         counter += 1;
         if counter % 300 == 0 {
-            let status = if recorder.lock().unwrap().is_recording() {
-                "recording"
-            } else {
-                "idle"
-            };
+            let status = format!("{:?}", session_machine.state());
             debug!(
-                status = status,
+                status = %status,
                 hold_hotkey = %config.hold_hotkey,
                 toggle_hotkey = %config.toggle_hotkey,
                 "Heartbeat"
             );
         }
 
-        overlay.update();
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn drive_session(
+    machine: &mut core::recording_session::RecordingSessionMachine,
+    initial_event: core::recording_session::SessionEvent,
+    recorder: &mut audio::AudioRecorder,
+    orchestrator: &core::orchestrator::SessionOrchestrator,
+    tray: &mut input::tray::TrayManager,
+    post_processor: &dyn postprocess::TextPostProcessor,
+    typer: &dyn input::typer::TextTyper,
+) -> bool {
+    use audio::{RecorderStartOutcome, RecorderStopOutcome};
+    use core::recording_session::{SessionEffect, SessionEvent};
+    use std::collections::VecDeque;
+
+    let mut events = VecDeque::from([initial_event]);
+    let mut ready_to_exit = false;
+    while let Some(event) = events.pop_front() {
+        for effect in machine.handle(event) {
+            match effect {
+                SessionEffect::StartRecorder { session_id } => {
+                    let event = match recorder.start_recording(session_id) {
+                        RecorderStartOutcome::Started { session_id } => {
+                            SessionEvent::RecorderStarted { session_id }
+                        }
+                        RecorderStartOutcome::AlreadyRecording {
+                            requested_session_id,
+                            active_session_id,
+                        } => SessionEvent::RecorderAlreadyRecording {
+                            requested_session_id,
+                            active_session_id,
+                        },
+                        RecorderStartOutcome::Failed { session_id, error } => {
+                            error!(
+                                session_id = session_id.0,
+                                error, "Failed to start recording"
+                            );
+                            SessionEvent::RecorderStartFailed { session_id, error }
+                        }
+                    };
+                    events.push_back(event);
+                }
+                SessionEffect::StartOrchestrator { session_id, mode } => {
+                    match orchestrator.start_session(session_id, mode) {
+                        Ok(()) => {
+                            events.push_back(SessionEvent::OrchestratorStarted { session_id })
+                        }
+                        Err(error) => {
+                            let active_session_id = match &error {
+                                core::orchestrator::SessionStartError::ActiveSession {
+                                    active,
+                                    ..
+                                } => Some(*active),
+                            };
+                            error!(session_id = session_id.0, error = %error, "Failed to start session orchestrator");
+                            events.push_back(SessionEvent::OrchestratorStartFailed {
+                                requested_session_id: session_id,
+                                active_session_id,
+                                error: error.to_string(),
+                            });
+                        }
+                    }
+                }
+                SessionEffect::StopRecorder { session_id } => {
+                    let event = match recorder.stop_recording(session_id) {
+                        RecorderStopOutcome::Stopped {
+                            session_id,
+                            chunks,
+                            warning,
+                        } => {
+                            if let Some(warning) = warning.as_deref() {
+                                warn!(
+                                    session_id = session_id.0,
+                                    warning, "Recorder stopped with a warning"
+                                );
+                            }
+                            SessionEvent::RecorderStopped {
+                                session_id,
+                                chunks,
+                                warning,
+                            }
+                        }
+                        RecorderStopOutcome::StillRecording { session_id, error } => {
+                            error!(session_id = session_id.0, error, "Failed to stop recorder");
+                            SessionEvent::RecorderStillRecording { session_id, error }
+                        }
+                        RecorderStopOutcome::NotRecording {
+                            requested_session_id,
+                        } => SessionEvent::RecorderNotRecording {
+                            session_id: requested_session_id,
+                        },
+                    };
+                    events.push_back(event);
+                }
+                SessionEffect::SubmitChunk { session_id, path } => {
+                    if let Err(error) = orchestrator.on_chunk_ready(session_id, path) {
+                        warn!(session_id = session_id.0, error = %error, "Chunk was rejected");
+                    }
+                }
+                SessionEffect::DeleteChunk { path } => {
+                    if let Err(error) = audio::remove_temp_audio_file(&path) {
+                        debug!(path, error = %error, "Could not delete stale chunk");
+                    }
+                }
+                SessionEffect::FinishOrchestrator { session_id } => {
+                    finish_transcription(
+                        orchestrator.finish_session(session_id),
+                        post_processor,
+                        typer,
+                    );
+                    events.push_back(SessionEvent::OrchestratorFinished { session_id });
+                }
+                SessionEffect::CancelRecorder { session_id } => {
+                    let outcome = recorder.cancel_recording(session_id);
+                    debug!(
+                        session_id = session_id.0,
+                        ?outcome,
+                        "Recorder cancellation handled"
+                    );
+                }
+                SessionEffect::AbortOrchestrator { session_id } => {
+                    if let Err(error) = orchestrator.abort_session(session_id) {
+                        debug!(session_id = session_id.0, error = %error, "No matching orchestrator session to abort");
+                    }
+                }
+                SessionEffect::SetTrayRecording(recording) => tray.set_recording(recording),
+                SessionEffect::ReadyToExit => ready_to_exit = true,
+            }
+        }
+    }
+    ready_to_exit
+}
+
+fn finish_transcription(
+    result: Result<String, core::orchestrator::SessionError>,
+    post_processor: &dyn postprocess::TextPostProcessor,
+    typer: &dyn input::typer::TextTyper,
+) {
+    use core::orchestrator::SessionError;
+
+    match result {
+        Ok(stt_text) => {
+            if stt_text.is_empty() {
+                info!("Transcription returned empty text");
+                return;
+            }
+            let text = {
+                let mut session = post_processor.start_session();
+                session.push_stable_chunk(&stt_text);
+                match session.finish() {
+                    Ok(processed) if !processed.is_empty() => processed,
+                    Ok(_) => {
+                        warn!("Post-processing returned empty text, using original STT text");
+                        stt_text
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "Post-processing failed, using original STT text");
+                        stt_text
+                    }
+                }
+            };
+            info!(text = %text, "Typing transcribed text");
+            if let Err(error) = typer.type_text(&text) {
+                error!(error = %error, "Failed to type text");
+            }
+        }
+        Err(SessionError::NoChunks) => warn!("No audio chunks to transcribe"),
+        Err(SessionError::Routing(error)) => {
+            error!(error = %error, "Session routing failed while finalizing")
+        }
+        Err(SessionError::PartialFailure {
+            errors,
+            partial_text,
+        }) => {
+            error!(
+                failed_chunks = errors.len(),
+                "Partial transcription failure"
+            );
+            if !partial_text.is_empty()
+                && let Err(error) = typer.type_text(&partial_text)
+            {
+                error!(error = %error, "Failed to type partial text");
+            }
+        }
+        Err(SessionError::ConvergenceTimeout {
+            pending_count,
+            partial_text,
+        }) => {
+            warn!(pending_count, "Convergence timeout");
+            if !partial_text.is_empty()
+                && let Err(error) = typer.type_text(&partial_text)
+            {
+                error!(error = %error, "Failed to type partial text");
+            }
+        }
     }
 }
 
@@ -688,10 +757,17 @@ mod integration_tests {
         let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
         let orch = SessionOrchestrator::new(t, Some("en".to_string()), Duration::from_secs(5));
 
-        orch.start_session(SessionMode::Hold);
+        orch.start_session(
+            crate::core::recording_session::SessionId(1),
+            SessionMode::Hold,
+        )
+        .unwrap();
         // MockTranscriber ignores the path, so a non-existent path is fine.
-        orch.on_chunk_ready("fake_chunk.wav".to_string());
-        let result = orch.stop_session();
+        let _ = orch.on_chunk_ready(
+            crate::core::recording_session::SessionId(1),
+            "fake_chunk.wav".to_string(),
+        );
+        let result = orch.finish_session(crate::core::recording_session::SessionId(1));
 
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
         assert!(!result.unwrap().is_empty());
@@ -706,8 +782,12 @@ mod integration_tests {
         let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
         let orch = SessionOrchestrator::new(t, None, Duration::from_secs(5));
 
-        orch.start_session(SessionMode::Toggle);
-        let result = orch.stop_session();
+        orch.start_session(
+            crate::core::recording_session::SessionId(1),
+            SessionMode::Toggle,
+        )
+        .unwrap();
+        let result = orch.finish_session(crate::core::recording_session::SessionId(1));
         assert!(matches!(result, Err(SessionError::NoChunks)));
     }
 
