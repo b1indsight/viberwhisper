@@ -152,12 +152,23 @@ enum WorkerMsg {
     Chunk { index: usize, path: String },
 }
 
+enum WorkerEvent {
+    UploadStarted {
+        index: usize,
+    },
+    Completed {
+        index: usize,
+        result: Result<String, TranscribeError>,
+    },
+}
+
 struct ActiveSessionInner {
     session_id: SessionId,
     #[allow(dead_code)]
     mode: SessionMode,
-    chunks: Arc<Mutex<Vec<ChunkEntry>>>,
+    chunks: Vec<ChunkEntry>,
     chunk_tx: mpsc::SyncSender<WorkerMsg>,
+    result_rx: mpsc::Receiver<WorkerEvent>,
     worker: thread::JoinHandle<()>,
     next_index: usize,
     cancelled: Arc<AtomicBool>,
@@ -209,23 +220,23 @@ impl SessionOrchestrator {
             });
         }
 
-        let chunks: Arc<Mutex<Vec<ChunkEntry>>> = Arc::new(Mutex::new(Vec::new()));
         let (chunk_tx, chunk_rx) = mpsc::sync_channel::<WorkerMsg>(64);
+        let (result_tx, result_rx) = mpsc::channel::<WorkerEvent>();
         let cancelled = Arc::new(AtomicBool::new(false));
 
-        let worker_chunks = Arc::clone(&chunks);
         let transcriber = Arc::clone(&self.transcriber);
         let worker_cancelled = Arc::clone(&cancelled);
 
         let worker = thread::spawn(move || {
-            worker_loop(chunk_rx, worker_chunks, transcriber, worker_cancelled);
+            worker_loop(chunk_rx, result_tx, transcriber, worker_cancelled);
         });
 
         *inner = Some(ActiveSessionInner {
             session_id,
             mode,
-            chunks,
+            chunks: Vec::new(),
             chunk_tx,
+            result_rx,
             worker,
             next_index: 0,
             cancelled,
@@ -266,7 +277,7 @@ impl SessionOrchestrator {
         let index = session.next_index;
         session.next_index += 1;
 
-        session.chunks.lock().unwrap().push(ChunkEntry {
+        session.chunks.push(ChunkEntry {
             index,
             state: ChunkState::Flushed,
         });
@@ -280,8 +291,7 @@ impl SessionOrchestrator {
                 mpsc::TrySendError::Disconnected(_) => "worker channel closed",
             };
             error!(path = %path, error = message, "Failed to enqueue chunk; marking as failed");
-            let mut chunks = session.chunks.lock().unwrap();
-            if let Some(entry) = chunks.iter_mut().find(|e| e.index == index) {
+            if let Some(entry) = session.chunks.iter_mut().find(|e| e.index == index) {
                 entry.state = ChunkState::Failed(TranscribeError::Network(message.to_string()));
             }
             remove_chunk_file(&path, "rejected");
@@ -289,6 +299,7 @@ impl SessionOrchestrator {
             info!(index = index, path = %path, "Chunk enqueued for background transcription");
         }
 
+        drain_worker_events(session);
         Ok(index)
     }
 
@@ -335,50 +346,64 @@ impl SessionOrchestrator {
         // covers the entire shutdown rather than starting after a blocking send.
         drop(session.chunk_tx);
 
-        let chunks = Arc::clone(&session.chunks);
+        let mut chunks = session.chunks;
+        let result_rx = session.result_rx;
+        let worker = session.worker;
         let deadline = Instant::now() + self.convergence_timeout;
         let mut timed_out = false;
 
         loop {
-            let all_terminal = chunks.lock().unwrap().iter().all(|e| e.state.is_terminal());
-            if all_terminal {
+            if chunks.iter().all(|entry| entry.state.is_terminal()) {
                 break;
             }
-            if Instant::now() >= deadline {
-                timed_out = true;
-                let mut locked = chunks.lock().unwrap();
-                let pending_count = locked.iter().filter(|e| !e.state.is_terminal()).count();
-                warn!(
-                    pending_count = pending_count,
-                    "Convergence timeout; marking pending chunks as Failed(Timeout)"
-                );
-                for entry in locked.iter_mut() {
-                    if !entry.state.is_terminal() {
-                        entry.state = ChunkState::Failed(TranscribeError::Timeout);
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match result_rx.recv_timeout(remaining) {
+                Ok(event) => apply_worker_event(&mut chunks, event),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    timed_out = true;
+                    let pending_count = chunks
+                        .iter()
+                        .filter(|entry| !entry.state.is_terminal())
+                        .count();
+                    warn!(
+                        pending_count = pending_count,
+                        "Convergence timeout; marking pending chunks as Failed(Timeout)"
+                    );
+                    for entry in &mut chunks {
+                        if !entry.state.is_terminal() {
+                            entry.state = ChunkState::Failed(TranscribeError::Timeout);
+                        }
                     }
+                    break;
                 }
-                break;
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let error =
+                        TranscribeError::Network("worker result channel closed".to_string());
+                    for entry in &mut chunks {
+                        if !entry.state.is_terminal() {
+                            entry.state = ChunkState::Failed(error.clone());
+                        }
+                    }
+                    break;
+                }
             }
-            thread::sleep(Duration::from_millis(100));
         }
 
         if !timed_out {
-            // Worker should have processed Done and exited; join to clean up.
-            let _ = session.worker.join();
+            // Every result was received or the result channel disconnected.
+            let _ = worker.join();
         } else {
             // Drop the handle without joining — the worker may still be mid-request.
-            // It will finish naturally; its Arc<Mutex<Vec<ChunkEntry>>> clone keeps
-            // the data valid until the thread exits.
-            drop(session.worker);
+            // It only owns the result sender, so it cannot retain or mutate `chunks`.
+            drop(worker);
         }
 
-        let locked = chunks.lock().unwrap();
-
         if timed_out {
-            let texts = collect_transcribed_texts(&locked);
-            let pending_count = locked
+            let texts = collect_transcribed_texts(&chunks);
+            let pending_count = chunks
                 .iter()
-                .filter(|e| matches!(e.state, ChunkState::Failed(TranscribeError::Timeout)))
+                .filter(|entry| matches!(entry.state, ChunkState::Failed(TranscribeError::Timeout)))
                 .count();
             return Err(SessionError::ConvergenceTimeout {
                 pending_count,
@@ -386,7 +411,7 @@ impl SessionOrchestrator {
             });
         }
 
-        collect_results(&locked, self.language.as_deref())
+        collect_results(&chunks, self.language.as_deref())
     }
 
     pub fn abort_session(&self, session_id: SessionId) -> Result<(), SessionRoutingError> {
@@ -407,8 +432,7 @@ impl SessionOrchestrator {
         };
 
         session.cancelled.store(true, Ordering::Release);
-        drop(session.chunk_tx);
-        drop(session.worker);
+        drop(session);
         info!(session_id = session_id.0, "Session aborted");
         Ok(())
     }
@@ -418,7 +442,7 @@ impl SessionOrchestrator {
 
 fn worker_loop(
     rx: mpsc::Receiver<WorkerMsg>,
-    chunks: Arc<Mutex<Vec<ChunkEntry>>>,
+    result_tx: mpsc::Sender<WorkerEvent>,
     transcriber: Arc<dyn Transcriber>,
     cancelled: Arc<AtomicBool>,
 ) {
@@ -429,17 +453,8 @@ fn worker_loop(
                     remove_chunk_file(&path, "cancelled");
                     continue;
                 }
-                // Transition to Uploading.
-                {
-                    let mut locked = chunks.lock().unwrap();
-                    if let Some(entry) = locked.iter_mut().find(|e| e.index == index)
-                        && !begin_upload(entry)
-                    {
-                        drop(locked);
-                        remove_chunk_file(&path, "skipped");
-                        continue;
-                    }
-                }
+
+                let _ = result_tx.send(WorkerEvent::UploadStarted { index });
 
                 debug!(index = index, path = %path, "Worker transcribing chunk");
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -449,14 +464,10 @@ fn worker_loop(
                     Err(TranscribeError::Network("transcriber panicked".to_string()))
                 });
 
-                // Clean up the chunk file (ignore errors — file may already be gone).
+                // Clean up the chunk file before publishing the terminal result.
                 remove_chunk_file(&path, "processed");
 
-                // Record outcome.
-                let mut locked = chunks.lock().unwrap();
-                if let Some(entry) = locked.iter_mut().find(|e| e.index == index) {
-                    record_worker_result(entry, result);
-                }
+                let _ = result_tx.send(WorkerEvent::Completed { index, result });
             }
         }
     }
@@ -465,9 +476,30 @@ fn worker_loop(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+fn drain_worker_events(session: &mut ActiveSessionInner) {
+    while let Ok(event) = session.result_rx.try_recv() {
+        apply_worker_event(&mut session.chunks, event);
+    }
+}
+
+fn apply_worker_event(chunks: &mut [ChunkEntry], event: WorkerEvent) {
+    match event {
+        WorkerEvent::UploadStarted { index } => {
+            if let Some(entry) = chunks.iter_mut().find(|entry| entry.index == index) {
+                begin_upload(entry);
+            }
+        }
+        WorkerEvent::Completed { index, result } => {
+            if let Some(entry) = chunks.iter_mut().find(|entry| entry.index == index) {
+                record_worker_result(entry, result);
+            }
+        }
+    }
+}
+
 fn record_worker_result(entry: &mut ChunkEntry, result: Result<String, TranscribeError>) {
     // A convergence timeout is terminal from the caller's perspective. A late
-    // HTTP response must not rewrite the snapshot used for the timeout result.
+    // worker event must not rewrite the snapshot used for the timeout result.
     if entry.state.is_terminal() {
         debug!(
             index = entry.index,
@@ -492,7 +524,7 @@ fn begin_upload(entry: &mut ChunkEntry) -> bool {
     if !matches!(entry.state, ChunkState::Flushed) {
         debug!(
             index = entry.index,
-            "Skipping upload for chunk that is no longer flushed"
+            "Ignoring upload event for chunk that is no longer flushed"
         );
         return false;
     }
@@ -663,6 +695,183 @@ mod tests {
     // ── Tests ────────────────────────────────────────────────────────────────
 
     #[test]
+    fn worker_reports_result_without_shared_chunks() {
+        let (chunk_tx, chunk_rx) = mpsc::sync_channel(1);
+        let (result_tx, result_rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker = thread::spawn({
+            let cancelled = Arc::clone(&cancelled);
+            move || {
+                worker_loop(
+                    chunk_rx,
+                    result_tx,
+                    Arc::new(FixedTranscriber("event result".to_string())),
+                    cancelled,
+                );
+            }
+        });
+
+        chunk_tx
+            .send(WorkerMsg::Chunk {
+                index: 7,
+                path: "event-result.wav".to_string(),
+            })
+            .unwrap();
+        drop(chunk_tx);
+
+        assert!(matches!(
+            result_rx.recv().unwrap(),
+            WorkerEvent::UploadStarted { index: 7 }
+        ));
+        assert!(matches!(
+            result_rx.recv().unwrap(),
+            WorkerEvent::Completed {
+                index: 7,
+                result: Ok(ref text),
+            } if text == "event result"
+        ));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn session_applies_worker_state_transitions() {
+        let mut chunks = vec![ChunkEntry {
+            index: 3,
+            state: ChunkState::Flushed,
+        }];
+
+        apply_worker_event(&mut chunks, WorkerEvent::UploadStarted { index: 3 });
+        assert!(matches!(
+            chunks[0].state,
+            ChunkState::Uploading { attempt: 1 }
+        ));
+
+        apply_worker_event(
+            &mut chunks,
+            WorkerEvent::Completed {
+                index: 3,
+                result: Ok("done".to_string()),
+            },
+        );
+        assert!(matches!(
+            chunks[0].state,
+            ChunkState::Transcribed(ref text) if text == "done"
+        ));
+    }
+
+    #[test]
+    fn multi_chunk_results_remain_index_ordered() {
+        let mut chunks = vec![
+            ChunkEntry {
+                index: 0,
+                state: ChunkState::Flushed,
+            },
+            ChunkEntry {
+                index: 1,
+                state: ChunkState::Flushed,
+            },
+        ];
+
+        apply_worker_event(
+            &mut chunks,
+            WorkerEvent::Completed {
+                index: 1,
+                result: Ok("second".to_string()),
+            },
+        );
+        apply_worker_event(
+            &mut chunks,
+            WorkerEvent::Completed {
+                index: 0,
+                result: Ok("first".to_string()),
+            },
+        );
+
+        assert_eq!(
+            collect_results(&chunks, Some("en")).unwrap(),
+            "first second"
+        );
+    }
+
+    #[test]
+    fn disconnected_result_channel_still_drains_and_cleans_queued_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "viberwhisper-session-77-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = [dir.join("first.wav"), dir.join("second.wav")];
+        for path in &paths {
+            std::fs::write(path, b"chunk").unwrap();
+        }
+
+        let (chunk_tx, chunk_rx) = mpsc::sync_channel(2);
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            worker_loop(
+                chunk_rx,
+                result_tx,
+                Arc::new(FixedTranscriber("unused".to_string())),
+                Arc::new(AtomicBool::new(false)),
+            );
+        });
+        drop(result_rx);
+
+        for (index, path) in paths.iter().enumerate() {
+            chunk_tx
+                .send(WorkerMsg::Chunk {
+                    index,
+                    path: path.to_string_lossy().into_owned(),
+                })
+                .unwrap();
+        }
+        drop(chunk_tx);
+        worker.join().unwrap();
+
+        assert!(!dir.exists(), "worker left the empty session directory");
+    }
+
+    #[test]
+    fn cancelled_worker_drains_and_cleans_queued_files_after_result_disconnect() {
+        let dir = std::env::temp_dir().join(format!(
+            "viberwhisper-session-78-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = [dir.join("first.wav"), dir.join("second.wav")];
+        for path in &paths {
+            std::fs::write(path, b"chunk").unwrap();
+        }
+
+        let (chunk_tx, chunk_rx) = mpsc::sync_channel(2);
+        for (index, path) in paths.iter().enumerate() {
+            chunk_tx
+                .send(WorkerMsg::Chunk {
+                    index,
+                    path: path.to_string_lossy().into_owned(),
+                })
+                .unwrap();
+        }
+        drop(chunk_tx);
+
+        let (result_tx, result_rx) = mpsc::channel();
+        drop(result_rx);
+        let worker = thread::spawn(move || {
+            worker_loop(
+                chunk_rx,
+                result_tx,
+                Arc::new(FixedTranscriber("unused".to_string())),
+                Arc::new(AtomicBool::new(true)),
+            );
+        });
+        worker.join().unwrap();
+
+        assert!(!dir.exists(), "cancelled worker left queued files behind");
+    }
+
+    #[test]
     fn test_single_chunk_success() {
         let t = Arc::new(FixedTranscriber("hello world".to_string()));
         let orch = default_orchestrator(t);
@@ -817,16 +1026,22 @@ mod tests {
 
     #[test]
     fn test_timed_out_chunk_cannot_be_overwritten_by_late_worker_result() {
-        let mut entry = ChunkEntry {
+        let mut chunks = vec![ChunkEntry {
             index: 0,
             state: ChunkState::Failed(TranscribeError::Timeout),
-        };
+        }];
 
-        assert!(!begin_upload(&mut entry));
-        record_worker_result(&mut entry, Ok("late result".to_string()));
+        apply_worker_event(&mut chunks, WorkerEvent::UploadStarted { index: 0 });
+        apply_worker_event(
+            &mut chunks,
+            WorkerEvent::Completed {
+                index: 0,
+                result: Ok("late result".to_string()),
+            },
+        );
 
         assert!(matches!(
-            entry.state,
+            chunks[0].state,
             ChunkState::Failed(TranscribeError::Timeout)
         ));
     }
@@ -840,9 +1055,23 @@ mod tests {
         let orch = default_orchestrator(t);
         orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
 
+        let dir = std::env::temp_dir().join(format!(
+            "viberwhisper-session-79-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<_> = (0..100)
+            .map(|index| {
+                let path = dir.join(format!("queue-{index}.wav"));
+                std::fs::write(&path, b"chunk").unwrap();
+                path
+            })
+            .collect();
+
         let started = Instant::now();
-        for index in 0..100 {
-            let _ = orch.on_chunk_ready(SessionId(1), format!("queue-{index}.wav"));
+        for path in &paths {
+            let _ = orch.on_chunk_ready(SessionId(1), path.to_string_lossy().into_owned());
         }
 
         assert!(
@@ -850,19 +1079,22 @@ mod tests {
             "enqueueing blocked on a full worker queue"
         );
         let inner = orch.inner.lock().unwrap();
-        let chunks = inner.as_ref().unwrap().chunks.lock().unwrap();
+        let chunks = &inner.as_ref().unwrap().chunks;
         assert!(chunks.iter().any(|entry| matches!(
             entry.state,
             ChunkState::Failed(TranscribeError::Network(ref message))
                 if message == "worker queue full"
         )));
-        drop(chunks);
         drop(inner);
 
         let (lock, condvar) = &*release;
         *lock.lock().unwrap() = true;
         condvar.notify_all();
         let _ = orch.finish_session(SessionId(1));
+        assert!(
+            !dir.exists(),
+            "queue processing left temporary files behind"
+        );
     }
 
     #[test]

@@ -153,11 +153,14 @@ Parsed with `clap::Parser`. No subcommand runs the main recording loop.
 ### Key Concepts
 
 - **Chunk State Machine**: `Flushed → Uploading → Transcribed / Failed`
+- **Session-owned Results**: Each active session exclusively owns its `Vec<ChunkEntry>`. The worker never reads or mutates chunk state; it reports `UploadStarted` and `Completed` events through a session-specific result channel.
 - **Convergence Timeout**: Configurable via `convergence_timeout_secs`; chunks still pending at the deadline are marked `Failed(Timeout)`
 - **Partial Failure**: If some chunks succeed and others fail, returns partial text with an error
 - **Bounded Queue**: Chunk submission is non-blocking. A full queue marks the chunk failed and deletes its temporary file rather than stalling session shutdown.
-- **Cleanup Guarantee**: Processed, rejected, orphaned, timed-out queued, and panicking-transcriber chunk paths are cleaned up by the orchestrator.
+- **Cleanup Guarantee**: Processed, rejected, orphaned, cancelled, result-disconnected, and panicking-transcriber chunk paths are cleaned up by the orchestrator. A disconnected result receiver does not stop the worker from draining paths it already owns.
 - **Strict Session Routing**: start, chunk, finish, and abort operations carry `SessionId`; duplicate starts and mismatched IDs are rejected without replacing active work.
+
+`on_chunk_ready` opportunistically drains completed worker events while recording. During shutdown, `finish_session` closes the bounded input sender and waits on the result receiver with the configured convergence deadline. Timeout or abort drops the session-owned chunk vector immediately; a detached worker can finish synchronous transcription and file cleanup, but late events cannot retain or mutate the ended session or reach a newer session.
 
 ### `SessionError` Enum
 
