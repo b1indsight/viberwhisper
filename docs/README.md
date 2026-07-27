@@ -40,3 +40,4 @@ Implementation plans and technical specs for each feature.
 | [11-packaging-and-ci.md](plan/11-packaging-and-ci.md) | Done | Cross-platform CI plus tag-triggered macOS DMG and Windows MSI release packaging |
 | [12-local-gemma-service.md](plan/12-local-gemma-service.md) | Done | Local Gemma inference service, lifecycle management, and CLI integration |
 | [14-tray-recording-control.md](plan/14-tray-recording-control.md) | Done | Tray-only control, input-independent recording state, and strict SessionId routing |
+| [16-session-owned-chunk-results.md](plan/16-session-owned-chunk-results.md) | Done | Keep chunk state and transcription results owned by one session; workers return events instead of mutating shared chunk storage |
