@@ -25,3 +25,4 @@
 2026-07-11: Remove the floating overlay; add debounced tray click recording control, an input-independent recording state machine, strict SessionId routing, session-scoped audio paths, and state-aware shutdown cleanup
 2026-07-11: Stop idle-loop chunk polling after recorder shutdown by clearing stop-time readiness bookkeeping and requiring an active session
 2026-07-27: Make transcription chunk state session-owned; workers now return lifecycle events through per-session channels and retain only temporary-file cleanup responsibility after session shutdown
+2026-07-31: Share language-aware transcription text merging across offline chunk uploads and session orchestration

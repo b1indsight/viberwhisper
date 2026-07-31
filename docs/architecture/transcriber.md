@@ -7,10 +7,12 @@ Converts a WAV file path to a transcribed text string. The module defines a trai
 ## Module Layout
 
 ```
-src/transcriber/
-  mod.rs      — re-exports all public symbols
-  api.rs      — Transcriber trait + ApiTranscriber + MockTranscriber
-  factory.rs  — create_transcriber factory function
+src/
+  text.rs         — shared language-aware transcription text merging
+  transcriber/
+    mod.rs        — re-exports all public symbols
+    api.rs        — Transcriber trait + ApiTranscriber + MockTranscriber
+    factory.rs    — create_transcriber factory function
 ```
 
 ## `Transcriber` Trait (`src/transcriber/api.rs`)
@@ -90,7 +92,8 @@ Each chunk upload retries on transient failures:
 
 ### Language-Aware Text Merging
 
-`merge_texts(texts, language)` joins transcribed chunks:
+`crate::text::merge_texts(texts, language)` is shared by `ApiTranscriber` and
+`SessionOrchestrator` when joining transcribed chunks:
 
 - **Chinese** (`zh`, `zh-cn`, etc.): Joins without separator (Chinese text doesn't use spaces between words).
 - **Other languages**: Joins with a single space.
