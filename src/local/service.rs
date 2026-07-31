@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use super::{LocalPaths, LocalQuantization, LocalServiceConfig};
+
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
 const HEALTH_INITIAL_DELAY: Duration = Duration::from_secs(20);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -30,7 +32,7 @@ pub struct LocalServiceManager {
     port: u16,
     model_dir: PathBuf,
     venv_dir: PathBuf,
-    quantization: String,
+    quantization: LocalQuantization,
     process: Option<Child>,
     log_file: Option<PathBuf>,
     /// True only when this manager spawned the server process itself.
@@ -38,17 +40,30 @@ pub struct LocalServiceManager {
 }
 
 impl LocalServiceManager {
+    pub fn for_paths(paths: LocalPaths) -> Self {
+        Self::new(17_265, paths.model_dir, paths.venv_dir)
+    }
+
+    pub fn from_config(config: LocalServiceConfig) -> Self {
+        Self::with_quantization(
+            config.port,
+            config.paths.model_dir,
+            config.paths.venv_dir,
+            config.quantization,
+        )
+    }
+
     /// Creates a new local service manager using the default `int8` quantization mode.
-    pub fn new(port: u16, model_dir: PathBuf, venv_dir: PathBuf) -> Self {
-        Self::with_quantization(port, model_dir, venv_dir, "int8".to_string())
+    fn new(port: u16, model_dir: PathBuf, venv_dir: PathBuf) -> Self {
+        Self::with_quantization(port, model_dir, venv_dir, LocalQuantization::Int8)
     }
 
     /// Creates a new local service manager with an explicit quantization mode.
-    pub fn with_quantization(
+    fn with_quantization(
         port: u16,
         model_dir: PathBuf,
         venv_dir: PathBuf,
-        quantization: String,
+        quantization: LocalQuantization,
     ) -> Self {
         let log_file = model_dir.parent().map(Self::default_log_file_path);
         Self {
@@ -107,7 +122,7 @@ impl LocalServiceManager {
                     &script_path,
                     &self.model_dir,
                     self.port,
-                    &self.quantization,
+                    self.quantization.as_str(),
                 ));
                 uv_command
                     .stdin(Stdio::null())
@@ -126,7 +141,7 @@ impl LocalServiceManager {
                             .arg("--port")
                             .arg(self.port.to_string())
                             .arg("--quantization")
-                            .arg(&self.quantization)
+                            .arg(self.quantization.as_str())
                             .stdin(Stdio::null())
                             .stdout(stdout)
                             .stderr(stderr);
@@ -147,7 +162,7 @@ impl LocalServiceManager {
                     .arg("--port")
                     .arg(self.port.to_string())
                     .arg("--quantization")
-                    .arg(&self.quantization)
+                    .arg(self.quantization.as_str())
                     .stdin(Stdio::null())
                     .stdout(stdout_stdio)
                     .stderr(stderr_stdio);

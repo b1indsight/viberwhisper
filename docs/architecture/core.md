@@ -2,145 +2,44 @@
 
 ## Purpose
 
-The `core` module (`src/core/`) contains configuration persistence (`config.rs`), CLI argument parsing (`cli.rs`), recording lifecycle state (`recording_session.rs`), and transcription orchestration (`orchestrator.rs`). It also serves as the boundary where local-mode runtime settings are carried into the main loop.
+The `core` module contains strict v2 configuration persistence, CLI parsing, recording lifecycle state, and transcription orchestration. Application-level configuration assembly lives in `src/runtime_config.rs` so business consumers never receive the full persisted document.
 
----
+## Config (`src/core/config/`)
 
-## Config (`src/core/config.rs`)
+The config package intentionally has four files:
 
-### `AppConfig` Struct
-
-```rust
-pub struct AppConfig {
-    // --- Transcription (STT) ---
-    pub api_key: Option<String>,              // not saved to file; from env or JSON
-    pub transcription_api_url: String,        // full URL of the audio transcription endpoint
-    pub provider: Option<String>,             // informational label only
-    pub model: String,
-    pub language: Option<String>,
-    pub prompt: Option<String>,
-    pub temperature: f32,
-
-    // --- Hotkeys ---
-    pub hold_hotkey: String,
-    pub toggle_hotkey: String,
-
-    // --- Audio ---
-    pub mic_gain: f32,
-    pub max_chunk_duration_secs: u32,         // max seconds per audio chunk (default: 30)
-    pub max_chunk_size_bytes: u64,            // max bytes per chunk incl. WAV header (default: 23 MiB)
-    pub max_retries: u32,                     // max retry attempts (default: 3, max: 16)
-    pub convergence_timeout_secs: u64,        // timeout (default: 30s, max: 3600s)
-
-    // --- LLM Post-processing ---
-    pub post_process_enabled: bool,           // default: false
-    pub post_process_streaming_enabled: bool, // default: true (preheat mode)
-    pub post_process_api_url: Option<String>,
-    pub post_process_api_key: Option<String>, // not saved to file
-    pub post_process_model: Option<String>,
-    pub post_process_prompt: Option<String>,
-    pub post_process_temperature: f32,        // default: 0.0
-
-    // --- Local runtime ---
-    pub local_mode: bool,                     // default: false
-    pub local_data_dir: Option<String>,       // default: ~/.viberwhisper
-    pub local_server_port: u16,               // default: 17265
-    pub local_quantization: String,           // default: "int8"
-}
-```
-
-Serialized to/from `config.json` via `serde_json`. `api_key` and `post_process_api_key` are excluded from the saved file (`#[serde(skip)]`).
-
-**Defaults:**
-
-| Field | Default |
+| File | Responsibility |
 |---|---|
-| `transcription_api_url` | `"https://api.groq.com/openai/v1/audio/transcriptions"` |
-| `model` | `"whisper-large-v3-turbo"` |
-| `language` | `"zh"` |
-| `temperature` | `0.0` |
-| `hold_hotkey` | `"F8"` |
-| `toggle_hotkey` | `"F9"` |
-| `mic_gain` | `1.0` |
-| `max_chunk_duration_secs` | `30` |
-| `max_chunk_size_bytes` | `24117248` (23 MiB) |
-| `max_retries` | `3` |
-| `convergence_timeout_secs` | `30` |
-| `post_process_enabled` | `false` |
-| `post_process_streaming_enabled` | `true` |
-| `post_process_temperature` | `0.0` |
-| `local_mode` | `false` |
-| `local_server_port` | `17265` |
-| `local_quantization` | `"int8"` |
+| `document.rs` | `ConfigDocument`, nested v2 serde schema, and defaults |
+| `fields.rs` | one canonical `ConfigKey`/`FieldSpec` catalog used by list/get/set |
+| `store.rs` | platform path discovery plus fail-closed load and atomic save |
+| `mod.rs` | facade, config errors, validation report, secret-safe value types |
 
-### Key Methods
+`ConfigDocument` accepts only a complete document with `schema_version: 2`. Missing or unknown fields, wrong versions, invalid JSON, and non-finite floats are errors. A missing file alone returns the in-memory defaults.
 
-**`AppConfig::load() -> Self`**
+`ConfigStore::discover()` gets the application directory from `platform::config_dir()` and appends `config.json`. Reads and writes therefore use the same canonical path independent of the launch working directory. Writes use a temporary file in the destination directory followed by atomic publication.
 
-Loads config in priority order:
-1. Defaults via `Default::default()`
-2. `config.json` (partial override via `apply_json`)
-3. `GROQ_API_KEY` env var → `api_key` (backward compat, lower priority)
-4. `TRANSCRIPTION_API_KEY` env var → `api_key` (higher priority)
-5. `POST_PROCESS_API_KEY` env var → `post_process_api_key`
+`EnvironmentSecretSource` reads only `TRANSCRIPTION_API_KEY` and `POST_PROCESS_API_KEY` through the runtime assembly layer. Environment values override disk secrets but are never copied into `ConfigDocument`; CLI output reports only `unset`, `disk`, `environment`, or `environment overrides disk`.
 
-**`save(&self) -> Result<()>`**
+## Runtime assembly (`src/runtime_config.rs`)
 
-Serializes to pretty-printed JSON. Runtime/environment secrets are never introduced into the file. If `api_key`, legacy `groq_api_key`, or `post_process_api_key` already exists in `config.json`, it is preserved when other fields are updated.
+`runtime_config` selects the API or Local profile, constructs module-owned consumer configs, and aggregates construction errors into `ListenerConfig` or `BackendConfig`. Profile selection is consumed during assembly: `BackendConfig` stores the common transcriber and post-process values directly, plus an optional Local service, rather than duplicating common fields across enum variants. It contains no generic validator registry and no duplicated raw DTO layer.
 
-**`get_field(&self, key: &str) -> Option<String>`**
-
-Returns a string representation of the named field. Supported keys: `api_key`, `groq_api_key`, `transcription_api_url`, `provider`, `model`, `hold_hotkey`, `toggle_hotkey`, `temperature`, `mic_gain`, `language`, `prompt`, `max_chunk_duration_secs`, `max_chunk_size_bytes`, `max_retries`, `convergence_timeout_secs`, `post_process_enabled`, `post_process_streaming_enabled`, `post_process_api_url`, `post_process_api_key`, `post_process_model`, `post_process_prompt`, `post_process_temperature`, `local_mode`, `local_data_dir`, `local_server_port`, `local_quantization`. Returns `"*** (set)"` for API key fields if present; `None` for unknown keys.
-
-**`set_field(&mut self, key: &str, value: &str) -> Result<(), String>`**
-
-Sets a field by name with type conversion and validation. Non-finite floats are rejected, `max_retries` is capped at 16, and `convergence_timeout_secs` is capped at 3600. Secret fields cannot be set through this command; use the documented environment variables or edit `config.json` directly. Local runtime keys can also be mutated from CLI.
-
-**`apply_json(&mut self, json: &Value)`** *(private)*
-
-Applies partial JSON overrides. Backward compatibility:
-- Old `"hotkey"` key maps to `hold_hotkey`
-- Old `"groq_api_key"` key maps to `api_key` (if `api_key` not already set)
-- Local runtime keys (`local_mode`, `local_data_dir`, `local_server_port`, `local_quantization`) are also deserialized from `config.json`
-
----
+Each consumer receives a type owned by its module: `HotkeyConfig`, `AudioConfig`, `OrchestratorConfig`, `TranscriberConfig`, `PostProcessConfig`, `LocalPaths`, or `LocalServiceConfig`. Local mode uses `ApiAuth::None`; API mode uses a redacted `SecretValue` when configured and `ApiAuth::None` otherwise. `local start` selects Local for one invocation without mutating the persisted profile.
 
 ## CLI (`src/core/cli.rs`)
 
-### `Cli` Struct
+No subcommand runs the recording listener. Other commands are:
 
-```rust
-pub struct Cli {
-    pub command: Option<Commands>,
-}
-```
-
-Parsed with `clap::Parser`. No subcommand runs the main recording loop.
-
-### `Commands` Enum
-
-| Variant | Description |
+| Command | Description |
 |---|---|
-| `Config { action: ConfigAction }` | Configuration management subcommand |
-| `Local { action: LocalCommand }` | Local Gemma runtime lifecycle commands |
-| `Convert { input: String, output: Option<String> }` | Transcribe a WAV file to text |
+| `config path` | Print the canonical file path |
+| `config check` | Resolve the active listener profile and report construction issues |
+| `config list/get/set` | Use canonical dotted keys from the single field catalog |
+| `local install/start/stop/status` | Manage the Local runtime; stop only requires Local paths |
+| `convert <wav>` | Resolve the persisted backend and transcribe a WAV file |
 
-### `ConfigAction` Enum
-
-| Variant | Description |
-|---|---|
-| `List` | Print all config fields and current values |
-| `Get { key: String }` | Print a single field value |
-| `Set { key: String, value: String }` | Update a field and save |
-
-### `LocalCommand` Enum
-
-| Variant | Description |
-|---|---|
-| `Install` | Create venv, install Python dependencies, download model, and verify install |
-| `Start` | Force `local_mode = true`, start local server, then enter the normal listener loop |
-| `Stop` | Stop the persisted local server process |
-| `Status` | Print runtime state, pid, port, memory usage, and `/health` result |
+`config set` parses the canonical field type and saves the updated document without running cross-field business validation. This permits incremental configuration; `config check` or the command that consumes a profile reports incomplete runtime configuration. Secret and schema fields are read-only. Legacy aliases are rejected.
 
 ---
 
@@ -195,8 +94,4 @@ Exit is represented as `ShutdownRequested`. It cancels recorder/orchestrator wor
 
 ## Main Integration Notes
 
-Although the main event loop lives in `src/main.rs`, `core` owns the configuration and CLI abstractions that feed it:
-
-- `run_listener_with_config(config)` is the common entry point for both default mode and `local start`
-- when `config.local_mode` is true, startup first calls into the `local` module to ensure the runtime exists, always rewrites the transcription endpoint, and conditionally rewrites the post-process endpoint when `post_process_enabled` is on
-- the same orchestrator pipeline is reused regardless of whether the backend is Groq/OpenAI-compatible cloud STT or the local Gemma service
+`main.rs` loads one `ConfigDocument`, asks `runtime_config` for a typed workflow configuration, and passes each narrow value to its consumer. API and Local backends reuse the same recording/orchestration pipeline; no endpoint rewriting or persisted-document mutation occurs in `main`.

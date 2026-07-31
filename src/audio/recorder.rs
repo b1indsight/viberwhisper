@@ -1,6 +1,8 @@
 use std::collections::HashSet;
+use std::error;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -10,8 +12,97 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
 use tracing::{debug, error, info, instrument, warn};
 
-use super::{remove_temp_audio_file, unique_temp_session_dir, unique_temp_wav_path_in};
+use super::{
+    AudioConfig, remove_temp_audio_file, unique_temp_session_dir, unique_temp_wav_path_in,
+};
 use crate::core::recording_session::SessionId;
+
+#[derive(Debug)]
+enum RecorderError {
+    Io(std::io::Error),
+    Wav(hound::Error),
+    Clock(std::time::SystemTimeError),
+    DefaultInputConfig(cpal::DefaultStreamConfigError),
+    BuildStream(cpal::BuildStreamError),
+    PlayStream(cpal::PlayStreamError),
+    NoInputDevice,
+    UnsupportedSampleFormat,
+    NotRecording,
+    NoAudioData,
+    NoActiveSession,
+}
+
+impl fmt::Display for RecorderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "I/O error: {error}"),
+            Self::Wav(error) => write!(f, "WAV error: {error}"),
+            Self::Clock(error) => write!(f, "system clock error: {error}"),
+            Self::DefaultInputConfig(error) => write!(f, "input configuration error: {error}"),
+            Self::BuildStream(error) => write!(f, "failed to build input stream: {error}"),
+            Self::PlayStream(error) => write!(f, "failed to start input stream: {error}"),
+            Self::NoInputDevice => write!(f, "no input device available"),
+            Self::UnsupportedSampleFormat => write!(f, "unsupported sample format"),
+            Self::NotRecording => write!(f, "not currently recording"),
+            Self::NoAudioData => write!(f, "no audio data recorded"),
+            Self::NoActiveSession => write!(f, "no active recording session"),
+        }
+    }
+}
+
+impl error::Error for RecorderError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Wav(error) => Some(error),
+            Self::Clock(error) => Some(error),
+            Self::DefaultInputConfig(error) => Some(error),
+            Self::BuildStream(error) => Some(error),
+            Self::PlayStream(error) => Some(error),
+            Self::NoInputDevice
+            | Self::UnsupportedSampleFormat
+            | Self::NotRecording
+            | Self::NoAudioData
+            | Self::NoActiveSession => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for RecorderError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<hound::Error> for RecorderError {
+    fn from(error: hound::Error) -> Self {
+        Self::Wav(error)
+    }
+}
+
+impl From<std::time::SystemTimeError> for RecorderError {
+    fn from(error: std::time::SystemTimeError) -> Self {
+        Self::Clock(error)
+    }
+}
+
+impl From<cpal::DefaultStreamConfigError> for RecorderError {
+    fn from(error: cpal::DefaultStreamConfigError) -> Self {
+        Self::DefaultInputConfig(error)
+    }
+}
+
+impl From<cpal::BuildStreamError> for RecorderError {
+    fn from(error: cpal::BuildStreamError) -> Self {
+        Self::BuildStream(error)
+    }
+}
+
+impl From<cpal::PlayStreamError> for RecorderError {
+    fn from(error: cpal::PlayStreamError) -> Self {
+        Self::PlayStream(error)
+    }
+}
 
 pub struct AudioRecorder {
     recording: Arc<AtomicBool>,
@@ -63,11 +154,7 @@ fn push_mono_chunk(
 }
 
 /// Write `samples` as a 16-bit mono WAV file to `path`.
-fn write_wav_to_path(
-    path: &PathBuf,
-    samples: &[i16],
-    sample_rate: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn write_wav_to_path(path: &Path, samples: &[i16], sample_rate: u32) -> Result<(), RecorderError> {
     let spec = WavSpec {
         channels: 1,
         sample_rate,
@@ -83,21 +170,15 @@ fn write_wav_to_path(
 }
 
 impl AudioRecorder {
-    #[cfg(test)]
-    pub fn new(gain: f32) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::with_config(gain, 30, 23 * 1024 * 1024)
-    }
-
     /// Create a recorder with chunk-splitting config.
     ///
     /// - `max_chunk_duration_secs`: flush a chunk every N seconds; 0 = no duration limit.
     /// - `max_chunk_size_bytes`: flush when the uncompressed PCM + 44-byte header exceeds
     ///   this size; 0 = no size limit.
-    pub fn with_config(
-        gain: f32,
-        max_chunk_duration_secs: u32,
-        max_chunk_size_bytes: u64,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn with_config(config: &AudioConfig) -> Self {
+        let gain = config.mic_gain;
+        let max_chunk_duration_secs = config.chunk_limits.max_duration_secs;
+        let max_chunk_size_bytes = config.chunk_limits.max_size_bytes;
         let host = cpal::default_host();
 
         let default_device_name = host
@@ -116,9 +197,12 @@ impl AudioRecorder {
             Err(e) => warn!(error = %e, "Failed to enumerate input devices"),
         }
 
-        info!(gain = gain, "Mic gain set");
+        info!(
+            gain,
+            max_chunk_duration_secs, max_chunk_size_bytes, "Audio recorder configured"
+        );
 
-        Ok(AudioRecorder {
+        AudioRecorder {
             recording: Arc::new(AtomicBool::new(false)),
             active_session_id: None,
             buffer: Arc::new(Mutex::new(Vec::new())),
@@ -133,7 +217,7 @@ impl AudioRecorder {
             chunk_max_samples: 0,
             max_chunk_duration_secs,
             max_chunk_size_bytes,
-        })
+        }
     }
 
     pub fn start_recording(&mut self, session_id: SessionId) -> RecorderStartOutcome {
@@ -154,14 +238,11 @@ impl AudioRecorder {
     }
 
     #[instrument(skip(self))]
-    fn try_start_recording(
-        &mut self,
-        session_id: SessionId,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn try_start_recording(&mut self, session_id: SessionId) -> Result<(), RecorderError> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
-            .ok_or("No input device available")?;
+            .ok_or(RecorderError::NoInputDevice)?;
         let config = device.default_input_config()?;
 
         let sample_rate = config.sample_rate().0;
@@ -256,7 +337,7 @@ impl AudioRecorder {
             ),
             _ => {
                 self.recording.store(false, Ordering::Relaxed);
-                return Err("Unsupported sample format".into());
+                return Err(RecorderError::UnsupportedSampleFormat);
             }
         }?;
 
@@ -332,7 +413,7 @@ impl AudioRecorder {
         &mut self,
         samples: &[i16],
         chunk_index: usize,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, RecorderError> {
         let session_dir = self.ensure_session_dir()?;
         let path = unique_temp_wav_path_in(&session_dir, &format!("chunk_live_{chunk_index:04}"))?;
 
@@ -405,10 +486,10 @@ impl AudioRecorder {
     }
 
     #[instrument(skip(self))]
-    fn try_stop_recording(&mut self) -> Result<StopResult, Box<dyn std::error::Error>> {
+    fn try_stop_recording(&mut self) -> Result<StopResult, RecorderError> {
         if !self.recording.load(Ordering::Relaxed) {
             debug!("Not recording, ignoring stop request");
-            return Err("Not currently recording".into());
+            return Err(RecorderError::NotRecording);
         }
 
         debug!("Stopping recording");
@@ -420,12 +501,12 @@ impl AudioRecorder {
         drop(self.stream.take());
         debug!("Stream stopped");
 
-        let (buffer_len, tail_samples, chunk_index, wrote_live_chunks) = {
+        let (tail_samples, chunk_index, wrote_live_chunks) = {
             let buffer = self.buffer.lock().unwrap();
             debug!(samples = buffer.len(), "Buffer size");
 
             if buffer.is_empty() {
-                return Err("No audio data recorded".into());
+                return Err(RecorderError::NoAudioData);
             }
 
             let tail_samples = buffer.to_vec();
@@ -434,17 +515,8 @@ impl AudioRecorder {
             } else {
                 0
             };
-            (
-                buffer.len(),
-                tail_samples,
-                chunk_index,
-                self.flushed_samples > 0,
-            )
+            (tail_samples, chunk_index, self.flushed_samples > 0)
         };
-
-        if buffer_len == 0 {
-            return Err("No audio data recorded".into());
-        }
 
         // If chunking is enabled and enough unflushed audio remains, catch up by
         // writing every complete chunk before the final tail.
@@ -481,7 +553,7 @@ impl AudioRecorder {
         &mut self,
         samples: &[i16],
         start_chunk_index: usize,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<String>, RecorderError> {
         let mut paths = Vec::new();
         for (offset, chunk) in samples.chunks(self.chunk_max_samples).enumerate() {
             paths.push(self.write_chunk(chunk, start_chunk_index + offset)?);
@@ -490,10 +562,7 @@ impl AudioRecorder {
     }
 
     /// Write the entire buffer as a single WAV file when no chunking occurred.
-    fn write_full_recording(
-        &mut self,
-        buffer: &[i16],
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    fn write_full_recording(&mut self, buffer: &[i16]) -> Result<String, RecorderError> {
         let session_dir = self.ensure_session_dir()?;
         let path = unique_temp_wav_path_in(&session_dir, "recording")?;
         let filename = path.to_string_lossy().to_string();
@@ -584,13 +653,13 @@ impl AudioRecorder {
         self.chunk_max_samples = 0;
     }
 
-    fn ensure_session_dir(&mut self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fn ensure_session_dir(&mut self) -> Result<PathBuf, RecorderError> {
         let session_dir = match &self.session_dir {
             Some(path) => path.clone(),
             None => {
                 let session_id = self
                     .active_session_id
-                    .ok_or("No active recording session")?;
+                    .ok_or(RecorderError::NoActiveSession)?;
                 let path = unique_temp_session_dir(session_id.0)?;
                 self.session_dir = Some(path.clone());
                 path
@@ -682,35 +751,15 @@ mod tests {
     // so keep them on platforms where teardown is stable.
     #[test]
     #[cfg(not(target_os = "windows"))]
-    fn test_audio_recorder_creation() {
-        let recorder = AudioRecorder::new(1.0);
-        assert!(recorder.is_ok());
-    }
-
-    #[test]
-    #[cfg(not(target_os = "windows"))]
-    fn test_recorder_not_recording_initially() {
-        let recorder = AudioRecorder::new(1.0).unwrap();
-        assert!(!recorder.is_recording());
-    }
-
-    #[test]
-    #[cfg(not(target_os = "windows"))]
     fn test_recorder_with_config() {
-        let recorder = AudioRecorder::with_config(1.0, 30, 23 * 1024 * 1024);
-        assert!(recorder.is_ok());
-        let r = recorder.unwrap();
-        assert_eq!(r.max_chunk_duration_secs, 30);
-        assert_eq!(r.max_chunk_size_bytes, 23 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_stop_result_variants_exist() {
-        // Just verify the enum compiles and variants are accessible.
-        let _single = StopResult::SingleFile("path".to_string());
-        let _tail = StopResult::TailChunk("path".to_string());
-        let _chunks = StopResult::ChunkFiles(vec!["path".to_string()]);
-        let _chunks = StopResult::ChunksOnly;
+        let config = AudioConfig::from_sections(
+            &crate::core::config::AudioSection::default(),
+            &crate::core::config::ChunkingSection::default(),
+        );
+        let recorder = AudioRecorder::with_config(&config);
+        assert!(!recorder.is_recording());
+        assert_eq!(recorder.max_chunk_duration_secs, 30);
+        assert_eq!(recorder.max_chunk_size_bytes, 23 * 1024 * 1024);
     }
 
     fn recorder_for_buffer(samples: Vec<i16>, chunk_max_samples: usize) -> AudioRecorder {

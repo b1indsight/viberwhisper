@@ -2,7 +2,11 @@
 
 ## Purpose
 
-The `platform` module (`src/platform/`) provides platform-specific implementations of the `TextTyper` trait from `src/input/typer.rs`. The correct implementation is selected at compile time via `#[cfg(target_os)]`.
+The `platform` module provides platform-specific text injection and the platform-specific application configuration directory. Implementations are selected at compile time via `#[cfg(target_os)]`.
+
+## Configuration directory
+
+`platform::config_dir()` delegates to the current OS module. macOS appends `com.b1indsight.viberwhisper`; Windows appends `ViberWhisper`. `core::config::ConfigStore` alone appends `config.json`, so platform code does not depend on config schema or errors.
 
 ---
 

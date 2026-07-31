@@ -1,5 +1,7 @@
-use crate::audio::split_wav;
-use crate::core::config::AppConfig;
+use crate::audio::{ChunkLimits, split_wav};
+use crate::core::config::{
+    ApiAuth, ChunkingSection, ConfigKey, TranscriptionSection, ValidationIssue,
+};
 use crate::text::merge_texts;
 use crate::transcriber::TranscribeError;
 use std::time::Duration;
@@ -14,8 +16,10 @@ pub trait Transcriber: Send + Sync {
     fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError>;
 }
 
+#[cfg(test)]
 pub struct MockTranscriber;
 
+#[cfg(test)]
 impl Transcriber for MockTranscriber {
     #[instrument(name = "mock_stt", skip(self), fields(path = %wav_path))]
     fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError> {
@@ -23,6 +27,77 @@ impl Transcriber for MockTranscriber {
         let text = "This is mock transcribed text".to_string();
         info!(result = %text, "Transcription complete");
         Ok(text)
+    }
+}
+
+#[derive(Debug)]
+pub struct TranscriberConfig {
+    endpoint: reqwest::Url,
+    auth: ApiAuth,
+    model: String,
+    language: Option<String>,
+    prompt: Option<String>,
+    temperature: f32,
+    chunk_limits: ChunkLimits,
+    max_retries: u32,
+}
+
+impl TranscriberConfig {
+    pub(crate) fn validate(
+        endpoint: &str,
+        auth: ApiAuth,
+        model: &str,
+        transcription: &TranscriptionSection,
+        chunking: &ChunkingSection,
+        chunk_limits: ChunkLimits,
+    ) -> Result<Self, Vec<ValidationIssue>> {
+        let mut issues = Vec::new();
+        let endpoint = match reqwest::Url::parse(endpoint) {
+            Ok(url) if matches!(url.scheme(), "http" | "https") => Some(url),
+            Ok(_) => {
+                issues.push(ValidationIssue::new(
+                    ConfigKey::ApiTranscriptionUrl,
+                    "transcriber.url_scheme",
+                    "transcription URL must use http or https",
+                ));
+                None
+            }
+            Err(error) => {
+                issues.push(ValidationIssue::new(
+                    ConfigKey::ApiTranscriptionUrl,
+                    "transcriber.url_invalid",
+                    format!("invalid transcription URL: {error}"),
+                ));
+                None
+            }
+        };
+        if model.trim().is_empty() {
+            issues.push(ValidationIssue::new(
+                ConfigKey::ApiTranscriptionModel,
+                "transcriber.model_empty",
+                "transcription model cannot be empty",
+            ));
+        }
+        if chunking.max_retries > 16 {
+            issues.push(ValidationIssue::new(
+                ConfigKey::ChunkingMaxRetries,
+                "transcriber.retries_too_large",
+                "max retries must be at most 16",
+            ));
+        }
+        match endpoint {
+            Some(endpoint) if issues.is_empty() => Ok(Self {
+                endpoint,
+                auth,
+                model: model.to_string(),
+                language: transcription.language.clone(),
+                prompt: transcription.prompt.clone(),
+                temperature: transcription.temperature,
+                chunk_limits,
+                max_retries: chunking.max_retries,
+            }),
+            _ => Err(issues),
+        }
     }
 }
 
@@ -35,16 +110,13 @@ impl Transcriber for MockTranscriber {
 /// transcriber will automatically split the file into smaller chunks, upload each chunk
 /// individually (with exponential-backoff retry on transient errors), and merge the results.
 pub struct ApiTranscriber {
-    api_key: String,
-    api_url: String,
+    auth: ApiAuth,
+    api_url: reqwest::Url,
     model: String,
     language: Option<String>,
     prompt: Option<String>,
     temperature: f32,
-    /// Maximum duration per chunk in seconds. 0 = no duration limit.
-    max_chunk_duration_secs: u32,
-    /// Maximum byte size per chunk (including WAV header). 0 = no size limit.
-    max_chunk_size_bytes: u64,
+    chunk_limits: ChunkLimits,
     /// Maximum retry attempts per chunk on transient errors (5xx / network).
     max_retries: u32,
     /// Shared HTTP client (connection reuse + request timeout).
@@ -52,25 +124,28 @@ pub struct ApiTranscriber {
 }
 
 impl ApiTranscriber {
-    pub fn from_config(config: &AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let api_key = config
-            .api_key
-            .clone()
-            .ok_or("api_key not configured (set api_key in config.json or GROQ_API_KEY env var)")?;
-        Ok(Self {
-            api_key,
-            api_url: config.transcription_api_url.clone(),
-            model: config.model.clone(),
-            language: config.language.clone(),
-            prompt: config.prompt.clone(),
+    pub fn new(config: TranscriberConfig) -> Result<Self, reqwest::Error> {
+        let transcriber = Self {
+            auth: config.auth,
+            api_url: config.endpoint,
+            model: config.model,
+            language: config.language,
+            prompt: config.prompt,
             temperature: config.temperature,
-            max_chunk_duration_secs: config.max_chunk_duration_secs,
-            max_chunk_size_bytes: config.max_chunk_size_bytes,
+            chunk_limits: config.chunk_limits,
             max_retries: config.max_retries,
             client: reqwest::blocking::Client::builder()
                 .timeout(STT_REQUEST_TIMEOUT)
                 .build()?,
-        })
+        };
+        info!(
+            model = %transcriber.model,
+            api_url = %transcriber.api_url,
+            language = transcriber.language.as_deref().unwrap_or("auto"),
+            max_retries = transcriber.max_retries,
+            "Using API transcriber for speech recognition"
+        );
+        Ok(transcriber)
     }
 
     /// Upload a single WAV file and return its transcription text.
@@ -101,11 +176,11 @@ impl ApiTranscriber {
             form = form.text("prompt", prompt.clone());
         }
 
-        let response = self
-            .client
-            .post(&self.api_url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .multipart(form)
+        let mut request = self.client.post(self.api_url.clone()).multipart(form);
+        if let ApiAuth::Bearer(secret) = &self.auth {
+            request = request.bearer_auth(secret.expose());
+        }
+        let response = request
             .send()
             .map_err(|e| TranscribeError::Network(e.to_string()))?;
 
@@ -208,12 +283,8 @@ impl Transcriber for ApiTranscriber {
     fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError> {
         info!("Starting transcription");
 
-        let chunks = split_wav(
-            wav_path,
-            self.max_chunk_duration_secs,
-            self.max_chunk_size_bytes,
-        )
-        .map_err(|e| TranscribeError::Network(format!("failed to split {wav_path}: {e}")))?;
+        let chunks = split_wav(wav_path, self.chunk_limits)
+            .map_err(|e| TranscribeError::Network(format!("failed to split {wav_path}: {e}")))?;
 
         if chunks.is_empty() {
             // File fits within limits — use single-shot upload path (no splitting overhead).
@@ -225,9 +296,10 @@ impl Transcriber for ApiTranscriber {
         let total = chunks.len();
         info!(chunks = total, "Audio split into chunks for transcription");
 
-        let mut texts: Vec<String> = Vec::with_capacity(total);
+        let mut texts = Vec::with_capacity(total);
         for chunk in &chunks {
-            let text = self.upload_file_with_retry(chunk.path_str(), chunk.index, total)?;
+            let path = chunk.path.to_string_lossy();
+            let text = self.upload_file_with_retry(&path, chunk.index, total)?;
             texts.push(text);
         }
 
@@ -240,76 +312,34 @@ impl Transcriber for ApiTranscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::AppConfig;
+    use crate::core::config::{ApiAuth, ChunkingSection, SecretValue, TranscriptionSection};
 
-    #[test]
-    fn test_mock_transcriber_returns_text() {
-        let t = MockTranscriber;
-        let result = t.transcribe("fake.wav");
-        assert!(result.is_ok());
-        assert!(!result.unwrap().is_empty());
+    fn validated_config(endpoint: &str, max_retries: u32) -> TranscriberConfig {
+        validated_config_with_auth(
+            endpoint,
+            max_retries,
+            ApiAuth::Bearer(SecretValue::new("test_key")),
+        )
     }
 
-    #[test]
-    fn test_api_transcriber_from_config_no_key_fails() {
-        let config = AppConfig::default(); // no api_key
-        let result = ApiTranscriber::from_config(&config);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_api_transcriber_from_config_with_key() {
-        let config = AppConfig {
-            api_key: Some("test_key".to_string()),
-            ..Default::default()
+    fn validated_config_with_auth(
+        endpoint: &str,
+        max_retries: u32,
+        auth: ApiAuth,
+    ) -> TranscriberConfig {
+        let chunking = ChunkingSection {
+            max_retries,
+            ..ChunkingSection::default()
         };
-        let result = ApiTranscriber::from_config(&config);
-        assert!(result.is_ok());
-        let t = result.unwrap();
-        assert_eq!(t.api_key, "test_key");
-        assert_eq!(
-            t.api_url,
-            "https://api.groq.com/openai/v1/audio/transcriptions"
-        );
-        assert_eq!(t.model, "whisper-large-v3-turbo");
-        assert_eq!(t.max_chunk_duration_secs, 30);
-        assert_eq!(t.max_chunk_size_bytes, 23 * 1024 * 1024);
-        assert_eq!(t.max_retries, 3);
-    }
-
-    #[test]
-    fn test_api_transcriber_custom_url() {
-        let config = AppConfig {
-            api_key: Some("key".to_string()),
-            transcription_api_url: "https://api.openai.com/v1/audio/transcriptions".to_string(),
-            ..Default::default()
-        };
-        let t = ApiTranscriber::from_config(&config).unwrap();
-        assert_eq!(t.api_url, "https://api.openai.com/v1/audio/transcriptions");
-    }
-
-    #[test]
-    fn test_api_transcriber_chunk_config_from_config() {
-        let config = AppConfig {
-            api_key: Some("key".to_string()),
-            max_chunk_duration_secs: 60,
-            max_chunk_size_bytes: 10_000_000,
-            max_retries: 5,
-            ..Default::default()
-        };
-        let t = ApiTranscriber::from_config(&config).unwrap();
-        assert_eq!(t.max_chunk_duration_secs, 60);
-        assert_eq!(t.max_chunk_size_bytes, 10_000_000);
-        assert_eq!(t.max_retries, 5);
-    }
-
-    #[test]
-    fn test_is_retryable_status() {
-        assert!(ApiTranscriber::is_retryable_status(500));
-        assert!(ApiTranscriber::is_retryable_status(503));
-        assert!(!ApiTranscriber::is_retryable_status(400));
-        assert!(!ApiTranscriber::is_retryable_status(404));
-        assert!(!ApiTranscriber::is_retryable_status(429));
+        TranscriberConfig::validate(
+            endpoint,
+            auth,
+            "whisper-large-v3-turbo",
+            &TranscriptionSection::default(),
+            &chunking,
+            ChunkLimits::from_section(&chunking),
+        )
+        .unwrap()
     }
 
     // --- structured error tests against a local HTTP stub ---
@@ -318,6 +348,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
 
     /// Minimal HTTP server that answers every connection with a fixed response
     /// and counts how many requests it served.
@@ -350,14 +381,45 @@ mod tests {
         (port, requests)
     }
 
+    fn spawn_header_stub() -> (u16, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 16_384];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(size) => request.extend_from_slice(&buffer[..size]),
+                }
+            }
+            let headers = String::from_utf8_lossy(&request)
+                .split("\r\n\r\n")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            sender.send(headers).unwrap();
+            let body = r#"{"text":"ok"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (port, receiver)
+    }
+
     fn transcriber_for_port(port: u16, max_retries: u32) -> ApiTranscriber {
-        let config = AppConfig {
-            api_key: Some("test_key".to_string()),
-            transcription_api_url: format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
+        let config = validated_config(
+            &format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
             max_retries,
-            ..Default::default()
-        };
-        ApiTranscriber::from_config(&config).unwrap()
+        );
+        ApiTranscriber::new(config).unwrap()
     }
 
     fn temp_upload_file(name: &str) -> std::path::PathBuf {
@@ -379,6 +441,37 @@ mod tests {
 
         assert_eq!(result.unwrap(), "hello");
         let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn authorization_header_matches_typed_auth_mode() {
+        for (auth, expected_header) in [
+            (ApiAuth::None, None),
+            (
+                ApiAuth::Bearer(SecretValue::new("header-token")),
+                Some("authorization: bearer header-token"),
+            ),
+        ] {
+            let (port, headers) = spawn_header_stub();
+            let config = validated_config_with_auth(
+                &format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
+                0,
+                auth,
+            );
+            let transcriber = ApiTranscriber::new(config).unwrap();
+            let file = temp_upload_file("auth");
+
+            assert_eq!(
+                transcriber.upload_file(file.to_str().unwrap()).unwrap(),
+                "ok"
+            );
+            let headers = headers.recv().unwrap().to_ascii_lowercase();
+            match expected_header {
+                Some(expected) => assert!(headers.contains(expected)),
+                None => assert!(!headers.contains("authorization:")),
+            }
+            let _ = std::fs::remove_file(file);
+        }
     }
 
     #[test]

@@ -4,21 +4,21 @@ mod input;
 mod local;
 mod platform;
 mod postprocess;
+mod runtime_config;
 mod text;
 mod transcriber;
 
 use clap::Parser;
 use core::cli::{Cli, Commands, ConfigAction, LocalCommand};
-use core::config::AppConfig;
+use core::config::{ConfigDocument, ConfigStore, EnvironmentSecretSource};
 use local::{
-    LocalServiceManager, PythonRuntime, dependencies_installed, detect_python_runtime,
+    LocalPaths, LocalServiceManager, PythonRuntime, dependencies_installed, detect_python_runtime,
     download_model, install_requirements, model_weights_present, setup_venv, verify_install,
 };
+use runtime_config::{BackendConfig, ListenerConfig, ProfileSelection};
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
-
-const LOCAL_MODEL_NAME: &str = "gemma-4-E2B-it";
 
 struct LocalServiceGuard(Option<LocalServiceManager>);
 
@@ -52,13 +52,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_listener()?;
         }
         Some(Commands::Config { action }) => {
-            handle_config(action);
+            handle_config(action)?;
         }
         Some(Commands::Local { action }) => {
             handle_local(action)?;
         }
         Some(Commands::Convert { input, output }) => {
-            handle_convert(&input, output.as_deref());
+            handle_convert(&input, output.as_deref())?;
         }
     }
 
@@ -66,29 +66,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn handle_local(action: LocalCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let mut config = AppConfig::load();
+    let (store, document) = load_config()?;
+    let (config_dir, home_dir) = config_context(&store)?;
     match action {
         LocalCommand::Install => {
-            ensure_local_install(&config, true)?;
+            let paths = runtime_config::resolve_local_paths(&document, &config_dir, &home_dir)?;
+            ensure_local_install(&paths, true)?;
             println!("Local Gemma runtime is installed.");
             Ok(())
         }
         LocalCommand::Start => {
-            config.local_mode = true;
+            let config = runtime_config::resolve_listener(
+                &document,
+                &EnvironmentSecretSource,
+                ProfileSelection::Local,
+                &config_dir,
+                &home_dir,
+            )?;
             run_listener_with_config(config)
         }
         LocalCommand::Stop => {
-            let paths = local_paths(&config)?;
-            let mut manager =
-                LocalServiceManager::new(config.local_server_port, paths.model_dir, paths.venv_dir);
+            let paths = runtime_config::resolve_local_paths(&document, &config_dir, &home_dir)?;
+            let mut manager = LocalServiceManager::for_paths(paths);
             manager.stop();
             println!("Local Gemma service stopped.");
             Ok(())
         }
         LocalCommand::Status => {
-            let paths = local_paths(&config)?;
-            let manager =
-                LocalServiceManager::new(config.local_server_port, paths.model_dir, paths.venv_dir);
+            let config = runtime_config::resolve_local_service(&document, &config_dir, &home_dir)?;
+            let manager = LocalServiceManager::from_config(config);
             let status = manager.status()?;
             println!("running: {}", status.running);
             println!("port: {}", status.port);
@@ -111,36 +117,22 @@ fn handle_local(action: LocalCommand) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
-struct LocalPaths {
-    venv_dir: PathBuf,
-    model_dir: PathBuf,
-}
-
-fn prepare_runtime_config(
-    mut config: AppConfig,
-) -> Result<(AppConfig, Option<LocalServiceManager>), Box<dyn std::error::Error>> {
-    if !config.local_mode {
-        return Ok((config, None));
-    }
-
-    let paths = ensure_local_install(&config, false)?;
-    let mut manager = LocalServiceManager::with_quantization(
-        config.local_server_port,
-        paths.model_dir,
-        paths.venv_dir,
-        config.local_quantization.clone(),
-    );
+fn start_local_backend(
+    backend: &mut BackendConfig,
+) -> Result<Option<LocalServiceManager>, Box<dyn std::error::Error>> {
+    let Some(config) = backend.local_service.take() else {
+        return Ok(None);
+    };
+    ensure_local_install(&config.paths, false)?;
+    let mut manager = LocalServiceManager::from_config(config);
     manager.start()?;
-    config = apply_local_endpoint_overrides(&config, &manager.base_url());
-
-    Ok((config, Some(manager)))
+    Ok(Some(manager))
 }
 
 fn ensure_local_install(
-    config: &AppConfig,
+    paths: &LocalPaths,
     install_deps: bool,
-) -> Result<LocalPaths, Box<dyn std::error::Error>> {
-    let paths = local_paths(config)?;
+) -> Result<(), Box<dyn std::error::Error>> {
     let hf_endpoint =
         std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string());
     let runtime = detect_python_runtime()?;
@@ -173,7 +165,7 @@ fn ensure_local_install(
     println!("[local] step 4/4 – verify");
     verify_install(&paths.venv_dir, &paths.model_dir)?;
 
-    Ok(paths)
+    Ok(())
 }
 
 fn print_python_runtime(runtime: &PythonRuntime) {
@@ -190,25 +182,20 @@ fn print_python_runtime(runtime: &PythonRuntime) {
     }
 }
 
-fn local_paths(config: &AppConfig) -> Result<LocalPaths, Box<dyn std::error::Error>> {
-    let data_dir = match &config.local_data_dir {
-        Some(path) if path.starts_with("~/") => {
-            let home = dirs::home_dir().ok_or("could not determine home directory")?;
-            home.join(&path[2..])
-        }
-        Some(path) => PathBuf::from(path),
-        None => default_local_data_dir()?,
-    };
-
-    Ok(LocalPaths {
-        venv_dir: data_dir.join("venv"),
-        model_dir: data_dir.join("model"),
-    })
+fn load_config() -> Result<(ConfigStore, ConfigDocument), Box<dyn std::error::Error>> {
+    let store = ConfigStore::discover()?;
+    let document = store.load()?;
+    Ok((store, document))
 }
 
-fn default_local_data_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn config_context(store: &ConfigStore) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let config_dir = store
+        .path()
+        .parent()
+        .ok_or("configuration path has no parent directory")?
+        .to_path_buf();
     let home_dir = dirs::home_dir().ok_or("could not determine home directory")?;
-    Ok(home_dir.join(".viberwhisper"))
+    Ok((config_dir, home_dir))
 }
 
 fn local_requirements_path() -> PathBuf {
@@ -234,10 +221,19 @@ fn find_server_file(filename: &str) -> PathBuf {
 }
 
 fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
-    run_listener_with_config(AppConfig::load())
+    let (store, document) = load_config()?;
+    let (config_dir, home_dir) = config_context(&store)?;
+    let config = runtime_config::resolve_listener(
+        &document,
+        &EnvironmentSecretSource,
+        ProfileSelection::Configured,
+        &config_dir,
+        &home_dir,
+    )?;
+    run_listener_with_config(config)
 }
 
-fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
+fn run_listener_with_config(mut config: ListenerConfig) -> Result<(), Box<dyn std::error::Error>> {
     use audio::AudioRecorder;
     use core::orchestrator::SessionOrchestrator;
     use core::recording_session::{
@@ -246,49 +242,27 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
     };
     use input::hotkey::{HotkeyEvent, HotkeyManager, HotkeySource};
     use input::tray::{TrayAction, TrayManager};
-    use postprocess::create_post_processor;
+    use postprocess::PostProcessor;
     use std::sync::Arc;
-    use std::time::Duration;
-    use transcriber::{Transcriber, create_transcriber};
+    use transcriber::{ApiTranscriber, Transcriber};
 
     println!("ViberWhisper - Voice-to-Text Input");
     println!("===================================");
     println!();
 
-    let (config, local_manager) = prepare_runtime_config(config)?;
+    let local_manager = start_local_backend(&mut config.backend)?;
     let _local_manager = LocalServiceGuard::new(local_manager);
-    info!(
-        hold_hotkey = %config.hold_hotkey,
-        toggle_hotkey = %config.toggle_hotkey,
-        model = %config.model,
-        language = %config.language.as_deref().unwrap_or("auto"),
-        api_url = %config.transcription_api_url,
-        max_chunk_duration_secs = config.max_chunk_duration_secs,
-        max_chunk_size_bytes = config.max_chunk_size_bytes,
-        max_retries = config.max_retries,
-        convergence_timeout_secs = config.convergence_timeout_secs,
-        post_process_enabled = config.post_process_enabled,
-        "Config loaded"
-    );
+    let hotkey_manager = HotkeyManager::new(&config.hotkeys);
 
-    let hotkey_manager = HotkeyManager::new(&config.hold_hotkey, &config.toggle_hotkey)?;
-
-    let mut recorder = AudioRecorder::with_config(
-        config.mic_gain,
-        config.max_chunk_duration_secs,
-        config.max_chunk_size_bytes,
-    )?;
+    let mut recorder = AudioRecorder::with_config(&config.audio);
 
     // Build transcriber and wrap in Arc<dyn Transcriber> for orchestrator injection.
-    let transcriber: Arc<dyn Transcriber> = Arc::from(create_transcriber(&config)?);
+    let transcriber: Arc<dyn Transcriber> =
+        Arc::new(ApiTranscriber::new(config.backend.transcriber)?);
 
-    let post_processor = create_post_processor(&config);
+    let post_processor = PostProcessor::new(config.backend.post_process);
 
-    let orchestrator = SessionOrchestrator::new(
-        Arc::clone(&transcriber),
-        config.language.clone(),
-        Duration::from_secs(config.convergence_timeout_secs),
-    );
+    let orchestrator = SessionOrchestrator::new(Arc::clone(&transcriber), config.orchestrator);
 
     #[cfg(target_os = "macos")]
     let typer = platform::macos::MacTyper;
@@ -301,14 +275,12 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
     info!("System tray icon started");
     let mut session_machine = RecordingSessionMachine::new();
 
-    println!(
-        "Hold {} to record, release to transcribe.",
-        config.hold_hotkey
-    );
-    println!(
-        "Press {} to start recording, press again to stop.",
-        config.toggle_hotkey
-    );
+    if let Some(hotkey) = config.hotkeys.hold_label.as_deref() {
+        println!("Hold {hotkey} to record, release to transcribe.");
+    }
+    if let Some(hotkey) = config.hotkeys.toggle_label.as_deref() {
+        println!("Press {hotkey} to start recording, press again to stop.");
+    }
     println!("Press Ctrl+C to exit.");
     println!();
 
@@ -330,7 +302,7 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
                 &mut recorder,
                 &orchestrator,
                 &mut tray,
-                post_processor.as_ref(),
+                &post_processor,
                 &typer,
             ) {
                 break Ok(());
@@ -360,7 +332,7 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
                     &mut recorder,
                     &orchestrator,
                     &mut tray,
-                    post_processor.as_ref(),
+                    &post_processor,
                     &typer,
                 );
             }
@@ -376,7 +348,7 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
                 &mut recorder,
                 &orchestrator,
                 &mut tray,
-                post_processor.as_ref(),
+                &post_processor,
                 &typer,
             );
         }
@@ -386,8 +358,8 @@ fn run_listener_with_config(config: AppConfig) -> Result<(), Box<dyn std::error:
             let status = format!("{:?}", session_machine.state());
             debug!(
                 status = %status,
-                hold_hotkey = %config.hold_hotkey,
-                toggle_hotkey = %config.toggle_hotkey,
+                hold_hotkey = %config.hotkeys.hold_label.as_deref().unwrap_or("disabled"),
+                toggle_hotkey = %config.hotkeys.toggle_label.as_deref().unwrap_or("disabled"),
                 "Heartbeat"
             );
         }
@@ -402,7 +374,7 @@ fn drive_session(
     recorder: &mut audio::AudioRecorder,
     orchestrator: &core::orchestrator::SessionOrchestrator,
     tray: &mut input::tray::TrayManager,
-    post_processor: &dyn postprocess::TextPostProcessor,
+    post_processor: &postprocess::PostProcessor,
     typer: &dyn input::typer::TextTyper,
 ) -> bool {
     use audio::{RecorderStartOutcome, RecorderStopOutcome};
@@ -529,7 +501,7 @@ fn drive_session(
 
 fn finish_transcription(
     result: Result<String, core::orchestrator::SessionError>,
-    post_processor: &dyn postprocess::TextPostProcessor,
+    post_processor: &postprocess::PostProcessor,
     typer: &dyn input::typer::TextTyper,
 ) {
     use core::orchestrator::SessionError;
@@ -592,153 +564,95 @@ fn finish_transcription(
     }
 }
 
-fn handle_config(action: ConfigAction) {
-    use crate::core::config::AppConfig;
+fn handle_config(action: ConfigAction) -> Result<(), Box<dyn std::error::Error>> {
+    let store = ConfigStore::discover()?;
+    if matches!(action, ConfigAction::Path) {
+        println!("{}", store.path().display());
+        return Ok(());
+    }
 
-    let mut config = AppConfig::load();
-
+    let mut document = store.load()?;
+    let secrets = EnvironmentSecretSource;
+    let (config_dir, home_dir) = config_context(&store)?;
     match action {
+        ConfigAction::Path => unreachable!(),
+        ConfigAction::Check => {
+            runtime_config::check(&document, &secrets, &config_dir, &home_dir)?;
+            println!("Configuration is valid.");
+        }
         ConfigAction::List => {
-            println!("{:<25} Value", "Key");
-            println!("{}", "-".repeat(60));
-            for key in &[
-                "api_key",
-                "transcription_api_url",
-                "model",
-                "hold_hotkey",
-                "toggle_hotkey",
-                "language",
-                "prompt",
-                "temperature",
-                "mic_gain",
-                "max_chunk_duration_secs",
-                "max_chunk_size_bytes",
-                "max_retries",
-                "convergence_timeout_secs",
-                "post_process_enabled",
-                "post_process_streaming_enabled",
-                "post_process_api_url",
-                "post_process_api_key",
-                "post_process_model",
-                "post_process_prompt",
-                "post_process_temperature",
-                "local_mode",
-                "local_data_dir",
-                "local_server_port",
-                "local_quantization",
-            ] {
-                let value = config
-                    .get_field(key)
-                    .unwrap_or_else(|| "(not set)".to_string());
-                println!("{:<25} {}", key, value);
+            println!("{:<48} Value", "Key");
+            println!("{}", "-".repeat(80));
+            for spec in ConfigDocument::field_specs() {
+                let value = document.get_field(spec.key.as_str(), &secrets)?;
+                println!("{:<48} {}", spec.key.as_str(), value);
             }
         }
-
-        ConfigAction::Get { key } => match config.get_field(&key) {
-            Some(value) => println!("{}", value),
-            None => {
-                eprintln!("Error: unknown config key '{}'", key);
-                std::process::exit(1);
-            }
-        },
-
-        ConfigAction::Set { key, value } => match config.set_field(&key, &value) {
-            Ok(()) => {
-                if let Err(e) = config.save() {
-                    eprintln!("Failed to save config: {}", e);
-                    std::process::exit(1);
-                }
-                println!("Set {} = {}", key, value);
-            }
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
-        },
+        ConfigAction::Get { key } => {
+            println!("{}", document.get_field(&key, &secrets)?);
+        }
+        ConfigAction::Set { key, value } => {
+            let mut candidate = document.clone();
+            candidate.set_field(&key, &value)?;
+            store.save(&candidate)?;
+            document = candidate;
+            let displayed = document.get_field(&key, &secrets)?;
+            println!("Set {key} = {displayed}");
+        }
     }
+    Ok(())
 }
 
-fn handle_convert(input: &str, output: Option<&str>) {
-    use postprocess::create_post_processor;
-    use transcriber::{Transcriber, create_transcriber};
+fn handle_convert(input: &str, output: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    use postprocess::PostProcessor;
+    use transcriber::{ApiTranscriber, Transcriber};
 
     println!("Transcribing: {}", input);
 
-    let config = AppConfig::load();
-    let (config, local_manager) = match prepare_runtime_config(config) {
-        Ok(result) => result,
-        Err(e) => {
-            eprintln!("Failed to prepare runtime: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let (store, document) = load_config()?;
+    let (config_dir, home_dir) = config_context(&store)?;
+    let mut config = runtime_config::resolve_convert(
+        &document,
+        &EnvironmentSecretSource,
+        &config_dir,
+        &home_dir,
+    )?;
+    let local_manager = start_local_backend(&mut config)?;
     let _local_manager = LocalServiceGuard::new(local_manager);
-    let transcriber: Box<dyn Transcriber> = match create_transcriber(&config) {
-        Ok(transcriber) => transcriber,
+    let transcriber = ApiTranscriber::new(config.transcriber)?;
+    let post_processor = PostProcessor::new(config.post_process);
+
+    let stt_text = transcriber.transcribe(input)?;
+    let text = match post_processor.process(&stt_text) {
+        Ok(processed) if !processed.is_empty() => processed,
+        Ok(_) => {
+            // Empty post-process output is not useful; keep the STT text.
+            warn!("Post-processing returned empty text, using original STT text");
+            stt_text
+        }
         Err(e) => {
-            eprintln!("Failed to initialize transcriber: {}", e);
-            std::process::exit(1);
+            // Runtime LLM errors should not discard a successful STT result.
+            warn!(error = %e, "Post-processing failed, using original STT text");
+            stt_text
         }
     };
-    let post_processor = create_post_processor(&config);
-
-    match transcriber.transcribe(input) {
-        Ok(stt_text) => {
-            let text = match post_processor.process(&stt_text) {
-                Ok(processed) if !processed.is_empty() => processed,
-                Ok(_) => {
-                    // Empty post-process output is not useful; keep the STT text.
-                    warn!("Post-processing returned empty text, using original STT text");
-                    stt_text
-                }
-                Err(e) => {
-                    // Runtime LLM errors should not discard a successful STT result.
-                    warn!(error = %e, "Post-processing failed, using original STT text");
-                    stt_text
-                }
-            };
-            match output {
-                Some(path) => {
-                    if let Err(e) = std::fs::write(path, &text) {
-                        eprintln!("Failed to write file: {}", e);
-                        std::process::exit(1);
-                    }
-                    println!("Saved to: {}", path);
-                }
-                None => println!("{}", text),
+    match output {
+        Some(path) => {
+            if let Err(e) = std::fs::write(path, &text) {
+                eprintln!("Failed to write file: {}", e);
+                return Err(e.into());
             }
+            println!("Saved to: {}", path);
         }
-        Err(e) => {
-            eprintln!("Transcription failed: {}", e);
-            std::process::exit(1);
-        }
+        None => println!("{}", text),
     }
-}
-
-fn apply_local_endpoint_overrides(config: &AppConfig, base_url: &str) -> AppConfig {
-    let mut local = config.clone();
-    local.api_key = Some("local".to_string());
-    local.transcription_api_url = format!("{base_url}/v1/audio/transcriptions");
-    if local.post_process_enabled {
-        local.post_process_api_key = Some("local".to_string());
-        local.post_process_api_url = Some(format!("{base_url}/v1/chat/completions"));
-        local.post_process_model = Some(LOCAL_MODEL_NAME.to_string());
-    }
-    local
+    Ok(())
 }
 
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::core::config::AppConfig;
-    use audio::AudioRecorder;
     use transcriber::{MockTranscriber, Transcriber};
-
-    #[test]
-    fn test_audio_module_loads() {
-        let audio_result = AudioRecorder::new(1.0);
-        assert!(audio_result.is_ok());
-    }
 
     #[test]
     fn test_full_pipeline_mock() {
@@ -751,12 +665,18 @@ mod integration_tests {
 
     #[test]
     fn test_orchestrator_integration_single_chunk() {
-        use self::core::orchestrator::{SessionMode, SessionOrchestrator};
+        use self::core::orchestrator::{OrchestratorConfig, SessionMode, SessionOrchestrator};
         use std::sync::Arc;
-        use std::time::Duration;
 
         let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
-        let orch = SessionOrchestrator::new(t, Some("en".to_string()), Duration::from_secs(5));
+        let orch = SessionOrchestrator::new(
+            t,
+            OrchestratorConfig::validate(
+                &crate::core::config::SessionSection::default(),
+                Some("en".to_string()),
+            )
+            .unwrap(),
+        );
 
         orch.start_session(
             crate::core::recording_session::SessionId(1),
@@ -776,12 +696,17 @@ mod integration_tests {
 
     #[test]
     fn test_orchestrator_no_chunks() {
-        use self::core::orchestrator::{SessionError, SessionMode, SessionOrchestrator};
+        use self::core::orchestrator::{
+            OrchestratorConfig, SessionError, SessionMode, SessionOrchestrator,
+        };
         use std::sync::Arc;
-        use std::time::Duration;
 
         let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
-        let orch = SessionOrchestrator::new(t, None, Duration::from_secs(5));
+        let orch = SessionOrchestrator::new(
+            t,
+            OrchestratorConfig::validate(&crate::core::config::SessionSection::default(), None)
+                .unwrap(),
+        );
 
         orch.start_session(
             crate::core::recording_session::SessionId(1),
@@ -790,52 +715,5 @@ mod integration_tests {
         .unwrap();
         let result = orch.finish_session(crate::core::recording_session::SessionId(1));
         assert!(matches!(result, Err(SessionError::NoChunks)));
-    }
-
-    #[test]
-    fn test_apply_local_endpoint_overrides_enabled_post_process() {
-        let config = AppConfig {
-            local_server_port: 17265,
-            post_process_enabled: true,
-            post_process_model: Some("gpt-4o-mini".to_string()),
-            ..Default::default()
-        };
-
-        let local = apply_local_endpoint_overrides(&config, "http://127.0.0.1:17265");
-
-        assert_eq!(
-            local.transcription_api_url,
-            "http://127.0.0.1:17265/v1/audio/transcriptions"
-        );
-        assert_eq!(
-            local.post_process_api_url.as_deref(),
-            Some("http://127.0.0.1:17265/v1/chat/completions")
-        );
-        assert!(local.post_process_enabled);
-        assert_eq!(local.post_process_model.as_deref(), Some("gemma-4-E2B-it"));
-        assert_eq!(local.api_key.as_deref(), Some("local"));
-        assert_eq!(local.post_process_api_key.as_deref(), Some("local"));
-    }
-
-    #[test]
-    fn test_apply_local_endpoint_overrides_keeps_post_process_disabled() {
-        let config = AppConfig {
-            local_server_port: 17265,
-            post_process_enabled: false,
-            post_process_model: Some("gpt-4o-mini".to_string()),
-            ..Default::default()
-        };
-
-        let local = apply_local_endpoint_overrides(&config, "http://127.0.0.1:17265");
-
-        assert_eq!(
-            local.transcription_api_url,
-            "http://127.0.0.1:17265/v1/audio/transcriptions"
-        );
-        assert!(!local.post_process_enabled);
-        assert_eq!(local.post_process_model.as_deref(), Some("gpt-4o-mini"));
-        assert_eq!(local.post_process_api_url, None);
-        assert_eq!(local.post_process_api_key, None);
-        assert_eq!(local.api_key.as_deref(), Some("local"));
     }
 }

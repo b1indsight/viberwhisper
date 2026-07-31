@@ -1,25 +1,48 @@
 {
-  "api_key": "YOUR_API_KEY_HERE",
-  "provider": "groq",
-  "transcription_api_url": "https://api.groq.com/openai/v1/audio/transcriptions",
-  "model": "whisper-large-v3-turbo",
-  "language": "zh",
-  "prompt": "以下是一段简体中文的普通话句子，去掉首尾的语气词",
-  "temperature": 0,
-  "hold_hotkey": "F8",
-  "toggle_hotkey": "F9",
-  "mic_gain": 3.0,
-  "max_chunk_duration_secs": 30,
-  "max_chunk_size_bytes": 24117248,
-  "max_retries": 3,
-  "convergence_timeout_secs": 30,
-  "post_process_enabled": false,
-  "post_process_streaming_enabled": true,
-  "post_process_api_url": "https://api.openai.com/v1/chat/completions",
-  "post_process_model": "gpt-4o-mini",
-  "post_process_temperature": 0.0,
-  "local_mode": false,
-  "local_data_dir": "~/.viberwhisper",
-  "local_server_port": 17265,
-  "local_quantization": "int8"
+  "schema_version": 2,
+  "input": {
+    "hold_hotkey": "F8",
+    "toggle_hotkey": "F9"
+  },
+  "audio": {
+    "mic_gain": 3.0
+  },
+  "chunking": {
+    "max_duration_secs": 30,
+    "max_size_bytes": 24117248,
+    "max_retries": 3
+  },
+  "session": {
+    "convergence_timeout_secs": 30
+  },
+  "transcription": {
+    "language": "zh",
+    "prompt": "以下是一段简体中文的普通话句子，去掉首尾的语气词",
+    "temperature": 0.0
+  },
+  "post_process": {
+    "enabled": false,
+    "preheat_enabled": true,
+    "prompt": null,
+    "temperature": 0.0
+  },
+  "inference": {
+    "active": "api",
+    "api": {
+      "provider": "groq",
+      "transcription": {
+        "api_url": "https://api.groq.com/openai/v1/audio/transcriptions",
+        "model": "whisper-large-v3-turbo"
+      },
+      "post_process": {
+        "api_url": "https://api.openai.com/v1/chat/completions",
+        "model": "gpt-4o-mini"
+      }
+    },
+    "local": {
+      "data_dir": "~/.viberwhisper",
+      "server_port": 17265,
+      "quantization": "int8"
+    }
+  }
 }

@@ -32,38 +32,28 @@
 
 ### 2. 配置
 
-项目已提供示例配置文件 `config.example.json`，先复制一份：
+程序只读取严格的 nested v2 配置，不探测当前目录中的旧版平铺 `config.json`，也不会自动迁移。实际路径可用下面的命令查看：
 
 ```bash
-cp config.example.json config.json
+viberwhisper config path
 ```
 
-然后按需修改 `config.json` 中的字段，例如：
+- macOS：`~/Library/Application Support/com.b1indsight.viberwhisper/config.json`
+- Windows：`%APPDATA%\ViberWhisper\config.json`
 
-```json
-{
-  "api_key": "YOUR_API_KEY_HERE",
-  "provider": "groq",
-  "transcription_api_url": "https://api.groq.com/openai/v1/audio/transcriptions",
-  "model": "whisper-large-v3-turbo",
-  "language": "zh",
-  "prompt": "以下是一段简体中文的普通话句子，去掉首尾的语气词",
-  "temperature": 0,
-  "hold_hotkey": "F8",
-  "toggle_hotkey": "F9",
-  "mic_gain": 3.0
-}
-```
+配置文件不存在时使用内置默认值。可将 [`config.example.json`](config.example.json) 复制到上述路径，或使用
+`config set` 创建完整配置。已有文件必须包含 `schema_version: 2` 和完整结构；缺字段、未知字段、损坏 JSON
+或其他 schema 版本都会明确报错，不会静默回退默认值。
 
-> **向后兼容**：旧版配置中的 `groq_api_key` 和 `hotkey` 字段仍可识别，自动映射到 `api_key` 和 `hold_hotkey`。
-
-也可以通过环境变量设置 API 密钥（优先级高于配置文件）：
+API 密钥优先从环境变量读取，其次才读取配置文件中的对应 secret 字段：
 
 ```bash
-export GROQ_API_KEY=your_api_key_here          # 旧版兼容
-export TRANSCRIPTION_API_KEY=your_api_key_here  # 转写 API 密钥（优先级最高）
-export POST_PROCESS_API_KEY=your_key_here       # LLM 后处理 API 密钥
+export TRANSCRIPTION_API_KEY=your_api_key_here
+export POST_PROCESS_API_KEY=your_key_here
 ```
+
+环境变量中的密钥只参与运行时解析，绝不会写回磁盘。`config get/list` 只显示密钥来源状态，不显示值；
+secret key 也不能通过 `config set` 修改。
 
 ### 3. 构建并运行
 
@@ -79,7 +69,7 @@ cargo run -- local install
 cargo run -- local start
 ```
 
-`local install` 会先校验本机 Python 版本是否为 3.10 或以上，然后优先使用 `uv` 创建虚拟环境和安装 `server/requirements.txt` 中的依赖；若未安装 `uv`，则回退到系统 Python。随后会下载 `google/gemma-4-E2B-it` 模型并校验安装结果。默认数据目录为 `~/.viberwhisper`，可通过 `local_data_dir` 覆盖；如需 Hugging Face 镜像，可在安装前设置 `HF_ENDPOINT`。
+`local install` 会先校验本机 Python 版本是否为 3.10 或以上，然后优先使用 `uv` 创建虚拟环境和安装 `server/requirements.txt` 中的依赖；若未安装 `uv`，则回退到系统 Python。随后会下载 `google/gemma-4-E2B-it` 模型并校验安装结果。默认数据目录为 `~/.viberwhisper`，可通过 `inference.local.data_dir` 覆盖；如需 Hugging Face 镜像，可在安装前设置 `HF_ENDPOINT`。
 
 ### 4. 使用
 
@@ -107,6 +97,10 @@ viberwhisper local status
 # 查看所有配置
 viberwhisper config list
 
+# 显示配置路径 / 检查当前 profile 的运行配置
+viberwhisper config path
+viberwhisper config check
+
 # 查看单个配置项
 viberwhisper config get <key>
 
@@ -120,46 +114,44 @@ viberwhisper convert input.wav --output output.txt
 
 ## 配置说明
 
-### 转写服务
+CLI 只接受下表中的 canonical dotted key；`hotkey`、`model`、`local_mode` 等旧别名不再支持。
+
+### 输入、音频与会话
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `api_key` | 字符串 | 无 | 转写服务 API 密钥（必填，不写入配置文件） |
-| `transcription_api_url` | 字符串 | Groq Whisper URL | 转写 API 地址（兼容 OpenAI multipart 格式） |
-| `provider` | 字符串 | 无 | 服务商标签（仅用于标注，不影响行为） |
-| `model` | 字符串 | `whisper-large-v3-turbo` | 转录模型 |
-| `language` | 字符串 | `zh` | 语言代码，留空为自动检测 |
-| `prompt` | 字符串 | 中文提示词 | 指导转录风格和格式 |
-| `temperature` | 数字 | `0` | 随机性（0-1） |
+| `input.hold_hotkey` | 字符串 | `F8` | 按住录音热键；空字符串可禁用 |
+| `input.toggle_hotkey` | 字符串 | `F9` | 切换录音热键；空字符串可禁用 |
+| `audio.mic_gain` | 数字 | `1.0` | 麦克风增益倍数 |
+| `chunking.max_duration_secs` | 数字 | `30` | 每个分片最大秒数（`0` = 不限） |
+| `chunking.max_size_bytes` | 数字 | `24117248` | 每个分片最大字节数（`0` = 不限） |
+| `chunking.max_retries` | 数字 | `3` | 分片上传失败最大重试次数（最大 16） |
+| `session.convergence_timeout_secs` | 数字 | `30` | 等待分片收敛的超时秒数（最大 3600） |
 
-### 热键与音频
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `hold_hotkey` | 字符串 | `F8` | 按住录音热键（Hold 模式） |
-| `toggle_hotkey` | 字符串 | `F9` | 切换录音热键（Toggle 模式） |
-| `mic_gain` | 数字 | `1.0` | 麦克风增益倍数 |
-
-### 音频分片
+### 转写与 API profile
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `max_chunk_duration_secs` | 数字 | `30` | 每个分片最大秒数（0 = 不限） |
-| `max_chunk_size_bytes` | 数字 | `24117248` | 每个分片最大字节数（0 = 不限） |
-| `max_retries` | 数字 | `3` | 分片上传失败最大重试次数（最大 16） |
-| `convergence_timeout_secs` | 数字 | `30` | 录音结束后等待所有分片转写完成的超时秒数（最大 3600） |
+| `transcription.language` | 字符串/null | `zh` | 语言代码；`null` 为自动检测 |
+| `transcription.prompt` | 字符串/null | 中文提示词 | 转写提示词 |
+| `transcription.temperature` | 数字 | `0` | 转写温度 |
+| `inference.active` | `api`/`local` | `api` | 默认使用的推理 profile |
+| `inference.api.provider` | 字符串/null | 无 | 仅用于标注 |
+| `inference.api.transcription.api_url` | URL | Groq Whisper URL | OpenAI-compatible multipart 地址 |
+| `inference.api.transcription.model` | 字符串 | `whisper-large-v3-turbo` | 转写模型 |
+| `inference.api.transcription.api_key` | secret | 无 | 只读状态；环境变量为 `TRANSCRIPTION_API_KEY` |
 
 ### LLM 后处理
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `post_process_enabled` | 布尔 | `false` | 是否启用 LLM 后处理 |
-| `post_process_streaming_enabled` | 布尔 | `true` | 是否启用预热模式（录音中提前发送 LLM 请求） |
-| `post_process_api_url` | 字符串 | 无 | LLM chat completions API 地址 |
-| `post_process_api_key` | 字符串 | 无 | LLM API 密钥（不写入配置文件，可通过 `POST_PROCESS_API_KEY` 环境变量设置） |
-| `post_process_model` | 字符串 | 无 | LLM 模型名（如 `gpt-4o-mini`） |
-| `post_process_prompt` | 字符串 | 内置默认 | 后处理系统提示词 |
-| `post_process_temperature` | 数字 | `0.0` | 后处理温度 |
+| `post_process.enabled` | 布尔 | `false` | 是否启用 LLM 后处理 |
+| `post_process.preheat_enabled` | 布尔 | `true` | 是否在录音中提前发送 LLM 请求 |
+| `post_process.prompt` | 字符串/null | 内置默认 | 后处理系统提示词 |
+| `post_process.temperature` | 数字 | `0.0` | 后处理温度 |
+| `inference.api.post_process.api_url` | URL/null | 无 | OpenAI-compatible chat completions 地址 |
+| `inference.api.post_process.model` | 字符串/null | 无 | LLM 模型名 |
+| `inference.api.post_process.api_key` | secret | 无 | 只读状态；环境变量为 `POST_PROCESS_API_KEY` |
 
 > **注意**：`config.json` 已在 `.gitignore` 中排除，避免误提交真实密钥。程序不会把环境变量中的密钥写入磁盘；手工写在 `config.json` 中的密钥会在更新其他配置项时原样保留。
 > 后处理当前固定使用 OpenAI-compatible chat completions 请求格式。
@@ -168,20 +160,20 @@ viberwhisper convert input.wav --output output.txt
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `local_mode` | 布尔 | `false` | 是否启用本地 Gemma 服务 |
-| `local_data_dir` | 字符串 | `~/.viberwhisper` | 本地模型、虚拟环境、PID 和日志目录 |
-| `local_server_port` | 数字 | `17265` | 本地 FastAPI 服务端口 |
-| `local_quantization` | 字符串 | `int8` | 量化模式，可选 `int4` / `int8` / `bf16` |
+| `inference.local.data_dir` | 字符串/null | `~/.viberwhisper` | 模型、虚拟环境、PID 和日志目录 |
+| `inference.local.server_port` | 数字 | `17265` | 本地 FastAPI 服务端口 |
+| `inference.local.quantization` | 字符串 | `int8` | 可选 `int4` / `int8` / `bf16` |
 
-启用 `local_mode` 后，程序会在启动监听前自动确保本地运行时已安装、拉起本地服务，并把转写端点重写为本地服务地址；如果同时启用了 `post_process_enabled`，后处理端点也会改写到本地 `/v1/chat/completions`。当前本地服务固定使用 `gemma-4-E2B-it` 作为模型名。
+将 `inference.active` 设为 `local` 后，默认监听和 `convert` 使用 Local profile。`local start` 只对本次运行做
+Local override，不修改持久化配置。Local 请求使用显式无认证模式，不发送 `Authorization` 头。
 
 ### 切换转写服务
 
-只需修改 `transcription_api_url` 和 `api_key` 即可切换到任何兼容 OpenAI Whisper multipart 格式的接口：
+修改 API profile 的 endpoint、model 和环境密钥即可切换兼容接口：
 
 ```bash
-./viberwhisper config set transcription_api_url https://api.openai.com/v1/audio/transcriptions
-./viberwhisper config set model whisper-1
+./viberwhisper config set inference.api.transcription.api_url https://api.openai.com/v1/audio/transcriptions
+./viberwhisper config set inference.api.transcription.model whisper-1
 ```
 
 ## LLM 后处理
@@ -192,11 +184,11 @@ viberwhisper convert input.wav --output output.txt
 
 ```bash
 # 启用后处理
-viberwhisper config set post_process_enabled true
+viberwhisper config set post_process.enabled true
 
 # 配置 LLM API
-viberwhisper config set post_process_api_url https://api.openai.com/v1/chat/completions
-viberwhisper config set post_process_model gpt-4o-mini
+viberwhisper config set inference.api.post_process.api_url https://api.openai.com/v1/chat/completions
+viberwhisper config set inference.api.post_process.model gpt-4o-mini
 
 # 设置 API 密钥（通过环境变量）
 export POST_PROCESS_API_KEY=your_key_here
@@ -204,8 +196,8 @@ export POST_PROCESS_API_KEY=your_key_here
 
 ### 两种模式
 
-- **预热模式**（默认，`post_process_streaming_enabled = true`）：录音过程中每收到一段稳定文本就提前发送 LLM 请求，录音结束后几乎零等待
-- **保守模式**（`post_process_streaming_enabled = false`）：录音全部结束后一次性发送，零 token 浪费
+- **预热模式**（默认，`post_process.preheat_enabled = true`）：录音过程中每收到一段稳定文本就提前发送 LLM 请求，录音结束后几乎零等待
+- **保守模式**（`post_process.preheat_enabled = false`）：录音全部结束后一次性发送，零 token 浪费
 
 后处理失败时自动降级为输出原始转写文本，不会导致整次录音失败。
 
@@ -216,7 +208,7 @@ export POST_PROCESS_API_KEY=your_key_here
 - `POST /v1/audio/transcriptions`：接收 WAV 音频并调用 Gemma 音频理解能力返回转写结果
 - `POST /v1/chat/completions`：供后处理模块复用，返回整理后的文本
 
-Rust 侧的 `LocalServiceManager` 负责启动、健康检查、PID 记录、日志文件和关闭流程。`viberwhisper local start` 会先拉起服务，再进入正常监听循环；直接把 `local_mode` 设为 `true` 也会在启动主程序时自动做同样的准备。
+Rust 侧的 `LocalServiceManager` 负责启动、健康检查、PID 记录、日志文件和关闭流程。`viberwhisper local start` 会先拉起服务，再进入正常监听循环；将 `inference.active` 设为 `local` 也会在启动主程序时自动做同样的准备。
 
 当前本地服务限制单次音频请求最长 30 秒，因此长录音仍由 Rust 端先分片，再逐片提交给本地端点。
 

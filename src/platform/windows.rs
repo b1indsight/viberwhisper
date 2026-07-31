@@ -92,3 +92,16 @@ mod ffi {
         }
     }
 }
+use std::path::PathBuf;
+
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|base| base.join("ViberWhisper"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn config_directory_uses_windows_application_name() {
+        assert!(super::config_dir().unwrap().ends_with("ViberWhisper"));
+    }
+}

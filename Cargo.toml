@@ -21,6 +21,7 @@ clap = { version = "4", features = ["derive"] }
 tray-icon = "0.21"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

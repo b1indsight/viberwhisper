@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Converts a WAV file path to a transcribed text string. The module defines a trait, provides a generic HTTP implementation with automatic chunking and retry, and exposes a factory function that creates a transcriber from config.
+Converts a WAV file path to a transcribed text string. The module defines a trait for orchestrator injection and provides a generic HTTP implementation with automatic chunking and retry.
 
 ## Module Layout
 
@@ -12,49 +12,29 @@ src/
   transcriber/
     mod.rs        — re-exports all public symbols
     api.rs        — Transcriber trait + ApiTranscriber + MockTranscriber
-    factory.rs    — create_transcriber factory function
 ```
 
 ## `Transcriber` Trait (`src/transcriber/api.rs`)
 
 ```rust
 pub trait Transcriber {
-    fn transcribe(&self, wav_path: &str) -> Result<String, Box<dyn std::error::Error>>;
+    fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError>;
 }
 ```
 
 The single method takes a file path and returns the transcribed text or an error.
 
----
-
-## Factory (`src/transcriber/factory.rs`)
-
-```rust
-pub fn create_transcriber(config: &AppConfig) -> Result<Box<dyn Transcriber>, Box<dyn std::error::Error>>
-```
-
-Creates an `ApiTranscriber` from `config.api_key` and `config.transcription_api_url`. In debug/test builds, falls back to `MockTranscriber` when no API key is configured. In release builds, returns the initialization error instead of silently using mock transcription.
-
-| Condition | Result |
-|---|---|
-| `config.api_key` is set | `ApiTranscriber` |
-| `config.api_key` is `None`, debug/test build | `MockTranscriber` (with a warning log) |
-| `config.api_key` is `None`, release build | Error |
-
----
-
 ## `ApiTranscriber`
 
 ```rust
 pub struct ApiTranscriber {
-    api_key: String,
-    api_url: String,
+    auth: ApiAuth,
+    api_url: Url,
     model: String,
     language: Option<String>,
     prompt: Option<String>,
     temperature: f32,
-    max_chunk_duration_secs: u32,
-    max_chunk_size_bytes: u64,
+    chunk_limits: ChunkLimits,
     max_retries: u32,
 }
 ```
@@ -63,9 +43,9 @@ A generic HTTP transcriber compatible with OpenAI-style multipart audio endpoint
 
 ### Construction
 
-**`ApiTranscriber::from_config(config: &AppConfig) -> Result<Self>`**
+**`ApiTranscriber::new(config: TranscriberConfig) -> Result<Self, reqwest::Error>`**
 
-Reads `config.api_key` (required), `config.transcription_api_url`, transcription fields, and chunk config fields.
+Consumes the assembled endpoint, authentication mode, model, transcription options, limits, and retry count owned by the transcriber. `ApiAuth::None` omits the `Authorization` header; `ApiAuth::Bearer` sends it. Listener assembly wraps the concrete value in `Arc<dyn Transcriber>` because the orchestrator needs runtime injection; one-shot conversion keeps the concrete type.
 
 ### `transcribe` Implementation
 
@@ -113,7 +93,7 @@ Multipart POST with fields: `model`, `temperature`, `response_format=verbose_jso
 pub struct MockTranscriber;
 ```
 
-Returns the fixed string `"This is mock transcribed text"` without making any network calls. Used in unit tests and as a runtime fallback when no API key is configured.
+Returns the fixed string `"This is mock transcribed text"` without making network calls. It is compiled only for unit tests.
 
 ---
 
@@ -121,18 +101,16 @@ Returns the fixed string `"This is mock transcribed text"` without making any ne
 
 ```rust
 pub mod api;
-pub mod factory;
 #[cfg(test)]
 pub use api::MockTranscriber;
-pub use api::Transcriber;
-pub use factory::create_transcriber;
+pub use api::{ApiTranscriber, Transcriber, TranscriberConfig};
 ```
 
 ---
 
 ## Switching Endpoints
 
-To use a different OpenAI-compatible transcription endpoint, set `transcription_api_url` in `config.json` or via `config set transcription_api_url <url>`. No code changes needed.
+To use a different OpenAI-compatible endpoint, set `inference.api.transcription.api_url` and `inference.api.transcription.model`, then supply `TRANSCRIPTION_API_KEY`.
 
 ## Adding a New Provider Type
 
@@ -140,5 +118,5 @@ If a future provider requires a fundamentally different request format (not mult
 
 1. Create `src/transcriber/<name>.rs` implementing `Transcriber`.
 2. Add a `pub mod <name>;` line in `mod.rs`.
-3. Update `factory.rs` to select the new implementation based on a config field.
-4. Add any new config fields to `AppConfig` if needed.
+3. Add runtime selection only when a second implementation actually requires it.
+4. Add persisted fields to `ConfigDocument`/the canonical field catalog and validate them into `TranscriberConfig`.

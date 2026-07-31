@@ -5,6 +5,72 @@ use std::thread;
 use rdev::{Event, EventType, Key, listen};
 use tracing::{debug, error, info};
 
+use crate::core::config::{ConfigKey, InputSection, ValidationIssue};
+
+#[derive(Debug)]
+pub struct HotkeyConfig {
+    hold_key: Option<Key>,
+    toggle_key: Option<Key>,
+    pub(crate) hold_label: Option<String>,
+    pub(crate) toggle_label: Option<String>,
+}
+
+impl HotkeyConfig {
+    pub(crate) fn validate(section: &InputSection) -> Result<Self, Vec<ValidationIssue>> {
+        let mut issues = Vec::new();
+        let hold_key = validate_binding(
+            ConfigKey::InputHoldHotkey,
+            &section.hold_hotkey,
+            &mut issues,
+        );
+        let toggle_key = validate_binding(
+            ConfigKey::InputToggleHotkey,
+            &section.toggle_hotkey,
+            &mut issues,
+        );
+
+        if hold_key.is_some() && hold_key == toggle_key {
+            issues.push(ValidationIssue::new(
+                ConfigKey::InputToggleHotkey,
+                "hotkey.duplicate",
+                "hold and toggle hotkeys must use different keys",
+            ));
+        }
+
+        if !issues.is_empty() {
+            return Err(issues);
+        }
+        Ok(Self {
+            hold_key,
+            toggle_key,
+            hold_label: binding_label(&section.hold_hotkey),
+            toggle_label: binding_label(&section.toggle_hotkey),
+        })
+    }
+}
+
+fn validate_binding(key: ConfigKey, value: &str, issues: &mut Vec<ValidationIssue>) -> Option<Key> {
+    if value.trim().is_empty() {
+        return None;
+    }
+    match parse_key(value) {
+        Some(parsed) => Some(parsed),
+        None => {
+            issues.push(ValidationIssue::new(
+                key,
+                "hotkey.invalid",
+                format!("invalid hotkey `{value}`; expected F1 through F12"),
+            ));
+            None
+        }
+    }
+}
+
+fn binding_label(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_ascii_uppercase())
+}
+
 /// Parse a configured function key. Empty strings disable a binding.
 pub fn parse_key(value: &str) -> Option<Key> {
     match value.trim().to_ascii_uppercase().as_str() {
@@ -82,44 +148,26 @@ pub struct HotkeyManager {
 }
 
 impl HotkeyManager {
-    pub fn new(hold_hotkey: &str, toggle_hotkey: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let hold_key = parse_binding("hold_hotkey", hold_hotkey)?;
-        let toggle_key = parse_binding("toggle_hotkey", toggle_hotkey)?;
-
-        if hold_key.is_none() && toggle_key.is_none() {
-            return Err("at least one hotkey must be configured".into());
-        }
-        if hold_key == toggle_key {
-            return Err("hold_hotkey and toggle_hotkey must use different keys".into());
-        }
-
+    pub fn new(config: &HotkeyConfig) -> Self {
+        let hold_key = config.hold_key;
+        let toggle_key = config.toggle_key;
         let (sender, events) = mpsc::channel();
         spawn_listener(EventMapper::new(hold_key, toggle_key), sender);
 
-        if hold_key.is_some() {
-            info!(hotkey = %hold_hotkey.trim(), "hold hotkey registered");
+        if let Some(label) = config.hold_label.as_deref() {
+            info!(hotkey = %label, "hold hotkey registered");
         }
-        if toggle_key.is_some() {
-            info!(hotkey = %toggle_hotkey.trim(), "toggle hotkey registered");
+        if let Some(label) = config.toggle_label.as_deref() {
+            info!(hotkey = %label, "toggle hotkey registered");
         }
 
-        Ok(Self { events })
+        Self { events }
     }
 
     /// Return the oldest pending event without losing later events.
     pub fn check_event(&self) -> Option<HotkeyEvent> {
         self.events.try_recv().ok()
     }
-}
-
-fn parse_binding(name: &str, value: &str) -> Result<Option<Key>, Box<dyn std::error::Error>> {
-    if value.trim().is_empty() {
-        return Ok(None);
-    }
-
-    parse_key(value)
-        .map(Some)
-        .ok_or_else(|| format!("invalid {name} `{value}`; expected F1 through F12").into())
 }
 
 fn spawn_listener(mapper: EventMapper, sender: Sender<HotkeyEvent>) {
@@ -146,6 +194,35 @@ fn spawn_listener(mapper: EventMapper, sender: Sender<HotkeyEvent>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::{ConfigKey, InputSection};
+
+    #[test]
+    fn validates_hotkey_section_before_manager_construction() {
+        let config = HotkeyConfig::validate(&InputSection::default()).unwrap();
+        assert_eq!(config.hold_key, Some(Key::F8));
+        assert_eq!(config.toggle_key, Some(Key::F9));
+
+        let tray_only = InputSection {
+            hold_hotkey: String::new(),
+            toggle_hotkey: String::new(),
+        };
+        let config = HotkeyConfig::validate(&tray_only).unwrap();
+        assert_eq!(config.hold_key, None);
+        assert_eq!(config.toggle_key, None);
+
+        let invalid = InputSection {
+            hold_hotkey: "F13".to_string(),
+            toggle_hotkey: "F13".to_string(),
+        };
+        let issues = HotkeyConfig::validate(&invalid).unwrap_err();
+        assert_eq!(issues[0].key, ConfigKey::InputHoldHotkey);
+
+        let duplicate = InputSection {
+            hold_hotkey: "F8".to_string(),
+            toggle_hotkey: "f8".to_string(),
+        };
+        assert!(HotkeyConfig::validate(&duplicate).is_err());
+    }
 
     #[test]
     fn parses_keys_case_insensitively_and_ignores_outer_whitespace() {
@@ -153,14 +230,6 @@ mod tests {
         assert_eq!(parse_key(" f9 "), Some(Key::F9));
         assert_eq!(parse_key("F12"), Some(Key::F12));
         assert_eq!(parse_key("invalid"), None);
-    }
-
-    #[test]
-    fn rejects_invalid_and_ambiguous_bindings_before_starting_listener() {
-        assert!(HotkeyManager::new("F13", "F9").is_err());
-        assert!(HotkeyManager::new("", "invalid").is_err());
-        assert!(HotkeyManager::new("", "").is_err());
-        assert!(HotkeyManager::new("F8", "f8").is_err());
     }
 
     #[test]
