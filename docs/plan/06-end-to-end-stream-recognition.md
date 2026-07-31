@@ -13,7 +13,7 @@ PR #26（`05-long-audio-streaming.md`）已落地以下底层能力：
 | WAV 离线分片（`split_wav`） | `src/audio/splitter.rs` |
 | Toggle 录音达阈值封片落盘 | `src/audio/recorder.rs` |
 | 单片指数退避重试 | `src/transcriber/api.rs` |
-| 多语言文本合并（`merge_texts`） | `src/transcriber/api.rs` |
+| 多语言文本合并（`merge_texts`） | `src/text.rs` |
 | 三个分片配置项 | `src/core/config.rs` |
 
 然而，**会话（session）级的统一调度层**尚未建立：分片的生成、上传队列、结果收集、错误传播等逻辑散布在 `recorder.rs` 与 `api.rs` 中，Hold 与 Toggle 两种模式也没有共享统一的会话生命周期模型。
@@ -307,7 +307,8 @@ impl SessionOrchestrator {
 | `src/main.rs` | **修改** | `run_listener` 持有 `SessionOrchestrator`；热键事件映射到 `start_session` / `stop_session`；移除原有内联分片转写逻辑 |
 | `src/core/config.rs` | **修改** | 新增 `convergence_timeout_secs: u64`（默认 30），更新 `get_field`/`set_field`/`apply_json` |
 | `src/transcriber/mod.rs` | **不变** | `Transcriber` trait 签名不变 |
-| `src/transcriber/api.rs` | **不变** | `transcribe_chunk_with_retry`、`merge_texts` 不变；orchestrator 直接调用 |
+| `src/text.rs` | **后续新增** | 集中提供 crate 内共享的 `merge_texts` |
+| `src/transcriber/api.rs` | **后续修改** | 保留分片转录与重试，改为调用共享 `merge_texts` |
 | `docs/architecture/core.md` | **修改** | 补充 `SessionOrchestrator` 及其与 recorder / transcriber 的协作关系 |
 
 ## 配置项
@@ -444,6 +445,10 @@ pub convergence_timeout_secs: u64,
 **验收**：`cargo test` 全绿；PR review 通过。
 
 ## 后续扩展方向
+
+共享文本合并后续重构将 `merge_texts` 移至 `src/text.rs`，离线分片转录和
+`SessionOrchestrator` 均通过 crate 内接口复用同一实现；该调整不改变本计划的
+session 生命周期和错误语义。
 
 - **增量式实时字幕**：orchestrator 在每个分片 `Transcribed` 时立即通过回调通知 UI，而非等待收敛。当前接口预留了 `on_chunk_transcribed` 扩展点位置。
 - **失败分片重传**：收敛后对 `PartialFailure` 中的失败分片可选择性重试，无需重录。

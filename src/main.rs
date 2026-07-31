@@ -4,6 +4,7 @@ mod input;
 mod local;
 mod platform;
 mod postprocess;
+mod text;
 mod transcriber;
 
 use clap::Parser;
