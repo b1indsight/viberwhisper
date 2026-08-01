@@ -69,6 +69,7 @@ Each chunk upload retries on transient failures:
 - **4xx errors**: Non-retryable (client errors, bad request). Fails immediately.
 - **5xx errors**: Retryable (server errors). Retries up to `max_retries` times with exponential backoff (1s, 2s, 4s, ...).
 - **Network errors**: Retryable. Same backoff strategy.
+- **Timeout budget**: At most four 5-second requests plus 1s, 2s, and 4s backoff keep the worst-case retry window near 27 seconds.
 
 ### Language-Aware Text Merging
 

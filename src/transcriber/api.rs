@@ -7,10 +7,8 @@ use crate::transcriber::TranscribeError;
 use std::time::Duration;
 use tracing::{info, instrument, warn};
 
-/// Total per-request timeout for one chunk upload (connect + send + response).
-/// Without it, a hung request would pin the orchestrator worker thread forever;
-/// the convergence timeout only stops the caller from waiting, not the worker.
-const STT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Four attempts plus exponential backoff stay below the 30-second session budget.
+const STT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError>;
@@ -78,11 +76,11 @@ impl TranscriberConfig {
                 "transcription model cannot be empty",
             ));
         }
-        if chunking.max_retries > 16 {
+        if chunking.max_retries > 3 {
             issues.push(ValidationIssue::new(
                 ConfigKey::ChunkingMaxRetries,
                 "transcriber.retries_too_large",
-                "max retries must be at most 16",
+                "max retries must be at most 3",
             ));
         }
         match endpoint {
