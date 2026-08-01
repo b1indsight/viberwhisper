@@ -19,11 +19,11 @@ server/
 
 ## Runtime Flow
 
-1. `main.rs` 解析到 `local` 子命令，或检测到 `config.local_mode = true`
-2. `ensure_local_install()` 准备 `venv`、Python 依赖、Gemma 权重并做安装校验
-3. `LocalServiceManager::start()` 启动 `server/server.py`
-4. 健康检查通过后，`apply_local_endpoint_overrides()` 将转写端点改写到 `http://127.0.0.1:<port>`；若启用了后处理，再同时改写 chat completions 端点
-5. 之后主流程继续复用现有 `Transcriber` 和 `TextPostProcessor`，无需额外分支
+1. `runtime_config` 根据 `inference.active` 或一次性的 `LocalOverride` 选择 Local profile
+2. `LocalPaths::resolve()` 相对 canonical config directory 解析路径，`LocalServiceConfig::validate()` 校验 port 和 quantization
+3. `ensure_local_install()` 准备 `venv`、Python 依赖、Gemma 权重并做安装校验
+4. `LocalServiceManager::from_config()` 启动或复用 `server/server.py`
+5. 同一个 assembly step 直接构造 loopback transcriber/post-process 配置；不 clone/mutate 持久化配置，也不写入假密钥
 
 ## Installer (`src/local/installer.rs`)
 
@@ -31,7 +31,7 @@ server/
 
 - `setup_venv(venv_dir)`: 创建 Python 虚拟环境；优先使用 `PYTHON` 环境变量指定的解释器，否则按平台寻找 `python3` / `python`
 - `install_requirements(venv_dir, reqs)`: 安装 [`server/requirements.txt`](../../server/requirements.txt) 中的运行时依赖
-- `download_model(model_dir, hf_endpoint)`: 通过 `huggingface_hub` 下载 `google/gemma-4-E4B-it`
+- `download_model(model_dir, hf_endpoint)`: 通过 `huggingface_hub` 下载 `google/gemma-4-E2B-it`
 - `verify_install(venv_dir, model_dir)`: 校验 Python 可执行文件和模型目录是否存在且非空
 - `dependencies_installed(venv_dir)`: 通过导入关键包确认依赖已安装
 - `model_weights_present(model_dir)`: 检测 `config.json` 与至少一个 `.safetensors` / `.bin` 权重文件
@@ -63,6 +63,8 @@ pub struct LocalServiceManager {
 
 ### Key Behaviors
 
+- `from_config(&LocalServiceConfig)`: 使用已经校验的路径、端口和量化模式构造 manager
+- `for_paths(&LocalPaths)`: 为 `local stop` 提供只依赖状态路径的最小入口
 - `start()`: 如果已有健康服务则直接复用，否则启动 Python 进程并轮询 `/health`
 - `stop()`: 读取当前子进程或 PID 文件，对目标进程发送终止信号；超时后升级为强制 kill
 - `release()`: 仅在当前 manager 自己启动了服务时才停止，避免误杀复用中的后台进程
@@ -74,7 +76,7 @@ pub struct LocalServiceManager {
 - PID 会写入 `local_server.pid`
 - 非 Windows 平台通过 `ps` / `kill` 检查和结束进程
 - Windows 通过 `tasklist` / `taskkill`
-- 健康检查超时时间为 120 秒，轮询间隔 500 ms
+- 健康检查超时时间为 120 秒，首次等待 20 秒，之后每 10 秒轮询一次
 
 ## FastAPI Server (`server/server.py`)
 

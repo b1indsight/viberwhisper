@@ -35,3 +35,20 @@ tell application "System Events" to keystroke "v" using command down"#,
         Ok(())
     }
 }
+use std::path::PathBuf;
+
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|base| base.join("com.b1indsight.viberwhisper"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn config_directory_uses_macos_bundle_identifier() {
+        assert!(
+            super::config_dir()
+                .unwrap()
+                .ends_with("com.b1indsight.viberwhisper")
+        );
+    }
+}

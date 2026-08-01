@@ -51,13 +51,9 @@ pub struct AudioRecorder {
 
 ## Key Methods
 
-### `new(gain: f32) -> Result<Self>`
+### `with_config(config: &AudioConfig) -> Result<Self>`
 
-Creates a recorder with default chunk config (30s / 23 MiB). Queries `cpal::default_host()` for the default input device.
-
-### `with_config(gain, max_chunk_duration_secs, max_chunk_size_bytes) -> Result<Self>`
-
-Creates a recorder with explicit chunk-splitting config. The chunk threshold is computed as `min(duration_limit, size_limit)` in sample count.
+Receives validated gain and `ChunkLimits` owned by the audio module. The chunk threshold is computed as `min(duration_limit, size_limit)` in sample count. The scalar `new(gain)` constructor exists only for tests.
 
 ### `start_recording(&mut self) -> Result<()>`
 
@@ -103,7 +99,7 @@ Recorder-generated WAV files live in a unique directory whose name includes the 
 
 Offline WAV splitting for files that exceed size or duration limits.
 
-- `split_wav(path, max_duration_secs, max_size_bytes) -> Result<Vec<TmpChunk>>`: Splits a WAV file into chunks.
+- `split_wav(path, limits: ChunkLimits) -> Result<Vec<TmpChunk>, Box<dyn Error>>`: Splits a WAV file into temporary chunks; callers only add operation context and do not branch on error variants.
 - `TmpChunk`: Wraps a temporary WAV file path with `Drop` trait for auto-cleanup.
 
 ## Dependencies

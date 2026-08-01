@@ -8,17 +8,19 @@ Optional LLM-based text cleanup applied after STT transcription. Adds punctuatio
 
 ```
 src/postprocess/
-  mod.rs      — traits (TextPostProcessor, TextPostProcessorSession), NoopPostProcessor
+  mod.rs      — PostProcessor facade, session facade, typed config and errors
   llm.rs      — LlmPostProcessor, ConservativeLlmSession, PreheatLlmSession
-  factory.rs  — create_post_processor factory function
 ```
 
-## `TextPostProcessor` Trait
+## `PostProcessor` Facade
 
 ```rust
-pub trait TextPostProcessor: Send + Sync {
-    fn process(&self, text: &str) -> Result<String, Box<dyn std::error::Error>>;
-    fn start_session(&self) -> Box<dyn TextPostProcessorSession>;
+pub struct PostProcessor(/* private implementation enum */);
+
+impl PostProcessor {
+    pub fn new(config: PostProcessConfig) -> Self;
+    pub fn process(&self, text: &str) -> Result<String, PostProcessError>;
+    pub fn start_session(&self) -> PostProcessorSession;
 }
 ```
 
@@ -26,12 +28,14 @@ Two interfaces for different use cases:
 - `process`: one-shot processing for the `convert` CLI path
 - `start_session`: incremental session for the `run_listener` path
 
-## `TextPostProcessorSession` Trait
+The supported implementations are a closed set, so the module uses a concrete facade over a private enum instead of allocating boxed trait objects. Only the much larger LLM session variant uses `Box`, preventing the pass-through session from inheriting its stack size. Construction selects pass-through or LLM behavior from the validated config. If HTTP-client initialization fails, it logs the error and falls back to pass-through because cleanup is optional.
+
+## `PostProcessorSession`
 
 ```rust
-pub trait TextPostProcessorSession: Send {
-    fn push_stable_chunk(&mut self, text: &str);
-    fn finish(&mut self) -> Result<String, Box<dyn std::error::Error>>;
+impl PostProcessorSession {
+    pub fn push_stable_chunk(&mut self, text: &str);
+    pub fn finish(&mut self) -> Result<String, PostProcessError>;
 }
 ```
 
@@ -39,21 +43,21 @@ Designed for incremental input: stable STT chunks are pushed as they become avai
 
 ## Implementations
 
-### `NoopPostProcessor`
+### Pass-through
 
-Passes text through unchanged. Used when post-processing is disabled or as a fallback when LLM configuration is incomplete. Its session simply concatenates all pushed chunks.
+Passes text through unchanged when post-processing is disabled. Its session simply concatenates all pushed chunks.
 
 ### `LlmPostProcessor`
 
 Calls an OpenAI-compatible chat completions API to clean up transcribed text. This is the only supported post-processing API format.
 
-**Construction:** `LlmPostProcessor::from_config(config) -> Result<Self>`
+**Construction:** `LlmPostProcessor::new(config: LlmConfig) -> Result<Self>`
 
-Requires `post_process_api_key`, `post_process_api_url`, and `post_process_model` to be configured. Returns an error if any are missing.
+`PostProcessConfig::validate` owns URL/model validation and produces either `Disabled` or a validated `LlmConfig`. Authentication is explicit: Local uses `ApiAuth::None`; API mode uses Bearer auth when enabled.
 
 **`process` method:** Sends a single blocking request to the LLM API. Empty text is returned immediately without a network call.
 
-**Session modes (controlled by `post_process_streaming_enabled`):**
+**Session modes (controlled by `post_process.preheat_enabled`):**
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
@@ -103,21 +107,9 @@ Non-streaming OpenAI chat completions (`"stream": false`):
 }
 ```
 
-## Factory (`src/postprocess/factory.rs`)
+## Error Handling
 
-```rust
-pub fn create_post_processor(config: &AppConfig) -> Box<dyn TextPostProcessor>
-```
-
-| Condition | Result |
-|-----------|--------|
-| `post_process_enabled = false` | `NoopPostProcessor` |
-| `post_process_enabled = true`, config valid | `LlmPostProcessor` |
-| `post_process_enabled = true`, config invalid | `NoopPostProcessor` (with warning log) |
-
-Ensures the main pipeline is never blocked by a missing or broken LLM setup.
-
-Configuration errors fall back to `NoopPostProcessor` because post-processing is optional. Runtime LLM request failures and empty LLM outputs are returned to the caller, which keeps the original STT text.
+`PostProcessError` distinguishes HTTP transport, malformed JSON, API status, missing content, and empty content failures. Configuration errors are returned before processor construction. Runtime request failures are returned to the caller, which keeps the original STT text.
 
 ## Dependencies
 

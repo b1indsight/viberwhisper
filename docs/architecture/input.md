@@ -41,11 +41,10 @@ Spawns an `rdev::listen` thread that maps native events into an ordered channel.
 
 ### Key Methods
 
-**`HotkeyManager::new(hold_hotkey: &str, toggle_hotkey: &str) -> Result<Self>`**
+**`HotkeyManager::new(config: &HotkeyConfig) -> Self`**
 
-- Parses both hotkey strings via `parse_key()`.
-- Treats an empty string as a disabled binding and rejects any non-empty invalid binding.
-- Requires at least one enabled key and rejects assigning the same key to both modes.
+- `HotkeyConfig::validate(&InputSection)` parses and validates both bindings before construction.
+- Empty strings disable a binding, including both bindings for tray-only control; duplicate non-empty bindings are rejected.
 - Spawns the listener thread without blocking application startup.
 
 **`check_event(&self) -> Option<HotkeyEvent>`**

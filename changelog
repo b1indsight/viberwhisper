@@ -26,3 +26,4 @@
 2026-07-11: Stop idle-loop chunk polling after recorder shutdown by clearing stop-time readiness bookkeeping and requiring an active session
 2026-07-27: Make transcription chunk state session-owned; workers now return lifecycle events through per-session channels and retain only temporary-file cleanup responsibility after session shutdown
 2026-07-31: Share language-aware transcription text merging across offline chunk uploads and session orchestration
+2026-08-01: Replace the flat working-directory config with strict canonical v2 persistence, module-owned consumer configs, explicit API/Local profiles, canonical dotted CLI keys, active-profile checks, optional API authentication, secret-safe runtime assembly, concrete errors, and allocation-light consumer construction

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::audio::remove_temp_audio_file;
+use crate::core::config::{ConfigKey, SessionSection, ValidationIssue};
 
 use crate::core::recording_session::SessionId;
 pub use crate::core::recording_session::SessionMode;
@@ -22,6 +23,31 @@ use crate::transcriber::Transcriber;
 pub use crate::transcriber::TranscribeError;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct OrchestratorConfig {
+    language: Option<String>,
+    convergence_timeout: Duration,
+}
+
+impl OrchestratorConfig {
+    pub(crate) fn validate(
+        session: &SessionSection,
+        language: Option<String>,
+    ) -> Result<Self, Vec<ValidationIssue>> {
+        if session.convergence_timeout_secs > 60 * 60 {
+            return Err(vec![ValidationIssue::new(
+                ConfigKey::SessionConvergenceTimeoutSecs,
+                "session.timeout_too_large",
+                "convergence timeout must be at most 3600 seconds",
+            )]);
+        }
+        Ok(Self {
+            language,
+            convergence_timeout: Duration::from_secs(session.convergence_timeout_secs),
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionStartError {
@@ -126,7 +152,7 @@ enum ChunkState {
     /// Written to disk; not yet picked up by the worker.
     Flushed,
     /// Worker is transcribing this chunk.
-    /// `attempt` is reserved for future retry logic (see `max_retries` in AppConfig);
+    /// `attempt` is reserved for future orchestrator-level retry logic;
     /// retry is not yet implemented — on failure the chunk transitions directly to `Failed`.
     Uploading {
         #[allow(dead_code)]
@@ -190,17 +216,17 @@ impl SessionOrchestrator {
     /// Create an orchestrator.
     ///
     /// - `transcriber`: injected for testability (use `MockTranscriber` in tests).
-    /// - `language`: passed to `merge_texts` for separator selection.
-    /// - `convergence_timeout`: how long `finish_session` waits for background chunks.
-    pub fn new(
-        transcriber: Arc<dyn Transcriber>,
-        language: Option<String>,
-        convergence_timeout: Duration,
-    ) -> Self {
+    /// - `config`: already validated at the application boundary.
+    pub fn new(transcriber: Arc<dyn Transcriber>, config: OrchestratorConfig) -> Self {
+        info!(
+            language = config.language.as_deref().unwrap_or("auto"),
+            convergence_timeout_secs = config.convergence_timeout.as_secs(),
+            "Session orchestrator configured"
+        );
         Self {
             transcriber,
-            language,
-            convergence_timeout,
+            language: config.language,
+            convergence_timeout: config.convergence_timeout,
             inner: Mutex::new(None),
         }
     }
@@ -313,9 +339,9 @@ impl SessionOrchestrator {
     /// - `Err(SessionError::PartialFailure { … })` — some chunks failed; partial text included.
     /// - `Err(SessionError::ConvergenceTimeout { … })` — timeout hit; partial text included.
     pub fn finish_session(&self, session_id: SessionId) -> Result<String, SessionError> {
-        let active = {
+        let session = {
             let mut inner = self.inner.lock().unwrap();
-            let Some(active) = inner.as_ref() else {
+            let Some(active) = inner.take() else {
                 return Err(SessionError::Routing(
                     SessionRoutingError::NoActiveSession {
                         requested: session_id,
@@ -323,17 +349,17 @@ impl SessionOrchestrator {
                 ));
             };
             if active.session_id != session_id {
+                let active_session_id = active.session_id;
+                *inner = Some(active);
                 return Err(SessionError::Routing(
                     SessionRoutingError::SessionMismatch {
                         requested: session_id,
-                        active: active.session_id,
+                        active: active_session_id,
                     },
                 ));
             }
-            inner.take()
+            active
         };
-
-        let session = active.expect("active session checked before take");
 
         if session.next_index == 0 {
             // Closing the channel lets the idle worker exit immediately.
@@ -418,18 +444,20 @@ impl SessionOrchestrator {
     pub fn abort_session(&self, session_id: SessionId) -> Result<(), SessionRoutingError> {
         let session = {
             let mut inner = self.inner.lock().unwrap();
-            let Some(active) = inner.as_ref() else {
+            let Some(active) = inner.take() else {
                 return Err(SessionRoutingError::NoActiveSession {
                     requested: session_id,
                 });
             };
             if active.session_id != session_id {
+                let active_session_id = active.session_id;
+                *inner = Some(active);
                 return Err(SessionRoutingError::SessionMismatch {
                     requested: session_id,
-                    active: active.session_id,
+                    active: active_session_id,
                 });
             }
-            inner.take().expect("active session checked before take")
+            active
         };
 
         session.cancelled.store(true, Ordering::Release);
@@ -598,7 +626,13 @@ mod tests {
         transcriber: Arc<dyn Transcriber>,
         timeout: Duration,
     ) -> SessionOrchestrator {
-        SessionOrchestrator::new(transcriber, Some("en".to_string()), timeout)
+        SessionOrchestrator::new(
+            transcriber,
+            OrchestratorConfig {
+                language: Some("en".to_string()),
+                convergence_timeout: timeout,
+            },
+        )
     }
 
     fn default_orchestrator(transcriber: Arc<dyn Transcriber>) -> SessionOrchestrator {

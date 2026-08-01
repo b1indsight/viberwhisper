@@ -7,12 +7,12 @@ Module-level design docs covering structs, methods, and dependencies.
 | Document | Description |
 |---|---|
 | [audio.md](architecture/audio.md) | Audio recording — `AudioRecorder`, cpal stream management, live chunking, WAV output |
-| [core.md](architecture/core.md) | Config persistence (`AppConfig`), CLI argument parsing (`Cli`, `Commands`), `SessionOrchestrator` |
+| [core.md](architecture/core.md) | Strict v2 config persistence, runtime assembly, CLI parsing, and `SessionOrchestrator` |
 | [input.md](architecture/input.md) | Hotkey detection (`HotkeyManager`), text injection (`TextTyper`), system tray (`TrayManager`) |
 | [local.md](architecture/local.md) | Local Gemma runtime: installer, Python FastAPI service, process lifecycle, health/status management |
 | [transcriber.md](architecture/transcriber.md) | Transcription trait, `ApiTranscriber` (OpenAI-compatible API), chunking, retry, text merging |
 | [platform.md](architecture/platform.md) | Platform text injection — `MacTyper` (osascript) and `WindowsTyper` (SendInput) |
-| [postprocess.md](architecture/postprocess.md) | Post-processing — `TextPostProcessor` trait, LLM integration, preheat/conservative sessions |
+| [postprocess.md](architecture/postprocess.md) | Post-processing — concrete processor facade, LLM integration, preheat/conservative sessions |
 
 ## Examples
 
@@ -20,7 +20,7 @@ Tracked example files for local setup.
 
 | File | Description |
 |---|---|
-| [../config.example.json](../config.example.json) | Example local config; copy to `config.json` and fill your own API key |
+| [../config.example.json](../config.example.json) | Canonical secret-free v2 configuration example |
 
 ## Feature Plans
 
@@ -41,3 +41,5 @@ Implementation plans and technical specs for each feature.
 | [12-local-gemma-service.md](plan/12-local-gemma-service.md) | Done | Local Gemma inference service, lifecycle management, and CLI integration |
 | [14-tray-recording-control.md](plan/14-tray-recording-control.md) | Done | Tray-only control, input-independent recording state, and strict SessionId routing |
 | [16-session-owned-chunk-results.md](plan/16-session-owned-chunk-results.md) | Done | Keep chunk state and transcription results owned by one session; workers return events instead of mutating shared chunk storage |
+| [17-shared-text-merge.md](plan/17-shared-text-merge.md) | Done | Centralize transcription text merging for offline chunks and session orchestration |
+| [18-config-architecture-refactor.md](plan/18-config-architecture-refactor.md) | Done | Strict v2-only config, module-owned validation, minimal runtime views, and explicit API/Local profiles |

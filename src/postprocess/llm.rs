@@ -1,5 +1,5 @@
-use crate::core::config::AppConfig;
-use crate::postprocess::{TextPostProcessor, TextPostProcessorSession};
+use crate::core::config::ApiAuth;
+use crate::postprocess::{LlmConfig, PostProcessError};
 use reqwest::blocking::Client;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -16,8 +16,8 @@ const DEFAULT_PROMPT: &str = "请将下面的语音转写结果整理为适合�
     - 只输出整理后的最终文本，不要解释";
 
 pub struct LlmPostProcessor {
-    api_key: String,
-    api_url: String,
+    auth: ApiAuth,
+    api_url: reqwest::Url,
     model: String,
     prompt: String,
     temperature: f32,
@@ -26,38 +26,23 @@ pub struct LlmPostProcessor {
 }
 
 impl LlmPostProcessor {
-    pub fn from_config(config: &AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let api_key = config
-            .post_process_api_key
-            .clone()
-            .ok_or("post_process_api_key not configured")?;
-        let api_url = config
-            .post_process_api_url
-            .clone()
-            .ok_or("post_process_api_url not configured")?;
-        let model = config
-            .post_process_model
-            .clone()
-            .ok_or("post_process_model not configured")?;
-        let prompt = config
-            .post_process_prompt
-            .clone()
-            .unwrap_or_else(|| DEFAULT_PROMPT.to_string());
+    pub(crate) fn new(config: LlmConfig) -> Result<Self, reqwest::Error> {
+        let prompt = config.prompt.unwrap_or_else(|| DEFAULT_PROMPT.to_string());
         Ok(Self {
-            api_key,
-            api_url,
-            model,
+            auth: config.auth,
+            api_url: config.endpoint,
+            model: config.model,
             prompt,
-            temperature: config.post_process_temperature,
-            streaming_enabled: config.post_process_streaming_enabled,
+            temperature: config.temperature,
+            streaming_enabled: config.preheat_enabled,
             client: Client::builder().timeout(LLM_REQUEST_TIMEOUT).build()?,
         })
     }
 
-    fn call_llm(&self, text: &str) -> Result<String, Box<dyn std::error::Error>> {
+    fn call_llm(&self, text: &str) -> Result<String, PostProcessError> {
         call_llm_impl(
             &self.client,
-            &self.api_key,
+            &self.auth,
             &self.api_url,
             &self.model,
             &self.prompt,
@@ -65,17 +50,51 @@ impl LlmPostProcessor {
             text,
         )
     }
+
+    pub(crate) fn process(&self, text: &str) -> Result<String, PostProcessError> {
+        if text.is_empty() {
+            return Ok(text.to_string());
+        }
+        info!(text_len = text.len(), "Post-processing text with LLM");
+        let result = self.call_llm(text)?;
+        info!(result_len = result.len(), "LLM post-processing complete");
+        Ok(result)
+    }
+
+    pub(crate) fn start_session(&self) -> LlmSession {
+        let session = if self.streaming_enabled {
+            LlmSessionKind::Preheat(PreheatLlmSession::new(
+                self.auth.clone(),
+                self.api_url.clone(),
+                self.model.clone(),
+                self.prompt.clone(),
+                self.temperature,
+                self.client.clone(),
+            ))
+        } else {
+            LlmSessionKind::Conservative(ConservativeLlmSession {
+                auth: self.auth.clone(),
+                api_url: self.api_url.clone(),
+                model: self.model.clone(),
+                prompt: self.prompt.clone(),
+                temperature: self.temperature,
+                client: self.client.clone(),
+                chunks: Vec::new(),
+            })
+        };
+        LlmSession(session)
+    }
 }
 
 fn call_llm_impl(
     client: &Client,
-    api_key: &str,
-    api_url: &str,
+    auth: &ApiAuth,
+    api_url: &reqwest::Url,
     model: &str,
     prompt: &str,
     temperature: f32,
     text: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, PostProcessError> {
     let request_body = serde_json::json!({
         "model": model,
         "messages": [
@@ -86,67 +105,37 @@ fn call_llm_impl(
         "stream": false
     });
 
-    let response = client
-        .post(api_url)
-        .header("Authorization", format!("Bearer {}", api_key))
+    let mut request = client
+        .post(api_url.clone())
         .header("Content-Type", "application/json")
-        .json(&request_body)
-        .send()?;
+        .json(&request_body);
+    if let ApiAuth::Bearer(secret) = auth {
+        request = request.bearer_auth(secret.expose());
+    }
+    let response = request.send()?;
 
     let status = response.status();
     let body = response.text()?;
 
     if !status.is_success() {
-        return Err(format!("LLM API error {}: {}", status, body).into());
+        return Err(PostProcessError::Api {
+            status: status.as_u16(),
+            body,
+        });
     }
 
     let json: serde_json::Value = serde_json::from_str(&body)?;
     let content = json["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or("content field not found in LLM response")?
+        .ok_or(PostProcessError::MissingContent)?
         .trim()
         .to_string();
 
     if content.is_empty() {
-        return Err("LLM returned empty content".into());
+        return Err(PostProcessError::EmptyContent);
     }
 
     Ok(content)
-}
-
-impl TextPostProcessor for LlmPostProcessor {
-    fn process(&self, text: &str) -> Result<String, Box<dyn std::error::Error>> {
-        if text.is_empty() {
-            return Ok(text.to_string());
-        }
-        info!(text_len = text.len(), "Post-processing text with LLM");
-        let result = self.call_llm(text)?;
-        info!(result_len = result.len(), "LLM post-processing complete");
-        Ok(result)
-    }
-
-    fn start_session(&self) -> Box<dyn TextPostProcessorSession> {
-        if self.streaming_enabled {
-            Box::new(PreheatLlmSession::new(
-                self.api_key.clone(),
-                self.api_url.clone(),
-                self.model.clone(),
-                self.prompt.clone(),
-                self.temperature,
-                self.client.clone(),
-            ))
-        } else {
-            Box::new(ConservativeLlmSession {
-                api_key: self.api_key.clone(),
-                api_url: self.api_url.clone(),
-                model: self.model.clone(),
-                prompt: self.prompt.clone(),
-                temperature: self.temperature,
-                client: self.client.clone(),
-                chunks: Vec::new(),
-            })
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -154,8 +143,8 @@ impl TextPostProcessor for LlmPostProcessor {
 // ---------------------------------------------------------------------------
 
 struct ConservativeLlmSession {
-    api_key: String,
-    api_url: String,
+    auth: ApiAuth,
+    api_url: reqwest::Url,
     model: String,
     prompt: String,
     temperature: f32,
@@ -163,14 +152,14 @@ struct ConservativeLlmSession {
     chunks: Vec<String>,
 }
 
-impl TextPostProcessorSession for ConservativeLlmSession {
+impl ConservativeLlmSession {
     fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());
         }
     }
 
-    fn finish(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+    fn finish(&mut self) -> Result<String, PostProcessError> {
         // Post-processing receives already ordered stable text fragments; joining
         // without separators preserves the STT layer's chosen spacing/punctuation.
         let combined = self.chunks.join("");
@@ -179,7 +168,7 @@ impl TextPostProcessorSession for ConservativeLlmSession {
         }
         call_llm_impl(
             &self.client,
-            &self.api_key,
+            &self.auth,
             &self.api_url,
             &self.model,
             &self.prompt,
@@ -202,8 +191,8 @@ struct PreheatState {
 }
 
 struct PreheatLlmSession {
-    api_key: String,
-    api_url: String,
+    auth: ApiAuth,
+    api_url: reqwest::Url,
     model: String,
     prompt: String,
     temperature: f32,
@@ -215,15 +204,15 @@ struct PreheatLlmSession {
 
 impl PreheatLlmSession {
     fn new(
-        api_key: String,
-        api_url: String,
+        auth: ApiAuth,
+        api_url: reqwest::Url,
         model: String,
         prompt: String,
         temperature: f32,
         client: Client,
     ) -> Self {
         Self {
-            api_key,
+            auth,
             api_url,
             model,
             prompt,
@@ -259,7 +248,7 @@ impl PreheatLlmSession {
             st.latest_result = None; // clear stale result
         }
 
-        let api_key = self.api_key.clone();
+        let auth = self.auth.clone();
         let api_url = self.api_url.clone();
         let model = self.model.clone();
         let prompt = self.prompt.clone();
@@ -270,7 +259,7 @@ impl PreheatLlmSession {
         thread::spawn(move || {
             let result = call_llm_impl(
                 &client,
-                &api_key,
+                &auth,
                 &api_url,
                 &model,
                 &prompt,
@@ -290,7 +279,7 @@ impl PreheatLlmSession {
     }
 }
 
-impl TextPostProcessorSession for PreheatLlmSession {
+impl PreheatLlmSession {
     fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());
@@ -303,7 +292,7 @@ impl TextPostProcessorSession for PreheatLlmSession {
         }
     }
 
-    fn finish(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+    fn finish(&mut self) -> Result<String, PostProcessError> {
         // Keep post-processing concatenation separator-free; the STT result is
         // already a display-ready text stream before LLM cleanup.
         let combined = self.chunks.join("");
@@ -316,7 +305,7 @@ impl TextPostProcessorSession for PreheatLlmSession {
         if self.generation == 0 {
             return call_llm_impl(
                 &self.client,
-                &self.api_key,
+                &self.auth,
                 &self.api_url,
                 &self.model,
                 &self.prompt,
@@ -347,7 +336,7 @@ impl TextPostProcessorSession for PreheatLlmSession {
                 drop(st);
                 call_llm_impl(
                     &self.client,
-                    &self.api_key,
+                    &self.auth,
                     &self.api_url,
                     &self.model,
                     &self.prompt,
@@ -359,91 +348,137 @@ impl TextPostProcessorSession for PreheatLlmSession {
     }
 }
 
+pub(crate) struct LlmSession(LlmSessionKind);
+
+enum LlmSessionKind {
+    Conservative(ConservativeLlmSession),
+    Preheat(PreheatLlmSession),
+}
+
+impl LlmSession {
+    pub(crate) fn push_stable_chunk(&mut self, text: &str) {
+        match &mut self.0 {
+            LlmSessionKind::Conservative(session) => session.push_stable_chunk(text),
+            LlmSessionKind::Preheat(session) => session.push_stable_chunk(text),
+        }
+    }
+
+    pub(crate) fn finish(&mut self) -> Result<String, PostProcessError> {
+        match &mut self.0 {
+            LlmSessionKind::Conservative(session) => session.finish(),
+            LlmSessionKind::Preheat(session) => session.finish(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::AppConfig;
+    use crate::core::config::{ApiAuth, PostProcessSection, SecretValue};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
 
-    fn config_with_postprocess() -> AppConfig {
-        AppConfig {
-            post_process_enabled: true,
-            post_process_api_key: Some("test_key".to_string()),
-            post_process_api_url: Some("https://api.example.com/v1/chat/completions".to_string()),
-            post_process_model: Some("gpt-4o-mini".to_string()),
-            ..Default::default()
+    fn config_with_postprocess(preheat_enabled: bool, prompt: Option<&str>) -> LlmConfig {
+        let section = PostProcessSection {
+            enabled: true,
+            preheat_enabled,
+            prompt: prompt.map(str::to_string),
+            temperature: 0.0,
+        };
+        match crate::postprocess::PostProcessConfig::validate(
+            Some("https://api.example.com/v1/chat/completions"),
+            ApiAuth::Bearer(SecretValue::new("test_key")),
+            Some("gpt-4o-mini"),
+            &section,
+        )
+        .unwrap()
+        {
+            crate::postprocess::PostProcessConfig::Llm(config) => config,
+            crate::postprocess::PostProcessConfig::Disabled => unreachable!(),
+        }
+    }
+
+    fn spawn_header_stub() -> (reqwest::Url, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 16_384];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(size) => request.extend_from_slice(&buffer[..size]),
+                }
+            }
+            let headers = String::from_utf8_lossy(&request)
+                .split("\r\n\r\n")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            sender.send(headers).unwrap();
+            let body = r#"{"choices":[{"message":{"content":"clean"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (
+            reqwest::Url::parse(&format!("http://127.0.0.1:{port}/v1/chat/completions")).unwrap(),
+            receiver,
+        )
+    }
+
+    #[test]
+    fn authorization_header_matches_typed_auth_mode() {
+        let client = Client::builder().build().unwrap();
+        for (auth, expected_header) in [
+            (ApiAuth::None, None),
+            (
+                ApiAuth::Bearer(SecretValue::new("header-token")),
+                Some("authorization: bearer header-token"),
+            ),
+        ] {
+            let (endpoint, headers) = spawn_header_stub();
+            assert_eq!(
+                call_llm_impl(&client, &auth, &endpoint, "model", "prompt", 0.0, "raw").unwrap(),
+                "clean"
+            );
+            let headers = headers.recv().unwrap().to_ascii_lowercase();
+            match expected_header {
+                Some(expected) => assert!(headers.contains(expected)),
+                None => assert!(!headers.contains("authorization:")),
+            }
         }
     }
 
     #[test]
-    fn test_from_config_missing_key() {
-        let config = AppConfig::default();
-        assert!(LlmPostProcessor::from_config(&config).is_err());
-    }
-
-    #[test]
-    fn test_from_config_missing_url() {
-        let config = AppConfig {
-            post_process_api_key: Some("key".to_string()),
-            ..Default::default()
-        };
-        assert!(LlmPostProcessor::from_config(&config).is_err());
-    }
-
-    #[test]
-    fn test_from_config_missing_model() {
-        let config = AppConfig {
-            post_process_api_key: Some("key".to_string()),
-            post_process_api_url: Some("https://example.com/v1/chat/completions".to_string()),
-            ..Default::default()
-        };
-        assert!(LlmPostProcessor::from_config(&config).is_err());
-    }
-
-    #[test]
-    fn test_from_config_success() {
-        let config = config_with_postprocess();
-        let result = LlmPostProcessor::from_config(&config);
-        assert!(result.is_ok());
-        let p = result.unwrap();
-        assert_eq!(p.api_key, "test_key");
+    fn configures_prompt_and_session_mode() {
+        let p = LlmPostProcessor::new(config_with_postprocess(true, None)).unwrap();
         assert_eq!(p.model, "gpt-4o-mini");
-        assert_eq!(p.api_url, "https://api.example.com/v1/chat/completions");
-    }
-
-    #[test]
-    fn test_from_config_default_prompt() {
-        let config = config_with_postprocess();
-        let p = LlmPostProcessor::from_config(&config).unwrap();
+        assert_eq!(
+            p.api_url.as_str(),
+            "https://api.example.com/v1/chat/completions"
+        );
         assert_eq!(p.prompt, DEFAULT_PROMPT);
-    }
-
-    #[test]
-    fn test_from_config_custom_prompt() {
-        let mut config = config_with_postprocess();
-        config.post_process_prompt = Some("custom prompt".to_string());
-        let p = LlmPostProcessor::from_config(&config).unwrap();
-        assert_eq!(p.prompt, "custom prompt");
-    }
-
-    #[test]
-    fn test_from_config_streaming_enabled_default() {
-        let config = config_with_postprocess();
-        let p = LlmPostProcessor::from_config(&config).unwrap();
         assert!(p.streaming_enabled);
-    }
 
-    #[test]
-    fn test_from_config_streaming_disabled() {
-        let mut config = config_with_postprocess();
-        config.post_process_streaming_enabled = false;
-        let p = LlmPostProcessor::from_config(&config).unwrap();
-        assert!(!p.streaming_enabled);
+        let custom =
+            LlmPostProcessor::new(config_with_postprocess(false, Some("custom prompt"))).unwrap();
+        assert_eq!(custom.prompt, "custom prompt");
+        assert!(!custom.streaming_enabled);
     }
 
     #[test]
     fn test_process_empty_text_bypasses_llm() {
-        let config = config_with_postprocess();
-        let p = LlmPostProcessor::from_config(&config).unwrap();
+        let config = config_with_postprocess(true, None);
+        let p = LlmPostProcessor::new(config).unwrap();
         let result = p.process("");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
@@ -453,22 +488,9 @@ mod tests {
 
     #[test]
     fn test_conservative_session_no_chunks_finish_empty() {
-        let mut config = config_with_postprocess();
-        config.post_process_streaming_enabled = false;
-        let p = LlmPostProcessor::from_config(&config).unwrap();
+        let config = config_with_postprocess(false, None);
+        let p = LlmPostProcessor::new(config).unwrap();
         let mut session = p.start_session();
-        let result = session.finish();
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "");
-    }
-
-    #[test]
-    fn test_conservative_session_empty_chunk_ignored() {
-        let mut config = config_with_postprocess();
-        config.post_process_streaming_enabled = false;
-        let p = LlmPostProcessor::from_config(&config).unwrap();
-        let mut session = p.start_session();
-        session.push_stable_chunk("");
         let result = session.finish();
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
@@ -478,46 +500,11 @@ mod tests {
 
     #[test]
     fn test_preheat_session_no_chunks_finish_empty() {
-        let config = config_with_postprocess(); // streaming_enabled = true by default
-        let p = LlmPostProcessor::from_config(&config).unwrap();
+        let config = config_with_postprocess(true, None);
+        let p = LlmPostProcessor::new(config).unwrap();
         let mut session = p.start_session();
         let result = session.finish();
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
-    }
-
-    #[test]
-    fn test_preheat_session_empty_chunk_ignored() {
-        let config = config_with_postprocess();
-        let p = LlmPostProcessor::from_config(&config).unwrap();
-        let mut session = p.start_session();
-        session.push_stable_chunk("");
-        let result = session.finish();
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "");
-    }
-
-    #[test]
-    fn test_preheat_state_generation_increments() {
-        let mut session = PreheatLlmSession::new(
-            "key".to_string(),
-            "http://localhost:1/v1/chat/completions".to_string(),
-            "model".to_string(),
-            "prompt".to_string(),
-            0.0,
-            Client::builder()
-                .timeout(LLM_REQUEST_TIMEOUT)
-                .build()
-                .unwrap(),
-        );
-        assert_eq!(session.generation, 0);
-        // push_stable_chunk fires a request and increments generation.
-        // The HTTP call will fail (localhost:1), but generation still increments.
-        session.chunks.push("hello".to_string());
-        session.generation += 1;
-        assert_eq!(session.generation, 1);
-        session.chunks.push("world".to_string());
-        session.generation += 1;
-        assert_eq!(session.generation, 2);
     }
 }

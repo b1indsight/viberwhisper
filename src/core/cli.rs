@@ -36,16 +36,20 @@ pub enum Commands {
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigAction {
+    /// 显示当前平台使用的配置文件路径
+    Path,
+    /// 检查当前 profile 的运行配置
+    Check,
     /// 列出所有配置项及当前值
     List,
     /// 读取指定配置项的值
     Get {
-        /// 配置项名称（如 hotkey, model, language）
+        /// Canonical dotted key（如 input.hold_hotkey）
         key: String,
     },
     /// 设置指定配置项的值
     Set {
-        /// 配置项名称
+        /// Canonical dotted key
         key: String,
         /// 新值
         value: String,
@@ -86,13 +90,33 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_config_path_and_check() {
+        let path = Cli::try_parse_from(["viberwhisper", "config", "path"]).unwrap();
+        assert!(matches!(
+            path.command,
+            Some(Commands::Config {
+                action: ConfigAction::Path
+            })
+        ));
+
+        let check = Cli::try_parse_from(["viberwhisper", "config", "check"]).unwrap();
+        assert!(matches!(
+            check.command,
+            Some(Commands::Config {
+                action: ConfigAction::Check
+            })
+        ));
+    }
+
+    #[test]
     fn test_cli_config_get() {
-        let cli = Cli::try_parse_from(["viberwhisper", "config", "get", "hotkey"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["viberwhisper", "config", "get", "input.hold_hotkey"]).unwrap();
         if let Some(Commands::Config {
             action: ConfigAction::Get { key },
         }) = cli.command
         {
-            assert_eq!(key, "hotkey");
+            assert_eq!(key, "input.hold_hotkey");
         } else {
             panic!("Expected config get command");
         }
@@ -100,12 +124,13 @@ mod tests {
 
     #[test]
     fn test_cli_config_set() {
-        let cli = Cli::try_parse_from(["viberwhisper", "config", "set", "hotkey", "F9"]).unwrap();
+        let cli = Cli::try_parse_from(["viberwhisper", "config", "set", "input.hold_hotkey", "F9"])
+            .unwrap();
         if let Some(Commands::Config {
             action: ConfigAction::Set { key, value },
         }) = cli.command
         {
-            assert_eq!(key, "hotkey");
+            assert_eq!(key, "input.hold_hotkey");
             assert_eq!(value, "F9");
         } else {
             panic!("Expected config set command");
