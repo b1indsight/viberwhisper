@@ -152,12 +152,7 @@ enum ChunkState {
     /// Written to disk; not yet picked up by the worker.
     Flushed,
     /// Worker is transcribing this chunk.
-    /// `attempt` is reserved for future orchestrator-level retry logic;
-    /// retry is not yet implemented — on failure the chunk transitions directly to `Failed`.
-    Uploading {
-        #[allow(dead_code)]
-        attempt: u32,
-    },
+    Uploading,
     /// Successfully transcribed.
     Transcribed(String),
     /// Transcription failed (all retries exhausted, or timeout).
@@ -191,8 +186,6 @@ enum WorkerEvent {
 
 struct ActiveSessionInner {
     session_id: SessionId,
-    #[allow(dead_code)]
-    mode: SessionMode,
     chunks: Vec<ChunkEntry>,
     chunk_tx: mpsc::SyncSender<WorkerMsg>,
     result_rx: mpsc::Receiver<WorkerEvent>,
@@ -260,7 +253,6 @@ impl SessionOrchestrator {
 
         *inner = Some(ActiveSessionInner {
             session_id,
-            mode,
             chunks: Vec::new(),
             chunk_tx,
             result_rx,
@@ -557,7 +549,7 @@ fn begin_upload(entry: &mut ChunkEntry) -> bool {
         );
         return false;
     }
-    entry.state = ChunkState::Uploading { attempt: 1 };
+    entry.state = ChunkState::Uploading;
     true
 }
 
@@ -761,10 +753,7 @@ mod tests {
         }];
 
         apply_worker_event(&mut chunks, WorkerEvent::UploadStarted { index: 3 });
-        assert!(matches!(
-            chunks[0].state,
-            ChunkState::Uploading { attempt: 1 }
-        ));
+        assert!(matches!(chunks[0].state, ChunkState::Uploading));
 
         apply_worker_event(
             &mut chunks,

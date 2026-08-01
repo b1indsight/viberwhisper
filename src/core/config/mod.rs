@@ -10,8 +10,9 @@ pub(crate) use document::{
     AudioSection, ChunkingSection, InferenceProfile, InputSection, LocalSection,
     PostProcessSection, SessionSection, TranscriptionSection,
 };
-#[allow(unused_imports)]
-pub use fields::{ConfigKey, FieldError, FieldSpec, FieldValue, SecretStatus, ValueKind};
+pub use fields::ConfigKey;
+#[cfg(test)]
+use fields::{FieldError, FieldValue, SecretStatus};
 pub use store::ConfigStore;
 
 #[derive(Debug)]
@@ -217,9 +218,9 @@ mod tests {
 
     #[test]
     fn field_catalog_uses_canonical_keys_and_rejects_legacy_aliases() {
-        let keys: Vec<_> = ConfigDocument::field_specs()
+        let keys: Vec<_> = ConfigDocument::field_keys()
             .iter()
-            .map(|spec| spec.key.as_str())
+            .map(|key| key.as_str())
             .collect();
         assert!(keys.contains(&"input.hold_hotkey"));
         assert!(keys.contains(&"inference.api.transcription.api_url"));
@@ -230,8 +231,8 @@ mod tests {
 
         let document = ConfigDocument::default();
         let secrets = MapSecrets(HashMap::new());
-        for spec in ConfigDocument::field_specs() {
-            document.get_field(spec.key.as_str(), &secrets).unwrap();
+        for key in ConfigDocument::field_keys() {
+            document.get_field(key.as_str(), &secrets).unwrap();
         }
     }
 
