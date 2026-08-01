@@ -1,9 +1,9 @@
-use crate::audio::{ChunkLimits, split_wav};
+use crate::audio::WavChunk;
 use crate::core::config::{
     ApiAuth, ChunkingSection, ConfigKey, TranscriptionSection, ValidationIssue,
 };
-use crate::text::merge_texts;
 use crate::transcriber::TranscribeError;
+use std::io::Cursor;
 use std::time::Duration;
 use tracing::{info, instrument, warn};
 
@@ -11,7 +11,7 @@ use tracing::{info, instrument, warn};
 const STT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub trait Transcriber: Send + Sync {
-    fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError>;
+    fn transcribe(&self, chunk: &WavChunk) -> Result<String, TranscribeError>;
 }
 
 #[cfg(test)]
@@ -19,8 +19,8 @@ pub struct MockTranscriber;
 
 #[cfg(test)]
 impl Transcriber for MockTranscriber {
-    #[instrument(name = "mock_stt", skip(self), fields(path = %wav_path))]
-    fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError> {
+    #[instrument(name = "mock_stt", skip(self, _chunk))]
+    fn transcribe(&self, _chunk: &WavChunk) -> Result<String, TranscribeError> {
         info!("Starting transcription");
         let text = "This is mock transcribed text".to_string();
         info!(result = %text, "Transcription complete");
@@ -36,7 +36,6 @@ pub struct TranscriberConfig {
     language: Option<String>,
     prompt: Option<String>,
     temperature: f32,
-    chunk_limits: ChunkLimits,
     max_retries: u32,
 }
 
@@ -47,7 +46,6 @@ impl TranscriberConfig {
         model: &str,
         transcription: &TranscriptionSection,
         chunking: &ChunkingSection,
-        chunk_limits: ChunkLimits,
     ) -> Result<Self, Vec<ValidationIssue>> {
         let mut issues = Vec::new();
         let endpoint = match reqwest::Url::parse(endpoint) {
@@ -91,7 +89,6 @@ impl TranscriberConfig {
                 language: transcription.language.clone(),
                 prompt: transcription.prompt.clone(),
                 temperature: transcription.temperature,
-                chunk_limits,
                 max_retries: chunking.max_retries,
             }),
             _ => Err(issues),
@@ -104,9 +101,8 @@ impl TranscriberConfig {
 /// Initialized from config via `api_key`, `transcription_api_url`, and `model`.
 /// No provider name is hardcoded — the caller supplies all connection details through config.
 ///
-/// For audio files that exceed `max_chunk_size_bytes` or `max_chunk_duration_secs`, the
-/// transcriber will automatically split the file into smaller chunks, upload each chunk
-/// individually (with exponential-backoff retry on transient errors), and merge the results.
+/// Each call uploads one already-encoded in-memory WAV chunk. Chunk production and ordered
+/// result merging belong to the recording and offline-conversion workflows.
 pub struct ApiTranscriber {
     auth: ApiAuth,
     api_url: reqwest::Url,
@@ -114,7 +110,6 @@ pub struct ApiTranscriber {
     language: Option<String>,
     prompt: Option<String>,
     temperature: f32,
-    chunk_limits: ChunkLimits,
     /// Maximum retry attempts per chunk on transient errors (5xx / network).
     max_retries: u32,
     /// Shared HTTP client (connection reuse + request timeout).
@@ -130,7 +125,6 @@ impl ApiTranscriber {
             language: config.language,
             prompt: config.prompt,
             temperature: config.temperature,
-            chunk_limits: config.chunk_limits,
             max_retries: config.max_retries,
             client: reqwest::blocking::Client::builder()
                 .timeout(STT_REQUEST_TIMEOUT)
@@ -146,20 +140,15 @@ impl ApiTranscriber {
         Ok(transcriber)
     }
 
-    /// Upload a single WAV file and return its transcription text.
-    fn upload_file(&self, wav_path: &str) -> Result<String, TranscribeError> {
-        let file_bytes = std::fs::read(wav_path)
-            .map_err(|e| TranscribeError::Network(format!("failed to read {wav_path}: {e}")))?;
-        let file_name = std::path::Path::new(wav_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("audio.wav")
-            .to_string();
-
-        let part = reqwest::blocking::multipart::Part::bytes(file_bytes)
-            .file_name(file_name)
-            .mime_str("audio/wav")
-            .map_err(|e| TranscribeError::Network(e.to_string()))?;
+    /// Upload one complete in-memory WAV payload and return its transcription text.
+    fn upload_chunk(&self, chunk: &WavChunk) -> Result<String, TranscribeError> {
+        let part = reqwest::blocking::multipart::Part::reader_with_length(
+            Cursor::new(chunk.shared_bytes()),
+            chunk.len() as u64,
+        )
+        .file_name("audio.wav")
+        .mime_str("audio/wav")
+        .map_err(|e| TranscribeError::Network(e.to_string()))?;
 
         let mut form = reqwest::blocking::multipart::Form::new()
             .text("model", self.model.clone())
@@ -216,20 +205,13 @@ impl ApiTranscriber {
     ///
     /// Retries on: network/connection errors, HTTP 5xx.
     /// Does NOT retry: HTTP 4xx (client errors — retrying is futile).
-    fn upload_file_with_retry(
-        &self,
-        wav_path: &str,
-        chunk_index: usize,
-        total_chunks: usize,
-    ) -> Result<String, TranscribeError> {
+    fn upload_chunk_with_retry(&self, chunk: &WavChunk) -> Result<String, TranscribeError> {
         let mut last_error = TranscribeError::Network("upload not attempted".to_string());
 
         for attempt in 0..=self.max_retries {
             if attempt > 0 {
                 let wait_secs = std::cmp::min(1u64 << (attempt - 1), 16);
                 warn!(
-                    chunk = chunk_index + 1,
-                    total = total_chunks,
                     attempt = attempt,
                     wait_secs = wait_secs,
                     "Retrying chunk upload"
@@ -237,14 +219,9 @@ impl ApiTranscriber {
                 std::thread::sleep(std::time::Duration::from_secs(wait_secs));
             }
 
-            info!(
-                chunk = chunk_index + 1,
-                total = total_chunks,
-                attempt = attempt,
-                "Uploading chunk"
-            );
+            info!(attempt = attempt, "Uploading chunk");
 
-            match self.upload_file(wav_path) {
+            match self.upload_chunk(chunk) {
                 Ok(text) => return Ok(text),
                 // Client errors (4xx) are not transient — retrying is futile.
                 Err(e @ TranscribeError::Api { status, .. })
@@ -254,8 +231,6 @@ impl ApiTranscriber {
                 }
                 Err(e) => {
                     warn!(
-                        chunk = chunk_index + 1,
-                        total = total_chunks,
                         attempt = attempt,
                         error = %e,
                         "Chunk upload failed"
@@ -266,8 +241,6 @@ impl ApiTranscriber {
         }
 
         warn!(
-            chunk = chunk_index + 1,
-            total = total_chunks,
             attempts = self.max_retries + 1,
             error = %last_error,
             "Chunk upload failed after all retries"
@@ -277,33 +250,12 @@ impl ApiTranscriber {
 }
 
 impl Transcriber for ApiTranscriber {
-    #[instrument(name = "api_stt", skip(self), fields(path = %wav_path))]
-    fn transcribe(&self, wav_path: &str) -> Result<String, TranscribeError> {
+    #[instrument(name = "api_stt", skip(self, chunk), fields(bytes = chunk.len()))]
+    fn transcribe(&self, chunk: &WavChunk) -> Result<String, TranscribeError> {
         info!("Starting transcription");
-
-        let chunks = split_wav(wav_path, self.chunk_limits)
-            .map_err(|e| TranscribeError::Network(format!("failed to split {wav_path}: {e}")))?;
-
-        if chunks.is_empty() {
-            // File fits within limits — use single-shot upload path (no splitting overhead).
-            let text = self.upload_file_with_retry(wav_path, 0, 1)?;
-            info!(result = %text, "Transcription complete");
-            return Ok(text);
-        }
-
-        let total = chunks.len();
-        info!(chunks = total, "Audio split into chunks for transcription");
-
-        let mut texts = Vec::with_capacity(total);
-        for chunk in &chunks {
-            let path = chunk.path.to_string_lossy();
-            let text = self.upload_file_with_retry(&path, chunk.index, total)?;
-            texts.push(text);
-        }
-
-        let result = merge_texts(&texts, self.language.as_deref());
-        info!(result = %result, chunks = total, "Transcription complete (merged)");
-        Ok(result)
+        let text = self.upload_chunk_with_retry(chunk)?;
+        info!(result = %text, "Transcription complete");
+        Ok(text)
     }
 }
 
@@ -335,7 +287,6 @@ mod tests {
             "whisper-large-v3-turbo",
             &TranscriptionSection::default(),
             &chunking,
-            ChunkLimits::from_section(&chunking),
         )
         .unwrap()
     }
@@ -379,7 +330,7 @@ mod tests {
         (port, requests)
     }
 
-    fn spawn_header_stub() -> (u16, mpsc::Receiver<String>) {
+    fn spawn_request_stub() -> (u16, mpsc::Receiver<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (sender, receiver) = mpsc::channel();
@@ -396,12 +347,7 @@ mod tests {
                     Ok(size) => request.extend_from_slice(&buffer[..size]),
                 }
             }
-            let headers = String::from_utf8_lossy(&request)
-                .split("\r\n\r\n")
-                .next()
-                .unwrap_or_default()
-                .to_string();
-            sender.send(headers).unwrap();
+            sender.send(request).unwrap();
             let body = r#"{"text":"ok"}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
@@ -420,25 +366,19 @@ mod tests {
         ApiTranscriber::new(config).unwrap()
     }
 
-    fn temp_upload_file(name: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "viberwhisper-api-test-{}-{name}.wav",
-            std::process::id()
-        ));
-        std::fs::write(&path, b"fake wav bytes").unwrap();
-        path
+    fn test_chunk() -> WavChunk {
+        WavChunk::from_encoded_bytes(b"fake wav bytes".to_vec())
     }
 
     #[test]
     fn test_upload_success_returns_trimmed_text() {
         let (port, _requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\": \" hello \"}");
         let t = transcriber_for_port(port, 3);
-        let file = temp_upload_file("ok");
+        let chunk = test_chunk();
 
-        let result = t.upload_file_with_retry(file.to_str().unwrap(), 0, 1);
+        let result = t.upload_chunk_with_retry(&chunk);
 
         assert_eq!(result.unwrap(), "hello");
-        let _ = std::fs::remove_file(file);
     }
 
     #[test]
@@ -450,26 +390,44 @@ mod tests {
                 Some("authorization: bearer header-token"),
             ),
         ] {
-            let (port, headers) = spawn_header_stub();
+            let (port, request) = spawn_request_stub();
             let config = validated_config_with_auth(
                 &format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
                 0,
                 auth,
             );
             let transcriber = ApiTranscriber::new(config).unwrap();
-            let file = temp_upload_file("auth");
+            let chunk = test_chunk();
 
-            assert_eq!(
-                transcriber.upload_file(file.to_str().unwrap()).unwrap(),
-                "ok"
-            );
-            let headers = headers.recv().unwrap().to_ascii_lowercase();
+            assert_eq!(transcriber.upload_chunk(&chunk).unwrap(), "ok");
+            let request = request.recv().unwrap();
+            let headers = String::from_utf8_lossy(&request)
+                .split("\r\n\r\n")
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             match expected_header {
                 Some(expected) => assert!(headers.contains(expected)),
                 None => assert!(!headers.contains("authorization:")),
             }
-            let _ = std::fs::remove_file(file);
         }
+    }
+
+    #[test]
+    fn multipart_upload_contains_the_shared_chunk_bytes() {
+        let (port, request) = spawn_request_stub();
+        let transcriber = transcriber_for_port(port, 0);
+        let chunk = test_chunk();
+
+        assert_eq!(transcriber.upload_chunk(&chunk).unwrap(), "ok");
+        let request = request.recv().unwrap();
+        let request_text = String::from_utf8_lossy(&request);
+        assert!(request_text.contains("filename=\"audio.wav\""));
+        assert!(
+            request
+                .windows(chunk.bytes().len())
+                .any(|window| window == chunk.bytes())
+        );
     }
 
     #[test]
@@ -477,10 +435,10 @@ mod tests {
         let (port, requests) =
             spawn_http_stub("HTTP/1.1 400 Bad Request", "{\"error\":\"bad model\"}");
         let t = transcriber_for_port(port, 3);
-        let file = temp_upload_file("bad-request");
+        let chunk = test_chunk();
 
         let started = std::time::Instant::now();
-        let result = t.upload_file_with_retry(file.to_str().unwrap(), 0, 1);
+        let result = t.upload_chunk_with_retry(&chunk);
 
         match result {
             Err(TranscribeError::Api { status: 400, body }) => {
@@ -491,7 +449,6 @@ mod tests {
         // No retry: a single request, no exponential-backoff sleeps.
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        let _ = std::fs::remove_file(file);
     }
 
     #[test]
@@ -499,9 +456,9 @@ mod tests {
         let (port, requests) =
             spawn_http_stub("HTTP/1.1 503 Service Unavailable", "{\"error\":\"busy\"}");
         let t = transcriber_for_port(port, 1);
-        let file = temp_upload_file("server-error");
+        let chunk = test_chunk();
 
-        let result = t.upload_file_with_retry(file.to_str().unwrap(), 0, 1);
+        let result = t.upload_chunk_with_retry(&chunk);
 
         assert!(matches!(
             result,
@@ -509,16 +466,5 @@ mod tests {
         ));
         // Initial attempt + one retry.
         assert_eq!(requests.load(Ordering::SeqCst), 2);
-        let _ = std::fs::remove_file(file);
-    }
-
-    #[test]
-    fn test_missing_file_is_network_error() {
-        let (port, _requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\":\"x\"}");
-        let t = transcriber_for_port(port, 0);
-
-        let result = t.upload_file_with_retry("/nonexistent/viberwhisper.wav", 0, 1);
-
-        assert!(matches!(result, Err(TranscribeError::Network(_))));
     }
 }

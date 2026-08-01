@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info, warn};
 
-use crate::audio::remove_temp_audio_file;
+use crate::audio::WavChunk;
 use crate::core::config::{ConfigKey, SessionSection, ValidationIssue};
 
 use crate::core::recording_session::SessionId;
@@ -149,7 +149,7 @@ impl fmt::Display for SessionError {
 
 #[derive(Debug)]
 enum ChunkState {
-    /// Written to disk; not yet picked up by the worker.
+    /// Produced and queued; not yet picked up by the worker.
     Flushed,
     /// Worker is transcribing this chunk.
     Uploading,
@@ -171,7 +171,7 @@ struct ChunkEntry {
 }
 
 enum WorkerMsg {
-    Chunk { index: usize, path: String },
+    Chunk { index: usize, chunk: WavChunk },
 }
 
 enum WorkerEvent {
@@ -240,7 +240,7 @@ impl SessionOrchestrator {
             });
         }
 
-        let (chunk_tx, chunk_rx) = mpsc::sync_channel::<WorkerMsg>(64);
+        let (chunk_tx, chunk_rx) = mpsc::sync_channel::<WorkerMsg>(2);
         let (result_tx, result_rx) = mpsc::channel::<WorkerEvent>();
         let cancelled = Arc::new(AtomicBool::new(false));
 
@@ -265,28 +265,26 @@ impl SessionOrchestrator {
         Ok(())
     }
 
-    /// Submit a chunk file path for background transcription.
-    ///
-    /// The worker thread will call `transcriber.transcribe(&path)` and delete the
-    /// file after processing (success or failure). Returns the assigned chunk index,
-    /// or `None` if no session is active.
+    /// Submit one in-memory WAV chunk for background transcription.
     pub fn on_chunk_ready(
         &self,
         session_id: SessionId,
-        path: String,
+        chunk: WavChunk,
     ) -> Result<usize, SessionRoutingError> {
         let mut inner = self.inner.lock().unwrap();
         let Some(session) = inner.as_mut() else {
-            warn!(path = %path, "Chunk arrived without an active session; deleting it");
-            remove_chunk_file(&path, "orphan");
+            warn!("Chunk arrived without an active session");
             return Err(SessionRoutingError::NoActiveSession {
                 requested: session_id,
             });
         };
         if session.session_id != session_id {
             let active = session.session_id;
-            warn!(path = %path, requested = session_id.0, active = active.0, "Rejecting stale chunk");
-            remove_chunk_file(&path, "stale");
+            warn!(
+                requested = session_id.0,
+                active = active.0,
+                "Rejecting stale chunk"
+            );
             return Err(SessionRoutingError::SessionMismatch {
                 requested: session_id,
                 active,
@@ -301,21 +299,20 @@ impl SessionOrchestrator {
             state: ChunkState::Flushed,
         });
 
-        if let Err(e) = session.chunk_tx.try_send(WorkerMsg::Chunk {
-            index,
-            path: path.clone(),
-        }) {
+        if let Err(e) = session.chunk_tx.try_send(WorkerMsg::Chunk { index, chunk }) {
             let message = match e {
                 mpsc::TrySendError::Full(_) => "worker queue full",
                 mpsc::TrySendError::Disconnected(_) => "worker channel closed",
             };
-            error!(path = %path, error = message, "Failed to enqueue chunk; marking as failed");
+            error!(
+                error = message,
+                "Failed to enqueue chunk; marking as failed"
+            );
             if let Some(entry) = session.chunks.iter_mut().find(|e| e.index == index) {
                 entry.state = ChunkState::Failed(TranscribeError::Network(message.to_string()));
             }
-            remove_chunk_file(&path, "rejected");
         } else {
-            info!(index = index, path = %path, "Chunk enqueued for background transcription");
+            info!(index = index, "Chunk enqueued for background transcription");
         }
 
         drain_worker_events(session);
@@ -469,24 +466,24 @@ fn worker_loop(
 ) {
     for msg in rx {
         match msg {
-            WorkerMsg::Chunk { index, path } => {
+            WorkerMsg::Chunk { index, chunk } => {
                 if cancelled.load(Ordering::Acquire) {
-                    remove_chunk_file(&path, "cancelled");
                     continue;
                 }
 
                 let _ = result_tx.send(WorkerEvent::UploadStarted { index });
 
-                debug!(index = index, path = %path, "Worker transcribing chunk");
+                debug!(
+                    index = index,
+                    bytes = chunk.len(),
+                    "Worker transcribing chunk"
+                );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    transcriber.transcribe(&path)
+                    transcriber.transcribe(&chunk)
                 }))
                 .unwrap_or_else(|_| {
                     Err(TranscribeError::Network("transcriber panicked".to_string()))
                 });
-
-                // Clean up the chunk file before publishing the terminal result.
-                remove_chunk_file(&path, "processed");
 
                 let _ = result_tx.send(WorkerEvent::Completed { index, result });
             }
@@ -551,12 +548,6 @@ fn begin_upload(entry: &mut ChunkEntry) -> bool {
     }
     entry.state = ChunkState::Uploading;
     true
-}
-
-fn remove_chunk_file(path: &str, reason: &str) {
-    if let Err(e) = remove_temp_audio_file(path) {
-        debug!(path, reason, error = %e, "Could not delete chunk file");
-    }
 }
 
 fn collect_transcribed_texts(chunks: &[ChunkEntry]) -> Vec<String> {
@@ -631,13 +622,17 @@ mod tests {
         make_orchestrator_with_timeout(transcriber, Duration::from_secs(5))
     }
 
+    fn test_chunk() -> WavChunk {
+        WavChunk::from_encoded_bytes(b"test wav chunk".to_vec())
+    }
+
     // ── Mock transcribers ────────────────────────────────────────────────────
 
     /// Always returns a fixed text; never touches the file system.
     struct FixedTranscriber(String);
 
     impl Transcriber for FixedTranscriber {
-        fn transcribe(&self, _path: &str) -> Result<String, TranscribeError> {
+        fn transcribe(&self, _chunk: &WavChunk) -> Result<String, TranscribeError> {
             Ok(self.0.clone())
         }
     }
@@ -658,7 +653,7 @@ mod tests {
     }
 
     impl Transcriber for ScriptedTranscriber {
-        fn transcribe(&self, _path: &str) -> Result<String, TranscribeError> {
+        fn transcribe(&self, _chunk: &WavChunk) -> Result<String, TranscribeError> {
             let i = self.call_count.fetch_add(1, Ordering::SeqCst);
             match self.results.get(i) {
                 Some(Ok(s)) => Ok(s.clone()),
@@ -678,7 +673,7 @@ mod tests {
     }
 
     impl Transcriber for GateTranscriber {
-        fn transcribe(&self, _path: &str) -> Result<String, TranscribeError> {
+        fn transcribe(&self, _chunk: &WavChunk) -> Result<String, TranscribeError> {
             let (lock, condvar) = &*self.release;
             let mut released = lock.lock().unwrap();
             while !*released {
@@ -689,7 +684,7 @@ mod tests {
     }
 
     impl Transcriber for SlowTranscriber {
-        fn transcribe(&self, _path: &str) -> Result<String, TranscribeError> {
+        fn transcribe(&self, _chunk: &WavChunk) -> Result<String, TranscribeError> {
             thread::sleep(self.delay);
             Ok("slow".to_string())
         }
@@ -699,7 +694,7 @@ mod tests {
     struct PanicTranscriber;
 
     impl Transcriber for PanicTranscriber {
-        fn transcribe(&self, _path: &str) -> Result<String, TranscribeError> {
+        fn transcribe(&self, _chunk: &WavChunk) -> Result<String, TranscribeError> {
             panic!("intentional transcriber panic for testing");
         }
     }
@@ -726,7 +721,7 @@ mod tests {
         chunk_tx
             .send(WorkerMsg::Chunk {
                 index: 7,
-                path: "event-result.wav".to_string(),
+                chunk: test_chunk(),
             })
             .unwrap();
         drop(chunk_tx);
@@ -803,18 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn disconnected_result_channel_still_drains_and_cleans_queued_files() {
-        let dir = std::env::temp_dir().join(format!(
-            "viberwhisper-session-77-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let paths = [dir.join("first.wav"), dir.join("second.wav")];
-        for path in &paths {
-            std::fs::write(path, b"chunk").unwrap();
-        }
-
+    fn disconnected_result_channel_still_drains_queued_chunks() {
         let (chunk_tx, chunk_rx) = mpsc::sync_channel(2);
         let (result_tx, result_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
@@ -827,39 +811,26 @@ mod tests {
         });
         drop(result_rx);
 
-        for (index, path) in paths.iter().enumerate() {
+        for index in 0..2 {
             chunk_tx
                 .send(WorkerMsg::Chunk {
                     index,
-                    path: path.to_string_lossy().into_owned(),
+                    chunk: test_chunk(),
                 })
                 .unwrap();
         }
         drop(chunk_tx);
         worker.join().unwrap();
-
-        assert!(!dir.exists(), "worker left the empty session directory");
     }
 
     #[test]
-    fn cancelled_worker_drains_and_cleans_queued_files_after_result_disconnect() {
-        let dir = std::env::temp_dir().join(format!(
-            "viberwhisper-session-78-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let paths = [dir.join("first.wav"), dir.join("second.wav")];
-        for path in &paths {
-            std::fs::write(path, b"chunk").unwrap();
-        }
-
+    fn cancelled_worker_drains_queued_chunks_after_result_disconnect() {
         let (chunk_tx, chunk_rx) = mpsc::sync_channel(2);
-        for (index, path) in paths.iter().enumerate() {
+        for index in 0..2 {
             chunk_tx
                 .send(WorkerMsg::Chunk {
                     index,
-                    path: path.to_string_lossy().into_owned(),
+                    chunk: test_chunk(),
                 })
                 .unwrap();
         }
@@ -876,8 +847,6 @@ mod tests {
             );
         });
         worker.join().unwrap();
-
-        assert!(!dir.exists(), "cancelled worker left queued files behind");
     }
 
     #[test]
@@ -886,32 +855,11 @@ mod tests {
         let orch = default_orchestrator(t);
 
         orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), "chunk0.wav".to_string());
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
         assert_eq!(result.unwrap(), "hello world");
-    }
-
-    #[test]
-    fn processed_chunk_removes_empty_session_directory() {
-        let dir = std::env::temp_dir().join(format!(
-            "viberwhisper-session-1-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("chunk.wav");
-        std::fs::write(&path, b"chunk").unwrap();
-        let orch = default_orchestrator(Arc::new(FixedTranscriber("done".to_string())));
-
-        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
-        orch.on_chunk_ready(SessionId(1), path.to_string_lossy().into_owned())
-            .unwrap();
-        assert_eq!(orch.finish_session(SessionId(1)).unwrap(), "done");
-
-        assert!(!path.exists());
-        assert!(!dir.exists());
     }
 
     #[test]
@@ -925,9 +873,11 @@ mod tests {
         let orch = default_orchestrator(t);
 
         orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), "c0.wav".to_string()); // index 0
-        let _ = orch.on_chunk_ready(SessionId(1), "c1.wav".to_string()); // index 1
-        let _ = orch.on_chunk_ready(SessionId(1), "c2.wav".to_string()); // index 2
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk()); // index 0
+        thread::sleep(Duration::from_millis(10));
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk()); // index 1
+        thread::sleep(Duration::from_millis(10));
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk()); // index 2
         let result = orch.finish_session(SessionId(1));
 
         assert!(result.is_ok());
@@ -958,22 +908,15 @@ mod tests {
     }
 
     #[test]
-    fn test_chunk_without_active_session_is_deleted() {
-        let path = std::env::temp_dir().join(format!(
-            "viberwhisper-orphan-chunk-{}-{:?}.wav",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::write(&path, b"orphan chunk").unwrap();
+    fn test_chunk_without_active_session_is_rejected() {
         let orch = default_orchestrator(Arc::new(MockTranscriber));
 
-        let result = orch.on_chunk_ready(SessionId(1), path.to_string_lossy().into_owned());
+        let result = orch.on_chunk_ready(SessionId(1), test_chunk());
 
         assert!(matches!(
             result,
             Err(SessionRoutingError::NoActiveSession { .. })
         ));
-        assert!(!path.exists(), "orphan chunk file was not deleted");
     }
 
     #[test]
@@ -989,9 +932,11 @@ mod tests {
         let orch = default_orchestrator(t);
 
         orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), "c0.wav".to_string());
-        let _ = orch.on_chunk_ready(SessionId(1), "c1.wav".to_string());
-        let _ = orch.on_chunk_ready(SessionId(1), "c2.wav".to_string());
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
+        thread::sleep(Duration::from_millis(10));
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
+        thread::sleep(Duration::from_millis(10));
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
         match result {
@@ -1022,7 +967,7 @@ mod tests {
         let orch = make_orchestrator_with_timeout(t, Duration::from_millis(100));
 
         orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), "slow.wav".to_string());
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
         match result {
@@ -1064,23 +1009,9 @@ mod tests {
         let orch = default_orchestrator(t);
         orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
 
-        let dir = std::env::temp_dir().join(format!(
-            "viberwhisper-session-79-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let paths: Vec<_> = (0..100)
-            .map(|index| {
-                let path = dir.join(format!("queue-{index}.wav"));
-                std::fs::write(&path, b"chunk").unwrap();
-                path
-            })
-            .collect();
-
         let started = Instant::now();
-        for path in &paths {
-            let _ = orch.on_chunk_ready(SessionId(1), path.to_string_lossy().into_owned());
+        for _ in 0..100 {
+            let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         }
 
         assert!(
@@ -1100,10 +1031,6 @@ mod tests {
         *lock.lock().unwrap() = true;
         condvar.notify_all();
         let _ = orch.finish_session(SessionId(1));
-        assert!(
-            !dir.exists(),
-            "queue processing left temporary files behind"
-        );
     }
 
     #[test]
@@ -1114,7 +1041,7 @@ mod tests {
             let orch = default_orchestrator(t);
 
             orch.start_session(SessionId(1), mode).unwrap();
-            let _ = orch.on_chunk_ready(SessionId(1), "chunk.wav".to_string());
+            let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
             let result = orch.finish_session(SessionId(1));
 
             assert!(result.is_ok(), "Mode {:?} failed: {:?}", mode, result);
@@ -1128,7 +1055,7 @@ mod tests {
         let orch = default_orchestrator(t);
 
         orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), "old_chunk.wav".to_string());
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
 
         let error = orch
             .start_session(SessionId(2), SessionMode::Toggle)
@@ -1148,21 +1075,14 @@ mod tests {
 
     #[test]
     fn mismatched_chunk_and_finish_do_not_mutate_active_session() {
-        let path = std::env::temp_dir().join(format!(
-            "viberwhisper-stale-chunk-{}-{:?}.wav",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::write(&path, b"stale").unwrap();
         let orch = default_orchestrator(Arc::new(FixedTranscriber("active".into())));
         orch.start_session(SessionId(1), SessionMode::Toggle)
             .unwrap();
 
         assert!(matches!(
-            orch.on_chunk_ready(SessionId(2), path.to_string_lossy().into_owned()),
+            orch.on_chunk_ready(SessionId(2), test_chunk()),
             Err(SessionRoutingError::SessionMismatch { .. })
         ));
-        assert!(!path.exists());
         assert!(matches!(
             orch.finish_session(SessionId(2)),
             Err(SessionError::Routing(
@@ -1194,7 +1114,7 @@ mod tests {
         let orch = make_orchestrator_with_timeout(t, Duration::from_millis(200));
 
         orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), "panic.wav".to_string());
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
         // Worker panicked → chunk never reaches terminal state → ConvergenceTimeout.
@@ -1210,21 +1130,14 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_panic_removes_chunk_file_and_reports_failure() {
-        let path = std::env::temp_dir().join(format!(
-            "viberwhisper-panic-chunk-{}-{:?}.wav",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::write(&path, b"test chunk").unwrap();
+    fn test_worker_panic_reports_failure() {
         let t = Arc::new(PanicTranscriber);
         let orch = default_orchestrator(t);
 
         orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), path.to_string_lossy().into_owned());
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
         assert!(matches!(result, Err(SessionError::PartialFailure { .. })));
-        assert!(!path.exists(), "panicking worker leaked chunk file");
     }
 }

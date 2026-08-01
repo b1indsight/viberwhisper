@@ -1,27 +1,21 @@
-use std::collections::HashSet;
 use std::error;
-use std::ffi::OsString;
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use hound::{WavSpec, WavWriter};
+use hound::WavSpec;
 use tracing::{debug, error, info, instrument, warn};
 
-use super::{
-    AudioConfig, remove_temp_audio_file, unique_temp_session_dir, unique_temp_wav_path_in,
-};
+use super::chunk::{ChunkError, WavChunk, encode_i16_wav};
+use super::{AudioConfig, max_frames_per_chunk};
 use crate::core::recording_session::SessionId;
 
 #[derive(Debug)]
 enum RecorderError {
-    Io(std::io::Error),
-    Wav(hound::Error),
-    Clock(std::time::SystemTimeError),
+    Chunk(ChunkError),
     DefaultInputConfig(cpal::DefaultStreamConfigError),
     BuildStream(cpal::BuildStreamError),
     PlayStream(cpal::PlayStreamError),
@@ -29,15 +23,12 @@ enum RecorderError {
     UnsupportedSampleFormat,
     NotRecording,
     NoAudioData,
-    NoActiveSession,
 }
 
 impl fmt::Display for RecorderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(error) => write!(f, "I/O error: {error}"),
-            Self::Wav(error) => write!(f, "WAV error: {error}"),
-            Self::Clock(error) => write!(f, "system clock error: {error}"),
+            Self::Chunk(error) => write!(f, "chunk error: {error}"),
             Self::DefaultInputConfig(error) => write!(f, "input configuration error: {error}"),
             Self::BuildStream(error) => write!(f, "failed to build input stream: {error}"),
             Self::PlayStream(error) => write!(f, "failed to start input stream: {error}"),
@@ -45,7 +36,6 @@ impl fmt::Display for RecorderError {
             Self::UnsupportedSampleFormat => write!(f, "unsupported sample format"),
             Self::NotRecording => write!(f, "not currently recording"),
             Self::NoAudioData => write!(f, "no audio data recorded"),
-            Self::NoActiveSession => write!(f, "no active recording session"),
         }
     }
 }
@@ -53,36 +43,21 @@ impl fmt::Display for RecorderError {
 impl error::Error for RecorderError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            Self::Io(error) => Some(error),
-            Self::Wav(error) => Some(error),
-            Self::Clock(error) => Some(error),
+            Self::Chunk(error) => Some(error),
             Self::DefaultInputConfig(error) => Some(error),
             Self::BuildStream(error) => Some(error),
             Self::PlayStream(error) => Some(error),
             Self::NoInputDevice
             | Self::UnsupportedSampleFormat
             | Self::NotRecording
-            | Self::NoAudioData
-            | Self::NoActiveSession => None,
+            | Self::NoAudioData => None,
         }
     }
 }
 
-impl From<std::io::Error> for RecorderError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-impl From<hound::Error> for RecorderError {
-    fn from(error: hound::Error) -> Self {
-        Self::Wav(error)
-    }
-}
-
-impl From<std::time::SystemTimeError> for RecorderError {
-    fn from(error: std::time::SystemTimeError) -> Self {
-        Self::Clock(error)
+impl From<ChunkError> for RecorderError {
+    fn from(error: ChunkError) -> Self {
+        Self::Chunk(error)
     }
 }
 
@@ -112,16 +87,12 @@ pub struct AudioRecorder {
     sample_count: Arc<AtomicUsize>,
     gain: f32,
     sample_rate: u32,
-    /// Number of samples already flushed to chunk files during the current recording.
+    /// Number of samples already emitted as chunks during the current recording.
     flushed_samples: usize,
     /// Number of complete chunks observed by the audio callback.
     ready_chunk_count: Arc<AtomicUsize>,
-    /// WAV files generated during the current recording session.
-    current_session_files: Vec<PathBuf>,
-    /// Session-scoped directory containing recorder-generated WAV files.
-    session_dir: Option<PathBuf>,
-    /// Maximum samples per chunk (0 = unlimited). Computed from config at start_recording.
-    chunk_max_samples: usize,
+    /// Maximum mono frames per chunk. `None` means unlimited and `Some(0)` suppresses output.
+    chunk_max_samples: Option<usize>,
     /// Config: max chunk duration in seconds.
     max_chunk_duration_secs: u32,
     /// Config: max chunk size in bytes (including 44-byte WAV header).
@@ -153,22 +124,6 @@ fn push_mono_chunk(
     }
 }
 
-/// Write `samples` as a 16-bit mono WAV file to `path`.
-fn write_wav_to_path(path: &Path, samples: &[i16], sample_rate: u32) -> Result<(), RecorderError> {
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer = WavWriter::create(path, spec)?;
-    for &sample in samples {
-        writer.write_sample(sample)?;
-    }
-    writer.finalize()?;
-    Ok(())
-}
-
 impl AudioRecorder {
     /// Create a recorder with chunk-splitting config.
     ///
@@ -177,8 +132,8 @@ impl AudioRecorder {
     ///   this size; 0 = no size limit.
     pub fn with_config(config: &AudioConfig) -> Self {
         let gain = config.mic_gain;
-        let max_chunk_duration_secs = config.chunk_limits.max_duration_secs;
-        let max_chunk_size_bytes = config.chunk_limits.max_size_bytes;
+        let max_chunk_duration_secs = config.max_chunk_duration_secs;
+        let max_chunk_size_bytes = config.max_chunk_size_bytes;
         let host = cpal::default_host();
 
         let default_device_name = host
@@ -212,9 +167,7 @@ impl AudioRecorder {
             sample_rate: 44100,
             flushed_samples: 0,
             ready_chunk_count: Arc::new(AtomicUsize::new(0)),
-            current_session_files: Vec::new(),
-            session_dir: None,
-            chunk_max_samples: 0,
+            chunk_max_samples: None,
             max_chunk_duration_secs,
             max_chunk_size_bytes,
         }
@@ -253,32 +206,26 @@ impl AudioRecorder {
 
         self.sample_rate = sample_rate;
         self.flushed_samples = 0;
-        self.current_session_files.clear();
-        self.session_dir = Some(unique_temp_session_dir(session_id.0)?);
         self.ready_chunk_count.store(0, Ordering::Release);
 
-        // Compute max samples per chunk from config.
-        const WAV_HEADER_BYTES: u64 = 44;
-        let bytes_per_sample = 2u64; // i16 = 2 bytes (mono after downmix)
-        let max_by_duration: usize = if self.max_chunk_duration_secs > 0 {
-            self.max_chunk_duration_secs as usize * sample_rate as usize
-        } else {
-            usize::MAX
-        };
-        let max_by_size: usize = if self.max_chunk_size_bytes > WAV_HEADER_BYTES {
-            ((self.max_chunk_size_bytes - WAV_HEADER_BYTES) / bytes_per_sample) as usize
-        } else if self.max_chunk_size_bytes > 0 {
-            0
-        } else {
-            usize::MAX
-        };
-        self.chunk_max_samples = max_by_duration.min(max_by_size);
+        self.chunk_max_samples = max_frames_per_chunk(
+            self.max_chunk_duration_secs,
+            self.max_chunk_size_bytes,
+            WavSpec {
+                channels: 1,
+                sample_rate,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )?
+        .map(|frames| usize::try_from(frames).map_err(|_| ChunkError::ArithmeticOverflow))
+        .transpose()?;
 
         let recording = Arc::clone(&self.recording);
         let buffer = Arc::clone(&self.buffer);
         let sample_count = Arc::clone(&self.sample_count);
         let ready_chunk_count = Arc::clone(&self.ready_chunk_count);
-        let chunk_max_samples = self.chunk_max_samples;
+        let chunk_max_samples = self.chunk_max_samples.unwrap_or(0);
         let gain = self.gain;
 
         buffer.lock().unwrap().clear();
@@ -355,77 +302,48 @@ impl AudioRecorder {
         Ok(())
     }
 
-    /// Poll for a completed chunk to transcribe in the background.
-    ///
-    /// Returns `Some(path)` when a new chunk has been written to disk and is ready
-    /// for background transcription. Returns `None` when no chunk is ready yet.
-    ///
-    /// This should be called periodically from the main event loop while recording.
+    /// Encode and return the next complete in-memory chunk, if one is ready.
     pub fn take_ready_chunk(&mut self) -> Option<ReadyChunk> {
-        if !self.recording.load(Ordering::Relaxed)
-            || self.active_session_id.is_none()
-            || self.chunk_max_samples == 0
-        {
+        if !self.recording.load(Ordering::Relaxed) || self.active_session_id.is_none() {
             return None;
         }
+        let chunk_max_samples = self.chunk_max_samples.filter(|&samples| samples > 0)?;
 
-        let flushed_chunk_count = self.flushed_samples / self.chunk_max_samples;
+        let flushed_chunk_count = self.flushed_samples / chunk_max_samples;
         let ready_chunk_count = self.ready_chunk_count.load(Ordering::Acquire);
         if ready_chunk_count <= flushed_chunk_count {
             return None;
         }
 
-        let chunk_end = self.flushed_samples + self.chunk_max_samples;
-        let chunk_index = flushed_chunk_count;
+        let chunk_end = self.flushed_samples + chunk_max_samples;
         let chunk_samples = {
             let buffer = self.buffer.lock().unwrap();
             let total_samples = buffer.len();
-            if total_samples < self.chunk_max_samples {
+            if total_samples < chunk_max_samples {
                 debug!(
                     total_samples = total_samples,
-                    chunk_size = self.chunk_max_samples,
+                    chunk_size = chunk_max_samples,
                     "Chunk count is ahead of buffered samples; retrying later"
                 );
                 return None;
             }
-            buffer[..self.chunk_max_samples].to_vec()
+            buffer[..chunk_max_samples].to_vec()
         };
 
-        match self.write_chunk(&chunk_samples, chunk_index) {
-            Ok(path) => {
-                self.buffer.lock().unwrap().drain(..self.chunk_max_samples);
+        match encode_i16_wav(&chunk_samples, self.sample_rate) {
+            Ok(chunk) => {
+                self.buffer.lock().unwrap().drain(..chunk_max_samples);
                 self.flushed_samples = chunk_end;
-                self.relinquish_path(&path);
                 Some(ReadyChunk {
                     session_id: self.active_session_id?,
-                    path,
+                    chunk,
                 })
             }
             Err(e) => {
-                warn!(error = %e, "Failed to write in-recording chunk; will retry next cycle");
+                warn!(error = %e, "Failed to encode in-recording chunk; will retry next cycle");
                 None
             }
         }
-    }
-
-    /// Write PCM samples to a WAV file in the active session directory.
-    fn write_chunk(
-        &mut self,
-        samples: &[i16],
-        chunk_index: usize,
-    ) -> Result<String, RecorderError> {
-        let session_dir = self.ensure_session_dir()?;
-        let path = unique_temp_wav_path_in(&session_dir, &format!("chunk_live_{chunk_index:04}"))?;
-
-        if let Err(error) = write_wav_to_path(&path, samples, self.sample_rate) {
-            let _ = remove_temp_audio_file(&path);
-            return Err(error);
-        }
-
-        let path_str = path.to_string_lossy().to_string();
-        info!(path = %path_str, index = chunk_index, samples = samples.len(), "Live chunk written");
-        self.current_session_files.push(path);
-        Ok(path_str)
     }
 
     #[instrument(skip(self))]
@@ -447,14 +365,9 @@ impl AudioRecorder {
         }
 
         match self.try_stop_recording() {
-            Ok(result) => {
-                let chunks = result.into_paths();
-                for path in &chunks {
-                    self.relinquish_path(path);
-                }
+            Ok(chunks) => {
                 self.reset_chunk_bookkeeping();
                 self.active_session_id = None;
-                self.session_dir = None;
                 RecorderStopOutcome::Stopped {
                     session_id,
                     chunks,
@@ -468,17 +381,11 @@ impl AudioRecorder {
                 }
             }
             Err(error) => {
-                let chunks = self
-                    .current_session_files
-                    .drain(..)
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .collect();
                 self.reset_chunk_bookkeeping();
                 self.active_session_id = None;
-                self.session_dir = None;
                 RecorderStopOutcome::Stopped {
                     session_id,
-                    chunks,
+                    chunks: Vec::new(),
                     warning: Some(error.to_string()),
                 }
             }
@@ -486,7 +393,7 @@ impl AudioRecorder {
     }
 
     #[instrument(skip(self))]
-    fn try_stop_recording(&mut self) -> Result<StopResult, RecorderError> {
+    fn try_stop_recording(&mut self) -> Result<Vec<WavChunk>, RecorderError> {
         if !self.recording.load(Ordering::Relaxed) {
             debug!("Not recording, ignoring stop request");
             return Err(RecorderError::NotRecording);
@@ -501,120 +408,27 @@ impl AudioRecorder {
         drop(self.stream.take());
         debug!("Stream stopped");
 
-        let (tail_samples, chunk_index, wrote_live_chunks) = {
+        let samples = {
             let buffer = self.buffer.lock().unwrap();
             debug!(samples = buffer.len(), "Buffer size");
 
             if buffer.is_empty() {
-                return Err(RecorderError::NoAudioData);
+                return if self.flushed_samples > 0 {
+                    Ok(Vec::new())
+                } else {
+                    Err(RecorderError::NoAudioData)
+                };
             }
-
-            let tail_samples = buffer.to_vec();
-            let chunk_index = if self.flushed_samples > 0 && self.chunk_max_samples > 0 {
-                self.flushed_samples / self.chunk_max_samples
-            } else {
-                0
-            };
-            (tail_samples, chunk_index, self.flushed_samples > 0)
+            buffer.to_vec()
         };
 
-        // If chunking is enabled and enough unflushed audio remains, catch up by
-        // writing every complete chunk before the final tail.
-        if tail_samples.is_empty() {
-            // All audio was already flushed to chunks; nothing left.
-            self.cleanup_old_recordings("./tmp", 10);
-            return Ok(StopResult::ChunksOnly);
-        }
-
-        if self.chunk_max_samples > 0 && tail_samples.len() >= self.chunk_max_samples {
-            let paths = self.write_chunk_sequence(&tail_samples, chunk_index)?;
-            self.cleanup_old_recordings("./tmp", 10);
-            return Ok(StopResult::ChunkFiles(paths));
-        }
-
-        // Write tail (or full recording if no prior chunks and no stop-time catch-up is needed).
-        let path = if !wrote_live_chunks {
-            // No chunking happened — write the original-style single file.
-            self.write_full_recording(&tail_samples)?
-        } else {
-            self.write_chunk(&tail_samples, chunk_index)?
-        };
-
-        self.cleanup_old_recordings("./tmp", 10);
-
-        if !wrote_live_chunks {
-            Ok(StopResult::SingleFile(path))
-        } else {
-            Ok(StopResult::TailChunk(path))
-        }
-    }
-
-    fn write_chunk_sequence(
-        &mut self,
-        samples: &[i16],
-        start_chunk_index: usize,
-    ) -> Result<Vec<String>, RecorderError> {
-        let mut paths = Vec::new();
-        for (offset, chunk) in samples.chunks(self.chunk_max_samples).enumerate() {
-            paths.push(self.write_chunk(chunk, start_chunk_index + offset)?);
-        }
-        Ok(paths)
-    }
-
-    /// Write the entire buffer as a single WAV file when no chunking occurred.
-    fn write_full_recording(&mut self, buffer: &[i16]) -> Result<String, RecorderError> {
-        let session_dir = self.ensure_session_dir()?;
-        let path = unique_temp_wav_path_in(&session_dir, "recording")?;
-        let filename = path.to_string_lossy().to_string();
-        debug!(path = %filename, "Saving recording");
-
-        if let Err(error) = write_wav_to_path(&path, buffer, self.sample_rate) {
-            let _ = remove_temp_audio_file(&path);
-            return Err(error);
-        }
-
-        info!(path = %filename, "Recording saved");
-        self.current_session_files.push(path);
-        Ok(filename)
-    }
-
-    fn cleanup_old_recordings(&self, dir: &str, keep: usize) {
-        let current_files: HashSet<OsString> = self
-            .current_session_files
-            .iter()
-            .filter_map(|path| path.file_name().map(|name| name.to_owned()))
-            .collect();
-        let mut entries: Vec<_> = match std::fs::read_dir(dir) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .map(|ext| ext == "wav")
-                        .unwrap_or(false)
-                })
-                .filter(|e| {
-                    e.path()
-                        .file_name()
-                        .is_none_or(|name| !current_files.contains(name))
-                })
+        match self.chunk_max_samples {
+            Some(0) => Ok(Vec::new()),
+            Some(max_samples) => samples
+                .chunks(max_samples)
+                .map(|samples| encode_i16_wav(samples, self.sample_rate).map_err(Into::into))
                 .collect(),
-            Err(_) => return,
-        };
-
-        if entries.len() <= keep {
-            return;
-        }
-
-        entries.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
-
-        for entry in &entries[..entries.len() - keep] {
-            if let Err(e) = std::fs::remove_file(entry.path()) {
-                warn!(path = ?entry.path(), error = %e, "Failed to delete old recording");
-            } else {
-                debug!(path = ?entry.path(), "Deleted old recording");
-            }
+            None => Ok(vec![encode_i16_wav(&samples, self.sample_rate)?]),
         }
     }
 
@@ -635,12 +449,6 @@ impl AudioRecorder {
         self.recording.store(false, Ordering::Relaxed);
         drop(self.stream.take());
         self.reset_chunk_bookkeeping();
-        for path in self.current_session_files.drain(..) {
-            let _ = remove_temp_audio_file(path);
-        }
-        if let Some(session_dir) = self.session_dir.take() {
-            let _ = std::fs::remove_dir(session_dir);
-        }
         self.active_session_id = None;
         RecorderCancelOutcome::Cancelled
     }
@@ -650,58 +458,14 @@ impl AudioRecorder {
         self.sample_count.store(0, Ordering::Relaxed);
         self.ready_chunk_count.store(0, Ordering::Release);
         self.flushed_samples = 0;
-        self.chunk_max_samples = 0;
-    }
-
-    fn ensure_session_dir(&mut self) -> Result<PathBuf, RecorderError> {
-        let session_dir = match &self.session_dir {
-            Some(path) => path.clone(),
-            None => {
-                let session_id = self
-                    .active_session_id
-                    .ok_or(RecorderError::NoActiveSession)?;
-                let path = unique_temp_session_dir(session_id.0)?;
-                self.session_dir = Some(path.clone());
-                path
-            }
-        };
-        std::fs::create_dir_all(&session_dir)?;
-        Ok(session_dir)
-    }
-
-    fn relinquish_path(&mut self, path: &str) {
-        self.current_session_files
-            .retain(|owned| owned.to_string_lossy() != path);
-    }
-}
-
-/// Result returned by `stop_recording`.
-#[derive(Debug)]
-pub enum StopResult {
-    /// No chunking occurred; the entire recording is in this single WAV file.
-    SingleFile(String),
-    /// Some chunks were flushed during recording; this is the final tail chunk.
-    TailChunk(String),
-    /// One or more chunks were written while stopping to catch up with unflushed audio.
-    ChunkFiles(Vec<String>),
-    /// All audio was flushed to chunks during recording; no tail remains.
-    ChunksOnly,
-}
-
-impl StopResult {
-    fn into_paths(self) -> Vec<String> {
-        match self {
-            Self::SingleFile(path) | Self::TailChunk(path) => vec![path],
-            Self::ChunkFiles(paths) => paths,
-            Self::ChunksOnly => Vec::new(),
-        }
+        self.chunk_max_samples = None;
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadyChunk {
     pub session_id: SessionId,
-    pub path: String,
+    pub chunk: WavChunk,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -723,7 +487,7 @@ pub enum RecorderStartOutcome {
 pub enum RecorderStopOutcome {
     Stopped {
         session_id: SessionId,
-        chunks: Vec<String>,
+        chunks: Vec<WavChunk>,
         warning: Option<String>,
     },
     StillRecording {
@@ -773,9 +537,7 @@ mod tests {
             sample_rate: 16000,
             flushed_samples: 0,
             ready_chunk_count: Arc::new(AtomicUsize::new(0)),
-            current_session_files: Vec::new(),
-            session_dir: None,
-            chunk_max_samples,
+            chunk_max_samples: Some(chunk_max_samples),
             max_chunk_duration_secs: 0,
             max_chunk_size_bytes: 0,
         }
@@ -797,93 +559,14 @@ mod tests {
         assert!(third.is_some());
         assert!(fourth.is_none());
         assert_eq!(recorder.flushed_samples, 30);
-        assert_eq!(recorder.current_session_files.len(), 0);
         assert!(
             recorder.buffer.lock().unwrap().is_empty(),
             "flushed samples should be released from memory"
         );
 
-        for chunk in [first, second, third].into_iter().flatten() {
-            let _ = remove_temp_audio_file(chunk.path);
+        for ready in [first, second, third].into_iter().flatten() {
+            assert!(hound::WavReader::new(std::io::Cursor::new(ready.chunk.bytes())).is_ok());
         }
-    }
-
-    #[test]
-    fn test_chunk_paths_are_unique() {
-        let mut recorder = recorder_for_buffer(Vec::new(), 10);
-        let first = recorder.write_chunk(&[1, 2, 3], 0).unwrap();
-        let second = recorder.write_chunk(&[4, 5, 6], 0).unwrap();
-
-        assert_ne!(first, second);
-
-        for path in recorder.current_session_files {
-            let _ = remove_temp_audio_file(path);
-        }
-    }
-
-    #[test]
-    fn test_chunk_paths_include_session_directory() {
-        let mut recorder = recorder_for_buffer(Vec::new(), 10);
-        let path = PathBuf::from(recorder.write_chunk(&[1, 2, 3], 0).unwrap());
-
-        let parent_name = path
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|name| name.to_str())
-            .unwrap();
-        assert!(parent_name.starts_with("viberwhisper-session-1-"));
-
-        let _ = remove_temp_audio_file(&path);
-    }
-
-    #[test]
-    fn test_cleanup_keeps_chunks_in_session_directories() {
-        let root = std::env::temp_dir().join(format!(
-            "viberwhisper-session-cleanup-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let session_dir = root.join("viberwhisper-session-1-test");
-        std::fs::create_dir_all(&session_dir).unwrap();
-        let paths: Vec<PathBuf> = (0..11)
-            .map(|index| {
-                let path = session_dir.join(format!("chunk-{index}.wav"));
-                std::fs::write(&path, b"chunk").unwrap();
-                path
-            })
-            .collect();
-        let recorder = recorder_for_buffer(Vec::new(), 10);
-
-        recorder.cleanup_old_recordings(root.to_str().unwrap(), 10);
-
-        assert!(paths.iter().all(|path| path.exists()));
-
-        for path in &paths {
-            let _ = std::fs::remove_file(path);
-        }
-        let _ = std::fs::remove_dir(session_dir);
-        let _ = std::fs::remove_dir(root);
-    }
-
-    #[test]
-    fn test_cleanup_old_recordings_keeps_current_session_files() {
-        let dir =
-            std::env::temp_dir().join(format!("viberwhisper-audio-cleanup-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let current = dir.join("current.wav");
-        let old = dir.join("old.wav");
-        std::fs::write(&current, b"current").unwrap();
-        std::fs::write(&old, b"old").unwrap();
-
-        let mut recorder = recorder_for_buffer(Vec::new(), 10);
-        recorder.current_session_files.push(current.clone());
-        recorder.cleanup_old_recordings(dir.to_str().unwrap(), 0);
-
-        assert!(current.exists());
-        assert!(!old.exists());
-
-        let _ = std::fs::remove_file(current);
-        let _ = std::fs::remove_dir(dir);
     }
 
     #[test]
@@ -894,12 +577,8 @@ mod tests {
         let result = recorder.stop_recording(SessionId(1));
 
         match result {
-            RecorderStopOutcome::Stopped { chunks: paths, .. } => {
-                assert_eq!(paths.len(), 3);
-                assert_eq!(recorder.current_session_files.len(), 0);
-                for path in paths {
-                    let _ = remove_temp_audio_file(path);
-                }
+            RecorderStopOutcome::Stopped { chunks, .. } => {
+                assert_eq!(chunks.len(), 3);
             }
             _ => panic!("expected stop-time chunk catch-up"),
         }
@@ -920,12 +599,8 @@ mod tests {
         assert!(recorder.buffer.lock().unwrap().is_empty());
         assert_eq!(recorder.ready_chunk_count.load(Ordering::Acquire), 0);
         assert_eq!(recorder.flushed_samples, 0);
-        assert_eq!(recorder.chunk_max_samples, 0);
+        assert_eq!(recorder.chunk_max_samples, None);
         assert!(recorder.take_ready_chunk().is_none());
-
-        for path in chunks {
-            let _ = remove_temp_audio_file(path);
-        }
     }
 
     #[test]
@@ -937,20 +612,14 @@ mod tests {
         let first = recorder.take_ready_chunk();
         assert!(first.is_some());
 
-        let first_path = first.unwrap().path;
         let result = recorder.stop_recording(SessionId(1));
 
         match result {
-            RecorderStopOutcome::Stopped { chunks: paths, .. } => {
-                assert_eq!(paths.len(), 3);
-                assert_eq!(recorder.current_session_files.len(), 0);
-                for path in paths {
-                    let _ = remove_temp_audio_file(path);
-                }
+            RecorderStopOutcome::Stopped { chunks, .. } => {
+                assert_eq!(chunks.len(), 3);
             }
             _ => panic!("expected remaining audio to be chunked"),
         }
-        let _ = remove_temp_audio_file(first_path);
     }
 
     #[test]
@@ -982,15 +651,8 @@ mod tests {
     }
 
     #[test]
-    fn cancel_clears_owned_files_and_recorder_state() {
+    fn cancel_clears_recorder_state() {
         let mut recorder = recorder_for_buffer(vec![1, 2, 3], 10);
-        let path = std::env::temp_dir().join(format!(
-            "viberwhisper-cancel-{}-{:?}.wav",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::write(&path, b"owned").unwrap();
-        recorder.current_session_files.push(path.clone());
 
         assert_eq!(
             recorder.cancel_recording(SessionId(1)),
@@ -998,6 +660,18 @@ mod tests {
         );
         assert!(!recorder.is_recording());
         assert!(recorder.buffer.lock().unwrap().is_empty());
-        assert!(!path.exists());
+    }
+
+    #[test]
+    fn too_small_chunk_capacity_produces_no_stop_chunk() {
+        let mut recorder = recorder_for_buffer(vec![1, 2, 3], 10);
+        recorder.chunk_max_samples = Some(0);
+
+        let RecorderStopOutcome::Stopped { chunks, .. } = recorder.stop_recording(SessionId(1))
+        else {
+            panic!("expected stopped outcome");
+        };
+
+        assert!(chunks.is_empty());
     }
 }

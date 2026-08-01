@@ -1,3 +1,5 @@
+use crate::audio::WavChunk;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(pub u64);
 
@@ -91,11 +93,11 @@ pub enum SessionEvent {
     },
     ChunkReady {
         session_id: SessionId,
-        path: String,
+        chunk: WavChunk,
     },
     RecorderStopped {
         session_id: SessionId,
-        chunks: Vec<String>,
+        chunks: Vec<WavChunk>,
         warning: Option<String>,
     },
     RecorderStillRecording {
@@ -125,10 +127,7 @@ pub enum SessionEffect {
     },
     SubmitChunk {
         session_id: SessionId,
-        path: String,
-    },
-    DeleteChunk {
-        path: String,
+        chunk: WavChunk,
     },
     FinishOrchestrator {
         session_id: SessionId,
@@ -264,13 +263,13 @@ impl RecordingSessionMachine {
                     SessionEffect::SetTrayRecording(false),
                 ]
             }
-            SessionEvent::ChunkReady { session_id, path } => {
+            SessionEvent::ChunkReady { session_id, chunk } => {
                 if self.active_session_id() == Some(session_id)
                     && matches!(self.state, RecordingState::Recording { .. })
                 {
-                    vec![SessionEffect::SubmitChunk { session_id, path }]
+                    vec![SessionEffect::SubmitChunk { session_id, chunk }]
                 } else {
-                    vec![SessionEffect::DeleteChunk { path }]
+                    Vec::new()
                 }
             }
             SessionEvent::RecorderStopped {
@@ -361,7 +360,7 @@ impl RecordingSessionMachine {
     fn recorder_stopped(
         &mut self,
         session_id: SessionId,
-        chunks: Vec<String>,
+        chunks: Vec<WavChunk>,
     ) -> Vec<SessionEffect> {
         let RecordingState::Stopping {
             session_id: active_id,
@@ -369,16 +368,10 @@ impl RecordingSessionMachine {
             ..
         } = self.state
         else {
-            return chunks
-                .into_iter()
-                .map(|path| SessionEffect::DeleteChunk { path })
-                .collect();
+            return Vec::new();
         };
         if session_id != active_id {
-            return chunks
-                .into_iter()
-                .map(|path| SessionEffect::DeleteChunk { path })
-                .collect();
+            return Vec::new();
         }
         if let RecordingState::Stopping { phase, .. } = &mut self.state {
             *phase = StopPhase::Orchestrator;
@@ -388,7 +381,7 @@ impl RecordingSessionMachine {
         effects.extend(
             chunks
                 .into_iter()
-                .map(|path| SessionEffect::SubmitChunk { session_id, path }),
+                .map(|chunk| SessionEffect::SubmitChunk { session_id, chunk }),
         );
         effects.push(SessionEffect::FinishOrchestrator { session_id });
         effects
@@ -433,6 +426,10 @@ impl RecordingSessionMachine {
 mod tests {
     use super::*;
 
+    fn test_chunk() -> WavChunk {
+        WavChunk::from_encoded_bytes(b"test wav chunk".to_vec())
+    }
+
     fn toggle(source: ControlSource) -> SessionEvent {
         SessionEvent::Control(ControlEvent {
             source,
@@ -443,6 +440,7 @@ mod tests {
     #[test]
     fn toggle_session_runs_one_start_and_stop_chain() {
         let mut machine = RecordingSessionMachine::new();
+        let chunk = test_chunk();
 
         assert_eq!(
             machine.handle(toggle(ControlSource::Tray)),
@@ -476,14 +474,14 @@ mod tests {
         assert_eq!(
             machine.handle(SessionEvent::RecorderStopped {
                 session_id: SessionId(1),
-                chunks: vec!["tail.wav".into()],
+                chunks: vec![chunk.clone()],
                 warning: None,
             }),
             vec![
                 SessionEffect::SetTrayRecording(false),
                 SessionEffect::SubmitChunk {
                     session_id: SessionId(1),
-                    path: "tail.wav".into(),
+                    chunk,
                 },
                 SessionEffect::FinishOrchestrator {
                     session_id: SessionId(1),
@@ -545,11 +543,9 @@ mod tests {
         assert_eq!(
             machine.handle(SessionEvent::ChunkReady {
                 session_id: SessionId(99),
-                path: "stale.wav".into(),
+                chunk: test_chunk(),
             }),
-            vec![SessionEffect::DeleteChunk {
-                path: "stale.wav".into()
-            }]
+            Vec::<SessionEffect>::new()
         );
         assert!(
             machine
