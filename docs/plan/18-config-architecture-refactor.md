@@ -87,7 +87,7 @@ ConfigStore ── read/write ── ConfigDocument
 src/core/config/
   mod.rs       — public facade、共享错误与必要的安全 value types
   document.rs  — v2 serde schema、默认值和 ConfigDocument
-  fields.rs    — ConfigKey / FieldSpec、list/get/set
+  fields.rs    — ConfigKey catalog、list/get/set
   store.rs     — 追加 canonical 文件名、load/save 和原子发布
 src/runtime_config.rs
                — target/profile 选择、业务校验调用、问题汇总和顶层运行配置
@@ -230,13 +230,11 @@ v2 使用嵌套配置表达用户可理解的配置分组，并以必填的 `sch
 
 ## 字段目录与 CLI
 
-`fields.rs` 定义唯一的 `ConfigKey` / `FieldSpec` catalog。每个字段记录：
+`fields.rs` 定义唯一的 `ConfigKey` catalog。每个字段记录：
 
 - canonical dotted key；
-- value kind；
-- optional、secret、writable 属性；
-- 受影响的业务 owner，仅用于 `config set` 后选择校验函数；
-- getter/setter。
+- writable 属性；
+- getter/setter 分派。
 
 `schema_version` 进入 catalog，但固定为 read-only metadata。使用一个小型 declarative macro 生成 key、lookup、
 list/get/set 分派；持久化 struct 保持普通 Rust 定义，并用 schema-leaf 与 catalog coverage test 防止漂移。

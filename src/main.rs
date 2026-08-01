@@ -583,9 +583,9 @@ fn handle_config(action: ConfigAction) -> Result<(), Box<dyn std::error::Error>>
         ConfigAction::List => {
             println!("{:<48} Value", "Key");
             println!("{}", "-".repeat(80));
-            for spec in ConfigDocument::field_specs() {
-                let value = document.get_field(spec.key.as_str(), &secrets)?;
-                println!("{:<48} {}", spec.key.as_str(), value);
+            for key in ConfigDocument::field_keys() {
+                let value = document.get_field(key.as_str(), &secrets)?;
+                println!("{:<48} {}", key.as_str(), value);
             }
         }
         ConfigAction::Get { key } => {

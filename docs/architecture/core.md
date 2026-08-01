@@ -11,7 +11,7 @@ The config package intentionally has four files:
 | File | Responsibility |
 |---|---|
 | `document.rs` | `ConfigDocument`, nested v2 serde schema, and defaults |
-| `fields.rs` | one canonical `ConfigKey`/`FieldSpec` catalog used by list/get/set |
+| `fields.rs` | one canonical `ConfigKey` catalog used by list/get/set |
 | `store.rs` | platform path discovery plus fail-closed load and atomic save |
 | `mod.rs` | facade, config errors, validation report, secret-safe value types |
 

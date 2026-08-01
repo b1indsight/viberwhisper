@@ -15,7 +15,6 @@ pub(crate) const MODEL_NAME: &str = "gemma-4-E2B-it";
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct LocalPaths {
-    data_dir: PathBuf,
     pub(crate) venv_dir: PathBuf,
     pub(crate) model_dir: PathBuf,
 }
@@ -50,7 +49,6 @@ impl LocalPaths {
         Ok(Self {
             venv_dir: data_dir.join("venv"),
             model_dir: data_dir.join("model"),
-            data_dir,
         })
     }
 }
@@ -151,8 +149,12 @@ mod config_tests {
         )
         .unwrap();
         assert_eq!(
-            paths.data_dir,
-            Path::new("/config/viberwhisper/models/local")
+            paths.venv_dir,
+            Path::new("/config/viberwhisper/models/local/venv")
+        );
+        assert_eq!(
+            paths.model_dir,
+            Path::new("/config/viberwhisper/models/local/model")
         );
 
         let home = LocalSection {
@@ -165,6 +167,13 @@ mod config_tests {
             Path::new("/home/test"),
         )
         .unwrap();
-        assert_eq!(paths.data_dir, Path::new("/home/test/.custom-viberwhisper"));
+        assert_eq!(
+            paths.venv_dir,
+            Path::new("/home/test/.custom-viberwhisper/venv")
+        );
+        assert_eq!(
+            paths.model_dir,
+            Path::new("/home/test/.custom-viberwhisper/model")
+        );
     }
 }

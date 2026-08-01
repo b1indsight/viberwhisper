@@ -2,25 +2,11 @@ use std::fmt;
 
 use super::{ConfigDocument, InferenceProfile, SecretSource};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueKind {
-    Version,
-    String,
-    Float,
-    U16,
-    U32,
-    U64,
-    Bool,
-    Profile,
-}
-
 macro_rules! define_config_fields {
     ($(
         $variant:ident => {
             name: $name:literal,
-            kind: $kind:ident,
-            writable: $writable:literal,
-            secret: $secret:literal
+            writable: $writable:literal
         }
     ),+ $(,)?) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,52 +35,39 @@ macro_rules! define_config_fields {
             }
         }
 
-        const FIELD_SPECS: &[FieldSpec] = &[
-            $(FieldSpec {
-                key: ConfigKey::$variant,
-                kind: ValueKind::$kind,
-                writable: $writable,
-                secret: $secret,
-            }),+
+        const CONFIG_KEYS: &[ConfigKey] = &[
+            $(ConfigKey::$variant),+
         ];
     };
 }
 
 define_config_fields! {
-    SchemaVersion => { name: "schema_version", kind: Version, writable: false, secret: false },
-    InputHoldHotkey => { name: "input.hold_hotkey", kind: String, writable: true, secret: false },
-    InputToggleHotkey => { name: "input.toggle_hotkey", kind: String, writable: true, secret: false },
-    AudioMicGain => { name: "audio.mic_gain", kind: Float, writable: true, secret: false },
-    ChunkingMaxDurationSecs => { name: "chunking.max_duration_secs", kind: U32, writable: true, secret: false },
-    ChunkingMaxSizeBytes => { name: "chunking.max_size_bytes", kind: U64, writable: true, secret: false },
-    ChunkingMaxRetries => { name: "chunking.max_retries", kind: U32, writable: true, secret: false },
-    SessionConvergenceTimeoutSecs => { name: "session.convergence_timeout_secs", kind: U64, writable: true, secret: false },
-    TranscriptionLanguage => { name: "transcription.language", kind: String, writable: true, secret: false },
-    TranscriptionPrompt => { name: "transcription.prompt", kind: String, writable: true, secret: false },
-    TranscriptionTemperature => { name: "transcription.temperature", kind: Float, writable: true, secret: false },
-    PostProcessEnabled => { name: "post_process.enabled", kind: Bool, writable: true, secret: false },
-    PostProcessPreheatEnabled => { name: "post_process.preheat_enabled", kind: Bool, writable: true, secret: false },
-    PostProcessPrompt => { name: "post_process.prompt", kind: String, writable: true, secret: false },
-    PostProcessTemperature => { name: "post_process.temperature", kind: Float, writable: true, secret: false },
-    InferenceActive => { name: "inference.active", kind: Profile, writable: true, secret: false },
-    ApiProvider => { name: "inference.api.provider", kind: String, writable: true, secret: false },
-    ApiTranscriptionUrl => { name: "inference.api.transcription.api_url", kind: String, writable: true, secret: false },
-    ApiTranscriptionModel => { name: "inference.api.transcription.model", kind: String, writable: true, secret: false },
-    ApiTranscriptionKey => { name: "inference.api.transcription.api_key", kind: String, writable: false, secret: true },
-    ApiPostProcessUrl => { name: "inference.api.post_process.api_url", kind: String, writable: true, secret: false },
-    ApiPostProcessModel => { name: "inference.api.post_process.model", kind: String, writable: true, secret: false },
-    ApiPostProcessKey => { name: "inference.api.post_process.api_key", kind: String, writable: false, secret: true },
-    LocalDataDir => { name: "inference.local.data_dir", kind: String, writable: true, secret: false },
-    LocalServerPort => { name: "inference.local.server_port", kind: U16, writable: true, secret: false },
-    LocalQuantization => { name: "inference.local.quantization", kind: String, writable: true, secret: false },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FieldSpec {
-    pub key: ConfigKey,
-    pub kind: ValueKind,
-    pub writable: bool,
-    pub secret: bool,
+    SchemaVersion => { name: "schema_version", writable: false },
+    InputHoldHotkey => { name: "input.hold_hotkey", writable: true },
+    InputToggleHotkey => { name: "input.toggle_hotkey", writable: true },
+    AudioMicGain => { name: "audio.mic_gain", writable: true },
+    ChunkingMaxDurationSecs => { name: "chunking.max_duration_secs", writable: true },
+    ChunkingMaxSizeBytes => { name: "chunking.max_size_bytes", writable: true },
+    ChunkingMaxRetries => { name: "chunking.max_retries", writable: true },
+    SessionConvergenceTimeoutSecs => { name: "session.convergence_timeout_secs", writable: true },
+    TranscriptionLanguage => { name: "transcription.language", writable: true },
+    TranscriptionPrompt => { name: "transcription.prompt", writable: true },
+    TranscriptionTemperature => { name: "transcription.temperature", writable: true },
+    PostProcessEnabled => { name: "post_process.enabled", writable: true },
+    PostProcessPreheatEnabled => { name: "post_process.preheat_enabled", writable: true },
+    PostProcessPrompt => { name: "post_process.prompt", writable: true },
+    PostProcessTemperature => { name: "post_process.temperature", writable: true },
+    InferenceActive => { name: "inference.active", writable: true },
+    ApiProvider => { name: "inference.api.provider", writable: true },
+    ApiTranscriptionUrl => { name: "inference.api.transcription.api_url", writable: true },
+    ApiTranscriptionModel => { name: "inference.api.transcription.model", writable: true },
+    ApiTranscriptionKey => { name: "inference.api.transcription.api_key", writable: false },
+    ApiPostProcessUrl => { name: "inference.api.post_process.api_url", writable: true },
+    ApiPostProcessModel => { name: "inference.api.post_process.model", writable: true },
+    ApiPostProcessKey => { name: "inference.api.post_process.api_key", writable: false },
+    LocalDataDir => { name: "inference.local.data_dir", writable: true },
+    LocalServerPort => { name: "inference.local.server_port", writable: true },
+    LocalQuantization => { name: "inference.local.quantization", writable: true },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,8 +128,8 @@ impl fmt::Display for FieldError {
 impl std::error::Error for FieldError {}
 
 impl ConfigDocument {
-    pub fn field_specs() -> &'static [FieldSpec] {
-        FIELD_SPECS
+    pub fn field_keys() -> &'static [ConfigKey] {
+        CONFIG_KEYS
     }
 
     pub fn get_field(
