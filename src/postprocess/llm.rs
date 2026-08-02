@@ -1,5 +1,7 @@
 use crate::core::config::ApiAuth;
-use crate::postprocess::{LlmConfig, PostProcessError};
+use crate::postprocess::{
+    LlmConfig, PostProcessError, TextPostProcessor, TextPostProcessorSession,
+};
 use reqwest::blocking::Client;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -50,8 +52,10 @@ impl LlmPostProcessor {
             text,
         )
     }
+}
 
-    pub(crate) fn process(&self, text: &str) -> Result<String, PostProcessError> {
+impl TextPostProcessor for LlmPostProcessor {
+    fn process(&self, text: &str) -> Result<String, PostProcessError> {
         if text.is_empty() {
             return Ok(text.to_string());
         }
@@ -61,9 +65,9 @@ impl LlmPostProcessor {
         Ok(result)
     }
 
-    pub(crate) fn start_session(&self) -> LlmSession {
-        let session = if self.streaming_enabled {
-            LlmSessionKind::Preheat(PreheatLlmSession::new(
+    fn start_session(&self) -> Box<dyn TextPostProcessorSession> {
+        if self.streaming_enabled {
+            Box::new(PreheatLlmSession::new(
                 self.auth.clone(),
                 self.api_url.clone(),
                 self.model.clone(),
@@ -72,7 +76,7 @@ impl LlmPostProcessor {
                 self.client.clone(),
             ))
         } else {
-            LlmSessionKind::Conservative(ConservativeLlmSession {
+            Box::new(ConservativeLlmSession {
                 auth: self.auth.clone(),
                 api_url: self.api_url.clone(),
                 model: self.model.clone(),
@@ -81,8 +85,7 @@ impl LlmPostProcessor {
                 client: self.client.clone(),
                 chunks: Vec::new(),
             })
-        };
-        LlmSession(session)
+        }
     }
 }
 
@@ -152,7 +155,7 @@ struct ConservativeLlmSession {
     chunks: Vec<String>,
 }
 
-impl ConservativeLlmSession {
+impl TextPostProcessorSession for ConservativeLlmSession {
     fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());
@@ -279,7 +282,7 @@ impl PreheatLlmSession {
     }
 }
 
-impl PreheatLlmSession {
+impl TextPostProcessorSession for PreheatLlmSession {
     fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());
@@ -344,29 +347,6 @@ impl PreheatLlmSession {
                     &combined,
                 )
             }
-        }
-    }
-}
-
-pub(crate) struct LlmSession(LlmSessionKind);
-
-enum LlmSessionKind {
-    Conservative(ConservativeLlmSession),
-    Preheat(PreheatLlmSession),
-}
-
-impl LlmSession {
-    pub(crate) fn push_stable_chunk(&mut self, text: &str) {
-        match &mut self.0 {
-            LlmSessionKind::Conservative(session) => session.push_stable_chunk(text),
-            LlmSessionKind::Preheat(session) => session.push_stable_chunk(text),
-        }
-    }
-
-    pub(crate) fn finish(&mut self) -> Result<String, PostProcessError> {
-        match &mut self.0 {
-            LlmSessionKind::Conservative(session) => session.finish(),
-            LlmSessionKind::Preheat(session) => session.finish(),
         }
     }
 }

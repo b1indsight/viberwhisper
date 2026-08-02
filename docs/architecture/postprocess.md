@@ -8,14 +8,14 @@ Optional LLM-based text cleanup applied after STT transcription. Adds punctuatio
 
 ```
 src/postprocess/
-  mod.rs      — PostProcessor facade, session facade, typed config and errors
+  mod.rs      — processor/session traits and facades, typed config and errors
   llm.rs      — LlmPostProcessor, ConservativeLlmSession, PreheatLlmSession
 ```
 
 ## `PostProcessor` Facade
 
 ```rust
-pub struct PostProcessor(/* private implementation enum */);
+pub struct PostProcessor(Box<dyn TextPostProcessor>);
 
 impl PostProcessor {
     pub fn new(config: PostProcessConfig) -> Self;
@@ -28,18 +28,20 @@ Two interfaces for different use cases:
 - `process`: one-shot processing for the `convert` CLI path
 - `start_session`: incremental session for the `run_listener` path
 
-The supported implementations are a closed set, so the module uses a concrete facade over a private enum instead of allocating boxed trait objects. Only the much larger LLM session variant uses `Box`, preventing the pass-through session from inheriting its stack size. Construction selects pass-through or LLM behavior from the validated config. If HTTP-client initialization fails, it logs the error and falls back to pass-through because cleanup is optional.
+`TextPostProcessor` defines the shared behavior implemented by `NoopPostProcessor` and `LlmPostProcessor`. The facade selects and boxes one implementation during construction, then delegates directly through the trait without repeating implementation-specific matches. The trait remains private so callers depend only on the stable `PostProcessor` API. If HTTP-client initialization fails, construction logs the error and selects the pass-through implementation because cleanup is optional.
 
 ## `PostProcessorSession`
 
 ```rust
+pub struct PostProcessorSession(Box<dyn TextPostProcessorSession>);
+
 impl PostProcessorSession {
     pub fn push_stable_chunk(&mut self, text: &str);
     pub fn finish(&mut self) -> Result<String, PostProcessError>;
 }
 ```
 
-Designed for incremental input: stable STT chunks are pushed as they become available; `finish` returns the final processed text.
+`TextPostProcessorSession` provides the common incremental interface implemented by `NoopSession`, `ConservativeLlmSession`, and `PreheatLlmSession`. The session facade delegates to the boxed implementation. The interface accepts stable STT chunks incrementally, and `finish` returns the final processed text.
 
 ## Implementations
 
