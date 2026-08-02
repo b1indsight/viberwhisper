@@ -46,10 +46,6 @@ define_config_fields! {
     InputHoldHotkey => { name: "input.hold_hotkey", writable: true },
     InputToggleHotkey => { name: "input.toggle_hotkey", writable: true },
     AudioMicGain => { name: "audio.mic_gain", writable: true },
-    ChunkingMaxDurationSecs => { name: "chunking.max_duration_secs", writable: true },
-    ChunkingMaxSizeBytes => { name: "chunking.max_size_bytes", writable: true },
-    ChunkingMaxRetries => { name: "chunking.max_retries", writable: true },
-    SessionConvergenceTimeoutSecs => { name: "session.convergence_timeout_secs", writable: true },
     TranscriptionLanguage => { name: "transcription.language", writable: true },
     TranscriptionPrompt => { name: "transcription.prompt", writable: true },
     TranscriptionTemperature => { name: "transcription.temperature", writable: true },
@@ -58,7 +54,6 @@ define_config_fields! {
     PostProcessPrompt => { name: "post_process.prompt", writable: true },
     PostProcessTemperature => { name: "post_process.temperature", writable: true },
     InferenceActive => { name: "inference.active", writable: true },
-    ApiProvider => { name: "inference.api.provider", writable: true },
     ApiTranscriptionUrl => { name: "inference.api.transcription.api_url", writable: true },
     ApiTranscriptionModel => { name: "inference.api.transcription.model", writable: true },
     ApiTranscriptionKey => { name: "inference.api.transcription.api_key", writable: false },
@@ -156,18 +151,6 @@ impl ConfigDocument {
             ConfigKey::InputHoldHotkey => FieldValue::Value(self.input.hold_hotkey.clone()),
             ConfigKey::InputToggleHotkey => FieldValue::Value(self.input.toggle_hotkey.clone()),
             ConfigKey::AudioMicGain => FieldValue::Value(self.audio.mic_gain.to_string()),
-            ConfigKey::ChunkingMaxDurationSecs => {
-                FieldValue::Value(self.chunking.max_duration_secs.to_string())
-            }
-            ConfigKey::ChunkingMaxSizeBytes => {
-                FieldValue::Value(self.chunking.max_size_bytes.to_string())
-            }
-            ConfigKey::ChunkingMaxRetries => {
-                FieldValue::Value(self.chunking.max_retries.to_string())
-            }
-            ConfigKey::SessionConvergenceTimeoutSecs => {
-                FieldValue::Value(self.session.convergence_timeout_secs.to_string())
-            }
             ConfigKey::TranscriptionLanguage => optional_field(&self.transcription.language),
             ConfigKey::TranscriptionPrompt => optional_field(&self.transcription.prompt),
             ConfigKey::TranscriptionTemperature => {
@@ -190,7 +173,6 @@ impl ConfigDocument {
                 }
                 .to_string(),
             ),
-            ConfigKey::ApiProvider => optional_field(&self.inference.api.provider),
             ConfigKey::ApiTranscriptionUrl => {
                 FieldValue::Value(self.inference.api.transcription.api_url.clone())
             }
@@ -227,19 +209,6 @@ impl ConfigDocument {
             ConfigKey::AudioMicGain => {
                 self.audio.mic_gain = parse_f32(value).map_err(invalid)?;
             }
-            ConfigKey::ChunkingMaxDurationSecs => {
-                self.chunking.max_duration_secs = parse_number::<u32>(value).map_err(invalid)?;
-            }
-            ConfigKey::ChunkingMaxSizeBytes => {
-                self.chunking.max_size_bytes = parse_number::<u64>(value).map_err(invalid)?;
-            }
-            ConfigKey::ChunkingMaxRetries => {
-                self.chunking.max_retries = parse_number::<u32>(value).map_err(invalid)?;
-            }
-            ConfigKey::SessionConvergenceTimeoutSecs => {
-                self.session.convergence_timeout_secs =
-                    parse_number::<u64>(value).map_err(invalid)?;
-            }
             ConfigKey::TranscriptionLanguage => self.transcription.language = parse_optional(value),
             ConfigKey::TranscriptionPrompt => self.transcription.prompt = parse_optional(value),
             ConfigKey::TranscriptionTemperature => {
@@ -262,7 +231,6 @@ impl ConfigDocument {
                     _ => return Err(invalid("expected `api` or `local`".to_string())),
                 };
             }
-            ConfigKey::ApiProvider => self.inference.api.provider = parse_optional(value),
             ConfigKey::ApiTranscriptionUrl => {
                 self.inference.api.transcription.api_url = value.to_string()
             }

@@ -675,14 +675,7 @@ mod integration_tests {
         use std::sync::Arc;
 
         let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
-        let orch = SessionOrchestrator::new(
-            t,
-            OrchestratorConfig::validate(
-                &crate::core::config::SessionSection::default(),
-                Some("en".to_string()),
-            )
-            .unwrap(),
-        );
+        let orch = SessionOrchestrator::new(t, OrchestratorConfig::new(Some("en".to_string())));
 
         orch.start_session(
             crate::core::recording_session::SessionId(1),
@@ -705,11 +698,7 @@ mod integration_tests {
         use std::sync::Arc;
 
         let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
-        let orch = SessionOrchestrator::new(
-            t,
-            OrchestratorConfig::validate(&crate::core::config::SessionSection::default(), None)
-                .unwrap(),
-        );
+        let orch = SessionOrchestrator::new(t, OrchestratorConfig::new(None));
 
         orch.start_session(
             crate::core::recording_session::SessionId(1),

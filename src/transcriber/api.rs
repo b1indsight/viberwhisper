@@ -1,14 +1,13 @@
 use crate::audio::WavChunk;
-use crate::core::config::{
-    ApiAuth, ChunkingSection, ConfigKey, TranscriptionSection, ValidationIssue,
-};
+use crate::core::config::{ApiAuth, ConfigKey, TranscriptionSection, ValidationIssue};
 use crate::transcriber::TranscribeError;
 use std::io::Cursor;
 use std::time::Duration;
 use tracing::{info, instrument, warn};
 
-/// Four attempts plus exponential backoff stay below the 30-second session budget.
-const STT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Two attempts plus the retry backoff stay below the 30-second session budget.
+const STT_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const STT_MAX_RETRIES: u32 = 1;
 
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, chunk: &WavChunk) -> Result<String, TranscribeError>;
@@ -36,7 +35,6 @@ pub struct TranscriberConfig {
     language: Option<String>,
     prompt: Option<String>,
     temperature: f32,
-    max_retries: u32,
 }
 
 impl TranscriberConfig {
@@ -45,7 +43,6 @@ impl TranscriberConfig {
         auth: ApiAuth,
         model: &str,
         transcription: &TranscriptionSection,
-        chunking: &ChunkingSection,
     ) -> Result<Self, Vec<ValidationIssue>> {
         let mut issues = Vec::new();
         let endpoint = match reqwest::Url::parse(endpoint) {
@@ -74,13 +71,6 @@ impl TranscriberConfig {
                 "transcription model cannot be empty",
             ));
         }
-        if chunking.max_retries > 3 {
-            issues.push(ValidationIssue::new(
-                ConfigKey::ChunkingMaxRetries,
-                "transcriber.retries_too_large",
-                "max retries must be at most 3",
-            ));
-        }
         match endpoint {
             Some(endpoint) if issues.is_empty() => Ok(Self {
                 endpoint,
@@ -89,7 +79,6 @@ impl TranscriberConfig {
                 language: transcription.language.clone(),
                 prompt: transcription.prompt.clone(),
                 temperature: transcription.temperature,
-                max_retries: chunking.max_retries,
             }),
             _ => Err(issues),
         }
@@ -110,8 +99,6 @@ pub struct ApiTranscriber {
     language: Option<String>,
     prompt: Option<String>,
     temperature: f32,
-    /// Maximum retry attempts per chunk on transient errors (5xx / network).
-    max_retries: u32,
     /// Shared HTTP client (connection reuse + request timeout).
     client: reqwest::blocking::Client,
 }
@@ -125,7 +112,6 @@ impl ApiTranscriber {
             language: config.language,
             prompt: config.prompt,
             temperature: config.temperature,
-            max_retries: config.max_retries,
             client: reqwest::blocking::Client::builder()
                 .timeout(STT_REQUEST_TIMEOUT)
                 .build()?,
@@ -134,7 +120,7 @@ impl ApiTranscriber {
             model = %transcriber.model,
             api_url = %transcriber.api_url,
             language = transcriber.language.as_deref().unwrap_or("auto"),
-            max_retries = transcriber.max_retries,
+            max_retries = STT_MAX_RETRIES,
             "Using API transcriber for speech recognition"
         );
         Ok(transcriber)
@@ -208,7 +194,7 @@ impl ApiTranscriber {
     fn upload_chunk_with_retry(&self, chunk: &WavChunk) -> Result<String, TranscribeError> {
         let mut last_error = TranscribeError::Network("upload not attempted".to_string());
 
-        for attempt in 0..=self.max_retries {
+        for attempt in 0..=STT_MAX_RETRIES {
             if attempt > 0 {
                 let wait_secs = std::cmp::min(1u64 << (attempt - 1), 16);
                 warn!(
@@ -241,7 +227,7 @@ impl ApiTranscriber {
         }
 
         warn!(
-            attempts = self.max_retries + 1,
+            attempts = STT_MAX_RETRIES + 1,
             error = %last_error,
             "Chunk upload failed after all retries"
         );
@@ -262,31 +248,18 @@ impl Transcriber for ApiTranscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::{ApiAuth, ChunkingSection, SecretValue, TranscriptionSection};
+    use crate::core::config::{ApiAuth, SecretValue, TranscriptionSection};
 
-    fn validated_config(endpoint: &str, max_retries: u32) -> TranscriberConfig {
-        validated_config_with_auth(
-            endpoint,
-            max_retries,
-            ApiAuth::Bearer(SecretValue::new("test_key")),
-        )
+    fn validated_config(endpoint: &str) -> TranscriberConfig {
+        validated_config_with_auth(endpoint, ApiAuth::Bearer(SecretValue::new("test_key")))
     }
 
-    fn validated_config_with_auth(
-        endpoint: &str,
-        max_retries: u32,
-        auth: ApiAuth,
-    ) -> TranscriberConfig {
-        let chunking = ChunkingSection {
-            max_retries,
-            ..ChunkingSection::default()
-        };
+    fn validated_config_with_auth(endpoint: &str, auth: ApiAuth) -> TranscriberConfig {
         TranscriberConfig::validate(
             endpoint,
             auth,
             "whisper-large-v3-turbo",
             &TranscriptionSection::default(),
-            &chunking,
         )
         .unwrap()
     }
@@ -358,11 +331,8 @@ mod tests {
         (port, receiver)
     }
 
-    fn transcriber_for_port(port: u16, max_retries: u32) -> ApiTranscriber {
-        let config = validated_config(
-            &format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
-            max_retries,
-        );
+    fn transcriber_for_port(port: u16) -> ApiTranscriber {
+        let config = validated_config(&format!("http://127.0.0.1:{port}/v1/audio/transcriptions"));
         ApiTranscriber::new(config).unwrap()
     }
 
@@ -373,7 +343,7 @@ mod tests {
     #[test]
     fn test_upload_success_returns_trimmed_text() {
         let (port, _requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\": \" hello \"}");
-        let t = transcriber_for_port(port, 3);
+        let t = transcriber_for_port(port);
         let chunk = test_chunk();
 
         let result = t.upload_chunk_with_retry(&chunk);
@@ -393,7 +363,6 @@ mod tests {
             let (port, request) = spawn_request_stub();
             let config = validated_config_with_auth(
                 &format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
-                0,
                 auth,
             );
             let transcriber = ApiTranscriber::new(config).unwrap();
@@ -416,7 +385,7 @@ mod tests {
     #[test]
     fn multipart_upload_contains_the_shared_chunk_bytes() {
         let (port, request) = spawn_request_stub();
-        let transcriber = transcriber_for_port(port, 0);
+        let transcriber = transcriber_for_port(port);
         let chunk = test_chunk();
 
         assert_eq!(transcriber.upload_chunk(&chunk).unwrap(), "ok");
@@ -434,7 +403,7 @@ mod tests {
     fn test_client_error_is_structured_and_not_retried() {
         let (port, requests) =
             spawn_http_stub("HTTP/1.1 400 Bad Request", "{\"error\":\"bad model\"}");
-        let t = transcriber_for_port(port, 3);
+        let t = transcriber_for_port(port);
         let chunk = test_chunk();
 
         let started = std::time::Instant::now();
@@ -455,7 +424,7 @@ mod tests {
     fn test_server_error_is_retried_and_kept_structured() {
         let (port, requests) =
             spawn_http_stub("HTTP/1.1 503 Service Unavailable", "{\"error\":\"busy\"}");
-        let t = transcriber_for_port(port, 1);
+        let t = transcriber_for_port(port);
         let chunk = test_chunk();
 
         let result = t.upload_chunk_with_retry(&chunk);

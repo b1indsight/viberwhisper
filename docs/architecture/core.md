@@ -15,7 +15,10 @@ The config package intentionally has four files:
 | `store.rs` | platform path discovery plus fail-closed load and atomic save |
 | `mod.rs` | facade, config errors, validation report, secret-safe value types |
 
-`ConfigDocument` accepts only a complete document with `schema_version: 2`. Missing or unknown fields, wrong versions, invalid JSON, and non-finite floats are errors. A missing file alone returns the in-memory defaults.
+`ConfigDocument` accepts only the current complete canonical document with `schema_version: 2`.
+Missing or unknown fields, wrong versions, invalid JSON, and non-finite floats are errors. Retired
+fields such as `chunking`, `session`, and `inference.api.provider` are not accepted. A missing file
+alone returns the in-memory defaults.
 
 `ConfigStore::discover()` gets the application directory from `platform::config_dir()` and appends `config.json`. Reads and writes therefore use the same canonical path independent of the launch working directory. Writes use a temporary file in the destination directory followed by atomic publication.
 
@@ -53,13 +56,17 @@ No subcommand runs the recording listener. Other commands are:
 
 - **Chunk State Machine**: `Flushed → Uploading → Transcribed / Failed`
 - **Session-owned Results**: Each active session exclusively owns its `Vec<ChunkEntry>`. The worker never reads or mutates chunk state; it reports `UploadStarted` and `Completed` events through a session-specific result channel.
-- **Convergence Timeout**: Configurable via `convergence_timeout_secs`; chunks still pending at the deadline are marked `Failed(Timeout)`
+- **Convergence Timeout**: A module-owned 30-second deadline marks chunks still pending as `Failed(Timeout)`
 - **Partial Failure**: If some chunks succeed and others fail, returns partial text with an error
 - **Bounded Queue**: The capacity-two in-memory `WavChunk` queue is non-blocking. A full queue marks the chunk failed rather than stalling session shutdown.
 - **Memory Ownership**: Queued chunks are immutable shared WAV bytes. Rejected, stale, cancelled, or completed chunks are released by normal ownership drops; the orchestrator performs no chunk-file cleanup.
 - **Strict Session Routing**: start, chunk, finish, and abort operations carry `SessionId`; duplicate starts and mismatched IDs are rejected without replacing active work.
 
-`on_chunk_ready` opportunistically drains completed worker events while recording. During shutdown, `finish_session` closes the bounded input sender and waits on the result receiver with the configured convergence deadline. Timeout or abort drops session-owned chunk state immediately; a detached worker can finish synchronous transcription, but late events cannot retain or mutate the ended session or reach a newer session.
+`on_chunk_ready` opportunistically drains completed worker events while recording. During shutdown,
+`finish_session` closes the bounded input sender and waits on the result receiver with the fixed
+convergence deadline. Timeout or abort drops session-owned chunk state immediately; a detached
+worker can finish synchronous transcription, but late events cannot retain or mutate the ended
+session or reach a newer session.
 
 ### `SessionError` Enum
 

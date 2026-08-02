@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 pub use document::ConfigDocument;
 pub(crate) use document::{
-    AudioSection, ChunkingSection, InferenceProfile, InputSection, LocalSection,
-    PostProcessSection, SessionSection, TranscriptionSection,
+    AudioSection, InferenceProfile, InputSection, LocalSection, PostProcessSection,
+    TranscriptionSection,
 };
 pub use fields::ConfigKey;
 #[cfg(test)]
@@ -163,10 +163,38 @@ mod tests {
             serde_json::from_str(include_str!("../../../config.example.json")).unwrap();
         assert_eq!(document.schema_version, 2);
         let encoded = serde_json::to_string(&document).unwrap();
+        let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert!(encoded_value.get("chunking").is_none());
+        assert!(encoded_value.get("session").is_none());
+        assert!(encoded_value["inference"]["api"].get("provider").is_none());
         assert_eq!(
             serde_json::from_str::<ConfigDocument>(&encoded).unwrap(),
             document
         );
+    }
+
+    #[test]
+    fn retired_policy_fields_are_rejected() {
+        // The current schema is the only accepted shape: removed policy knobs must not be
+        // mistaken for live settings that still affect runtime behavior.
+        let canonical: serde_json::Value =
+            serde_json::from_str(include_str!("../../../config.example.json")).unwrap();
+
+        let mut with_chunking = canonical.clone();
+        with_chunking["chunking"] = serde_json::json!({
+            "max_duration_secs": 30,
+            "max_size_bytes": 24117248,
+            "max_retries": 1
+        });
+        assert!(serde_json::from_value::<ConfigDocument>(with_chunking).is_err());
+
+        let mut with_session = canonical.clone();
+        with_session["session"] = serde_json::json!({"convergence_timeout_secs": 30});
+        assert!(serde_json::from_value::<ConfigDocument>(with_session).is_err());
+
+        let mut with_provider = canonical;
+        with_provider["inference"]["api"]["provider"] = serde_json::json!("groq");
+        assert!(serde_json::from_value::<ConfigDocument>(with_provider).is_err());
     }
 
     #[test]
@@ -227,7 +255,16 @@ mod tests {
         assert!(keys.contains(&"inference.local.server_port"));
         assert!(!keys.contains(&"hold_hotkey"));
         assert!(!keys.contains(&"local_mode"));
-        assert_eq!(keys.len(), 26);
+        for retired in [
+            "chunking.max_duration_secs",
+            "chunking.max_size_bytes",
+            "chunking.max_retries",
+            "session.convergence_timeout_secs",
+            "inference.api.provider",
+        ] {
+            assert!(!keys.contains(&retired));
+        }
+        assert_eq!(keys.len(), 21);
 
         let document = ConfigDocument::default();
         let secrets = MapSecrets(HashMap::new());
@@ -248,6 +285,10 @@ mod tests {
         );
         assert!(matches!(
             document.get_field("model", &secrets),
+            Err(FieldError::UnknownKey(_))
+        ));
+        assert!(matches!(
+            document.set_field("chunking.max_retries", "1"),
             Err(FieldError::UnknownKey(_))
         ));
         assert!(matches!(

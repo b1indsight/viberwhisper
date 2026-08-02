@@ -23,9 +23,14 @@ which lets retries create fresh multipart readers without copying the payload.
 
 ## Chunk Capacity
 
+Production uses one module-owned policy for both live recording and offline conversion: a chunk is
+limited to 30 seconds or 23 MiB, whichever produces fewer complete frames. These safety values are
+not persisted configuration.
+
 `max_frames_per_chunk(max_duration_secs, max_size_bytes, output_spec)` is the only duration/size
 conversion. It works in complete audio frames and accounts for channel count, sample width, and
-the 44-byte or 68-byte header that `hound` emits for the output spec.
+the 44-byte or 68-byte header that `hound` emits for the output spec. Its explicit parameters keep
+the capacity calculation independently testable; production callers pass the module policy.
 
 - `Ok(None)`: both limits are disabled; the producer does not proactively slice.
 - `Ok(Some(0))`: a nonzero size limit can hold no more than 0.5 seconds; the producer emits no

@@ -7,14 +7,6 @@
   "audio": {
     "mic_gain": 3.0
   },
-  "chunking": {
-    "max_duration_secs": 30,
-    "max_size_bytes": 24117248,
-    "max_retries": 3
-  },
-  "session": {
-    "convergence_timeout_secs": 30
-  },
   "transcription": {
     "language": "zh",
     "prompt": "以下是一段简体中文的普通话句子，去掉首尾的语气词",
@@ -29,7 +21,6 @@
   "inference": {
     "active": "api",
     "api": {
-      "provider": "groq",
       "transcription": {
         "api_url": "https://api.groq.com/openai/v1/audio/transcriptions",
         "model": "whisper-large-v3-turbo"
