@@ -11,8 +11,6 @@ pub struct ConfigDocument {
     pub(super) schema_version: u32,
     pub(crate) input: InputSection,
     pub(crate) audio: AudioSection,
-    pub(crate) chunking: ChunkingSection,
-    pub(crate) session: SessionSection,
     pub(crate) transcription: TranscriptionSection,
     pub(crate) post_process: PostProcessSection,
     pub(crate) inference: InferenceSection,
@@ -24,8 +22,6 @@ impl Default for ConfigDocument {
             schema_version: 2,
             input: InputSection::default(),
             audio: AudioSection::default(),
-            chunking: ChunkingSection::default(),
-            session: SessionSection::default(),
             transcription: TranscriptionSection::default(),
             post_process: PostProcessSection::default(),
             inference: InferenceSection::default(),
@@ -87,38 +83,6 @@ pub(crate) struct AudioSection {
 impl Default for AudioSection {
     fn default() -> Self {
         Self { mic_gain: 1.0 }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ChunkingSection {
-    pub(crate) max_duration_secs: u32,
-    pub(crate) max_size_bytes: u64,
-    pub(crate) max_retries: u32,
-}
-
-impl Default for ChunkingSection {
-    fn default() -> Self {
-        Self {
-            max_duration_secs: 30,
-            max_size_bytes: 23 * 1024 * 1024,
-            max_retries: 3,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SessionSection {
-    pub(crate) convergence_timeout_secs: u64,
-}
-
-impl Default for SessionSection {
-    fn default() -> Self {
-        Self {
-            convergence_timeout_secs: 30,
-        }
     }
 }
 
@@ -190,7 +154,6 @@ impl Default for InferenceSection {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ApiInferenceSection {
-    pub(crate) provider: Option<String>,
     pub(crate) transcription: ApiTranscriptionSection,
     pub(crate) post_process: ApiPostProcessSection,
 }

@@ -93,9 +93,9 @@ pub struct AudioRecorder {
     ready_chunk_count: Arc<AtomicUsize>,
     /// Maximum mono frames per chunk. `None` means unlimited and `Some(0)` suppresses output.
     chunk_max_samples: Option<usize>,
-    /// Config: max chunk duration in seconds.
+    /// Production policy: max chunk duration in seconds.
     max_chunk_duration_secs: u32,
-    /// Config: max chunk size in bytes (including 44-byte WAV header).
+    /// Production policy: max chunk size in bytes, including the encoded WAV header.
     max_chunk_size_bytes: u64,
 }
 
@@ -125,11 +125,7 @@ fn push_mono_chunk(
 }
 
 impl AudioRecorder {
-    /// Create a recorder with chunk-splitting config.
-    ///
-    /// - `max_chunk_duration_secs`: flush a chunk every N seconds; 0 = no duration limit.
-    /// - `max_chunk_size_bytes`: flush when the uncompressed PCM + 44-byte header exceeds
-    ///   this size; 0 = no size limit.
+    /// Create a recorder with the module-owned production chunk policy.
     pub fn with_config(config: &AudioConfig) -> Self {
         let gain = config.mic_gain;
         let max_chunk_duration_secs = config.max_chunk_duration_secs;
@@ -516,10 +512,7 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn test_recorder_with_config() {
-        let config = AudioConfig::from_sections(
-            &crate::core::config::AudioSection::default(),
-            &crate::core::config::ChunkingSection::default(),
-        );
+        let config = AudioConfig::from_section(&crate::core::config::AudioSection::default());
         let recorder = AudioRecorder::with_config(&config);
         assert!(!recorder.is_recording());
         assert_eq!(recorder.max_chunk_duration_secs, 30);

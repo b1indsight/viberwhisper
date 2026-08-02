@@ -29,3 +29,4 @@
 2026-08-01: Replace the flat working-directory config with strict canonical v2 persistence, module-owned consumer configs, explicit API/Local profiles, canonical dotted CLI keys, active-profile checks, optional API authentication, secret-safe runtime assembly, concrete errors, and allocation-light consumer construction
 2026-08-01: Bound STT chunk retries to a fixed 5-second request timeout and three retries, keeping the worst-case retry window below 30 seconds
 2026-08-01: Replace temporary WAV chunk files with shared in-memory WavChunk payloads for live recording and streaming offline conversion
+2026-08-02: Internalize chunk, STT retry, and session convergence policies; remove unused provider metadata and reject retired fields outside the current canonical v2 config

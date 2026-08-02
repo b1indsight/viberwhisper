@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::audio::AudioConfig;
+use crate::audio::{AudioConfig, MAX_CHUNK_DURATION_SECS, MAX_CHUNK_SIZE_BYTES};
 use crate::core::config::{
     ApiAuth, ConfigDocument, InferenceProfile, SecretSource, SecretValue, ValidationIssue,
     ValidationReport,
@@ -58,25 +58,20 @@ pub fn resolve_listener(
 ) -> Result<ListenerConfig, ValidationReport> {
     let mut issues = Vec::new();
     let hotkeys = collect_issues(HotkeyConfig::validate(&document.input), &mut issues);
-    let audio = AudioConfig::from_sections(&document.audio, &document.chunking);
-    let orchestrator = collect_issues(
-        OrchestratorConfig::validate(&document.session, document.transcription.language.clone()),
-        &mut issues,
-    );
+    let audio = AudioConfig::from_section(&document.audio);
+    let orchestrator = OrchestratorConfig::new(document.transcription.language.clone());
     let backend = collect_issues(
         resolve_backend(document, secrets, selection, config_dir, home_dir),
         &mut issues,
     );
 
-    match (hotkeys, orchestrator, backend) {
-        (Some(hotkeys), Some(orchestrator), Some(backend)) if issues.is_empty() => {
-            Ok(ListenerConfig {
-                hotkeys,
-                audio,
-                orchestrator,
-                backend,
-            })
-        }
+    match (hotkeys, backend) {
+        (Some(hotkeys), Some(backend)) if issues.is_empty() => Ok(ListenerConfig {
+            hotkeys,
+            audio,
+            orchestrator,
+            backend,
+        }),
         _ => Err(report(issues)),
     }
 }
@@ -99,8 +94,8 @@ pub fn resolve_convert(
     Ok(ConvertConfig {
         backend,
         language: document.transcription.language.clone(),
-        max_chunk_duration_secs: document.chunking.max_duration_secs,
-        max_chunk_size_bytes: document.chunking.max_size_bytes,
+        max_chunk_duration_secs: MAX_CHUNK_DURATION_SECS,
+        max_chunk_size_bytes: MAX_CHUNK_SIZE_BYTES,
     })
 }
 
@@ -172,7 +167,6 @@ fn resolve_api_backend(
             transcription_secret.map_or(ApiAuth::None, ApiAuth::Bearer),
             &document.inference.api.transcription.model,
             &document.transcription,
-            &document.chunking,
         ),
         &mut issues,
     );
@@ -225,7 +219,6 @@ fn resolve_local_backend(
             ApiAuth::None,
             LOCAL_MODEL_NAME,
             &document.transcription,
-            &document.chunking,
         ),
         &mut issues,
     );
@@ -354,6 +347,8 @@ mod tests {
         .unwrap();
 
         assert!(config.backend.local_service.is_none());
+        assert_eq!(config.max_chunk_duration_secs, 30);
+        assert_eq!(config.max_chunk_size_bytes, 23 * 1024 * 1024);
     }
 
     #[test]

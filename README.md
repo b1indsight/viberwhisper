@@ -42,8 +42,9 @@ viberwhisper config path
 - Windows：`%APPDATA%\ViberWhisper\config.json`
 
 配置文件不存在时使用内置默认值。可将 [`config.example.json`](config.example.json) 复制到上述路径，或使用
-`config set` 创建完整配置。已有文件必须包含 `schema_version: 2` 和完整结构；缺字段、未知字段、损坏 JSON
-或其他 schema 版本都会明确报错，不会静默回退默认值。
+`config set` 创建完整配置。已有文件必须包含 `schema_version: 2` 和当前完整结构；缺字段、未知字段、损坏
+JSON 或其他 schema 版本都会明确报错，不会静默回退默认值。已退役的 `chunking`、`session` 和
+`inference.api.provider` 均视为未知字段。
 
 API 密钥优先从环境变量读取，其次才读取配置文件中的对应 secret 字段：
 
@@ -116,17 +117,16 @@ viberwhisper convert input.wav --output output.txt
 
 CLI 只接受下表中的 canonical dotted key；`hotkey`、`model`、`local_mode` 等旧别名不再支持。
 
-### 输入、音频与会话
+### 输入与音频
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `input.hold_hotkey` | 字符串 | `F8` | 按住录音热键；空字符串可禁用 |
 | `input.toggle_hotkey` | 字符串 | `F9` | 切换录音热键；空字符串可禁用 |
 | `audio.mic_gain` | 数字 | `1.0` | 麦克风增益倍数 |
-| `chunking.max_duration_secs` | 数字 | `30` | 每个分片最大秒数（`0` = 不限） |
-| `chunking.max_size_bytes` | 数字 | `24117248` | 每个分片最大字节数（`0` = 不限） |
-| `chunking.max_retries` | 数字 | `3` | 分片上传失败最大重试次数（最大 16） |
-| `session.convergence_timeout_secs` | 数字 | `30` | 等待分片收敛的超时秒数（最大 3600） |
+
+内部可靠性策略不作为用户配置：实时与离线音频统一按 30 秒或 23 MiB 的较小限制分片；每个 STT 请求
+最多等待 12 秒，网络错误或 HTTP 5xx 最多重试一次；停止录音后的 session 收敛窗口固定为 30 秒。
 
 ### 转写与 API profile
 
@@ -136,7 +136,6 @@ CLI 只接受下表中的 canonical dotted key；`hotkey`、`model`、`local_mod
 | `transcription.prompt` | 字符串/null | 中文提示词 | 转写提示词 |
 | `transcription.temperature` | 数字 | `0` | 转写温度 |
 | `inference.active` | `api`/`local` | `api` | 默认使用的推理 profile |
-| `inference.api.provider` | 字符串/null | 无 | 仅用于标注 |
 | `inference.api.transcription.api_url` | URL | Groq Whisper URL | OpenAI-compatible multipart 地址 |
 | `inference.api.transcription.model` | 字符串 | `whisper-large-v3-turbo` | 转写模型 |
 | `inference.api.transcription.api_key` | secret | 无 | 只读状态；环境变量为 `TRANSCRIPTION_API_KEY` |

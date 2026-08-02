@@ -13,14 +13,15 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::audio::WavChunk;
-use crate::core::config::{ConfigKey, SessionSection, ValidationIssue};
-
 use crate::core::recording_session::SessionId;
 pub use crate::core::recording_session::SessionMode;
 use crate::text::merge_texts;
 use crate::transcriber::Transcriber;
 // Re-exported so callers can keep using `core::orchestrator::TranscribeError`.
 pub use crate::transcriber::TranscribeError;
+
+// The STT retry window is kept below this deadline so a tail chunk can normally converge on stop.
+const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -31,21 +32,11 @@ pub struct OrchestratorConfig {
 }
 
 impl OrchestratorConfig {
-    pub(crate) fn validate(
-        session: &SessionSection,
-        language: Option<String>,
-    ) -> Result<Self, Vec<ValidationIssue>> {
-        if session.convergence_timeout_secs > 60 * 60 {
-            return Err(vec![ValidationIssue::new(
-                ConfigKey::SessionConvergenceTimeoutSecs,
-                "session.timeout_too_large",
-                "convergence timeout must be at most 3600 seconds",
-            )]);
-        }
-        Ok(Self {
+    pub(crate) fn new(language: Option<String>) -> Self {
+        Self {
             language,
-            convergence_timeout: Duration::from_secs(session.convergence_timeout_secs),
-        })
+            convergence_timeout: CONVERGENCE_TIMEOUT,
+        }
     }
 }
 
@@ -620,6 +611,13 @@ mod tests {
 
     fn default_orchestrator(transcriber: Arc<dyn Transcriber>) -> SessionOrchestrator {
         make_orchestrator_with_timeout(transcriber, Duration::from_secs(5))
+    }
+
+    #[test]
+    fn production_config_uses_fixed_convergence_timeout() {
+        let config = OrchestratorConfig::new(Some("zh".to_string()));
+
+        assert_eq!(config.convergence_timeout, Duration::from_secs(30));
     }
 
     fn test_chunk() -> WavChunk {
