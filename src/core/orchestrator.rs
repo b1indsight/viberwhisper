@@ -1,7 +1,7 @@
 //! Session orchestrator for end-to-end stream recognition.
 //!
-//! `SessionOrchestrator` unifies the Hold and Toggle recording session lifecycle:
-//! chunk tracking, background transcription, convergence wait, and result merging.
+//! `SessionOrchestrator` owns recording-session chunk tracking, background transcription,
+//! convergence wait, and result merging.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +14,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::audio::WavChunk;
 use crate::core::recording_session::SessionId;
-pub use crate::core::recording_session::SessionMode;
 use crate::text::merge_texts;
 use crate::transcriber::Transcriber;
 // Re-exported so callers can keep using `core::orchestrator::TranscribeError`.
@@ -218,11 +217,7 @@ impl SessionOrchestrator {
     /// Start a new recording session.
     ///
     /// Returns an error without replacing an existing active session.
-    pub fn start_session(
-        &self,
-        session_id: SessionId,
-        mode: SessionMode,
-    ) -> Result<(), SessionStartError> {
+    pub fn start_session(&self, session_id: SessionId) -> Result<(), SessionStartError> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(active) = inner.as_ref() {
             return Err(SessionStartError::ActiveSession {
@@ -252,7 +247,7 @@ impl SessionOrchestrator {
             cancelled,
         });
 
-        info!(session_id = session_id.0, mode = ?mode, "Session started");
+        info!(session_id = session_id.0, "Session started");
         Ok(())
     }
 
@@ -852,7 +847,7 @@ mod tests {
         let t = Arc::new(FixedTranscriber("hello world".to_string()));
         let orch = default_orchestrator(t);
 
-        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        orch.start_session(SessionId(1)).unwrap();
         let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
@@ -870,7 +865,7 @@ mod tests {
         ]));
         let orch = default_orchestrator(t);
 
-        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        orch.start_session(SessionId(1)).unwrap();
         let _ = orch.on_chunk_ready(SessionId(1), test_chunk()); // index 0
         thread::sleep(Duration::from_millis(10));
         let _ = orch.on_chunk_ready(SessionId(1), test_chunk()); // index 1
@@ -888,8 +883,7 @@ mod tests {
         let t = Arc::new(MockTranscriber);
         let orch = default_orchestrator(t);
 
-        orch.start_session(SessionId(1), SessionMode::Toggle)
-            .unwrap();
+        orch.start_session(SessionId(1)).unwrap();
         let result = orch.finish_session(SessionId(1));
 
         assert!(matches!(result, Err(SessionError::NoChunks)));
@@ -929,7 +923,7 @@ mod tests {
         ]));
         let orch = default_orchestrator(t);
 
-        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        orch.start_session(SessionId(1)).unwrap();
         let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         thread::sleep(Duration::from_millis(10));
         let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
@@ -964,7 +958,7 @@ mod tests {
         });
         let orch = make_orchestrator_with_timeout(t, Duration::from_millis(100));
 
-        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        orch.start_session(SessionId(1)).unwrap();
         let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
@@ -1005,7 +999,7 @@ mod tests {
             release: Arc::clone(&release),
         });
         let orch = default_orchestrator(t);
-        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        orch.start_session(SessionId(1)).unwrap();
 
         let started = Instant::now();
         for _ in 0..100 {
@@ -1032,19 +1026,15 @@ mod tests {
     }
 
     #[test]
-    fn test_hold_and_toggle_same_lifecycle() {
-        // Both modes should go through the same start/stop path.
-        for mode in [SessionMode::Hold, SessionMode::Toggle] {
-            let t = Arc::new(FixedTranscriber("text".to_string()));
-            let orch = default_orchestrator(t);
+    fn test_session_lifecycle_is_mode_free() {
+        let t = Arc::new(FixedTranscriber("text".to_string()));
+        let orch = default_orchestrator(t);
 
-            orch.start_session(SessionId(1), mode).unwrap();
-            let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
-            let result = orch.finish_session(SessionId(1));
+        orch.start_session(SessionId(1)).unwrap();
+        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
+        let result = orch.finish_session(SessionId(1));
 
-            assert!(result.is_ok(), "Mode {:?} failed: {:?}", mode, result);
-            assert_eq!(result.unwrap(), "text");
-        }
+        assert_eq!(result.unwrap(), "text");
     }
 
     #[test]
@@ -1052,12 +1042,10 @@ mod tests {
         let t = Arc::new(FixedTranscriber("new session".to_string()));
         let orch = default_orchestrator(t);
 
-        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        orch.start_session(SessionId(1)).unwrap();
         let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
 
-        let error = orch
-            .start_session(SessionId(2), SessionMode::Toggle)
-            .unwrap_err();
+        let error = orch.start_session(SessionId(2)).unwrap_err();
         assert_eq!(
             error,
             SessionStartError::ActiveSession {
@@ -1074,8 +1062,7 @@ mod tests {
     #[test]
     fn mismatched_chunk_and_finish_do_not_mutate_active_session() {
         let orch = default_orchestrator(Arc::new(FixedTranscriber("active".into())));
-        orch.start_session(SessionId(1), SessionMode::Toggle)
-            .unwrap();
+        orch.start_session(SessionId(1)).unwrap();
 
         assert!(matches!(
             orch.on_chunk_ready(SessionId(2), test_chunk()),
@@ -1096,7 +1083,7 @@ mod tests {
     #[test]
     fn abort_rejects_wrong_id_and_preserves_active_session() {
         let orch = default_orchestrator(Arc::new(MockTranscriber));
-        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        orch.start_session(SessionId(1)).unwrap();
 
         assert!(matches!(
             orch.abort_session(SessionId(2)),
@@ -1111,7 +1098,7 @@ mod tests {
         let t = Arc::new(PanicTranscriber);
         let orch = make_orchestrator_with_timeout(t, Duration::from_millis(200));
 
-        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        orch.start_session(SessionId(1)).unwrap();
         let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
@@ -1132,7 +1119,7 @@ mod tests {
         let t = Arc::new(PanicTranscriber);
         let orch = default_orchestrator(t);
 
-        orch.start_session(SessionId(1), SessionMode::Hold).unwrap();
+        orch.start_session(SessionId(1)).unwrap();
         let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 

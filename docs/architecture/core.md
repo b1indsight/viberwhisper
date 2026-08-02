@@ -80,27 +80,27 @@ session or reach a newer session.
 
 ## Recording Session (`src/core/recording_session.rs`)
 
-`RecordingSessionMachine` is the sole authority for recording lifecycle transitions. Tray and hotkey adapters emit source-tagged `ControlEvent`s and never inspect recorder state directly.
+`RecordingSessionMachine` is the sole authority for recording lifecycle transitions. The listener integration maps source-specific hotkey and tray gestures into source-free `StartRequested` and `StopRequested` events before they enter core.
 
 ### States
 
 - `Idle`
-- `Starting`: recorder/orchestrator startup is in progress
+- `Starting`: the composite recorder/orchestrator startup is in progress
 - `Recording`: one session is accepting audio chunks
-- `Stopping`: recorder stop or orchestrator convergence is in progress
+- `Stopping`: the composite recorder stop, tail-chunk submission, and orchestrator convergence is in progress
 - `ShuttingDown`: new controls are ignored while cleanup effects run
 
-Every accepted start receives a monotonically increasing `SessionId`. The ID is propagated through recorder operations, ready chunks, orchestrator routing, effects, and completion events. Stale chunks are deleted and stale completions cannot mutate the current session.
+The active states carry only a monotonically increasing `SessionId`; input source, interaction mode, and lower-layer phases are not lifecycle state. The ID is propagated through recorder operations, ready chunks, orchestrator routing, effects, and completion events. Stale chunks and stale Session results cannot mutate the current session.
 
 ### Explicit Transition Table
 
-`RecordingSessionMachine::handle` is the only state-writing entry point. It first compares the event's routing `SessionId` with the active state once, then delegates matching events to one private `(RecordingState, SessionEvent)` match that lists every accepted state/phase path and returns the complete next state plus ordered effects. A multi-ID outcome such as `RecorderAlreadyRecording` routes by its requested session ID while retaining the observed lower-layer ID for cleanup. Events rejected by either layer leave the state unchanged, emit no effects, and produce one compact debug record containing only the current state, event name, and optional routing ID.
-
-An orphan recorder discovered during startup transitions directly back to `Idle` with cancellation effects. There is no transient `Recovering` state because the previous value was assigned and cleared inside one `handle` call and could never be observed.
+`RecordingSessionMachine::handle` is the only state-writing entry point. It first compares a result event's routing `SessionId` with the active state once, then delegates matching events to one private `(RecordingState, SessionEvent)` match. The allowed paths are `Idle -> Starting -> Recording -> Stopping -> Idle`, plus chunk submission, failure recovery, and shutdown. Events rejected by either layer leave the state unchanged, emit no effects, and produce one compact debug record containing only the current state, event name, and optional routing ID.
 
 ### Event/Effect Boundary
 
-The machine consumes external controls plus structured recorder/orchestrator outcomes and emits declarative effects. `main.rs` executes those effects and feeds results back as internal events. Tray state changes only after successful lifecycle transitions.
+The machine consumes source-free requests plus `SessionStarted`, `SessionStartFailed`, `SessionStopped`, and `SessionStopFailed` results. It emits composite `StartSession` and `StopSession` effects instead of exposing recorder/orchestrator startup phases.
+
+`main.rs` executes `StartSession` as an all-or-nothing recorder/orchestrator acquisition with rollback. `StopSession` stops the recorder, submits tail chunks in order, finishes orchestrator convergence, and runs the existing post-processing and text-injection path. The state machine changes the tray to idle when it accepts a stop and restores the recording indicator if the recorder remains active.
 
 Exit is represented as `ShutdownRequested`. It cancels recorder/orchestrator work, resets tray state, suppresses final text injection, and exits only after `ReadyToExit` is emitted.
 

@@ -39,6 +39,19 @@ pub struct HotkeyManager {
 
 Spawns an `rdev::listen` thread that maps native events into an ordered channel. Per-binding key-down state suppresses operating-system key-repeat events so one physical toggle press produces one toggle action.
 
+### Recording Input Normalization
+
+Hotkey and tray source details stop at the listener integration boundary in `main.rs`. The integration reads the session machine's current state without mutating it and publishes only source-free core requests:
+
+| Raw gesture | Idle | Recording | Transitional/shutdown state |
+|---|---|---|---|
+| Hold press | `StartRequested` | ignored | ignored |
+| Hold release | ignored | `StopRequested` | ignored |
+| Toggle press | `StartRequested` | `StopRequested` | ignored |
+| Tray left click | `StartRequested` | `StopRequested` | ignored |
+
+Because the core event carries no source, Hold release, Toggle, and tray input can stop a current session regardless of which input started it. Input modules continue to own native classification, key-repeat suppression, and click debounce; they do not own or copy recording state.
+
 ### Key Methods
 
 **`HotkeyManager::new(config: &HotkeyConfig) -> Self`**
