@@ -60,8 +60,7 @@ jj new                                    # Start a fresh child change after fin
 jj bookmark set feat/my-change -r @       # Point a bookmark at the current change
 jj git fetch --remote origin              # Sync remote refs before push
 jj git push --remote origin --bookmark feat/my-change  # Push the bookmark to GitHub
-gh pr create --draft --base master --head feat/my-change  # Open the plan PR
-gh pr ready <pr-number>                   # Mark the same PR ready after implementation
+gh pr create --base master --head feat/my-change  # Open a GitHub PR for review
 ```
 
 ### Packaging Commands
@@ -119,92 +118,6 @@ config.example.json          — Example configuration template
 changelog                    — Project changelog
 ```
 
-## Development Principles
+## Code Changes
 
-### 1. Feature Implementation Workflow
-
-When implementing any feature, **strictly follow this order**:
-
-1. Read the feature documentation in `./docs/plan/` directory (if exists)
-2. Write an implementation plan (design doc with tech choices, file structure, implementation steps)
-3. Push the plan-only change through a named `jj` bookmark and open a **draft PR**
-4. Keep that PR open and ask the user to review the plan; plan approval is given through review/comment and **must not merge or close the PR**
-5. **Wait for explicit user approval of the plan** before writing tests or implementation code
-6. Implement the feature with tests first, following the approved plan
-7. Push the implementation, updated feature doc, and `changelog` to the **same bookmark**, which updates the existing PR
-8. Mark the PR ready for final review only after implementation and validation are complete
-9. Merge only after the completed implementation has passed final review
-
-**One feature uses one bookmark and one PR from plan through implementation.** Never merge
-the plan-only PR, never create a second implementation PR, and never skip the plan review
-step. The user must explicitly approve the plan before any tests or implementation code are
-written.
-
-### 2. Test-Driven Development (TDD)
-
-This project follows TDD practices. Always:
-1. Write tests first
-2. Then implement the feature to make tests pass
-
-### 3. Version Control Workflow (jj)
-
-This repository uses **Jujutsu (`jj`)** for day-to-day development. Do not treat Git branches as the primary local workflow. Use `jj` changes plus bookmarks, then push bookmarks to GitHub when the work is ready for review.
-
-Rules:
-- Use `jj` as the default interface for local development history.
-- Use Git branches only as remote review artifacts created from `jj` bookmarks.
-- Do not start feature work with `git checkout -b`.
-- Do not use `git commit` for normal development in this repository.
-- Do not use `git push origin HEAD` or other ad hoc Git push flows for review branches.
-- Every reviewable change must have a non-empty `jj` description before push.
-- Every reviewable change must be pushed via a named `jj` bookmark.
-- Reuse the same bookmark for the same review thread instead of creating multiple branch names for one change.
-
-Recommended flow from local edits to pushing a review branch:
-
-1. **Start from the latest remote state**
-   - Run `jj git fetch --remote origin`
-   - Confirm the current base with `jj status` or `jj log -r 'master|@'`
-   - If the working copy should be based on `master`, make sure `@-` or the parent change is the latest `master`
-
-2. **Implement the change in the working copy**
-   - Edit files directly in the current working-copy change `@`
-   - Use `jj status` to verify touched files
-   - Use `jj diff` to review the exact patch before moving on
-
-3. **Describe the change clearly**
-   - Set the change description with `jj describe -m "type(scope): concise summary"`
-   - Descriptions should be meaningful before code review or push
-   - Do not leave a reviewable change as `(no description set)`
-
-4. **Run validation before sharing**
-   - Run the relevant checks such as `cargo test`, `cargo check`, `cargo clippy`, or targeted tests
-   - Re-check the final diff with `jj diff`
-   - If the change is split across logical steps, create additional child changes with `jj new`
-
-5. **Create or update the review bookmark**
-   - Attach a bookmark to the current change with `jj bookmark set <bookmark-name> -r @`
-   - Use a stable, review-friendly name such as `feat/windows-overlay`, `fix/hotkey-timeout`, or `docs/readme-refresh`
-   - Reuse the same bookmark while iterating on the same review
-
-6. **Push the bookmark to GitHub**
-   - Push with `jj git push --remote origin --bookmark <bookmark-name>`
-   - This creates or updates the corresponding remote branch for GitHub PRs
-   - If push safety checks fail, fetch again first with `jj git fetch --remote origin`
-   - For feature work, create a draft PR after pushing the plan-only state, for example with `gh pr create --draft --base master --head <bookmark-name>`
-   - Keep the draft PR open after plan approval; approval is a signal to continue implementation, not to merge
-   - Push the implementation to the same bookmark so GitHub updates the same PR
-
-7. **Continue iteration without losing history**
-   - Keep making edits in `@`, then update the description if needed
-   - Move the existing bookmark to the latest change with `jj bookmark set <bookmark-name> -r @`, especially after creating child changes with `jj new`
-   - Re-push the same bookmark with `jj git push --remote origin --bookmark <bookmark-name>`
-   - Do not create a second bookmark or PR for implementation after the plan is approved
-   - Mark the existing draft PR ready with `gh pr ready <pr-number>` only when implementation, documentation, changelog, and validation are complete
-   - When one change is finished and a new one should start, run `jj new` to create the next working change
-
-8. **After merge or when syncing with upstream**
-   - Merge the PR only after final implementation review, never at the plan-only stage
-   - Fetch again with `jj git fetch --remote origin`
-   - Move local work onto the new base if needed before continuing
-   - Keep bookmarks aligned with the active review change; do not accumulate stale review bookmarks unnecessarily
+All code changes must be submitted through a GitHub pull request against `master`.
