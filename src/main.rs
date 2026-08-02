@@ -364,7 +364,7 @@ fn run_listener_with_config(mut config: ListenerConfig) -> Result<(), Box<dyn st
             );
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
