@@ -1,4 +1,5 @@
 use crate::audio::WavChunk;
+use tracing::debug;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(pub u64);
@@ -41,7 +42,7 @@ pub enum StopPhase {
     Orchestrator,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingState {
     Idle,
     Starting {
@@ -60,9 +61,6 @@ pub enum RecordingState {
         mode: SessionMode,
         source: ControlSource,
         phase: StopPhase,
-    },
-    Recovering {
-        session_id: Option<SessionId>,
     },
     ShuttingDown {
         session_id: Option<SessionId>,
@@ -142,6 +140,51 @@ pub enum SessionEffect {
     ReadyToExit,
 }
 
+impl SessionEvent {
+    fn summary(&self) -> (&'static str, Option<SessionId>) {
+        match self {
+            Self::Control(ControlEvent { action, .. }) => {
+                let name = match action {
+                    ControlAction::Start(_) => "control_start",
+                    ControlAction::Stop => "control_stop",
+                    ControlAction::Toggle(_) => "control_toggle",
+                };
+                (name, None)
+            }
+            Self::RecorderStarted { session_id } => ("recorder_started", Some(*session_id)),
+            Self::RecorderStartFailed { session_id, .. } => {
+                ("recorder_start_failed", Some(*session_id))
+            }
+            Self::RecorderAlreadyRecording {
+                requested_session_id,
+                ..
+            } => ("recorder_already_recording", Some(*requested_session_id)),
+            Self::OrchestratorStarted { session_id } => ("orchestrator_started", Some(*session_id)),
+            Self::OrchestratorStartFailed {
+                requested_session_id,
+                ..
+            } => ("orchestrator_start_failed", Some(*requested_session_id)),
+            Self::ChunkReady { session_id, .. } => ("chunk_ready", Some(*session_id)),
+            Self::RecorderStopped { session_id, .. } => ("recorder_stopped", Some(*session_id)),
+            Self::RecorderStillRecording { session_id, .. } => {
+                ("recorder_still_recording", Some(*session_id))
+            }
+            Self::RecorderNotRecording { session_id } => {
+                ("recorder_not_recording", Some(*session_id))
+            }
+            Self::OrchestratorFinished { session_id } => {
+                ("orchestrator_finished", Some(*session_id))
+            }
+            Self::ShutdownRequested => ("shutdown_requested", None),
+        }
+    }
+}
+
+struct Transition {
+    next: RecordingState,
+    effects: Vec<SessionEffect>,
+}
+
 pub struct RecordingSessionMachine {
     state: RecordingState,
     next_session_id: u64,
@@ -165,260 +208,293 @@ impl RecordingSessionMachine {
         &self.state
     }
 
+    /// Apply one external or lower-layer event to the recording lifecycle.
+    ///
+    /// This is the machine's only state-writing entry point. Events outside the
+    /// explicit transition table are logged and leave the current state unchanged.
     pub fn handle(&mut self, event: SessionEvent) -> Vec<SessionEffect> {
-        if matches!(self.state, RecordingState::ShuttingDown { .. }) {
+        let (event_name, routing_session_id) = event.summary();
+        let session_mismatch = matches!(
+            (active_session_id(self.state), routing_session_id),
+            (Some(active), Some(routed)) if active != routed
+        );
+        let transition = if session_mismatch {
+            None
+        } else {
+            transition(self.state, event, &mut self.next_session_id)
+        };
+        let Some(transition) = transition else {
+            debug!(
+                state = ?self.state,
+                event = event_name,
+                session_id = ?routing_session_id.map(|id| id.0),
+                "Recording session event rejected"
+            );
             return Vec::new();
-        }
+        };
 
-        if matches!(event, SessionEvent::ShutdownRequested) {
-            return self.shutdown();
-        }
-
-        match event {
-            SessionEvent::Control(control) => self.handle_control(control),
-            SessionEvent::RecorderStarted { session_id } => {
-                let RecordingState::Starting {
-                    session_id: active_id,
-                    mode,
-                    phase: StartPhase::Recorder,
-                    ..
-                } = self.state
-                else {
-                    return Vec::new();
-                };
-                if session_id != active_id {
-                    return Vec::new();
-                }
-                if let RecordingState::Starting { phase, .. } = &mut self.state {
-                    *phase = StartPhase::Orchestrator;
-                }
-                vec![SessionEffect::StartOrchestrator { session_id, mode }]
-            }
-            SessionEvent::RecorderStartFailed { session_id, .. } => {
-                if self.matches_start(session_id) {
-                    self.state = RecordingState::Idle;
-                    vec![SessionEffect::SetTrayRecording(false)]
-                } else {
-                    Vec::new()
-                }
-            }
-            SessionEvent::RecorderAlreadyRecording {
-                requested_session_id,
-                active_session_id,
-            } => {
-                if !self.matches_start(requested_session_id) {
-                    return Vec::new();
-                }
-                self.state = RecordingState::Recovering {
-                    session_id: Some(active_session_id),
-                };
-                let effects = vec![
-                    SessionEffect::CancelRecorder {
-                        session_id: active_session_id,
-                    },
-                    SessionEffect::AbortOrchestrator {
-                        session_id: active_session_id,
-                    },
-                    SessionEffect::SetTrayRecording(false),
-                ];
-                self.state = RecordingState::Idle;
-                effects
-            }
-            SessionEvent::OrchestratorStarted { session_id } => {
-                let RecordingState::Starting {
-                    session_id: active_id,
-                    mode,
-                    source,
-                    phase: StartPhase::Orchestrator,
-                } = self.state
-                else {
-                    return Vec::new();
-                };
-                if session_id != active_id {
-                    return Vec::new();
-                }
-                self.state = RecordingState::Recording {
-                    session_id,
-                    mode,
-                    source,
-                };
-                vec![SessionEffect::SetTrayRecording(true)]
-            }
-            SessionEvent::OrchestratorStartFailed {
-                requested_session_id,
-                active_session_id,
-                ..
-            } => {
-                if !self.matches_start(requested_session_id) {
-                    return Vec::new();
-                }
-                self.state = RecordingState::Idle;
-                vec![
-                    SessionEffect::CancelRecorder {
-                        session_id: requested_session_id,
-                    },
-                    SessionEffect::AbortOrchestrator {
-                        session_id: active_session_id.unwrap_or(requested_session_id),
-                    },
-                    SessionEffect::SetTrayRecording(false),
-                ]
-            }
-            SessionEvent::ChunkReady { session_id, chunk } => {
-                if self.active_session_id() == Some(session_id)
-                    && matches!(self.state, RecordingState::Recording { .. })
-                {
-                    vec![SessionEffect::SubmitChunk { session_id, chunk }]
-                } else {
-                    Vec::new()
-                }
-            }
-            SessionEvent::RecorderStopped {
-                session_id, chunks, ..
-            } => self.recorder_stopped(session_id, chunks),
-            SessionEvent::RecorderNotRecording { session_id } => {
-                self.recorder_stopped(session_id, Vec::new())
-            }
-            SessionEvent::RecorderStillRecording { session_id, .. } => {
-                let RecordingState::Stopping {
-                    session_id: active_id,
-                    mode,
-                    source,
-                    phase: StopPhase::Recorder,
-                } = self.state
-                else {
-                    return Vec::new();
-                };
-                if session_id != active_id {
-                    return Vec::new();
-                }
-                self.state = RecordingState::Recording {
-                    session_id,
-                    mode,
-                    source,
-                };
-                vec![SessionEffect::SetTrayRecording(true)]
-            }
-            SessionEvent::OrchestratorFinished { session_id } => {
-                let RecordingState::Stopping {
-                    session_id: active_id,
-                    phase: StopPhase::Orchestrator,
-                    ..
-                } = self.state
-                else {
-                    return Vec::new();
-                };
-                if session_id != active_id {
-                    return Vec::new();
-                }
-                self.state = RecordingState::Idle;
-                Vec::new()
-            }
-            SessionEvent::ShutdownRequested => unreachable!(),
-        }
+        self.state = transition.next;
+        transition.effects
     }
+}
 
-    fn handle_control(&mut self, control: ControlEvent) -> Vec<SessionEffect> {
-        match self.state {
-            RecordingState::Idle => match control.action {
-                ControlAction::Start(mode) | ControlAction::Toggle(mode) => {
-                    let session_id = SessionId(self.next_session_id);
-                    self.next_session_id += 1;
-                    self.state = RecordingState::Starting {
-                        session_id,
-                        mode,
-                        source: control.source,
-                        phase: StartPhase::Recorder,
-                    };
-                    vec![SessionEffect::StartRecorder { session_id }]
-                }
-                ControlAction::Stop => Vec::new(),
+/// Enumerate every event that may change or act on the recording lifecycle.
+/// The caller validates session routing first; events not represented by a
+/// state/phase match arm are then rejected without mutating the current state.
+fn transition(
+    state: RecordingState,
+    event: SessionEvent,
+    next_session_id: &mut u64,
+) -> Option<Transition> {
+    match (state, event) {
+        (RecordingState::ShuttingDown { .. }, _) => None,
+        (state, SessionEvent::ShutdownRequested) => Some(shutdown_transition(state)),
+        (
+            RecordingState::Idle,
+            SessionEvent::Control(ControlEvent {
+                source,
+                action: ControlAction::Start(mode) | ControlAction::Toggle(mode),
+            }),
+        ) => {
+            let session_id = SessionId(*next_session_id);
+            *next_session_id += 1;
+            Some(Transition {
+                next: RecordingState::Starting {
+                    session_id,
+                    mode,
+                    source,
+                    phase: StartPhase::Recorder,
+                },
+                effects: vec![SessionEffect::StartRecorder { session_id }],
+            })
+        }
+        (
+            RecordingState::Starting {
+                session_id,
+                mode,
+                source,
+                phase: StartPhase::Recorder,
             },
+            SessionEvent::RecorderStarted { .. },
+        ) => Some(Transition {
+            next: RecordingState::Starting {
+                session_id,
+                mode,
+                source,
+                phase: StartPhase::Orchestrator,
+            },
+            effects: vec![SessionEffect::StartOrchestrator { session_id, mode }],
+        }),
+        (
+            RecordingState::Starting {
+                phase: StartPhase::Recorder,
+                ..
+            },
+            SessionEvent::RecorderStartFailed { .. },
+        ) => Some(Transition {
+            next: RecordingState::Idle,
+            effects: vec![SessionEffect::SetTrayRecording(false)],
+        }),
+        (
+            RecordingState::Starting {
+                phase: StartPhase::Recorder,
+                ..
+            },
+            SessionEvent::RecorderAlreadyRecording {
+                active_session_id, ..
+            },
+        ) => Some(Transition {
+            next: RecordingState::Idle,
+            effects: vec![
+                SessionEffect::CancelRecorder {
+                    session_id: active_session_id,
+                },
+                SessionEffect::AbortOrchestrator {
+                    session_id: active_session_id,
+                },
+                SessionEffect::SetTrayRecording(false),
+            ],
+        }),
+        (
+            RecordingState::Starting {
+                session_id,
+                mode,
+                source,
+                phase: StartPhase::Orchestrator,
+            },
+            SessionEvent::OrchestratorStarted { .. },
+        ) => Some(Transition {
+            next: RecordingState::Recording {
+                session_id,
+                mode,
+                source,
+            },
+            effects: vec![SessionEffect::SetTrayRecording(true)],
+        }),
+        (
+            RecordingState::Starting {
+                session_id,
+                phase: StartPhase::Orchestrator,
+                ..
+            },
+            SessionEvent::OrchestratorStartFailed {
+                active_session_id, ..
+            },
+        ) => Some(Transition {
+            next: RecordingState::Idle,
+            effects: vec![
+                SessionEffect::CancelRecorder { session_id },
+                SessionEffect::AbortOrchestrator {
+                    session_id: active_session_id.unwrap_or(session_id),
+                },
+                SessionEffect::SetTrayRecording(false),
+            ],
+        }),
+        (
+            state @ RecordingState::Recording { session_id, .. },
+            SessionEvent::ChunkReady { chunk, .. },
+        ) => Some(Transition {
+            next: state,
+            effects: vec![SessionEffect::SubmitChunk { session_id, chunk }],
+        }),
+        (
             RecordingState::Recording {
                 session_id,
                 mode,
                 source,
-            } => {
-                let should_stop = matches!(control.action, ControlAction::Toggle(_))
-                    || (matches!(control.action, ControlAction::Stop)
-                        && control.source == ControlSource::HoldHotkey
-                        && mode == SessionMode::Hold);
-                if !should_stop {
-                    return Vec::new();
-                }
-                self.state = RecordingState::Stopping {
-                    session_id,
-                    mode,
-                    source,
-                    phase: StopPhase::Recorder,
-                };
-                vec![SessionEffect::StopRecorder { session_id }]
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    fn recorder_stopped(
-        &mut self,
-        session_id: SessionId,
-        chunks: Vec<WavChunk>,
-    ) -> Vec<SessionEffect> {
-        let RecordingState::Stopping {
-            session_id: active_id,
-            phase: StopPhase::Recorder,
-            ..
-        } = self.state
-        else {
-            return Vec::new();
-        };
-        if session_id != active_id {
-            return Vec::new();
-        }
-        if let RecordingState::Stopping { phase, .. } = &mut self.state {
-            *phase = StopPhase::Orchestrator;
-        }
-        let mut effects = Vec::with_capacity(chunks.len() + 2);
-        effects.push(SessionEffect::SetTrayRecording(false));
-        effects.extend(
-            chunks
-                .into_iter()
-                .map(|chunk| SessionEffect::SubmitChunk { session_id, chunk }),
-        );
-        effects.push(SessionEffect::FinishOrchestrator { session_id });
-        effects
-    }
-
-    fn shutdown(&mut self) -> Vec<SessionEffect> {
-        let session_id = self.active_session_id();
-        self.state = RecordingState::ShuttingDown { session_id };
-        let mut effects = Vec::new();
-        if let Some(session_id) = session_id {
-            effects.push(SessionEffect::CancelRecorder { session_id });
-            effects.push(SessionEffect::AbortOrchestrator { session_id });
-        }
-        effects.push(SessionEffect::SetTrayRecording(false));
-        effects.push(SessionEffect::ReadyToExit);
-        effects
-    }
-
-    fn active_session_id(&self) -> Option<SessionId> {
-        match self.state {
-            RecordingState::Starting { session_id, .. }
-            | RecordingState::Recording { session_id, .. }
-            | RecordingState::Stopping { session_id, .. } => Some(session_id),
-            RecordingState::Recovering { session_id }
-            | RecordingState::ShuttingDown { session_id } => session_id,
-            RecordingState::Idle => None,
-        }
-    }
-
-    fn matches_start(&self, session_id: SessionId) -> bool {
-        matches!(
-            self.state,
-            RecordingState::Starting {
-                session_id: active_id,
+            },
+            SessionEvent::Control(ControlEvent {
+                action: ControlAction::Toggle(_),
                 ..
-            } if active_id == session_id
-        )
+            }),
+        ) => Some(stop_transition(session_id, mode, source)),
+        (
+            RecordingState::Recording {
+                session_id,
+                mode: SessionMode::Hold,
+                source,
+            },
+            SessionEvent::Control(ControlEvent {
+                source: ControlSource::HoldHotkey,
+                action: ControlAction::Stop,
+            }),
+        ) => Some(stop_transition(session_id, SessionMode::Hold, source)),
+        (
+            RecordingState::Stopping {
+                session_id,
+                mode,
+                source,
+                phase: StopPhase::Recorder,
+            },
+            SessionEvent::RecorderStopped { chunks, .. },
+        ) => Some(recorder_stopped_transition(
+            session_id, mode, source, chunks,
+        )),
+        (
+            RecordingState::Stopping {
+                session_id,
+                mode,
+                source,
+                phase: StopPhase::Recorder,
+            },
+            SessionEvent::RecorderNotRecording { .. },
+        ) => Some(recorder_stopped_transition(
+            session_id,
+            mode,
+            source,
+            Vec::new(),
+        )),
+        (
+            RecordingState::Stopping {
+                session_id,
+                mode,
+                source,
+                phase: StopPhase::Recorder,
+            },
+            SessionEvent::RecorderStillRecording { .. },
+        ) => Some(Transition {
+            next: RecordingState::Recording {
+                session_id,
+                mode,
+                source,
+            },
+            effects: vec![SessionEffect::SetTrayRecording(true)],
+        }),
+        (
+            RecordingState::Stopping {
+                phase: StopPhase::Orchestrator,
+                ..
+            },
+            SessionEvent::OrchestratorFinished { .. },
+        ) => Some(Transition {
+            next: RecordingState::Idle,
+            effects: Vec::new(),
+        }),
+        _ => None,
+    }
+}
+
+fn stop_transition(session_id: SessionId, mode: SessionMode, source: ControlSource) -> Transition {
+    Transition {
+        next: RecordingState::Stopping {
+            session_id,
+            mode,
+            source,
+            phase: StopPhase::Recorder,
+        },
+        effects: vec![SessionEffect::StopRecorder { session_id }],
+    }
+}
+
+fn recorder_stopped_transition(
+    session_id: SessionId,
+    mode: SessionMode,
+    source: ControlSource,
+    chunks: Vec<WavChunk>,
+) -> Transition {
+    let mut effects = Vec::with_capacity(chunks.len() + 2);
+    effects.push(SessionEffect::SetTrayRecording(false));
+    effects.extend(
+        chunks
+            .into_iter()
+            .map(|chunk| SessionEffect::SubmitChunk { session_id, chunk }),
+    );
+    effects.push(SessionEffect::FinishOrchestrator { session_id });
+
+    Transition {
+        next: RecordingState::Stopping {
+            session_id,
+            mode,
+            source,
+            phase: StopPhase::Orchestrator,
+        },
+        effects,
+    }
+}
+
+fn shutdown_transition(state: RecordingState) -> Transition {
+    let session_id = active_session_id(state);
+    let mut effects = Vec::new();
+    if let Some(session_id) = session_id {
+        effects.push(SessionEffect::CancelRecorder { session_id });
+        effects.push(SessionEffect::AbortOrchestrator { session_id });
+    }
+    effects.push(SessionEffect::SetTrayRecording(false));
+    effects.push(SessionEffect::ReadyToExit);
+
+    Transition {
+        next: RecordingState::ShuttingDown { session_id },
+        effects,
+    }
+}
+
+fn active_session_id(state: RecordingState) -> Option<SessionId> {
+    match state {
+        RecordingState::Starting { session_id, .. }
+        | RecordingState::Recording { session_id, .. }
+        | RecordingState::Stopping { session_id, .. } => Some(session_id),
+        RecordingState::ShuttingDown { session_id } => session_id,
+        RecordingState::Idle => None,
     }
 }
 
@@ -435,6 +511,79 @@ mod tests {
             source,
             action: ControlAction::Toggle(SessionMode::Toggle),
         })
+    }
+
+    #[test]
+    fn explicit_transition_table_rejects_unlisted_paths() {
+        let mut next_session_id = 2;
+
+        let result = transition(
+            RecordingState::Starting {
+                session_id: SessionId(1),
+                mode: SessionMode::Toggle,
+                source: ControlSource::Tray,
+                phase: StartPhase::Orchestrator,
+            },
+            SessionEvent::RecorderStarted {
+                session_id: SessionId(1),
+            },
+            &mut next_session_id,
+        );
+
+        assert!(result.is_none());
+        assert_eq!(next_session_id, 2);
+    }
+
+    #[test]
+    fn explicit_transition_table_accepts_applied_zero_effect_path() {
+        // Finishing convergence changes lifecycle state even though the runtime has
+        // no follow-up command to execute, so it must not hit the rejection fallback.
+        let mut next_session_id = 2;
+
+        let result = transition(
+            RecordingState::Stopping {
+                session_id: SessionId(1),
+                mode: SessionMode::Toggle,
+                source: ControlSource::Tray,
+                phase: StopPhase::Orchestrator,
+            },
+            SessionEvent::OrchestratorFinished {
+                session_id: SessionId(1),
+            },
+            &mut next_session_id,
+        )
+        .expect("listed transition should be accepted");
+
+        assert_eq!(result.next, RecordingState::Idle);
+        assert!(result.effects.is_empty());
+        assert_eq!(next_session_id, 2);
+    }
+
+    #[test]
+    fn orphan_recorder_routes_by_requested_session_id() {
+        // The requested ID routes the event to this machine; the different active
+        // ID identifies the orphan lower-layer resources that need cleanup.
+        let mut machine = RecordingSessionMachine::new();
+        machine.handle(toggle(ControlSource::Tray));
+
+        let effects = machine.handle(SessionEvent::RecorderAlreadyRecording {
+            requested_session_id: SessionId(1),
+            active_session_id: SessionId(7),
+        });
+
+        assert_eq!(machine.state(), &RecordingState::Idle);
+        assert_eq!(
+            effects,
+            vec![
+                SessionEffect::CancelRecorder {
+                    session_id: SessionId(7),
+                },
+                SessionEffect::AbortOrchestrator {
+                    session_id: SessionId(7),
+                },
+                SessionEffect::SetTrayRecording(false),
+            ]
+        );
     }
 
     #[test]

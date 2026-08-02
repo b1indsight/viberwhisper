@@ -88,10 +88,15 @@ session or reach a newer session.
 - `Starting`: recorder/orchestrator startup is in progress
 - `Recording`: one session is accepting audio chunks
 - `Stopping`: recorder stop or orchestrator convergence is in progress
-- `Recovering`: an inconsistent lower-layer state is being cancelled
 - `ShuttingDown`: new controls are ignored while cleanup effects run
 
 Every accepted start receives a monotonically increasing `SessionId`. The ID is propagated through recorder operations, ready chunks, orchestrator routing, effects, and completion events. Stale chunks are deleted and stale completions cannot mutate the current session.
+
+### Explicit Transition Table
+
+`RecordingSessionMachine::handle` is the only state-writing entry point. It first compares the event's routing `SessionId` with the active state once, then delegates matching events to one private `(RecordingState, SessionEvent)` match that lists every accepted state/phase path and returns the complete next state plus ordered effects. A multi-ID outcome such as `RecorderAlreadyRecording` routes by its requested session ID while retaining the observed lower-layer ID for cleanup. Events rejected by either layer leave the state unchanged, emit no effects, and produce one compact debug record containing only the current state, event name, and optional routing ID.
+
+An orphan recorder discovered during startup transitions directly back to `Idle` with cancellation effects. There is no transient `Recovering` state because the previous value was assigned and cleared inside one `handle` call and could never be observed.
 
 ### Event/Effect Boundary
 
