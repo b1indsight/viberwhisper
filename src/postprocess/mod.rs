@@ -1,7 +1,7 @@
 mod llm;
 
 use crate::core::config::{ApiAuth, ConfigKey, PostProcessSection, ValidationIssue};
-use llm::{LlmPostProcessor, LlmSession};
+use llm::LlmPostProcessor;
 use std::fmt;
 use tracing::warn;
 
@@ -134,66 +134,66 @@ impl From<serde_json::Error> for PostProcessError {
 ///
 /// LLM client construction falls back to pass-through behavior because cleanup
 /// is optional and must not make speech-to-text unavailable.
-pub struct PostProcessor(PostProcessorKind);
+pub struct PostProcessor(Box<dyn TextPostProcessor>);
 
-enum PostProcessorKind {
-    Noop,
-    Llm(LlmPostProcessor),
+/// Text-cleanup behavior selected once from the validated runtime config.
+trait TextPostProcessor: Send + Sync {
+    fn process(&self, text: &str) -> Result<String, PostProcessError>;
+    fn start_session(&self) -> Box<dyn TextPostProcessorSession>;
+}
+
+/// Mutable cleanup state owned by one recording session.
+trait TextPostProcessorSession: Send {
+    fn push_stable_chunk(&mut self, text: &str);
+    fn finish(&mut self) -> Result<String, PostProcessError>;
 }
 
 impl PostProcessor {
     pub fn new(config: PostProcessConfig) -> Self {
-        match config {
-            PostProcessConfig::Disabled => Self(PostProcessorKind::Noop),
+        let processor: Box<dyn TextPostProcessor> = match config {
+            PostProcessConfig::Disabled => Box::new(NoopPostProcessor),
             PostProcessConfig::Llm(config) => match LlmPostProcessor::new(config) {
-                Ok(processor) => Self(PostProcessorKind::Llm(processor)),
+                Ok(processor) => Box::new(processor),
                 Err(error) => {
                     warn!(error = %error, "Failed to create LLM post-processor, falling back to noop");
-                    Self(PostProcessorKind::Noop)
+                    Box::new(NoopPostProcessor)
                 }
             },
-        }
+        };
+        Self(processor)
     }
 
     pub fn process(&self, text: &str) -> Result<String, PostProcessError> {
-        match &self.0 {
-            PostProcessorKind::Noop => Ok(text.to_string()),
-            PostProcessorKind::Llm(processor) => processor.process(text),
-        }
+        self.0.process(text)
     }
 
     pub fn start_session(&self) -> PostProcessorSession {
-        let session = match &self.0 {
-            PostProcessorKind::Noop => PostProcessorSessionKind::Noop(NoopSession::default()),
-            PostProcessorKind::Llm(processor) => {
-                PostProcessorSessionKind::Llm(Box::new(processor.start_session()))
-            }
-        };
-        PostProcessorSession(session)
+        PostProcessorSession(self.0.start_session())
     }
 }
 
 /// Incremental cleanup state for one recording session.
-pub struct PostProcessorSession(PostProcessorSessionKind);
-
-enum PostProcessorSessionKind {
-    Noop(NoopSession),
-    Llm(Box<LlmSession>),
-}
+pub struct PostProcessorSession(Box<dyn TextPostProcessorSession>);
 
 impl PostProcessorSession {
     pub fn push_stable_chunk(&mut self, text: &str) {
-        match &mut self.0 {
-            PostProcessorSessionKind::Noop(session) => session.push_stable_chunk(text),
-            PostProcessorSessionKind::Llm(session) => session.push_stable_chunk(text),
-        }
+        self.0.push_stable_chunk(text);
     }
 
     pub fn finish(&mut self) -> Result<String, PostProcessError> {
-        match &mut self.0 {
-            PostProcessorSessionKind::Noop(session) => Ok(session.finish()),
-            PostProcessorSessionKind::Llm(session) => session.finish(),
-        }
+        self.0.finish()
+    }
+}
+
+struct NoopPostProcessor;
+
+impl TextPostProcessor for NoopPostProcessor {
+    fn process(&self, text: &str) -> Result<String, PostProcessError> {
+        Ok(text.to_string())
+    }
+
+    fn start_session(&self) -> Box<dyn TextPostProcessorSession> {
+        Box::new(NoopSession::default())
     }
 }
 
@@ -202,15 +202,15 @@ struct NoopSession {
     chunks: Vec<String>,
 }
 
-impl NoopSession {
+impl TextPostProcessorSession for NoopSession {
     fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());
         }
     }
 
-    fn finish(&mut self) -> String {
-        self.chunks.join("")
+    fn finish(&mut self) -> Result<String, PostProcessError> {
+        Ok(self.chunks.join(""))
     }
 }
 
