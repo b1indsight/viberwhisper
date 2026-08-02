@@ -233,13 +233,41 @@ fn run_listener() -> Result<(), Box<dyn std::error::Error>> {
     run_listener_with_config(config)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingInput {
+    HoldPressed,
+    HoldReleased,
+    TogglePressed,
+    TrayClicked,
+}
+
+fn normalize_recording_input(
+    input: RecordingInput,
+    state: &core::recording_session::RecordingState,
+) -> Option<core::recording_session::SessionEvent> {
+    use core::recording_session::{RecordingState, SessionEvent};
+
+    match (input, state) {
+        (
+            RecordingInput::HoldPressed
+            | RecordingInput::TogglePressed
+            | RecordingInput::TrayClicked,
+            RecordingState::Idle,
+        ) => Some(SessionEvent::StartRequested),
+        (
+            RecordingInput::HoldReleased
+            | RecordingInput::TogglePressed
+            | RecordingInput::TrayClicked,
+            RecordingState::Recording { .. },
+        ) => Some(SessionEvent::StopRequested),
+        _ => None,
+    }
+}
+
 fn run_listener_with_config(mut config: ListenerConfig) -> Result<(), Box<dyn std::error::Error>> {
     use audio::AudioRecorder;
     use core::orchestrator::SessionOrchestrator;
-    use core::recording_session::{
-        ControlAction, ControlEvent, ControlSource, RecordingSessionMachine, SessionEvent,
-        SessionMode,
-    };
+    use core::recording_session::{RecordingSessionMachine, SessionEvent};
     use input::hotkey::{HotkeyEvent, HotkeyManager, HotkeySource};
     use input::tray::{TrayAction, TrayManager};
     use postprocess::PostProcessor;
@@ -290,45 +318,39 @@ fn run_listener_with_config(mut config: ListenerConfig) -> Result<(), Box<dyn st
 
         if let Some(action) = tray.check_action() {
             let event = match action {
-                TrayAction::Exit => SessionEvent::ShutdownRequested,
-                TrayAction::ToggleRecording => SessionEvent::Control(ControlEvent {
-                    source: ControlSource::Tray,
-                    action: ControlAction::Toggle(SessionMode::Toggle),
-                }),
+                TrayAction::Exit => Some(SessionEvent::ShutdownRequested),
+                TrayAction::ToggleRecording => {
+                    normalize_recording_input(RecordingInput::TrayClicked, session_machine.state())
+                }
             };
-            if drive_session(
-                &mut session_machine,
-                event,
-                &mut recorder,
-                &orchestrator,
-                &mut tray,
-                &post_processor,
-                &typer,
-            ) {
+            if let Some(event) = event
+                && drive_session(
+                    &mut session_machine,
+                    event,
+                    &mut recorder,
+                    &orchestrator,
+                    &mut tray,
+                    &post_processor,
+                    &typer,
+                )
+            {
                 break Ok(());
             }
         }
 
         if let Some(event) = hotkey_manager.check_event() {
-            let control = match event {
-                HotkeyEvent::Pressed(HotkeySource::Hold) => Some(ControlEvent {
-                    source: ControlSource::HoldHotkey,
-                    action: ControlAction::Start(SessionMode::Hold),
-                }),
-                HotkeyEvent::Released(HotkeySource::Hold) => Some(ControlEvent {
-                    source: ControlSource::HoldHotkey,
-                    action: ControlAction::Stop,
-                }),
-                HotkeyEvent::Pressed(HotkeySource::Toggle) => Some(ControlEvent {
-                    source: ControlSource::ToggleHotkey,
-                    action: ControlAction::Toggle(SessionMode::Toggle),
-                }),
+            let input = match event {
+                HotkeyEvent::Pressed(HotkeySource::Hold) => Some(RecordingInput::HoldPressed),
+                HotkeyEvent::Released(HotkeySource::Hold) => Some(RecordingInput::HoldReleased),
+                HotkeyEvent::Pressed(HotkeySource::Toggle) => Some(RecordingInput::TogglePressed),
                 HotkeyEvent::Released(HotkeySource::Toggle) => None,
             };
-            if let Some(control) = control {
+            if let Some(event) =
+                input.and_then(|input| normalize_recording_input(input, session_machine.state()))
+            {
                 let _ = drive_session(
                     &mut session_machine,
-                    SessionEvent::Control(control),
+                    event,
                     &mut recorder,
                     &orchestrator,
                     &mut tray,
@@ -386,50 +408,87 @@ fn drive_session(
     while let Some(event) = events.pop_front() {
         for effect in machine.handle(event) {
             match effect {
-                SessionEffect::StartRecorder { session_id } => {
+                SessionEffect::StartSession { session_id } => {
                     let event = match recorder.start_recording(session_id) {
                         RecorderStartOutcome::Started { session_id } => {
-                            SessionEvent::RecorderStarted { session_id }
+                            match orchestrator.start_session(session_id) {
+                                Ok(()) => SessionEvent::SessionStarted { session_id },
+                                Err(error) => {
+                                    let active_session_id = match &error {
+                                        core::orchestrator::SessionStartError::ActiveSession {
+                                            active,
+                                            ..
+                                        } => *active,
+                                    };
+                                    let cancel_outcome = recorder.cancel_recording(session_id);
+                                    debug!(
+                                        session_id = session_id.0,
+                                        ?cancel_outcome,
+                                        "Recorder startup rollback handled"
+                                    );
+                                    if let Err(abort_error) =
+                                        orchestrator.abort_session(active_session_id)
+                                    {
+                                        debug!(
+                                            session_id = active_session_id.0,
+                                            error = %abort_error,
+                                            "Orchestrator startup rollback had no matching session"
+                                        );
+                                    }
+                                    error!(
+                                        session_id = session_id.0,
+                                        error = %error,
+                                        "Failed to start recording session"
+                                    );
+                                    SessionEvent::SessionStartFailed {
+                                        session_id,
+                                        error: error.to_string(),
+                                    }
+                                }
+                            }
                         }
                         RecorderStartOutcome::AlreadyRecording {
                             requested_session_id,
                             active_session_id,
-                        } => SessionEvent::RecorderAlreadyRecording {
-                            requested_session_id,
-                            active_session_id,
-                        },
+                        } => {
+                            let cancel_outcome = recorder.cancel_recording(active_session_id);
+                            debug!(
+                                session_id = active_session_id.0,
+                                ?cancel_outcome,
+                                "Orphan recorder cleanup handled"
+                            );
+                            if let Err(error) = orchestrator.abort_session(active_session_id) {
+                                debug!(
+                                    session_id = active_session_id.0,
+                                    error = %error,
+                                    "Orphan orchestrator cleanup had no matching session"
+                                );
+                            }
+                            let error = format!(
+                                "recorder session {} is already active",
+                                active_session_id.0
+                            );
+                            error!(
+                                requested_session_id = requested_session_id.0,
+                                active_session_id = active_session_id.0,
+                                "Failed to start recording session"
+                            );
+                            SessionEvent::SessionStartFailed {
+                                session_id: requested_session_id,
+                                error,
+                            }
+                        }
                         RecorderStartOutcome::Failed { session_id, error } => {
                             error!(
                                 session_id = session_id.0,
-                                error, "Failed to start recording"
+                                error, "Failed to start recording session"
                             );
-                            SessionEvent::RecorderStartFailed { session_id, error }
+                            SessionEvent::SessionStartFailed { session_id, error }
                         }
                     };
                     events.push_back(event);
                 }
-                SessionEffect::StartOrchestrator { session_id, mode } => {
-                    match orchestrator.start_session(session_id, mode) {
-                        Ok(()) => {
-                            events.push_back(SessionEvent::OrchestratorStarted { session_id })
-                        }
-                        Err(error) => {
-                            let active_session_id = match &error {
-                                core::orchestrator::SessionStartError::ActiveSession {
-                                    active,
-                                    ..
-                                } => Some(*active),
-                            };
-                            error!(session_id = session_id.0, error = %error, "Failed to start session orchestrator");
-                            events.push_back(SessionEvent::OrchestratorStartFailed {
-                                requested_session_id: session_id,
-                                active_session_id,
-                                error: error.to_string(),
-                            });
-                        }
-                    }
-                }
-                SessionEffect::StopRecorder { session_id } => {
+                SessionEffect::StopSession { session_id } => {
                     let event = match recorder.stop_recording(session_id) {
                         RecorderStopOutcome::Stopped {
                             session_id,
@@ -442,21 +501,34 @@ fn drive_session(
                                     warning, "Recorder stopped with a warning"
                                 );
                             }
-                            SessionEvent::RecorderStopped {
-                                session_id,
-                                chunks,
-                                warning,
+                            for chunk in chunks {
+                                if let Err(error) = orchestrator.on_chunk_ready(session_id, chunk) {
+                                    warn!(session_id = session_id.0, error = %error, "Stop-time chunk was rejected");
+                                }
                             }
+                            finish_transcription(
+                                orchestrator.finish_session(session_id),
+                                post_processor,
+                                typer,
+                            );
+                            SessionEvent::SessionStopped { session_id }
                         }
                         RecorderStopOutcome::StillRecording { session_id, error } => {
                             error!(session_id = session_id.0, error, "Failed to stop recorder");
-                            SessionEvent::RecorderStillRecording { session_id, error }
+                            SessionEvent::SessionStopFailed { session_id, error }
                         }
                         RecorderStopOutcome::NotRecording {
                             requested_session_id,
-                        } => SessionEvent::RecorderNotRecording {
-                            session_id: requested_session_id,
-                        },
+                        } => {
+                            finish_transcription(
+                                orchestrator.finish_session(requested_session_id),
+                                post_processor,
+                                typer,
+                            );
+                            SessionEvent::SessionStopped {
+                                session_id: requested_session_id,
+                            }
+                        }
                     };
                     events.push_back(event);
                 }
@@ -464,14 +536,6 @@ fn drive_session(
                     if let Err(error) = orchestrator.on_chunk_ready(session_id, chunk) {
                         warn!(session_id = session_id.0, error = %error, "Chunk was rejected");
                     }
-                }
-                SessionEffect::FinishOrchestrator { session_id } => {
-                    finish_transcription(
-                        orchestrator.finish_session(session_id),
-                        post_processor,
-                        typer,
-                    );
-                    events.push_back(SessionEvent::OrchestratorFinished { session_id });
                 }
                 SessionEffect::CancelRecorder { session_id } => {
                     let outcome = recorder.cancel_recording(session_id);
@@ -660,6 +724,57 @@ mod integration_tests {
     use transcriber::{MockTranscriber, Transcriber};
 
     #[test]
+    fn input_normalization_is_source_free_and_state_aware() {
+        use self::core::recording_session::{RecordingState, SessionEvent, SessionId};
+
+        let idle = RecordingState::Idle;
+        let recording = RecordingState::Recording {
+            session_id: SessionId(1),
+        };
+        let starting = RecordingState::Starting {
+            session_id: SessionId(2),
+        };
+
+        assert_eq!(
+            normalize_recording_input(RecordingInput::HoldPressed, &idle),
+            Some(SessionEvent::StartRequested)
+        );
+        assert_eq!(
+            normalize_recording_input(RecordingInput::HoldReleased, &recording),
+            Some(SessionEvent::StopRequested)
+        );
+        assert_eq!(
+            normalize_recording_input(RecordingInput::TogglePressed, &idle),
+            Some(SessionEvent::StartRequested)
+        );
+        assert_eq!(
+            normalize_recording_input(RecordingInput::TogglePressed, &recording),
+            Some(SessionEvent::StopRequested)
+        );
+        assert_eq!(
+            normalize_recording_input(RecordingInput::TrayClicked, &idle),
+            Some(SessionEvent::StartRequested)
+        );
+        assert_eq!(
+            normalize_recording_input(RecordingInput::TrayClicked, &recording),
+            Some(SessionEvent::StopRequested)
+        );
+
+        assert_eq!(
+            normalize_recording_input(RecordingInput::HoldPressed, &recording),
+            None
+        );
+        assert_eq!(
+            normalize_recording_input(RecordingInput::HoldReleased, &idle),
+            None
+        );
+        assert_eq!(
+            normalize_recording_input(RecordingInput::TogglePressed, &starting),
+            None
+        );
+    }
+
+    #[test]
     fn test_full_pipeline_mock() {
         use input::typer::{MockTyper, TextTyper};
         let transcriber = MockTranscriber;
@@ -671,17 +786,14 @@ mod integration_tests {
 
     #[test]
     fn test_orchestrator_integration_single_chunk() {
-        use self::core::orchestrator::{OrchestratorConfig, SessionMode, SessionOrchestrator};
+        use self::core::orchestrator::{OrchestratorConfig, SessionOrchestrator};
         use std::sync::Arc;
 
         let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
         let orch = SessionOrchestrator::new(t, OrchestratorConfig::new(Some("en".to_string())));
 
-        orch.start_session(
-            crate::core::recording_session::SessionId(1),
-            SessionMode::Hold,
-        )
-        .unwrap();
+        orch.start_session(crate::core::recording_session::SessionId(1))
+            .unwrap();
         let chunk = audio::WavChunk::from_encoded_bytes(b"fake wav".to_vec());
         let _ = orch.on_chunk_ready(crate::core::recording_session::SessionId(1), chunk);
         let result = orch.finish_session(crate::core::recording_session::SessionId(1));
@@ -692,19 +804,14 @@ mod integration_tests {
 
     #[test]
     fn test_orchestrator_no_chunks() {
-        use self::core::orchestrator::{
-            OrchestratorConfig, SessionError, SessionMode, SessionOrchestrator,
-        };
+        use self::core::orchestrator::{OrchestratorConfig, SessionError, SessionOrchestrator};
         use std::sync::Arc;
 
         let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
         let orch = SessionOrchestrator::new(t, OrchestratorConfig::new(None));
 
-        orch.start_session(
-            crate::core::recording_session::SessionId(1),
-            SessionMode::Toggle,
-        )
-        .unwrap();
+        orch.start_session(crate::core::recording_session::SessionId(1))
+            .unwrap();
         let result = orch.finish_session(crate::core::recording_session::SessionId(1));
         assert!(matches!(result, Err(SessionError::NoChunks)));
     }
