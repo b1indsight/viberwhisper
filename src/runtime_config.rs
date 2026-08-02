@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::audio::{AudioConfig, ChunkLimits};
+use crate::audio::AudioConfig;
 use crate::core::config::{
     ApiAuth, ConfigDocument, InferenceProfile, SecretSource, SecretValue, ValidationIssue,
     ValidationReport,
@@ -39,6 +39,15 @@ pub struct BackendConfig {
     pub(crate) local_service: Option<LocalServiceConfig>,
 }
 
+/// Runtime dependencies and chunking policy for one offline WAV conversion.
+#[derive(Debug)]
+pub struct ConvertConfig {
+    pub backend: BackendConfig,
+    pub language: Option<String>,
+    pub max_chunk_duration_secs: u32,
+    pub max_chunk_size_bytes: u64,
+}
+
 /// Resolve every dependency needed by the long-running listener.
 pub fn resolve_listener(
     document: &ConfigDocument,
@@ -47,7 +56,6 @@ pub fn resolve_listener(
     config_dir: &Path,
     home_dir: &Path,
 ) -> Result<ListenerConfig, ValidationReport> {
-    let chunk_limits = ChunkLimits::from_section(&document.chunking);
     let mut issues = Vec::new();
     let hotkeys = collect_issues(HotkeyConfig::validate(&document.input), &mut issues);
     let audio = AudioConfig::from_sections(&document.audio, &document.chunking);
@@ -56,14 +64,7 @@ pub fn resolve_listener(
         &mut issues,
     );
     let backend = collect_issues(
-        resolve_backend(
-            document,
-            secrets,
-            selection,
-            config_dir,
-            home_dir,
-            chunk_limits,
-        ),
+        resolve_backend(document, secrets, selection, config_dir, home_dir),
         &mut issues,
     );
 
@@ -86,17 +87,21 @@ pub fn resolve_convert(
     secrets: &dyn SecretSource,
     config_dir: &Path,
     home_dir: &Path,
-) -> Result<BackendConfig, ValidationReport> {
-    let chunk_limits = ChunkLimits::from_section(&document.chunking);
-    resolve_backend(
+) -> Result<ConvertConfig, ValidationReport> {
+    let backend = resolve_backend(
         document,
         secrets,
         ProfileSelection::Configured,
         config_dir,
         home_dir,
-        chunk_limits,
     )
-    .map_err(report)
+    .map_err(report)?;
+    Ok(ConvertConfig {
+        backend,
+        language: document.transcription.language.clone(),
+        max_chunk_duration_secs: document.chunking.max_duration_secs,
+        max_chunk_size_bytes: document.chunking.max_size_bytes,
+    })
 }
 
 /// Resolve Local filesystem paths without requiring the service to be valid.
@@ -141,24 +146,20 @@ fn resolve_backend(
     selection: ProfileSelection,
     config_dir: &Path,
     home_dir: &Path,
-    chunk_limits: ChunkLimits,
 ) -> Result<BackendConfig, Vec<ValidationIssue>> {
     let selected = match selection {
         ProfileSelection::Configured => document.inference.active,
         ProfileSelection::Local => InferenceProfile::Local,
     };
     match selected {
-        InferenceProfile::Api => resolve_api_backend(document, secrets, chunk_limits),
-        InferenceProfile::Local => {
-            resolve_local_backend(document, config_dir, home_dir, chunk_limits)
-        }
+        InferenceProfile::Api => resolve_api_backend(document, secrets),
+        InferenceProfile::Local => resolve_local_backend(document, config_dir, home_dir),
     }
 }
 
 fn resolve_api_backend(
     document: &ConfigDocument,
     secrets: &dyn SecretSource,
-    chunk_limits: ChunkLimits,
 ) -> Result<BackendConfig, Vec<ValidationIssue>> {
     let mut issues = Vec::new();
     let transcription_secret = effective_secret(
@@ -172,7 +173,6 @@ fn resolve_api_backend(
             &document.inference.api.transcription.model,
             &document.transcription,
             &document.chunking,
-            chunk_limits,
         ),
         &mut issues,
     );
@@ -205,7 +205,6 @@ fn resolve_local_backend(
     document: &ConfigDocument,
     config_dir: &Path,
     home_dir: &Path,
-    chunk_limits: ChunkLimits,
 ) -> Result<BackendConfig, Vec<ValidationIssue>> {
     let mut issues = Vec::new();
     let paths = collect_issues(
@@ -227,7 +226,6 @@ fn resolve_local_backend(
             LOCAL_MODEL_NAME,
             &document.transcription,
             &document.chunking,
-            chunk_limits,
         ),
         &mut issues,
     );
@@ -355,7 +353,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(config.local_service.is_none());
+        assert!(config.backend.local_service.is_none());
     }
 
     #[test]

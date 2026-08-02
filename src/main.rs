@@ -343,7 +343,7 @@ fn run_listener_with_config(mut config: ListenerConfig) -> Result<(), Box<dyn st
                 &mut session_machine,
                 SessionEvent::ChunkReady {
                     session_id: chunk.session_id,
-                    path: chunk.path,
+                    chunk: chunk.chunk,
                 },
                 &mut recorder,
                 &orchestrator,
@@ -460,14 +460,9 @@ fn drive_session(
                     };
                     events.push_back(event);
                 }
-                SessionEffect::SubmitChunk { session_id, path } => {
-                    if let Err(error) = orchestrator.on_chunk_ready(session_id, path) {
+                SessionEffect::SubmitChunk { session_id, chunk } => {
+                    if let Err(error) = orchestrator.on_chunk_ready(session_id, chunk) {
                         warn!(session_id = session_id.0, error = %error, "Chunk was rejected");
-                    }
-                }
-                SessionEffect::DeleteChunk { path } => {
-                    if let Err(error) = audio::remove_temp_audio_file(&path) {
-                        debug!(path, error = %error, "Could not delete stale chunk");
                     }
                 }
                 SessionEffect::FinishOrchestrator { session_id } => {
@@ -605,6 +600,7 @@ fn handle_config(action: ConfigAction) -> Result<(), Box<dyn std::error::Error>>
 
 fn handle_convert(input: &str, output: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     use postprocess::PostProcessor;
+    use std::path::Path;
     use transcriber::{ApiTranscriber, Transcriber};
 
     println!("Transcribing: {}", input);
@@ -617,12 +613,21 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<(), Box<dyn std::
         &config_dir,
         &home_dir,
     )?;
-    let local_manager = start_local_backend(&mut config)?;
+    let local_manager = start_local_backend(&mut config.backend)?;
     let _local_manager = LocalServiceGuard::new(local_manager);
-    let transcriber = ApiTranscriber::new(config.transcriber)?;
-    let post_processor = PostProcessor::new(config.post_process);
+    let transcriber = ApiTranscriber::new(config.backend.transcriber)?;
+    let post_processor = PostProcessor::new(config.backend.post_process);
 
-    let stt_text = transcriber.transcribe(input)?;
+    let mut chunk_reader = audio::WavChunkReader::open(
+        Path::new(input),
+        config.max_chunk_duration_secs,
+        config.max_chunk_size_bytes,
+    )?;
+    let mut chunk_texts = Vec::new();
+    for chunk in chunk_reader.chunks() {
+        chunk_texts.push(transcriber.transcribe(&chunk?)?);
+    }
+    let stt_text = text::merge_texts(&chunk_texts, config.language.as_deref());
     let text = match post_processor.process(&stt_text) {
         Ok(processed) if !processed.is_empty() => processed,
         Ok(_) => {
@@ -659,7 +664,8 @@ mod integration_tests {
         use input::typer::{MockTyper, TextTyper};
         let transcriber = MockTranscriber;
         let typer = MockTyper;
-        let text = transcriber.transcribe("fake.wav").unwrap();
+        let chunk = audio::WavChunk::from_encoded_bytes(b"fake wav".to_vec());
+        let text = transcriber.transcribe(&chunk).unwrap();
         assert!(typer.type_text(&text).is_ok());
     }
 
@@ -683,11 +689,8 @@ mod integration_tests {
             SessionMode::Hold,
         )
         .unwrap();
-        // MockTranscriber ignores the path, so a non-existent path is fine.
-        let _ = orch.on_chunk_ready(
-            crate::core::recording_session::SessionId(1),
-            "fake_chunk.wav".to_string(),
-        );
+        let chunk = audio::WavChunk::from_encoded_bytes(b"fake wav".to_vec());
+        let _ = orch.on_chunk_ready(crate::core::recording_session::SessionId(1), chunk);
         let result = orch.finish_session(crate::core::recording_session::SessionId(1));
 
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);

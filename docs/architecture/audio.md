@@ -2,110 +2,61 @@
 
 ## Purpose
 
-Captures microphone input and saves it as WAV files for transcription. Handles device enumeration, stream management, sample format conversion, live chunking during recording, and cleanup of old recordings.
+The audio module produces complete, independently decodable WAV chunks in memory. Microphone
+capture and local WAV files are two producers of the same `WavChunk` payload; neither producer
+writes intermediate chunk files.
 
 ## Module Layout
 
-```
+```text
 src/audio/
-  recorder.rs  — AudioRecorder with cpal stream and live chunking
-  splitter.rs  — Offline WAV file splitting utilities (TmpChunk)
+  chunk.rs     — WavChunk, ChunkError, WAV encoding, and shared capacity calculation
+  recorder.rs  — cpal microphone capture and live WavChunk production
+  wav_file.rs  — streaming local-WAV reader and fallible chunk iterator
 ```
 
-## Key Struct
+## `WavChunk`
 
-### `AudioRecorder` (`src/audio/recorder.rs`)
+`WavChunk` owns an `Arc<[u8]>` containing one complete WAV payload. It deliberately contains no
+path, session id, index, retry policy, or transcription state. Clones share the immutable bytes,
+which lets retries create fresh multipart readers without copying the payload.
 
-```rust
-pub struct AudioRecorder {
-    recording: Arc<Mutex<bool>>,
-    buffer: Arc<Mutex<Vec<i16>>>,
-    stream: Option<cpal::Stream>,
-    sample_count: Arc<AtomicUsize>,
-    gain: f32,
-    sample_rate: u32,
-    flushed_samples: usize,
-    ready_chunk_count: Arc<AtomicUsize>,
-    current_session_files: Vec<PathBuf>,
-    chunk_max_samples: usize,
-    max_chunk_duration_secs: u32,
-    max_chunk_size_bytes: u64,
-}
-```
+## Chunk Capacity
 
-| Field | Description |
-|---|---|
-| `recording` | Shared flag controlling the capture callback |
-| `buffer` | Accumulates mono i16 PCM samples across callbacks |
-| `stream` | The active `cpal` input stream (held to keep it alive) |
-| `sample_count` | Atomic counter for progress logging |
-| `gain` | Microphone amplification multiplier |
-| `sample_rate` | Detected at stream-open time (typically 44100 Hz) |
-| `flushed_samples` | Number of samples already flushed to chunk files during recording |
-| `ready_chunk_count` | Count of complete chunks observed by the audio callback |
-| `current_session_files` | WAV files still owned by the recorder during the active session |
-| `session_dir` | Unique `SessionId`-scoped directory containing the session's WAV files |
-| `chunk_max_samples` | Max samples per chunk, computed from config at `start_recording` |
-| `max_chunk_duration_secs` | Config: max chunk duration in seconds (0 = unlimited) |
-| `max_chunk_size_bytes` | Config: max chunk size in bytes including WAV header (0 = unlimited) |
+`max_frames_per_chunk(max_duration_secs, max_size_bytes, output_spec)` is the only duration/size
+conversion. It works in complete audio frames and accounts for channel count, sample width, and
+the 44-byte or 68-byte header that `hound` emits for the output spec.
 
-## Key Methods
+- `Ok(None)`: both limits are disabled; the producer does not proactively slice.
+- `Ok(Some(0))`: a nonzero size limit can hold no more than 0.5 seconds; the producer emits no
+  chunk and therefore makes no STT request.
+- `Ok(Some(frames))`: producers slice at the smaller valid duration/size capacity.
 
-### `with_config(config: &AudioConfig) -> Result<Self>`
+## Live Recorder
 
-Receives validated gain and `ChunkLimits` owned by the audio module. The chunk threshold is computed as `min(duration_limit, size_limit)` in sample count. The scalar `new(gain)` constructor exists only for tests.
+The cpal callback downmixes input to mono `i16`, applies microphone gain, appends PCM to the shared
+buffer, and updates the number of complete chunks. It never performs WAV encoding, channel waits,
+disk I/O, or network I/O.
 
-### `start_recording(&mut self) -> Result<()>`
+The main loop polls `take_ready_chunk()`. For each ready boundary the recorder copies one complete
+PCM slice, encodes it with `hound` into a `Cursor<Vec<u8>>`, drains the encoded samples only after
+successful encoding, and returns `ReadyChunk { session_id, chunk }`. On stop, complete remaining
+slices and the final tail are encoded the same way. `RecorderStopOutcome::Stopped` therefore owns
+`Vec<WavChunk>` rather than file paths.
 
-1. Returns early (no-op) if already recording.
-2. Opens a `cpal` input stream using the device's default config.
-3. Supports `I16` and `F32` sample formats; converts multi-channel to mono by averaging, then applies gain.
-4. Sets `recording = true` before playing the stream to avoid dropping initial frames.
-5. Computes `chunk_max_samples` from duration/size config.
-6. Resets `flushed_samples`, `ready_chunk_count`, and current session file tracking.
+## Local WAV Reader
 
-### `take_ready_chunk(&mut self) -> Option<String>`
+`WavChunkReader::open(path, duration_limit, size_limit)` opens the source once. Its `chunks()` method
+returns an `Iterator<Item = Result<WavChunk, ChunkError>>` that reads, encodes, and yields one chunk
+at a time. Integer and float sample formats, channel count, sample rate, and bit depth are preserved.
 
-Polls for a completed chunk during recording. Returns `Some(path)` when a chunk has been flushed to disk. Should be called periodically from the main event loop.
-
-The audio callback updates `ready_chunk_count` as chunk boundaries are crossed. This method compares that count with `flushed_samples`, copies the next complete chunk out of the shared buffer, releases the buffer lock, writes the chunk to a collision-safe temporary WAV path, removes the flushed samples from memory, advances `flushed_samples`, and returns the path. Repeated calls drain multiple ready chunks without losing boundaries or retaining the full recording in memory.
-
-### `stop_recording(&mut self) -> Result<StopResult>`
-
-1. Sets `recording = false`, sleeps 200 ms for pending callbacks.
-2. Drops the stream.
-3. Writes remaining samples into the active session directory. If chunking is enabled and complete unflushed chunks remain, writes them as chunk files before the final tail instead of collapsing them into one large tail file.
-4. Cleans up legacy root-level WAV files while the session directory keeps every recorder- or orchestrator-owned chunk outside that cleanup scope.
-5. Clears the in-memory buffer and chunk readiness counters so idle-loop polling cannot retry stop-time chunks after the session ends.
-
-### `StopResult` Enum
-
-| Variant | Description |
-|---|---|
-| `SingleFile(String)` | No chunking occurred; entire recording in one WAV file |
-| `TailChunk(String)` | Some chunks were flushed during recording; this is the final tail |
-| `ChunkFiles(Vec<String>)` | Stop-time catch-up wrote one or more chunk files |
-| `ChunksOnly` | All audio was flushed to chunks; no tail remains |
-
-### Private Methods
-
-- `write_chunk(samples, chunk_index) -> Result<String>`: Writes PCM samples under `./tmp/viberwhisper-session-<SessionId>-.../`.
-- `write_full_recording(buffer) -> Result<String>`: Writes the entire buffer as a single WAV in the active session directory when no chunking occurred.
-- `cleanup_old_recordings(dir, keep)`: Keeps at most `keep` legacy root-level WAV files and does not recurse into active session directories.
-
-Recorder-generated WAV files live in a unique directory whose name includes the `SessionId`, process ID, timestamp, and sequence. Ownership may transfer per file from the recorder to the orchestrator without removing the file from the session's cleanup boundary. The orchestrator deletes each file after processing (or cancellation) and removes the session directory once it becomes empty.
-
-## Audio Splitter (`src/audio/splitter.rs`)
-
-Offline WAV splitting for files that exceed size or duration limits.
-
-- `split_wav(path, limits: ChunkLimits) -> Result<Vec<TmpChunk>, Box<dyn Error>>`: Splits a WAV file into temporary chunks; callers only add operation context and do not branch on error variants.
-- `TmpChunk`: Wraps a temporary WAV file path with `Drop` trait for auto-cleanup.
+The iterator has no chunk-count cap. A decode error is yielded once and is terminal; subsequent
+`next()` calls return `None`. With both limits disabled, a non-empty file is returned as one chunk.
 
 ## Dependencies
 
 | Crate | Usage |
 |---|---|
-| `cpal` | Cross-platform audio I/O; device enumeration and stream creation |
-| `hound` | WAV file reading/writing (`WavWriter`, `WavSpec`) |
-| `tracing` | Structured logging via `instrument` macro |
+| `cpal` | Cross-platform microphone capture |
+| `hound` | WAV decoding and in-memory encoding |
+| `tracing` | Structured recorder diagnostics |
