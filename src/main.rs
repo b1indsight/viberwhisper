@@ -5,6 +5,7 @@ mod local;
 mod platform;
 mod postprocess;
 mod runtime_config;
+mod session;
 mod text;
 mod transcriber;
 
@@ -721,12 +722,12 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<(), Box<dyn std::
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    use crate::session::SessionId;
     use transcriber::{MockTranscriber, Transcriber};
 
     #[test]
     fn input_normalization_is_source_free_and_state_aware() {
-        use self::core::recording_session::{RecordingState, SessionEvent, SessionId};
-
+        use self::core::recording_session::{RecordingState, SessionEvent};
         let idle = RecordingState::Idle;
         let recording = RecordingState::Recording {
             session_id: SessionId(1),
@@ -792,11 +793,10 @@ mod integration_tests {
         let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
         let orch = SessionOrchestrator::new(t, OrchestratorConfig::new(Some("en".to_string())));
 
-        orch.start_session(crate::core::recording_session::SessionId(1))
-            .unwrap();
+        orch.start_session(SessionId(1)).unwrap();
         let chunk = audio::WavChunk::from_encoded_bytes(b"fake wav".to_vec());
-        let _ = orch.on_chunk_ready(crate::core::recording_session::SessionId(1), chunk);
-        let result = orch.finish_session(crate::core::recording_session::SessionId(1));
+        let _ = orch.on_chunk_ready(SessionId(1), chunk);
+        let result = orch.finish_session(SessionId(1));
 
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
         assert!(!result.unwrap().is_empty());
@@ -810,9 +810,8 @@ mod integration_tests {
         let t: Arc<dyn Transcriber> = Arc::new(MockTranscriber);
         let orch = SessionOrchestrator::new(t, OrchestratorConfig::new(None));
 
-        orch.start_session(crate::core::recording_session::SessionId(1))
-            .unwrap();
-        let result = orch.finish_session(crate::core::recording_session::SessionId(1));
+        orch.start_session(SessionId(1)).unwrap();
+        let result = orch.finish_session(SessionId(1));
         assert!(matches!(result, Err(SessionError::NoChunks)));
     }
 }

@@ -1,8 +1,6 @@
 use crate::audio::WavChunk;
+use crate::session::SessionId;
 use tracing::debug;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SessionId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingState {

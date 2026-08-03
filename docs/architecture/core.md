@@ -90,7 +90,7 @@ session or reach a newer session.
 - `Stopping`: the composite recorder stop, tail-chunk submission, and orchestrator convergence is in progress
 - `ShuttingDown`: new controls are ignored while cleanup effects run
 
-The active states carry only a monotonically increasing `SessionId`; input source, interaction mode, and lower-layer phases are not lifecycle state. The ID is propagated through recorder operations, ready chunks, orchestrator routing, effects, and completion events. Stale chunks and stale Session results cannot mutate the current session.
+The active states carry only a monotonically increasing `SessionId`; input source, interaction mode, and lower-layer phases are not lifecycle state. The shared identity type is defined in `src/session.rs`, while this state machine remains responsible for allocating IDs. The ID is propagated through recorder operations, ready chunks, orchestrator routing, effects, and completion events. Stale chunks and stale Session results cannot mutate the current session.
 
 ### Explicit Transition Table
 

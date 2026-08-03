@@ -32,3 +32,4 @@
 2026-08-02: Internalize chunk, STT retry, and session convergence policies; remove unused provider metadata and reject retired fields outside the current canonical v2 config
 2026-08-02: Centralize recording lifecycle changes behind one Session routing gate and an explicit state/event transition table with a lightweight rejected-event log path
 2026-08-02: Normalize hotkey and tray gestures into source-free recording requests; simplify lifecycle state to Session IDs and execute recorder/orchestrator startup and shutdown as composite Session effects
+2026-08-03: Extract SessionId into a shared leaf module so audio and core use a neutral session identity without changing routing behavior
