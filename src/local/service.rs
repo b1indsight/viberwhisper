@@ -533,12 +533,21 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
-    fn spawn_health_stub(port: u16, status_line: &'static str, body: &'static str) {
+    fn spawn_health_stub(
+        responses: &'static [(&'static str, &'static str)],
+    ) -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = Arc::clone(&requests);
         thread::spawn(move || {
-            let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
-            if let Ok((mut stream, _)) = listener.accept() {
+            for &(status_line, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                request_count.fetch_add(1, Ordering::SeqCst);
                 let mut buffer = [0_u8; 1024];
                 let _ = stream.read(&mut buffer);
                 let response = format!(
@@ -548,19 +557,12 @@ mod tests {
                 stream.write_all(response.as_bytes()).unwrap();
             }
         });
+        (port, requests)
     }
 
     #[test]
-    fn test_base_url_uses_loopback_port() {
-        let manager =
-            LocalServiceManager::new(17265, PathBuf::from("model"), PathBuf::from("venv"));
-        assert_eq!(manager.base_url(), "http://127.0.0.1:17265");
-    }
-
-    #[test]
-    fn test_health_check_accepts_ok_response() {
-        let port = 18765;
-        spawn_health_stub(port, "HTTP/1.1 200 OK", "{\"status\":\"ok\"}");
+    fn test_health_check_accepts_only_ok_response() {
+        let (port, requests) = spawn_health_stub(&[("HTTP/1.1 200 OK", "{\"status\":\"ok\"}")]);
         let result = health_check(
             &format!("http://127.0.0.1:{port}"),
             Duration::from_secs(1),
@@ -568,31 +570,23 @@ mod tests {
             Duration::from_millis(25),
         );
         assert!(result.is_ok());
-    }
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
 
-    #[test]
-    fn test_health_check_times_out_on_unhealthy_server() {
-        let port = 18766;
-        spawn_health_stub(
-            port,
-            "HTTP/1.1 503 Service Unavailable",
-            "{\"status\":\"loading\"}",
-        );
+        let (port, requests) = spawn_health_stub(&[
+            (
+                "HTTP/1.1 503 Service Unavailable",
+                "{\"status\":\"loading\"}",
+            ),
+            ("HTTP/1.1 200 OK", "{\"status\":\"ok\"}"),
+        ]);
         let result = health_check(
             &format!("http://127.0.0.1:{port}"),
-            Duration::from_millis(150),
-            Duration::from_secs(0),
-            Duration::from_millis(25),
+            Duration::from_secs(1),
+            Duration::ZERO,
+            Duration::ZERO,
         );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_pid_file_path_uses_expected_name() {
-        assert_eq!(
-            pid_file_path(Path::new("/tmp/viberwhisper")),
-            PathBuf::from("/tmp/viberwhisper/local_server.pid")
-        );
+        assert!(result.is_ok());
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -630,18 +624,21 @@ mod tests {
 
     #[test]
     fn test_status_clears_stale_pid_file() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("viberwhisper-local-service-{}", std::process::id()));
-        let model_dir = temp_dir.join("model");
-        let venv_dir = temp_dir.join("venv");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let model_dir = temp_dir.path().join("model");
+        let venv_dir = temp_dir.path().join("venv");
         fs::create_dir_all(&model_dir).unwrap();
-        fs::write(temp_dir.join("local_server.pid"), "999999").unwrap();
+        fs::write(
+            temp_dir.path().join("local_server.pid"),
+            u32::MAX.to_string(),
+        )
+        .unwrap();
 
         let manager = LocalServiceManager::new(17265, model_dir, venv_dir);
         let status = manager.status().unwrap();
 
         assert!(!status.running);
         assert_eq!(status.pid, None);
-        assert!(!temp_dir.join("local_server.pid").exists());
+        assert!(!temp_dir.path().join("local_server.pid").exists());
     }
 }

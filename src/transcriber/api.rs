@@ -192,6 +192,15 @@ impl ApiTranscriber {
     /// Retries on: network/connection errors, HTTP 5xx.
     /// Does NOT retry: HTTP 4xx (client errors — retrying is futile).
     fn upload_chunk_with_retry(&self, chunk: &WavChunk) -> Result<String, TranscribeError> {
+        self.upload_chunk_with_retry_using(chunk, std::thread::sleep)
+    }
+
+    /// Runs the retry policy with an injected wait operation so tests can avoid wall-clock delay.
+    fn upload_chunk_with_retry_using(
+        &self,
+        chunk: &WavChunk,
+        mut sleep: impl FnMut(std::time::Duration),
+    ) -> Result<String, TranscribeError> {
         let mut last_error = TranscribeError::Network("upload not attempted".to_string());
 
         for attempt in 0..=STT_MAX_RETRIES {
@@ -202,7 +211,7 @@ impl ApiTranscriber {
                     wait_secs = wait_secs,
                     "Retrying chunk upload"
                 );
-                std::thread::sleep(std::time::Duration::from_secs(wait_secs));
+                sleep(std::time::Duration::from_secs(wait_secs));
             }
 
             info!(attempt = attempt, "Uploading chunk");
@@ -405,9 +414,9 @@ mod tests {
             spawn_http_stub("HTTP/1.1 400 Bad Request", "{\"error\":\"bad model\"}");
         let t = transcriber_for_port(port);
         let chunk = test_chunk();
+        let mut waits = Vec::new();
 
-        let started = std::time::Instant::now();
-        let result = t.upload_chunk_with_retry(&chunk);
+        let result = t.upload_chunk_with_retry_using(&chunk, |duration| waits.push(duration));
 
         match result {
             Err(TranscribeError::Api { status: 400, body }) => {
@@ -417,7 +426,7 @@ mod tests {
         }
         // No retry: a single request, no exponential-backoff sleeps.
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(waits.is_empty());
     }
 
     #[test]
@@ -426,8 +435,9 @@ mod tests {
             spawn_http_stub("HTTP/1.1 503 Service Unavailable", "{\"error\":\"busy\"}");
         let t = transcriber_for_port(port);
         let chunk = test_chunk();
+        let mut waits = Vec::new();
 
-        let result = t.upload_chunk_with_retry(&chunk);
+        let result = t.upload_chunk_with_retry_using(&chunk, |duration| waits.push(duration));
 
         assert!(matches!(
             result,
@@ -435,5 +445,6 @@ mod tests {
         ));
         // Initial attempt + one retry.
         assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(waits, vec![std::time::Duration::from_secs(1)]);
     }
 }
