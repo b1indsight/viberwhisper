@@ -85,14 +85,23 @@ git tag v0.2.0 && git push origin v0.2.0  # Trigger CI release
 
 ```
 src/
-  main.rs                    — Entry point, hotkey event loop, CLI dispatch
+  main.rs                    — Thin process entry point delegating to viberwhisper::run
+  lib.rs                     — Crate module root and public application entry export
+  application/
+    mod.rs                   — Logging, CLI dispatch, config/local/convert workflows
+    listener.rs              — Hotkey/tray loop, session effects, transcription delivery
+  runtime_config.rs          — Application-level profile and consumer config assembly
+  session.rs                 — Shared SessionId value type
+  text.rs                    — Shared language-aware transcription text merge
   core/
-    config.rs                — AppConfig with all configuration fields
+    config/                  — Strict v2 document, field catalog, and atomic store
     cli.rs                   — Clap-based CLI (config, convert subcommands)
     orchestrator.rs          — SessionOrchestrator for session lifecycle
+    recording_session.rs     — Recording lifecycle state machine and effects
   audio/
+    chunk.rs                 — In-memory WavChunk encoding and capacity policy
     recorder.rs              — AudioRecorder with cpal stream and live chunking
-    splitter.rs              — WAV file splitting utilities
+    wav_file.rs              — Streaming offline WAV chunk reader
   input/
     hotkey.rs                — HotkeyManager with rdev
     typer.rs                 — TextTyper trait + MockTyper
@@ -102,12 +111,13 @@ src/
     windows.rs               — WindowsTyper (SendInput API)
   transcriber/
     api.rs                   — API-backed transcriber implementation
-    factory.rs               — create_transcriber factory function
     mod.rs                   — Transcriber traits and exports
   postprocess/
-    mod.rs                   — TextPostProcessor/TextPostProcessorSession traits, NoopPostProcessor
+    mod.rs                   — PostProcessor facade, session traits, NoopPostProcessor
     llm.rs                   — LlmPostProcessor with conservative and preheat sessions
-    factory.rs               — create_post_processor factory function
+  local/
+    installer.rs             — Python environment, dependencies, and model installation
+    service.rs               — Local inference service process lifecycle
 docs/
   architecture/              — Module-level design docs
   plan/                      — Feature implementation plans
