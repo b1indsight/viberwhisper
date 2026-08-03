@@ -41,7 +41,7 @@ Spawns an `rdev::listen` thread that maps native events into an ordered channel.
 
 ### Recording Input Normalization
 
-Hotkey and tray source details stop at the listener integration boundary in `main.rs`. The integration reads the session machine's current state without mutating it and publishes only source-free core requests:
+Hotkey and tray source details stop at the listener integration boundary in `application::listener`. The integration reads the session machine's current state without mutating it and publishes only source-free core requests:
 
 | Raw gesture | Idle | Recording | Transitional/shutdown state |
 |---|---|---|---|

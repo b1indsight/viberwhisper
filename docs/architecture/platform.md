@@ -53,7 +53,7 @@ Uses the Win32 `SendInput` API to inject Unicode keystrokes directly:
 
 ## Selecting an Implementation
 
-In `src/main.rs`, the typer is selected conditionally:
+In `src/application/listener.rs`, the typer is selected conditionally:
 
 ```rust
 #[cfg(target_os = "macos")]
@@ -66,4 +66,4 @@ let typer = WindowsTyper;
 let typer = MockTyper;
 ```
 
-All three types implement `TextTyper`, so `main.rs` calls `typer.type_text(text)` uniformly.
+All three types implement `TextTyper`, so the listener calls `typer.type_text(text)` uniformly.

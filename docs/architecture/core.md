@@ -100,10 +100,10 @@ The active states carry only a monotonically increasing `SessionId`; input sourc
 
 The machine consumes source-free requests plus `SessionStarted`, `SessionStartFailed`, `SessionStopped`, and `SessionStopFailed` results. It emits composite `StartSession` and `StopSession` effects instead of exposing recorder/orchestrator startup phases.
 
-`main.rs` executes `StartSession` as an all-or-nothing recorder/orchestrator acquisition with rollback. `StopSession` stops the recorder, submits tail chunks in order, finishes orchestrator convergence, and runs the existing post-processing and text-injection path. The state machine changes the tray to idle when it accepts a stop and restores the recording indicator if the recorder remains active.
+`application::listener` executes `StartSession` as an all-or-nothing recorder/orchestrator acquisition with rollback. `StopSession` stops the recorder, submits tail chunks in order, finishes orchestrator convergence, and runs the existing post-processing and text-injection path. The state machine changes the tray to idle when it accepts a stop and restores the recording indicator if the recorder remains active.
 
 Exit is represented as `ShutdownRequested`. It cancels recorder/orchestrator work, resets tray state, suppresses final text injection, and exits only after `ReadyToExit` is emitted.
 
 ## Main Integration Notes
 
-`main.rs` loads one `ConfigDocument`, asks `runtime_config` for a typed workflow configuration, and passes each narrow value to its consumer. API and Local backends reuse the same recording/orchestration pipeline; no endpoint rewriting or persisted-document mutation occurs in `main`.
+`application` loads one `ConfigDocument`, asks `runtime_config` for a typed workflow configuration, and passes each narrow value to its consumer. API and Local backends reuse the same recording/orchestration pipeline; no endpoint rewriting or persisted-document mutation occurs in the application layer. `main.rs` only delegates process startup to the library entry point.
