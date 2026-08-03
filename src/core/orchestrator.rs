@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::audio::WavChunk;
-use crate::core::recording_session::SessionId;
+use crate::session::SessionId;
 use crate::text::merge_texts;
 use crate::transcriber::Transcriber;
 // Re-exported so callers can keep using `core::orchestrator::TranscribeError`.

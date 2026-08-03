@@ -11,7 +11,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use super::chunk::{ChunkError, WavChunk, encode_i16_wav};
 use super::{AudioConfig, max_frames_per_chunk};
-use crate::core::recording_session::SessionId;
+use crate::session::SessionId;
 
 #[derive(Debug)]
 enum RecorderError {
