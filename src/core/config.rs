@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn canonical_example_round_trips_as_v2() {
         let document: ConfigDocument =
-            serde_json::from_str(include_str!("../../../config.example.json")).unwrap();
+            serde_json::from_str(include_str!("../../config.example.json")).unwrap();
         assert_eq!(document.schema_version, 2);
         let encoded = serde_json::to_string(&document).unwrap();
         let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
@@ -178,7 +178,7 @@ mod tests {
         // The current schema is the only accepted shape: removed policy knobs must not be
         // mistaken for live settings that still affect runtime behavior.
         let canonical: serde_json::Value =
-            serde_json::from_str(include_str!("../../../config.example.json")).unwrap();
+            serde_json::from_str(include_str!("../../config.example.json")).unwrap();
 
         let mut with_chunking = canonical.clone();
         with_chunking["chunking"] = serde_json::json!({
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn rejects_non_finite_float_values_from_json() {
-        let invalid = include_str!("../../../config.example.json")
+        let invalid = include_str!("../../config.example.json")
             .replace("\"mic_gain\": 3.0", "\"mic_gain\": 1e100");
         assert!(serde_json::from_str::<ConfigDocument>(&invalid).is_err());
     }
@@ -224,7 +224,7 @@ mod tests {
         assert!(!path.parent().unwrap().exists());
 
         let document: ConfigDocument =
-            serde_json::from_str(include_str!("../../../config.example.json")).unwrap();
+            serde_json::from_str(include_str!("../../config.example.json")).unwrap();
         store.save(&document).unwrap();
         assert_eq!(store.load().unwrap(), document);
 

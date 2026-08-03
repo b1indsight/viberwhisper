@@ -87,34 +87,43 @@ git tag v0.2.0 && git push origin v0.2.0  # Trigger CI release
 src/
   main.rs                    — Thin process entry point delegating to viberwhisper::run
   lib.rs                     — Crate module root and public application entry export
+  application.rs             — Logging, CLI dispatch, config/local/convert workflows
   application/
-    mod.rs                   — Logging, CLI dispatch, config/local/convert workflows
     listener.rs              — Hotkey/tray loop, session effects, transcription delivery
   runtime_config.rs          — Application-level profile and consumer config assembly
   session.rs                 — Shared SessionId value type
   text.rs                    — Shared language-aware transcription text merge
+  core.rs                    — Core module entry and submodule declarations
   core/
-    config/                  — Strict v2 document, field catalog, and atomic store
+    config.rs                — Config facade, errors, validation, and safe value types
+    config/
+      document.rs            — Strict v2 configuration document
+      fields.rs              — Canonical field catalog
+      store.rs               — Atomic configuration persistence
     cli.rs                   — Clap-based CLI (config, convert subcommands)
     orchestrator.rs          — SessionOrchestrator for session lifecycle
     recording_session.rs     — Recording lifecycle state machine and effects
+  audio.rs                   — Audio config, chunk policy, and public exports
   audio/
     chunk.rs                 — In-memory WavChunk encoding and capacity policy
     recorder.rs              — AudioRecorder with cpal stream and live chunking
     wav_file.rs              — Streaming offline WAV chunk reader
+  input.rs                   — Input module entry and submodule declarations
   input/
     hotkey.rs                — HotkeyManager with rdev
     typer.rs                 — TextTyper trait + MockTyper
     tray.rs                  — TrayManager for system tray icon and recording control
+  platform.rs                — Platform selection and config directory API
   platform/
     macos.rs                 — MacTyper (osascript + clipboard)
     windows.rs               — WindowsTyper (SendInput API)
+  transcriber.rs             — Transcriber traits, errors, and exports
   transcriber/
     api.rs                   — API-backed transcriber implementation
-    mod.rs                   — Transcriber traits and exports
+  postprocess.rs             — PostProcessor facade, session traits, NoopPostProcessor
   postprocess/
-    mod.rs                   — PostProcessor facade, session traits, NoopPostProcessor
     llm.rs                   — LlmPostProcessor with conservative and preheat sessions
+  local.rs                   — Local runtime facade and public exports
   local/
     installer.rs             — Python environment, dependencies, and model installation
     service.rs               — Local inference service process lifecycle

@@ -43,3 +43,4 @@ Implementation plans and technical specs for each feature.
 | [16-session-owned-chunk-results.md](plan/16-session-owned-chunk-results.md) | Done | Keep chunk state and transcription results owned by one session; workers return events instead of mutating shared chunk storage |
 | [17-shared-text-merge.md](plan/17-shared-text-merge.md) | Done | Centralize transcription text merging for offline chunks and session orchestration |
 | [18-config-architecture-refactor.md](plan/18-config-architecture-refactor.md) | Done | Strict v2-only config, module-owned validation, minimal runtime views, and explicit API/Local profiles |
+| [24-rust-2018-module-layout.md](plan/24-rust-2018-module-layout.md) | Done | Replace every `mod.rs` module entry with the Rust 2018-style sibling module file layout |
