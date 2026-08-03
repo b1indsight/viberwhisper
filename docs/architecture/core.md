@@ -13,7 +13,7 @@ The config package intentionally has four files:
 | `document.rs` | `ConfigDocument`, nested v2 serde schema, and defaults |
 | `fields.rs` | one canonical `ConfigKey` catalog used by list/get/set |
 | `store.rs` | platform path discovery plus fail-closed load and atomic save |
-| `mod.rs` | facade, config errors, validation report, secret-safe value types |
+| `src/core/config.rs` | facade, config errors, validation report, secret-safe value types |
 
 `ConfigDocument` accepts only the current complete canonical document with `schema_version: 2`.
 Missing or unknown fields, wrong versions, invalid JSON, and non-finite floats are errors. Retired

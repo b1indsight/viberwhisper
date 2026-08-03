@@ -7,9 +7,10 @@ Optional LLM-based text cleanup applied after STT transcription. Adds punctuatio
 ## Module Layout
 
 ```
-src/postprocess/
-  mod.rs      — processor/session traits and facades, typed config and errors
-  llm.rs      — LlmPostProcessor, ConservativeLlmSession, PreheatLlmSession
+src/
+  postprocess.rs      — processor/session traits and facades, typed config and errors
+  postprocess/
+    llm.rs            — LlmPostProcessor, ConservativeLlmSession, PreheatLlmSession
 ```
 
 ## `PostProcessor` Facade
