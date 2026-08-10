@@ -105,22 +105,33 @@ pub struct TrayManager {
 
 ### Icon States
 
-| State | Color | Tooltip |
-|---|---|---|
-| Idle | Gray `(128, 128, 128)` | `"ViberWhisper - 空闲"` |
-| Recording | Red `(220, 50, 50)` | `"ViberWhisper - 录音中"` |
+| State | Windows color | macOS rendering | Tooltip |
+|---|---|---|---|
+| Idle | Charcoal `#34373d` | Template tint | `"ViberWhisper - 空闲"` |
+| Recording | Red `#ef3340` | Explicit red | `"ViberWhisper - 录音中"` |
 
-Icons are 32×32 RGBA bitmaps generated at runtime as filled circles.
+Both states use the same five rounded voice-wave bars whose lower endpoints form a `V`. The 32×32
+RGBA PNGs are embedded in the executable and decoded during tray construction, so runtime loading
+does not depend on the current directory. Bundle icons use the same geometry from
+`assets/icon-source.svg` on a solid gray-blue `#282c34` rounded-square field.
+
+macOS treats the idle icon as an AppKit template so the system selects a legible menu-bar color for
+light and dark appearances. Recording switches the icon and template flag together, preserving the
+asset's explicit red. Windows ignores the template flag and displays the committed colors.
 
 ### Key Methods
 
 **`TrayManager::new() -> Result<Self>`**
 
-Builds the tray icon with a menu containing: title item, status item, separator, and exit item. Left-click menu opening is disabled so left click can toggle recording; right click retains the native context menu.
+Decodes the embedded idle and recording PNGs, then builds the tray icon with a menu containing:
+title item, status item, separator, and exit item. Corrupt or non-RGBA assets fail tray construction
+with an error, while tests enforce the committed 32×32 dimensions and transparency. Left-click menu
+opening is disabled so left click can toggle recording; right click retains the native context menu.
 
 **`set_recording(&mut self, recording: bool)`**
 
-Switches the icon, tooltip, and menu status text based on recording state. Native icon/tooltip update failures are logged rather than silently discarded.
+Switches the icon, macOS template mode, tooltip, and menu status text based on recording state.
+Native icon/tooltip update failures are logged rather than silently discarded.
 
 **`check_action(&mut self) -> Option<TrayAction>`**
 
