@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::time::{Duration, Instant};
 
 #[cfg(not(test))]
@@ -8,6 +9,8 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 const MIN_DEBOUNCE_WINDOW: Duration = Duration::from_millis(300);
+const STATUS_IDLE_PNG: &[u8] = include_bytes!("../../assets/status-idle.png");
+const STATUS_RECORDING_PNG: &[u8] = include_bytes!("../../assets/status-recording.png");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, allow(dead_code))]
@@ -90,8 +93,10 @@ pub struct TrayManager;
 impl TrayManager {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         prepare_platform_application()?;
-        let icon_idle = create_icon(128, 128, 128, 255)?;
-        let icon_recording = create_icon(220, 50, 50, 255)?;
+        let (idle_source, idle_is_template) = status_icon_source(false);
+        let (recording_source, _) = status_icon_source(true);
+        let icon_idle = create_icon(idle_source)?;
+        let icon_recording = create_icon(recording_source)?;
 
         let menu = Menu::new();
         let title_item = MenuItem::new("ViberWhisper", false, None);
@@ -109,6 +114,7 @@ impl TrayManager {
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .with_tooltip("ViberWhisper - 空闲")
+            .with_icon_as_template(idle_is_template)
             .with_icon(icon_idle.clone())
             .build()?;
 
@@ -125,10 +131,10 @@ impl TrayManager {
     }
 
     pub fn set_recording(&mut self, recording: bool) {
-        let icon = if recording {
-            &self.icon_recording
+        let (icon, is_template) = if recording {
+            (&self.icon_recording, status_icon_source(true).1)
         } else {
-            &self.icon_idle
+            (&self.icon_idle, status_icon_source(false).1)
         };
         let tooltip = if recording {
             "ViberWhisper - 录音中"
@@ -141,7 +147,7 @@ impl TrayManager {
         } else {
             "状态：空闲"
         });
-        if let Err(err) = self.tray_icon.set_icon(Some(icon.clone())) {
+        if let Err(err) = set_native_icon(&self.tray_icon, icon.clone(), is_template) {
             warn!(error = ?err, "failed to update tray icon");
         }
         if let Err(err) = self.tray_icon.set_tooltip(Some(tooltip)) {
@@ -332,37 +338,46 @@ mod windows_event_loop {
     }
 }
 
-// Pure RGBA generator shared by tests so they can verify icon data without
-// constructing a platform tray icon handle.
-fn build_icon_rgba(r: u8, g: u8, b: u8, a: u8) -> (Vec<u8>, u32) {
-    let size = 32u32;
-    let mut rgba = vec![0u8; (size * size * 4) as usize];
-    let center = size as f32 / 2.0;
-    let radius = center - 2.0;
-
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - center;
-            let dy = y as f32 - center;
-            let dist = (dx * dx + dy * dy).sqrt();
-
-            let idx = ((y * size + x) * 4) as usize;
-            if dist <= radius {
-                rgba[idx] = r;
-                rgba[idx + 1] = g;
-                rgba[idx + 2] = b;
-                rgba[idx + 3] = a;
-            }
-        }
+fn status_icon_source(recording: bool) -> (&'static [u8], bool) {
+    if recording {
+        (STATUS_RECORDING_PNG, false)
+    } else {
+        (STATUS_IDLE_PNG, true)
     }
-
-    (rgba, size)
 }
 
 #[cfg(not(test))]
-fn create_icon(r: u8, g: u8, b: u8, a: u8) -> Result<Icon, tray_icon::BadIcon> {
-    let (rgba, size) = build_icon_rgba(r, g, b, a);
-    Icon::from_rgba(rgba, size, size)
+fn create_icon(bytes: &[u8]) -> Result<Icon, Box<dyn std::error::Error>> {
+    let (rgba, width, height) = decode_icon_png(bytes)?;
+    Ok(Icon::from_rgba(rgba, width, height)?)
+}
+
+fn decode_icon_png(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error>> {
+    let decoder = png::Decoder::new(Cursor::new(bytes));
+    let mut reader = decoder.read_info()?;
+    let mut rgba = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut rgba)?;
+
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return Err(format!(
+            "status icon must be an 8-bit RGBA PNG, got {:?} {:?}",
+            info.bit_depth, info.color_type
+        )
+        .into());
+    }
+
+    rgba.truncate(info.buffer_size());
+    Ok((rgba, info.width, info.height))
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn set_native_icon(tray_icon: &TrayIcon, icon: Icon, is_template: bool) -> tray_icon::Result<()> {
+    tray_icon.set_icon_with_as_template(Some(icon), is_template)
+}
+
+#[cfg(all(not(target_os = "macos"), not(test)))]
+fn set_native_icon(tray_icon: &TrayIcon, icon: Icon, _is_template: bool) -> tray_icon::Result<()> {
+    tray_icon.set_icon(Some(icon))
 }
 
 #[cfg(test)]
@@ -370,16 +385,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_icon_rgba() {
-        let (rgba, size) = build_icon_rgba(128, 128, 128, 255);
-        assert_eq!(size, 32);
-        assert_eq!(rgba.len(), (size * size * 4) as usize);
-        assert_eq!(rgba[3], 0);
-        let center = ((size / 2 * size + size / 2) * 4) as usize;
-        assert_eq!(rgba[center], 128);
-        assert_eq!(rgba[center + 1], 128);
-        assert_eq!(rgba[center + 2], 128);
-        assert_eq!(rgba[center + 3], 255);
+    fn embedded_status_icons_are_32px_rgba_with_transparency() {
+        for bytes in [STATUS_IDLE_PNG, STATUS_RECORDING_PNG] {
+            let (rgba, width, height) = decode_icon_png(bytes).unwrap();
+
+            assert_eq!((width, height), (32, 32));
+            assert_eq!(rgba.len(), (width * height * 4) as usize);
+            assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] == 0));
+            assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] == 255));
+        }
+    }
+
+    #[test]
+    fn idle_uses_template_rendering_and_recording_keeps_explicit_color() {
+        assert!(status_icon_source(false).1);
+        assert!(!status_icon_source(true).1);
     }
 
     #[test]
