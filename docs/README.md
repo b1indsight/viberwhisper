@@ -45,6 +45,7 @@ Implementation plans and technical specs for each feature.
 | [10-objc2-overlay-migration.md](plan/10-objc2-overlay-migration.md) | Historical | Historical macOS overlay binding migration |
 | [11-packaging-and-ci.md](plan/11-packaging-and-ci.md) | Superseded | Original cross-platform CI and unexercised tag-release design; hardened by plan 27 |
 | [12-local-gemma-service.md](plan/12-local-gemma-service.md) | Done | Local Gemma inference service, lifecycle management, and CLI integration |
+| [13-full-hotkey-support.md](plan/13-full-hotkey-support.md) | Implemented | Expand Hold/Toggle configuration to named single keys, including standalone right Alt/Option |
 | [14-tray-recording-control.md](plan/14-tray-recording-control.md) | Done | Tray-only control, input-independent recording state, and strict SessionId routing |
 | [16-session-owned-chunk-results.md](plan/16-session-owned-chunk-results.md) | Done | Keep chunk state and transcription results owned by one session; workers return events instead of mutating shared chunk storage |
 | [17-shared-text-merge.md](plan/17-shared-text-merge.md) | Done | Centralize transcription text merging for offline chunks and session orchestration |

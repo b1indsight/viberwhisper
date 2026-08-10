@@ -39,6 +39,14 @@ pub struct HotkeyManager {
 
 Spawns an `rdev::listen` thread that maps native events into an ordered channel. Per-binding key-down state suppresses operating-system key-repeat events so one physical toggle press produces one toggle action.
 
+**`HotkeyConfig`**
+
+The runtime boundary between persisted hotkey strings and native events. Validation resolves each
+enabled string to one `rdev::Key` plus a canonical display label, rejects duplicate or
+platform-unavailable bindings, and keeps empty strings disabled. Persisted strings are not
+canonicalized: `config get/list` return the user's input, while listener output and logs use the
+canonical runtime label.
+
 ### Recording Input Normalization
 
 Hotkey and tray source details stop at the listener integration boundary in `application::listener`. The integration reads the session machine's current state without mutating it and publishes only source-free core requests:
@@ -58,6 +66,10 @@ Because the core event carries no source, Hold release, Toggle, and tray input c
 
 - `HotkeyConfig::validate(&InputSection)` parses and validates both bindings before construction.
 - Empty strings disable a binding, including both bindings for tray-only control; duplicate non-empty bindings are rejected.
+- Non-function bindings log that `rdev::listen` observes rather than suppresses their native input.
+- On Windows, a `LEFTCTRL` binding logs an additional warning because AltGr is reported as left Ctrl
+  plus right Alt by layouts that use AltGr. Validation rejects a `LEFTCTRL`/`RIGHTALT` pair so one
+  physical AltGr press cannot enqueue both configured recording actions.
 - Spawns the listener thread without blocking application startup.
 
 **`check_event(&self) -> Option<HotkeyEvent>`**
@@ -66,7 +78,39 @@ Non-blockingly receives the oldest pending event. Called from the main loop on e
 
 **`parse_key(s: &str) -> Option<Key>`**
 
-Maps trimmed key name strings (`"F1"`–`"F12"`, case-insensitive) to `rdev::Key` variants.
+Maps trimmed, ASCII-case-insensitive named physical keys to `rdev::Key` variants. The fixed lookup
+covers `F1`–`F12`, letters, number-row keys, editing/whitespace, navigation, left/right modifiers,
+locks/system keys, punctuation, and numeric-keypad keys. Explicit aliases normalize platform terms:
+`ALTGR` and `RIGHTOPTION` map to canonical `RIGHTALT`/`Key::AltGr`; `ALT` and `OPTION` map to
+`LEFTALT`/`Key::Alt`.
+
+`parse_key` recognizes the shared vocabulary independently of platform. `HotkeyConfig::validate`
+then returns `hotkey.unsupported` when the current `rdev 0.5.3` backend cannot emit the named
+variant. On macOS this includes Caps Lock (a status change rather than a press/release pair), right
+Ctrl, forward Delete/Insert/navigation-cluster keys, several lock/system keys, international
+backslash, and numeric-keypad names. On Windows it includes right Meta, Function, and the numeric
+keypad Enter key that `rdev` cannot distinguish from Enter. Unknown names use `hotkey.invalid`, and
+aliases resolving to the same key use `hotkey.duplicate`. Windows additionally uses
+`hotkey.altgr_conflict` when the two bindings are `LEFTCTRL` and `RIGHTALT` in either order.
+
+Configuration persistence intentionally does not invoke this runtime validation. `config set`
+stores the string; `config check` and listener startup call the existing `runtime_config` resolution
+path and report hotkey issues together with other active-listener configuration issues.
+
+Key names identify `rdev::Key` values rather than produced characters. The macOS backend maps
+hardware key codes, while the Windows backend maps virtual-key values; letter and punctuation
+bindings can therefore follow the active Windows layout rather than a fixed physical QWERTY
+position. The listener is passive, so printable, editing, navigation, and modifier keys continue to
+affect the focused application or operating system. Windows AltGr also emits left Ctrl at the
+`rdev::Event` boundary, so a standalone `LEFTCTRL` binding may fire from AltGr; the retained event
+type does not contain enough native information to filter that event reliably.
+
+On macOS, `rdev 0.5.3` derives modifier press/release direction from aggregate modifier flags.
+That direction can be wrong when the listener starts while a modifier is held or when both sides
+of one modifier overlap. Before `EventMapper` sees a macOS modifier event, the listener therefore
+uses Core Graphics `CGEventSourceKeyState` with the physical modifier key code to normalize it to
+the current press/release state. Ordinary key events still flow directly through `rdev`, preserving
+their existing repeat suppression.
 
 ---
 

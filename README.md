@@ -6,7 +6,7 @@
 
 ## 功能特性
 
-- **全局热键录音**：按住 F8 开始录音，松开自动停止（Hold 模式）；按一下 F9 开始，再按一下停止（Toggle 模式）
+- **全局热键录音**：默认按住 F8 开始、松开停止（Hold 模式），按一下 F9 开始、再按一下停止（Toggle 模式）；两者均可改为具名单键，包括单独的右 Alt/Option
 - **AI 语音识别**：通过可配置的 HTTP 转写接口将语音转为文字（默认 Groq Whisper）
 - **长录音自动分片**：超过时长/大小限制的录音自动切分，后台并行转写，结果智能合并
 - **LLM 文本后处理**：可选的 LLM 后处理层，自动补标点、去语气词、清理中断与重复
@@ -139,9 +139,50 @@ CLI 只接受下表中的 canonical dotted key；`hotkey`、`model`、`local_mod
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `input.hold_hotkey` | 字符串 | `F8` | 按住录音热键；空字符串可禁用 |
-| `input.toggle_hotkey` | 字符串 | `F9` | 切换录音热键；空字符串可禁用 |
+| `input.hold_hotkey` | 字符串 | `F8` | 按住录音的具名单键；空字符串可禁用 |
+| `input.toggle_hotkey` | 字符串 | `F9` | 切换录音的具名单键；空字符串可禁用 |
 | `audio.mic_gain` | 数字 | `1.0` | 麦克风增益倍数 |
+
+#### 单键热键名称
+
+两个热键字段都接受大小写不敏感的物理单键名称。例如，将 Hold 热键设为右 Alt/Option：
+
+```bash
+viberwhisper config set input.hold_hotkey RIGHTALT
+viberwhisper config check
+```
+
+`config set` 保留输入的原始字符串；`config check` 和程序启动负责验证名称、平台支持情况以及 Hold/Toggle
+是否重复。运行时消息使用 canonical 名称，因此 `altgr`、`rightoption` 会显示为 `RIGHTALT`。
+
+| 分组 | Canonical 名称 |
+|------|----------------|
+| 功能键 | `F1`–`F12` |
+| 字母与数字 | `A`–`Z`、主键盘区 `0`–`9` |
+| 编辑与空白 | `BACKSPACE`、`DELETE`、`INSERT`、`ENTER`、`SPACE`、`TAB`、`ESCAPE` |
+| 导航 | `UP`、`DOWN`、`LEFT`、`RIGHT`、`HOME`、`END`、`PAGEUP`、`PAGEDOWN` |
+| 修饰键 | `LEFTALT`、`RIGHTALT`、`LEFTCTRL`、`RIGHTCTRL`、`LEFTSHIFT`、`RIGHTSHIFT`、`LEFTMETA`、`RIGHTMETA` |
+| 锁定与系统键 | `CAPSLOCK`、`NUMLOCK`、`SCROLLLOCK`、`PRINTSCREEN`、`PAUSE`、`FUNCTION` |
+| 标点 | `BACKQUOTE`、`MINUS`、`EQUAL`、`LEFTBRACKET`、`RIGHTBRACKET`、`SEMICOLON`、`QUOTE`、`BACKSLASH`、`INTLBACKSLASH`、`COMMA`、`DOT`、`SLASH` |
+| 数字键盘 | `NUMPAD0`–`NUMPAD9`、`NUMPADENTER`、`NUMPADMINUS`、`NUMPADPLUS`、`NUMPADMULTIPLY`、`NUMPADDIVIDE`、`NUMPADDELETE` |
+
+常用别名包括：`ALTGR`/`RIGHTOPTION` → `RIGHTALT`，`ALT`/`OPTION` → `LEFTALT`，
+`RETURN` → `ENTER`，`ESC` → `ESCAPE`，`COMMAND`/`WIN`/`SUPER` → `LEFTMETA`，箭头名称可追加
+`ARROW`，数字键盘名称可将 `NUMPAD` 缩写为 `KP`。
+
+名称对应 `rdev::Key` 的键位标识，而不是输入后产生的字符。macOS 后端按硬件键码映射；Windows 后端
+使用虚拟键值，因此字母和标点在非 QWERTY 布局上可能跟随活动布局，使用前应实际确认。监听只观察而不
+拦截按键，所以字母、数字、标点、编辑键和修饰键仍会传给当前应用或操作系统；程序会为这类绑定记录
+warning。Windows 的 AltGr 通常表现为左 Ctrl + 右 Alt，因此 `RIGHTALT` 能正常匹配，但单独配置的
+`LEFTCTRL` 也可能被 AltGr 触发；为避免一次按键产生两个录音动作，Windows 会拒绝同时配置
+`LEFTCTRL` 和 `RIGHTALT`。
+
+当前 `rdev 0.5.3` 后端还有以下明确限制，`config check` 会拒绝对应名称：
+
+- macOS：`CAPSLOCK`、`RIGHTCTRL`、`DELETE`、`INSERT`、`HOME`、`END`、`PAGEUP`、
+  `PAGEDOWN`、`NUMLOCK`、`SCROLLLOCK`、`PRINTSCREEN`、`PAUSE`、`INTLBACKSLASH` 和全部
+  `NUMPAD*` 名称。
+- Windows：`RIGHTMETA`、`FUNCTION`、`NUMPADENTER`；数字键盘的报告方式还会受到 Num Lock 影响。
 
 内部可靠性策略不作为用户配置：实时与离线音频统一按 30 秒或 23 MiB 的较小限制分片；每个 STT 请求
 最多等待 12 秒，网络错误或 HTTP 5xx 最多重试一次；停止录音后的 session 收敛窗口固定为 30 秒。
