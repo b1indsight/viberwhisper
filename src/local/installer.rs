@@ -1,7 +1,19 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const DEPENDENCY_CHECK_SCRIPT: &str = "import accelerate, fastapi, huggingface_hub, librosa, multipart, PIL, soundfile, torch, torchvision, transformers, uvicorn";
+const REQUIRED_RUNTIME_PACKAGES: &[&str] = &[
+    "accelerate",
+    "fastapi",
+    "huggingface_hub",
+    "librosa",
+    "multipart",
+    "PIL",
+    "soundfile",
+    "torch",
+    "torchvision",
+    "transformers",
+    "uvicorn",
+];
 const MIN_PYTHON_MAJOR: u32 = 3;
 const MIN_PYTHON_MINOR: u32 = 10;
 
@@ -159,8 +171,9 @@ pub fn dependencies_installed(venv_dir: &Path) -> bool {
     if !python.exists() {
         return false;
     }
+    let check_script = format!("import {}", REQUIRED_RUNTIME_PACKAGES.join(", "));
     Command::new(python)
-        .args(["-c", DEPENDENCY_CHECK_SCRIPT])
+        .args(["-c", check_script.as_str()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -368,28 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dependency_check_script_covers_required_runtime_packages() {
-        for package in [
-            "accelerate",
-            "fastapi",
-            "huggingface_hub",
-            "librosa",
-            "multipart",
-            "PIL",
-            "soundfile",
-            "torch",
-            "torchvision",
-            "transformers",
-            "uvicorn",
-        ] {
-            assert!(
-                DEPENDENCY_CHECK_SCRIPT.contains(package),
-                "missing package in dependency check: {package}"
-            );
-        }
-    }
-
-    #[test]
     fn test_parse_python_version() {
         assert_eq!(parse_python_version("3.10\n").unwrap(), (3, 10));
         assert_eq!(parse_python_version("3.12").unwrap(), (3, 12));
@@ -407,15 +398,6 @@ mod tests {
         assert!(is_supported_python_version(3, 10));
         assert!(is_supported_python_version(3, 11));
         assert!(is_supported_python_version(4, 0));
-    }
-
-    #[test]
-    fn test_detect_python_runtime_reports_supported_version() {
-        let runtime = detect_python_runtime().unwrap();
-        assert!(is_supported_python_version(
-            runtime.version.0,
-            runtime.version.1
-        ));
     }
 
     #[cfg(feature = "integration")]

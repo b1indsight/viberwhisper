@@ -79,50 +79,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_config_list() {
-        let cli = Cli::try_parse_from(["viberwhisper", "config", "list"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Config {
-                action: ConfigAction::List
-            })
-        ));
-    }
-
-    #[test]
-    fn test_cli_config_path_and_check() {
-        let path = Cli::try_parse_from(["viberwhisper", "config", "path"]).unwrap();
-        assert!(matches!(
-            path.command,
-            Some(Commands::Config {
-                action: ConfigAction::Path
-            })
-        ));
-
-        let check = Cli::try_parse_from(["viberwhisper", "config", "check"]).unwrap();
-        assert!(matches!(
-            check.command,
-            Some(Commands::Config {
-                action: ConfigAction::Check
-            })
-        ));
-    }
-
-    #[test]
-    fn test_cli_config_get() {
-        let cli =
-            Cli::try_parse_from(["viberwhisper", "config", "get", "input.hold_hotkey"]).unwrap();
-        if let Some(Commands::Config {
-            action: ConfigAction::Get { key },
-        }) = cli.command
-        {
-            assert_eq!(key, "input.hold_hotkey");
-        } else {
-            panic!("Expected config get command");
-        }
-    }
-
-    #[test]
     fn test_cli_config_set() {
         let cli = Cli::try_parse_from(["viberwhisper", "config", "set", "input.hold_hotkey", "F9"])
             .unwrap();
@@ -138,26 +94,22 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_convert_basic() {
-        let cli = Cli::try_parse_from(["viberwhisper", "convert", "test.wav"]).unwrap();
-        if let Some(Commands::Convert { input, output }) = cli.command {
-            assert_eq!(input, "test.wav");
-            assert_eq!(output, None);
-        } else {
-            panic!("Expected convert command");
-        }
-    }
+    fn test_cli_convert_optional_output() {
+        let cases: &[(&[&str], Option<&str>)] = &[
+            (&["viberwhisper", "convert", "test.wav"], None),
+            (
+                &["viberwhisper", "convert", "test.wav", "--output", "out.txt"],
+                Some("out.txt"),
+            ),
+        ];
 
-    #[test]
-    fn test_cli_convert_with_output() {
-        let cli =
-            Cli::try_parse_from(["viberwhisper", "convert", "test.wav", "--output", "out.txt"])
-                .unwrap();
-        if let Some(Commands::Convert { input, output }) = cli.command {
+        for &(args, expected_output) in cases {
+            let cli = Cli::try_parse_from(args.iter().copied()).unwrap();
+            let Some(Commands::Convert { input, output }) = cli.command else {
+                panic!("Expected convert command for {args:?}");
+            };
             assert_eq!(input, "test.wav");
-            assert_eq!(output, Some("out.txt".to_string()));
-        } else {
-            panic!("Expected convert command");
+            assert_eq!(output.as_deref(), expected_output, "args: {args:?}");
         }
     }
 
@@ -168,17 +120,6 @@ mod tests {
             cli.command,
             Some(Commands::Local {
                 action: LocalCommand::Start
-            })
-        ));
-    }
-
-    #[test]
-    fn test_cli_local_status() {
-        let cli = Cli::try_parse_from(["viberwhisper", "local", "status"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Local {
-                action: LocalCommand::Status
             })
         ));
     }

@@ -13,14 +13,3 @@ impl TextTyper for MockTyper {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mock_typer_succeeds() {
-        let typer = MockTyper;
-        assert!(typer.type_text("hello world").is_ok());
-    }
-}

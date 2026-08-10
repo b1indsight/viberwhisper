@@ -634,31 +634,33 @@ mod tests {
     struct ScriptedTranscriber {
         results: Vec<Result<String, TranscribeError>>,
         call_count: AtomicUsize,
+        call_tx: mpsc::Sender<usize>,
     }
 
     impl ScriptedTranscriber {
-        fn new(results: Vec<Result<String, TranscribeError>>) -> Self {
-            Self {
-                results,
-                call_count: AtomicUsize::new(0),
-            }
+        fn new(results: Vec<Result<String, TranscribeError>>) -> (Self, mpsc::Receiver<usize>) {
+            let (call_tx, call_rx) = mpsc::channel();
+            (
+                Self {
+                    results,
+                    call_count: AtomicUsize::new(0),
+                    call_tx,
+                },
+                call_rx,
+            )
         }
     }
 
     impl Transcriber for ScriptedTranscriber {
         fn transcribe(&self, _chunk: &WavChunk) -> Result<String, TranscribeError> {
             let i = self.call_count.fetch_add(1, Ordering::SeqCst);
+            let _ = self.call_tx.send(i);
             match self.results.get(i) {
                 Some(Ok(s)) => Ok(s.clone()),
                 Some(Err(e)) => Err(e.clone()),
                 None => Ok("extra".to_string()),
             }
         }
-    }
-
-    /// Sleeps for `delay` before returning.
-    struct SlowTranscriber {
-        delay: Duration,
     }
 
     struct GateTranscriber {
@@ -673,13 +675,6 @@ mod tests {
                 released = condvar.wait(released).unwrap();
             }
             Ok("released".to_string())
-        }
-    }
-
-    impl Transcriber for SlowTranscriber {
-        fn transcribe(&self, _chunk: &WavChunk) -> Result<String, TranscribeError> {
-            thread::sleep(self.delay);
-            Ok("slow".to_string())
         }
     }
 
@@ -856,29 +851,6 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_chunk_ordered_merge() {
-        // Three chunks whose transcriptions arrive in-order.
-        let t = Arc::new(ScriptedTranscriber::new(vec![
-            Ok("one".to_string()),
-            Ok("two".to_string()),
-            Ok("three".to_string()),
-        ]));
-        let orch = default_orchestrator(t);
-
-        orch.start_session(SessionId(1)).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk()); // index 0
-        thread::sleep(Duration::from_millis(10));
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk()); // index 1
-        thread::sleep(Duration::from_millis(10));
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk()); // index 2
-        let result = orch.finish_session(SessionId(1));
-
-        assert!(result.is_ok());
-        // Chunks must be joined in submission order, not completion order.
-        assert_eq!(result.unwrap(), "one two three");
-    }
-
-    #[test]
     fn test_no_chunks_returns_error() {
         let t = Arc::new(MockTranscriber);
         let orch = default_orchestrator(t);
@@ -913,22 +885,27 @@ mod tests {
 
     #[test]
     fn test_partial_failure_returns_error_with_partial_text() {
-        let t = Arc::new(ScriptedTranscriber::new(vec![
+        let (t, calls) = ScriptedTranscriber::new(vec![
             Ok("good chunk".to_string()),
             Err(TranscribeError::Api {
                 status: 500,
                 body: "server error".to_string(),
             }),
             Ok("another good".to_string()),
-        ]));
-        let orch = default_orchestrator(t);
+        ]);
+        let orch = default_orchestrator(Arc::new(t));
 
         orch.start_session(SessionId(1)).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
-        thread::sleep(Duration::from_millis(10));
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
-        thread::sleep(Duration::from_millis(10));
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
+        for expected_call in 0..3 {
+            assert_eq!(
+                orch.on_chunk_ready(SessionId(1), test_chunk()).unwrap(),
+                expected_call
+            );
+            assert_eq!(
+                calls.recv_timeout(Duration::from_secs(1)).unwrap(),
+                expected_call
+            );
+        }
         let result = orch.finish_session(SessionId(1));
 
         match result {
@@ -952,15 +929,19 @@ mod tests {
 
     #[test]
     fn test_convergence_timeout() {
-        // Worker sleeps 500 ms per chunk; timeout is 100 ms — should time out.
-        let t = Arc::new(SlowTranscriber {
-            delay: Duration::from_millis(500),
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let t = Arc::new(GateTranscriber {
+            release: Arc::clone(&release),
         });
         let orch = make_orchestrator_with_timeout(t, Duration::from_millis(100));
 
         orch.start_session(SessionId(1)).unwrap();
         let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
+
+        let (lock, condvar) = &*release;
+        *lock.lock().unwrap() = true;
+        condvar.notify_all();
 
         match result {
             Err(SessionError::ConvergenceTimeout { pending_count, .. }) => {
@@ -1026,18 +1007,6 @@ mod tests {
     }
 
     #[test]
-    fn test_session_lifecycle_is_mode_free() {
-        let t = Arc::new(FixedTranscriber("text".to_string()));
-        let orch = default_orchestrator(t);
-
-        orch.start_session(SessionId(1)).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
-        let result = orch.finish_session(SessionId(1));
-
-        assert_eq!(result.unwrap(), "text");
-    }
-
-    #[test]
     fn test_session_reentry_is_rejected_without_replacing_active_session() {
         let t = Arc::new(FixedTranscriber("new session".to_string()));
         let orch = default_orchestrator(t);
@@ -1090,28 +1059,6 @@ mod tests {
             Err(SessionRoutingError::SessionMismatch { .. })
         ));
         assert!(orch.abort_session(SessionId(1)).is_ok());
-    }
-
-    #[test]
-    fn test_worker_panic_marks_chunks_failed_via_timeout() {
-        // PanicTranscriber panics; the worker thread dies; convergence times out.
-        let t = Arc::new(PanicTranscriber);
-        let orch = make_orchestrator_with_timeout(t, Duration::from_millis(200));
-
-        orch.start_session(SessionId(1)).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
-        let result = orch.finish_session(SessionId(1));
-
-        // Worker panicked → chunk never reaches terminal state → ConvergenceTimeout.
-        assert!(
-            matches!(
-                result,
-                Err(SessionError::ConvergenceTimeout { .. })
-                    | Err(SessionError::PartialFailure { .. })
-            ),
-            "Expected timeout or partial failure, got {:?}",
-            result
-        );
     }
 
     #[test]

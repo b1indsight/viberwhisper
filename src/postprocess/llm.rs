@@ -464,27 +464,18 @@ mod tests {
         assert_eq!(result.unwrap(), "");
     }
 
-    // --- Conservative session tests ---
-
     #[test]
-    fn test_conservative_session_no_chunks_finish_empty() {
-        let config = config_with_postprocess(false, None);
-        let p = LlmPostProcessor::new(config).unwrap();
-        let mut session = p.start_session();
-        let result = session.finish();
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "");
-    }
+    fn empty_session_finishes_empty_in_both_modes() {
+        for preheat_enabled in [false, true] {
+            let config = config_with_postprocess(preheat_enabled, None);
+            let p = LlmPostProcessor::new(config).unwrap();
+            let mut session = p.start_session();
 
-    // --- Preheat session tests ---
-
-    #[test]
-    fn test_preheat_session_no_chunks_finish_empty() {
-        let config = config_with_postprocess(true, None);
-        let p = LlmPostProcessor::new(config).unwrap();
-        let mut session = p.start_session();
-        let result = session.finish();
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "");
+            assert_eq!(
+                session.finish().unwrap(),
+                "",
+                "preheat_enabled={preheat_enabled}"
+            );
+        }
     }
 }
