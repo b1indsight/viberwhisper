@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" RequiredVersion="7.0.0">
+  <Package
+    Name="ViberWhisper"
+    Manufacturer="b1indsight"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="F7DC481B-9922-476B-960F-B813EEC6B4E9"
+    Scope="perMachine"
+    InstallerVersion="500"
+    Compressed="yes">
+    <SummaryInformation Description="Local-first voice-to-text input for macOS and Windows" />
+    <MajorUpgrade
+      Schedule="afterInstallInitialize"
+      DowngradeErrorMessage="A newer version of ViberWhisper is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="ViberWhisper.ico" SourceFile="assets\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="ViberWhisper.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/b1indsight/viberwhisper" />
+
+    <Feature Id="Main" Title="ViberWhisper" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="LicenseFile" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="ViberWhisper" />
+    </StandardDirectory>
+
+    <Component Id="MainExecutable" Directory="INSTALLFOLDER" Guid="AA05F0E0-9660-4AEB-8B09-42CF6356D601">
+      <File Id="ViberWhisperExe" Source="$(var.ExePath)" KeyPath="yes">
+        <Shortcut
+          Id="StartMenuShortcut"
+          Directory="ProgramMenuFolder"
+          Name="ViberWhisper"
+          Description="Voice-to-text input tool"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="ViberWhisper.ico"
+          Advertise="yes" />
+      </File>
+    </Component>
+
+    <Component Id="LicenseFile" Directory="INSTALLFOLDER" Guid="E00D51FC-3B38-470F-B9AB-94CCF01B4826">
+      <File Id="License" Source="LICENSE" KeyPath="yes" />
+    </Component>
+  </Fragment>
+</Wix>

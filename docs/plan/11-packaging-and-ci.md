@@ -2,7 +2,12 @@
 
 ## Status
 
-**Implemented.** CI runs cross-platform build and test gates, while version tags trigger macOS DMG and Windows MSI packaging plus GitHub Release publication. No release tag has been published yet.
+**Superseded by [plan 27](27-release-path-hardening.md).** This plan introduced cross-platform CI
+and the original tag-triggered macOS DMG / Windows MSI workflow, but its release path was never run
+and several release-only assumptions remained unvalidated. Plan 27 preserves this document as the
+historical design record while hardening package inputs, installer authoring, pre-tag validation,
+asset verification, and draft-first publication. No release tag had been published when plan 27
+began.
 
 ## Goal
 

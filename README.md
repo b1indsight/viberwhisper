@@ -21,8 +21,26 @@
 - **操作系统**：macOS 或 Windows
   - macOS：文字输入通过 System Events（osascript）实现，需在「系统设置 → 隐私与安全性 → 辅助功能」中授权终端应用
   - Windows：使用 SendInput API，无需额外权限
-- **Rust**：1.70 及以上版本
+- **Rust**：仅源码构建需要支持 Rust 2024 edition 的 stable toolchain；安装发布包不需要 Rust
 - **Python**：本地模式需要 Python 3.10+；安装时优先使用 `uv`，若未安装则回退到系统 Python（用于 FastAPI + Transformers 服务）
+
+## 下载安装包
+
+版本发布后可从 [GitHub Releases](https://github.com/b1indsight/viberwhisper/releases) 下载：
+
+- macOS：`ViberWhisper-v<version>-macos-universal.dmg`，同时支持 Apple Silicon 与 Intel；
+  `.tar.gz` 是保留应用权限的便携 `.app` 归档。
+- Windows：`ViberWhisper-v<version>-windows-x86_64.msi`；`.zip` 是包含
+  `viberwhisper.exe` 和 `LICENSE` 的便携版本。
+- `SHA256SUMS` 包含四个发行文件的 SHA-256，可用于下载后校验；GitHub Release 同时提供
+  artifact provenance。
+
+当前发行包尚未使用 Apple Developer ID/notarization 或 Windows Authenticode 签名，因此系统可能显示
+Gatekeeper/SmartScreen 警告。请先核对校验和与 GitHub provenance，再通过系统提供的确认入口运行。
+
+> **当前发行范围**：DMG、MSI 和便携归档只包含 Rust 应用，支持 API inference profile；不携带
+> `server/` 下的 Python/Gemma runtime。发行包中的 `local install`、`local start` 和 Local profile
+> 暂不支持；本地模式目前仍需从源码目录运行。
 
 ## 快速开始
 
@@ -231,6 +249,9 @@ cargo clippy   # 代码检查
 cargo fmt      # 代码格式化
 uv run pytest  # 运行 Python server 测试
 ```
+
+维护者打包、版本校验、tag 发布、产物验证和失败恢复流程见
+[`docs/releasing.md`](docs/releasing.md)。
 
 ## 许可证
 

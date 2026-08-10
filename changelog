@@ -35,3 +35,4 @@
 2026-08-03: Extract SessionId into a shared leaf module so audio and core use a neutral session identity without changing routing behavior
 2026-08-03: Reduce main.rs to a thin library entry point and move CLI workflows plus listener orchestration into a lightweight application layer
 2026-08-10: Replace placeholder bundle artwork and generated tray dots with a shared five-bar V-shaped waveform icon, including native macOS template tinting and a red recording state
+2026-08-10: Harden API-mode macOS and Windows packaging with locked inputs, reviewed WiX authoring, pre-tag dry runs, validated portable/installable artifacts, checksums, provenance, and draft-first GitHub Release publication
