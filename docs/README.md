@@ -1,5 +1,11 @@
 # ViberWhisper Documentation
 
+## Maintainer Guides
+
+| Document | Description |
+|---|---|
+| [releasing.md](releasing.md) | Prepare, dry-run, publish, verify, and recover macOS/Windows releases |
+
 ## Architecture
 
 Module-level design docs covering structs, methods, and dependencies.
@@ -37,7 +43,7 @@ Implementation plans and technical specs for each feature.
 | [08-llm-post-processing.md](plan/08-llm-post-processing.md) | Done | LLM text post-processing: punctuation, filler removal, preheat/conservative modes |
 | [09-floating-window.md](plan/09-floating-window.md) | Superseded | Historical cross-platform floating overlay design, removed by plan 14 |
 | [10-objc2-overlay-migration.md](plan/10-objc2-overlay-migration.md) | Historical | Historical macOS overlay binding migration |
-| [11-packaging-and-ci.md](plan/11-packaging-and-ci.md) | Done | Cross-platform CI plus tag-triggered macOS DMG and Windows MSI release packaging |
+| [11-packaging-and-ci.md](plan/11-packaging-and-ci.md) | Superseded | Original cross-platform CI and unexercised tag-release design; hardened by plan 27 |
 | [12-local-gemma-service.md](plan/12-local-gemma-service.md) | Done | Local Gemma inference service, lifecycle management, and CLI integration |
 | [14-tray-recording-control.md](plan/14-tray-recording-control.md) | Done | Tray-only control, input-independent recording state, and strict SessionId routing |
 | [16-session-owned-chunk-results.md](plan/16-session-owned-chunk-results.md) | Done | Keep chunk state and transcription results owned by one session; workers return events instead of mutating shared chunk storage |
@@ -46,3 +52,4 @@ Implementation plans and technical specs for each feature.
 | [24-rust-2018-module-layout.md](plan/24-rust-2018-module-layout.md) | Done | Replace every `mod.rs` module entry with the Rust 2018-style sibling module file layout |
 | [25-test-suite-pruning.md](plan/25-test-suite-pruning.md) | Done | Remove redundant tests and make retained coverage deterministic, fast, and proportional to risk |
 | [26-symbol-icon-refresh.md](plan/26-symbol-icon-refresh.md) | Done | Replace placeholder bundle artwork and generated tray dots with one cross-platform voice-input symbol |
+| [27-release-path-hardening.md](plan/27-release-path-hardening.md) | Implemented | Make API-mode macOS and Windows packages reproducible, manually testable, and safe to publish |

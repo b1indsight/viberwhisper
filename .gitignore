@@ -2,7 +2,6 @@
 
 # Rust build artifacts
 /target/
-/Cargo.lock
 
 # Config with secrets
 /config.json

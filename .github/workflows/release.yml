@@ -1,130 +1,506 @@
-name: Release
+name: Package & Release
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a GitHub Release; requires running the workflow from the exact version tag
+        required: true
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUNDLE_VERSION: "0.11.0"
+  WIX_VERSION: "7.0.0"
 
 jobs:
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
-
-      - name: Install cargo-bundle
-        run: cargo install cargo-bundle
-
-      - name: Build x86_64
-        run: cargo build --release --target x86_64-apple-darwin
-
-      - name: Build aarch64
-        run: cargo build --release --target aarch64-apple-darwin
-
-      - name: Create universal binary
-        run: |
-          lipo -create \
-            target/x86_64-apple-darwin/release/viberwhisper \
-            target/aarch64-apple-darwin/release/viberwhisper \
-            -output target/release/viberwhisper-universal
-
-      - name: Create .app bundle
-        run: cargo bundle --release
-
-      - name: Replace binary with universal binary
-        run: |
-          cp target/release/viberwhisper-universal \
-            target/release/bundle/osx/ViberWhisper.app/Contents/MacOS/viberwhisper
-
-      - name: Create DMG
-        run: |
-          hdiutil create -volname ViberWhisper \
-            -srcfolder target/release/bundle/osx/ViberWhisper.app \
-            -ov -format UDZO \
-            target/release/ViberWhisper.dmg
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-artifacts
-          path: |
-            target/release/ViberWhisper.dmg
-            target/x86_64-apple-darwin/release/viberwhisper
-            target/aarch64-apple-darwin/release/viberwhisper
-
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install WiX Toolset
-        run: |
-          dotnet tool install --global wix
-        shell: pwsh
-
-      - name: Install cargo-wix
-        run: cargo install cargo-wix
-
-      - name: Build release
-        run: cargo build --release --target x86_64-pc-windows-msvc
-
-      - name: Init WiX (if needed)
-        run: |
-          if (!(Test-Path "wix/main.wxs")) { cargo wix init }
-        shell: pwsh
-
-      - name: Create MSI
-        run: cargo wix
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-artifacts
-          path: |
-            target/wix/*.msi
-            target/x86_64-pc-windows-msvc/release/viberwhisper.exe
-
-  release:
-    needs: [build-macos, build-windows]
+  preflight:
+    name: Release metadata
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      tag: ${{ steps.metadata.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          name: macos-artifacts
-          path: artifacts/macos
+          fetch-depth: 0
 
-      - name: Download Windows artifacts
-        uses: actions/download-artifact@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
-          name: windows-artifacts
-          path: artifacts/windows
+          toolchain: stable
 
-      - name: Rename artifacts
+      - name: Validate release metadata
+        id: metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH_REQUESTED: ${{ inputs.publish }}
+        shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          mkdir -p release-assets
-          cp artifacts/macos/target/release/ViberWhisper.dmg "release-assets/ViberWhisper-${TAG}-macos-universal.dmg"
-          cp artifacts/macos/target/x86_64-apple-darwin/release/viberwhisper "release-assets/viberwhisper-${TAG}-macos-x86_64"
-          cp artifacts/macos/target/aarch64-apple-darwin/release/viberwhisper "release-assets/viberwhisper-${TAG}-macos-aarch64"
-          # Find and copy Windows artifacts
-          find artifacts/windows -name "*.msi" -exec cp {} "release-assets/ViberWhisper-${TAG}-windows-x86_64.msi" \;
-          find artifacts/windows -name "viberwhisper.exe" -exec cp {} "release-assets/viberwhisper-${TAG}-windows-x86_64.exe" \;
+          set -euo pipefail
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+          version="$(bash scripts/validate-release-contract.sh)"
+          tag="v${version}"
+
+          if [[ "${PUBLISH_REQUESTED}" == "true" ]]; then
+            if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${tag}" ]]; then
+              echo "Publishing requires dispatching from release tag ${tag}; got ${GITHUB_REF}." >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/master; then
+              echo "Tagged commit ${GITHUB_SHA} is not contained in origin/master." >&2
+              exit 1
+            fi
+            release_lookup="$(mktemp)"
+            if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" >"${release_lookup}" 2>&1; then
+              echo "A GitHub Release already exists for ${tag}." >&2
+              exit 1
+            fi
+            if ! grep -q 'HTTP 404' "${release_lookup}"; then
+              echo "Could not verify whether ${tag} already has a GitHub Release:" >&2
+              cat "${release_lookup}" >&2
+              exit 1
+            fi
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+  package-macos:
+    name: Package macOS universal
+    needs: preflight
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      ASSET_PREFIX: ViberWhisper-${{ needs.preflight.outputs.tag }}-macos-universal
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust stable with macOS targets
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
-          files: release-assets/*
-          generate_release_notes: true
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install pinned cargo-bundle
+        shell: bash
+        run: cargo install cargo-bundle --version "${CARGO_BUNDLE_VERSION}" --locked
+
+      - name: Build locked release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Build universal application bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/release
+          cp target/aarch64-apple-darwin/release/viberwhisper target/release/viberwhisper
+          CARGO_BUNDLE_SKIP_BUILD=1 cargo bundle --release --format osx
+          lipo -create \
+            target/aarch64-apple-darwin/release/viberwhisper \
+            target/x86_64-apple-darwin/release/viberwhisper \
+            -output target/release/bundle/osx/ViberWhisper.app/Contents/MacOS/viberwhisper
+
+      - name: Locate and validate application bundle
+        id: app
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/osx/ViberWhisper.app"
+          binary="${app}/Contents/MacOS/viberwhisper"
+          plist="${app}/Contents/Info.plist"
+          test -x "${binary}"
+          test -f "${plist}"
+          test -f "${app}/Contents/Resources/ViberWhisper.icns"
+
+          archs="$(lipo -archs "${binary}")"
+          [[ " ${archs} " == *" arm64 "* ]]
+          [[ " ${archs} " == *" x86_64 "* ]]
+
+          plutil -lint "${plist}"
+          [[ "$(plutil -extract CFBundleIdentifier raw -o - "${plist}")" == "com.b1indsight.viberwhisper" ]]
+          [[ "$(plutil -extract CFBundleShortVersionString raw -o - "${plist}")" == "${{ needs.preflight.outputs.version }}" ]]
+          [[ "$(plutil -extract LSUIElement raw -o - "${plist}")" == "true" ]]
+          test -n "$(plutil -extract NSMicrophoneUsageDescription raw -o - "${plist}")"
+
+          min_versions="$(otool -l "${binary}" | awk '/minos/{print $2}')"
+          test -n "${min_versions}"
+          if printf '%s\n' "${min_versions}" | awk '$1 != "11.0" { exit 1 }'; then
+            :
+          else
+            echo "Unexpected macOS deployment target(s): ${min_versions}" >&2
+            exit 1
+          fi
+
+          echo "path=${app}" >> "${GITHUB_OUTPUT}"
+
+      - name: Ad-hoc sign and verify application
+        env:
+          APP_PATH: ${{ steps.app.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          codesign --force --deep --sign - "${APP_PATH}"
+          codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
+
+      - name: Create and inspect distributions
+        env:
+          APP_PATH: ${{ steps.app.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets dmg-root archive-root
+          ditto "${APP_PATH}" dmg-root/ViberWhisper.app
+          ln -s /Applications dmg-root/Applications
+          hdiutil create \
+            -volname ViberWhisper \
+            -srcfolder dmg-root \
+            -format UDZO \
+            -ov \
+            "release-assets/${ASSET_PREFIX}.dmg"
+
+          ditto "${APP_PATH}" archive-root/ViberWhisper.app
+          tar -C archive-root -czf "release-assets/${ASSET_PREFIX}.tar.gz" ViberWhisper.app
+
+          mount_dir="$(mktemp -d)"
+          trap 'hdiutil detach "${mount_dir}" >/dev/null 2>&1 || true' EXIT
+          hdiutil attach \
+            -readonly \
+            -nobrowse \
+            -mountpoint "${mount_dir}" \
+            "release-assets/${ASSET_PREFIX}.dmg"
+          test -x "${mount_dir}/ViberWhisper.app/Contents/MacOS/viberwhisper"
+          test -L "${mount_dir}/Applications"
+          hdiutil detach "${mount_dir}"
+          trap - EXIT
+
+          tar -tzf "release-assets/${ASSET_PREFIX}.tar.gz" > archive-contents.txt
+          grep -q '^ViberWhisper.app/Contents/MacOS/viberwhisper$' archive-contents.txt
+          test "$(tar -tvzf "release-assets/${ASSET_PREFIX}.tar.gz" ViberWhisper.app/Contents/MacOS/viberwhisper | cut -c4)" == "x"
+          test "$(find release-assets -maxdepth 1 -type f | wc -l | tr -d ' ')" == "2"
+
+      - name: Upload macOS distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-macos
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  package-windows:
+    name: Package Windows x86_64
+    needs: preflight
+    runs-on: windows-latest
+    env:
+      ASSET_PREFIX: ViberWhisper-${{ needs.preflight.outputs.tag }}-windows-x86_64
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install pinned WiX Toolset
+        shell: pwsh
+        run: dotnet tool install --global wix --version $env:WIX_VERSION
+
+      - name: Build locked static-CRT executable
+        shell: pwsh
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Smoke-test executable and runtime dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "target/x86_64-pc-windows-msvc/release/viberwhisper.exe"
+          & $exe --help | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "viberwhisper --help failed" }
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (!(Test-Path $vswhere)) { throw "vswhere.exe not found" }
+          $dumpbin = (& $vswhere -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1)
+          if (!$dumpbin) { throw "dumpbin.exe not found" }
+
+          $dependencies = (& $dumpbin /dependents $exe | Out-String)
+          $dependencies | Write-Host
+          if ($dependencies -match '(?im)^\s*(VCRUNTIME|MSVCP)[^\s]*\.dll\s*$') {
+            throw "Release executable still depends on the dynamic MSVC runtime"
+          }
+
+      - name: Build and validate MSI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $exe = (Resolve-Path "target/x86_64-pc-windows-msvc/release/viberwhisper.exe").Path
+          $msi = "release-assets/$env:ASSET_PREFIX.msi"
+          $releaseVersion = "${{ needs.preflight.outputs.version }}"
+          $fixtureMsi = Join-Path $env:RUNNER_TEMP "ViberWhisper-upgrade-fixture.msi"
+          $fixtureExe = Join-Path $env:RUNNER_TEMP "viberwhisper-fixture.exe"
+          $fixtureMarker = Join-Path $env:RUNNER_TEMP "legacy-fixture.txt"
+          Copy-Item $exe $fixtureExe
+          [IO.File]::AppendAllText($fixtureExe, "`nVIBERWHISPER-UPGRADE-FIXTURE`n")
+          Set-Content -Path $fixtureMarker -NoNewline -Value "remove this during major upgrade"
+
+          wix build wix/main.wxs `
+            -arch x64 `
+            -d "ProductVersion=$releaseVersion" `
+            -d "ExePath=$exe" `
+            -pdbtype none `
+            -o $msi
+          if ($LASTEXITCODE -ne 0) { throw "WiX build failed" }
+
+          wix build wix/upgrade-fixture.wxs `
+            -arch x64 `
+            -d "ExePath=$fixtureExe" `
+            -d "MarkerPath=$fixtureMarker" `
+            -pdbtype none `
+            -o $fixtureMsi
+          if ($LASTEXITCODE -ne 0) { throw "WiX upgrade-fixture build failed" }
+
+          wix msi validate $msi
+          if ($LASTEXITCODE -ne 0) { throw "MSI validation failed" }
+
+          $extract = Join-Path $env:RUNNER_TEMP "msi-extract"
+          New-Item -ItemType Directory -Force $extract | Out-Null
+          $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            "/a", (Resolve-Path $msi).Path, "/qn", "TARGETDIR=$extract"
+          )
+          if ($process.ExitCode -ne 0) { throw "MSI administrative extraction failed: $($process.ExitCode)" }
+
+          $installedExe = @(Get-ChildItem $extract -Recurse -File -Filter viberwhisper.exe)
+          $installedLicense = @(Get-ChildItem $extract -Recurse -File -Filter LICENSE)
+          if ($installedExe.Count -ne 1) { throw "Expected one installed executable, found $($installedExe.Count)" }
+          if ($installedLicense.Count -ne 1) { throw "Expected one installed license, found $($installedLicense.Count)" }
+          if (Get-ChildItem $extract -Recurse -Directory | Where-Object Name -eq "server") {
+            throw "Python server payload must not be included in this release"
+          }
+
+      - name: Test MSI install, upgrade, shortcut, and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $releaseVersion = "${{ needs.preflight.outputs.version }}"
+          $fixtureVersion = "0.0.0"
+          $fixtureMsi = Join-Path $env:RUNNER_TEMP "ViberWhisper-upgrade-fixture.msi"
+          $releaseMsi = (Resolve-Path "release-assets/$env:ASSET_PREFIX.msi").Path
+          $releaseExe = (Resolve-Path "target/x86_64-pc-windows-msvc/release/viberwhisper.exe").Path
+          $releaseDigest = (Get-FileHash -Algorithm SHA256 $releaseExe).Hash
+          $installDir = Join-Path $env:ProgramFiles "ViberWhisper"
+          $installedExe = Join-Path $installDir "viberwhisper.exe"
+          $installedLicense = Join-Path $installDir "LICENSE"
+          $legacyMarker = Join-Path $installDir "legacy-fixture.txt"
+          $shortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\ViberWhisper.lnk"
+
+          function Get-ViberWhisperEntries {
+            @(
+              Get-ItemProperty @(
+                "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+                "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+              ) -ErrorAction SilentlyContinue |
+                Where-Object DisplayName -eq "ViberWhisper"
+            )
+          }
+
+          function Invoke-Msi {
+            param(
+              [Parameter(Mandatory = $true)][ValidateSet("i", "x")][string]$Action,
+              [Parameter(Mandatory = $true)][string]$Package,
+              [Parameter(Mandatory = $true)][string]$Log
+            )
+            $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+              "/$Action", $Package, "/qn", "/norestart", "/l*v", $Log
+            )
+            if ($process.ExitCode -notin @(0, 1641, 3010)) {
+              Get-Content $Log -Tail 200 -ErrorAction SilentlyContinue | Out-Host
+              throw "msiexec /$Action failed with exit code $($process.ExitCode)"
+            }
+          }
+
+          try {
+            Invoke-Msi -Action i -Package $fixtureMsi -Log (Join-Path $env:RUNNER_TEMP "fixture-install.log")
+            $fixtureEntries = @(Get-ViberWhisperEntries)
+            if ($fixtureEntries.Count -ne 1) { throw "Expected one fixture ARP entry" }
+            if ($fixtureEntries[0].DisplayVersion -ne $fixtureVersion) {
+              throw "Fixture ARP version is $($fixtureEntries[0].DisplayVersion), expected $fixtureVersion"
+            }
+            if (!(Test-Path $installedExe) -or !(Test-Path $installedLicense) -or
+                !(Test-Path $legacyMarker) -or !(Test-Path $shortcut)) {
+              throw "Fixture install did not create the frozen baseline payload and shortcut"
+            }
+            if ((Get-FileHash -Algorithm SHA256 $installedExe).Hash -eq $releaseDigest) {
+              throw "Fixture executable must be distinguishable from the release payload"
+            }
+
+            Invoke-Msi -Action i -Package $releaseMsi -Log (Join-Path $env:RUNNER_TEMP "release-upgrade.log")
+            $releaseEntries = @(Get-ViberWhisperEntries)
+            if ($releaseEntries.Count -ne 1) { throw "Expected one ARP entry after major upgrade" }
+            if ($releaseEntries[0].DisplayVersion -ne $releaseVersion) {
+              throw "Release ARP version is $($releaseEntries[0].DisplayVersion), expected $releaseVersion"
+            }
+            if ((Get-FileHash -Algorithm SHA256 $installedExe).Hash -ne $releaseDigest) {
+              throw "Major upgrade did not replace the fixture executable with the release payload"
+            }
+            if (Test-Path $legacyMarker) { throw "Major upgrade left the fixture-only file behind" }
+            & $installedExe --help | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "Installed executable smoke test failed" }
+
+            Invoke-Msi -Action x -Package $releaseEntries[0].PSChildName -Log (Join-Path $env:RUNNER_TEMP "release-uninstall.log")
+            if ((Test-Path $installDir) -or (Test-Path $shortcut)) {
+              throw "Uninstall left installer-owned files or the Start Menu shortcut behind"
+            }
+            if (@(Get-ViberWhisperEntries).Count -ne 0) { throw "Uninstall left an ARP entry behind" }
+          } finally {
+            foreach ($entry in @(Get-ViberWhisperEntries)) {
+              try {
+                Invoke-Msi -Action x -Package $entry.PSChildName -Log (Join-Path $env:RUNNER_TEMP "cleanup-$($entry.PSChildName).log")
+              } catch {
+                Write-Warning "Best-effort MSI cleanup failed: $_"
+              }
+            }
+          }
+
+      - name: Create and inspect portable archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $portable = "portable/ViberWhisper"
+          New-Item -ItemType Directory -Force $portable | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/viberwhisper.exe" $portable
+          Copy-Item LICENSE $portable
+          Compress-Archive -Path $portable -DestinationPath "release-assets/$env:ASSET_PREFIX.zip"
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path "release-assets/$env:ASSET_PREFIX.zip"))
+          try {
+            $names = @($zip.Entries | ForEach-Object FullName)
+            if ($names -notcontains "ViberWhisper/viberwhisper.exe") { throw "Portable executable missing" }
+            if ($names -notcontains "ViberWhisper/LICENSE") { throw "Portable license missing" }
+            if ($names.Count -ne 2) { throw "Unexpected portable archive entries: $($names -join ', ')" }
+          } finally {
+            $zip.Dispose()
+          }
+
+          $assets = @(Get-ChildItem release-assets -File)
+          if ($assets.Count -ne 2) { throw "Expected two Windows assets, found $($assets.Count)" }
+
+      - name: Upload Windows distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-windows
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    if: inputs.publish && github.ref_type == 'tag'
+    needs: [preflight, package-macos, package-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Verify release tag still targets the event commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          object="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.type + " " + .object.sha')"
+          read -r object_type object_sha <<< "${object}"
+          while [[ "${object_type}" == "tag" ]]; do
+            object="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}" --jq '.object.type + " " + .object.sha')"
+            read -r object_type object_sha <<< "${object}"
+          done
+          if [[ "${object_type}" != "commit" || "${object_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "Release tag ${RELEASE_TAG} resolves to ${object_type} ${object_sha}, expected commit ${GITHUB_SHA}." >&2
+            exit 1
+          fi
+
+      - name: Download release distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Validate release assets and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.preflight.outputs.tag }}"
+          expected=(
+            "ViberWhisper-${tag}-macos-universal.dmg"
+            "ViberWhisper-${tag}-macos-universal.tar.gz"
+            "ViberWhisper-${tag}-windows-x86_64.msi"
+            "ViberWhisper-${tag}-windows-x86_64.zip"
+          )
+
+          for asset in "${expected[@]}"; do
+            test -s "release-assets/${asset}"
+          done
+          test "$(find release-assets -maxdepth 1 -type f | wc -l | tr -d ' ')" == "${#expected[@]}"
+
+          (
+            cd release-assets
+            printf '%s\n' "${expected[@]}" | sort | xargs sha256sum > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Attest release provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release-assets/*
+
+      - name: Create complete draft and publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.preflight.outputs.tag }}"
+          create_args=(
+            "${tag}"
+            release-assets/*
+            --repo "${GITHUB_REPOSITORY}"
+            --verify-tag
+            --draft
+            --generate-notes
+            --title "${tag}"
+          )
+          gh release create "${create_args[@]}"
+
+          object="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq '.object.type + " " + .object.sha')"
+          read -r object_type object_sha <<< "${object}"
+          while [[ "${object_type}" == "tag" ]]; do
+            object="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}" --jq '.object.type + " " + .object.sha')"
+            read -r object_type object_sha <<< "${object}"
+          done
+          if [[ "${object_type}" != "commit" || "${object_sha}" != "${GITHUB_SHA}" ]]; then
+            echo "Release tag moved after packaging; leaving the draft unpublished for inspection." >&2
+            exit 1
+          fi
+
+          gh release edit "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false

@@ -69,16 +69,11 @@ gh pr create --base master --head feat/my-change  # Open a GitHub PR for review
 # macOS
 cargo install cargo-bundle    # Install bundler (one-time)
 cargo bundle --release        # Create .app bundle
-hdiutil create -volname ViberWhisper -srcfolder target/release/bundle/osx/ViberWhisper.app -ov -format UDZO ViberWhisper.dmg  # Create DMG
-
-# Windows
-cargo install cargo-wix       # Install WiX tooling (one-time)
-cargo wix init                # Generate wix/main.wxs template (one-time)
-cargo wix                     # Build .msi installer
-
-# Release
-git tag v0.2.0 && git push origin v0.2.0  # Trigger CI release
 ```
+
+The canonical cross-platform packaging, dry-run, version/tag, publication, verification, and
+recovery commands are maintained in [`docs/releasing.md`](docs/releasing.md). Do not generate
+`wix/main.wxs` during a release or push a version tag before following that runbook.
 
 
 ## Project Structure
