@@ -36,3 +36,4 @@
 2026-08-03: Reduce main.rs to a thin library entry point and move CLI workflows plus listener orchestration into a lightweight application layer
 2026-08-10: Replace placeholder bundle artwork and generated tray dots with a shared five-bar V-shaped waveform icon, including native macOS template tinting and a red recording state
 2026-08-10: Harden API-mode macOS and Windows packaging with locked inputs, reviewed WiX authoring, pre-tag dry runs, validated portable/installable artifacts, checksums, provenance, and draft-first GitHub Release publication
+2026-08-10: Expand Hold and Toggle hotkeys from F1–F12 to named single keyboard keys, including standalone right Alt/Option, canonical aliases, platform-aware validation, and passthrough warnings

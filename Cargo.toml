@@ -32,6 +32,7 @@ tempfile = "3"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSDate", "NSRunLoop"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSEvent"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGEventSource", "CGEventTypes", "CGRemoteOperation"] }
 
 [package.metadata.bundle]
 name = "ViberWhisper"
