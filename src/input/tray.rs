@@ -1,12 +1,16 @@
 use std::io::Cursor;
+#[cfg(not(test))]
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(not(test))]
 use tracing::warn;
 #[cfg(not(test))]
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{MenuEvent, MenuId};
 #[cfg(not(test))]
-use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent, TrayIconId};
 
 const MIN_DEBOUNCE_WINDOW: Duration = Duration::from_millis(300);
 const STATUS_IDLE_PNG: &[u8] = include_bytes!("../../assets/status-idle.png");
@@ -17,6 +21,13 @@ const STATUS_RECORDING_PNG: &[u8] = include_bytes!("../../assets/status-recordin
 pub enum TrayAction {
     ToggleRecording,
     Exit,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(test, allow(dead_code))]
+pub enum TrayEvent {
+    Icon(TrayIconEvent),
+    Menu(MenuEvent),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +78,28 @@ impl ClickDebounce {
     }
 }
 
+fn classify_icon_event(tray_icon_id: &TrayIconId, event: &TrayIconEvent) -> ClickPhase {
+    if event.id() != tray_icon_id {
+        return ClickPhase::Other;
+    }
+    match event {
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } => ClickPhase::LeftUp,
+        TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        } => ClickPhase::LeftDouble,
+        _ => ClickPhase::Other,
+    }
+}
+
+fn is_exit_menu_event(exit_item_id: &MenuId, event: &MenuEvent) -> bool {
+    event.id == *exit_item_id
+}
+
 fn effective_debounce_window(platform_interval: Option<Duration>) -> Duration {
     platform_interval
         .unwrap_or(MIN_DEBOUNCE_WINDOW)
@@ -91,7 +124,13 @@ pub struct TrayManager;
 
 #[cfg(not(test))]
 impl TrayManager {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    /// Construct the process's single tray manager and install its process-lifetime event handlers.
+    ///
+    /// `tray-icon` stores handlers in one-shot global cells, so another manager in the same process
+    /// cannot replace the callback.
+    pub fn new(
+        notify: impl Fn(TrayEvent) + Send + Sync + 'static,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         prepare_platform_application()?;
         let (idle_source, idle_is_template) = status_icon_source(false);
         let (recording_source, _) = status_icon_source(true);
@@ -110,6 +149,9 @@ impl TrayManager {
         menu.append(&separator)?;
         menu.append(&exit_item)?;
 
+        // tray-icon stores its handler choice in one-shot global cells. Install the
+        // process-lifetime callbacks before the native icon can emit the first event.
+        install_native_handlers(notify);
         let tray_icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
@@ -155,40 +197,31 @@ impl TrayManager {
         }
     }
 
-    pub fn check_action(&mut self) -> Option<TrayAction> {
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == self.exit_item_id {
-                return Some(TrayAction::Exit);
+    pub fn handle_event(&mut self, event: TrayEvent) -> Option<TrayAction> {
+        match event {
+            TrayEvent::Menu(event) => {
+                is_exit_menu_event(&self.exit_item_id, &event).then_some(TrayAction::Exit)
+            }
+            TrayEvent::Icon(event) => {
+                let phase = classify_icon_event(self.tray_icon.id(), &event);
+                self.click_debounce
+                    .accept(phase, Instant::now())
+                    .then_some(TrayAction::ToggleRecording)
             }
         }
-
-        let now = Instant::now();
-        let mut toggle = false;
-        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            if event.id() != self.tray_icon.id() {
-                continue;
-            }
-            let phase = match event {
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => ClickPhase::LeftUp,
-                TrayIconEvent::DoubleClick {
-                    button: MouseButton::Left,
-                    ..
-                } => ClickPhase::LeftDouble,
-                _ => ClickPhase::Other,
-            };
-            toggle |= self.click_debounce.accept(phase, now);
-        }
-
-        toggle.then_some(TrayAction::ToggleRecording)
     }
+}
 
-    pub fn update(&self) {
-        pump_platform_events();
-    }
+#[cfg(not(test))]
+fn install_native_handlers(notify: impl Fn(TrayEvent) + Send + Sync + 'static) {
+    let notify = Arc::new(notify);
+    let icon_notify = Arc::clone(&notify);
+    TrayIconEvent::set_event_handler(Some(move |event| {
+        icon_notify(TrayEvent::Icon(event));
+    }));
+    MenuEvent::set_event_handler(Some(move |event| {
+        notify(TrayEvent::Menu(event));
+    }));
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -208,17 +241,17 @@ fn prepare_platform_application() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 impl TrayManager {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        _notify: impl Fn(TrayEvent) + Send + Sync + 'static,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(TrayManager)
     }
 
     pub fn set_recording(&mut self, _recording: bool) {}
 
-    pub fn check_action(&mut self) -> Option<TrayAction> {
+    pub fn handle_event(&mut self, _event: TrayEvent) -> Option<TrayAction> {
         None
     }
-
-    pub fn update(&self) {}
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -243,98 +276,14 @@ fn platform_double_click_interval() -> Option<Duration> {
     None
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
-fn pump_platform_events() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApp, NSEventMask};
-    use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let app = NSApp(mtm);
-    loop {
-        let event = app.nextEventMatchingMask_untilDate_inMode_dequeue(
-            NSEventMask::all(),
-            None::<&NSDate>,
-            unsafe { NSDefaultRunLoopMode },
-            true,
-        );
-        let Some(event) = event else { break };
-        app.sendEvent(&event);
-    }
-}
-
-#[cfg(all(target_os = "windows", not(test)))]
-fn pump_platform_events() {
-    use std::mem::MaybeUninit;
-    use std::ptr;
-
-    unsafe {
-        let mut msg = MaybeUninit::<windows_event_loop::MSG>::zeroed();
-        while windows_event_loop::PeekMessageW(
-            msg.as_mut_ptr(),
-            ptr::null_mut(),
-            0,
-            0,
-            windows_event_loop::PM_REMOVE,
-        ) != 0
-        {
-            let msg = msg.assume_init();
-            windows_event_loop::TranslateMessage(&msg);
-            windows_event_loop::DispatchMessageW(&msg);
-        }
-    }
-}
-
-#[cfg(all(not(any(target_os = "macos", target_os = "windows")), not(test)))]
-fn pump_platform_events() {}
-
 #[cfg(all(target_os = "windows", not(test)))]
 #[allow(non_snake_case, clippy::upper_case_acronyms)]
 mod windows_event_loop {
-    use std::ffi::c_void;
-
-    pub type BOOL = i32;
-    pub type HWND = *mut c_void;
     pub type UINT = u32;
-    pub type WPARAM = usize;
-    pub type LPARAM = isize;
-    pub type LRESULT = isize;
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct POINT {
-        pub x: i32,
-        pub y: i32,
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct MSG {
-        pub hwnd: HWND,
-        pub message: UINT,
-        pub wParam: WPARAM,
-        pub lParam: LPARAM,
-        pub time: u32,
-        pub pt: POINT,
-        pub lPrivate: u32,
-    }
-
-    pub const PM_REMOVE: UINT = 0x0001;
 
     #[link(name = "user32")]
     unsafe extern "system" {
-        pub fn DispatchMessageW(msg: *const MSG) -> LRESULT;
         pub fn GetDoubleClickTime() -> UINT;
-        pub fn PeekMessageW(
-            msg: *mut MSG,
-            hwnd: HWND,
-            min_filter: UINT,
-            max_filter: UINT,
-            remove: UINT,
-        ) -> BOOL;
-        pub fn TranslateMessage(msg: *const MSG) -> BOOL;
     }
 }
 
@@ -383,6 +332,19 @@ fn set_native_icon(tray_icon: &TrayIcon, icon: Icon, _is_template: bool) -> tray
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tray_icon::dpi::PhysicalPosition;
+    use tray_icon::menu::MenuId;
+    use tray_icon::{Rect, TrayIconId};
+
+    fn left_up(id: &str) -> TrayIconEvent {
+        TrayIconEvent::Click {
+            id: TrayIconId::new(id),
+            position: PhysicalPosition::new(0.0, 0.0),
+            rect: Rect::default(),
+            button: tray_icon::MouseButton::Left,
+            button_state: tray_icon::MouseButtonState::Up,
+        }
+    }
 
     #[test]
     fn embedded_status_icons_are_32px_rgba_with_transparency() {
@@ -434,5 +396,31 @@ mod tests {
         assert!(!debounce.accept(ClickPhase::LeftDouble, base + Duration::from_millis(400)));
         assert!(!debounce.accept(ClickPhase::LeftUp, base + Duration::from_millis(401)));
         assert!(debounce.accept(ClickPhase::LeftUp, base + Duration::from_millis(402)));
+    }
+
+    #[test]
+    fn native_events_are_filtered_by_the_owning_tray_and_menu_ids() {
+        assert_eq!(
+            classify_icon_event(&TrayIconId::new("ours"), &left_up("ours")),
+            ClickPhase::LeftUp
+        );
+        assert_eq!(
+            classify_icon_event(&TrayIconId::new("ours"), &left_up("other")),
+            ClickPhase::Other
+        );
+
+        let exit_id = MenuId::new("exit");
+        assert!(is_exit_menu_event(
+            &exit_id,
+            &MenuEvent {
+                id: exit_id.clone()
+            }
+        ));
+        assert!(!is_exit_menu_event(
+            &exit_id,
+            &MenuEvent {
+                id: MenuId::new("status")
+            }
+        ));
     }
 }

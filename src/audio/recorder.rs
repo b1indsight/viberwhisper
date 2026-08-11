@@ -91,6 +91,7 @@ pub struct AudioRecorder {
     flushed_samples: usize,
     /// Number of complete chunks observed by the audio callback.
     ready_chunk_count: Arc<AtomicUsize>,
+    chunk_notifier: Arc<dyn Fn(SessionId) + Send + Sync>,
     /// Maximum mono frames per chunk. `None` means unlimited and `Some(0)` suppresses output.
     chunk_max_samples: Option<usize>,
     /// Production policy: max chunk duration in seconds.
@@ -99,8 +100,8 @@ pub struct AudioRecorder {
     max_chunk_size_bytes: u64,
 }
 
-/// Shared logic for both I16 and F32 audio callbacks: append mono samples to the
-/// buffer and signal a flush when the chunk threshold is crossed.
+/// Shared logic for both I16 and F32 audio callbacks: append mono samples and
+/// report whether the callback crossed a new chunk boundary.
 fn push_mono_chunk(
     mono: Vec<i16>,
     buffer: &Mutex<Vec<i16>>,
@@ -108,7 +109,7 @@ fn push_mono_chunk(
     ready_chunk_count: &AtomicUsize,
     sample_rate: u32,
     chunk_max_samples: usize,
-) {
+) -> bool {
     let len = mono.len();
     buffer.lock().unwrap().extend_from_slice(&mono);
     let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
@@ -120,13 +121,18 @@ fn push_mono_chunk(
         );
     }
     if let Some(ready_chunks) = total.checked_div(chunk_max_samples) {
-        ready_chunk_count.store(ready_chunks, Ordering::Release);
+        let previous = ready_chunk_count.swap(ready_chunks, Ordering::AcqRel);
+        return ready_chunks > previous;
     }
+    false
 }
 
 impl AudioRecorder {
     /// Create a recorder with the module-owned production chunk policy.
-    pub fn with_config(config: &AudioConfig) -> Self {
+    pub fn with_config(
+        config: &AudioConfig,
+        chunk_notifier: impl Fn(SessionId) + Send + Sync + 'static,
+    ) -> Self {
         let gain = config.mic_gain;
         let max_chunk_duration_secs = config.max_chunk_duration_secs;
         let max_chunk_size_bytes = config.max_chunk_size_bytes;
@@ -163,6 +169,7 @@ impl AudioRecorder {
             sample_rate: 44100,
             flushed_samples: 0,
             ready_chunk_count: Arc::new(AtomicUsize::new(0)),
+            chunk_notifier: Arc::new(chunk_notifier),
             chunk_max_samples: None,
             max_chunk_duration_secs,
             max_chunk_size_bytes,
@@ -221,6 +228,7 @@ impl AudioRecorder {
         let buffer = Arc::clone(&self.buffer);
         let sample_count = Arc::clone(&self.sample_count);
         let ready_chunk_count = Arc::clone(&self.ready_chunk_count);
+        let chunk_notifier = Arc::clone(&self.chunk_notifier);
         let chunk_max_samples = self.chunk_max_samples.unwrap_or(0);
         let gain = self.gain;
 
@@ -240,14 +248,16 @@ impl AudioRecorder {
                                 (avg * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16
                             })
                             .collect();
-                        push_mono_chunk(
+                        if push_mono_chunk(
                             mono,
                             &buffer,
                             &sample_count,
                             &ready_chunk_count,
                             sample_rate,
                             chunk_max_samples,
-                        );
+                        ) {
+                            chunk_notifier(session_id);
+                        }
                     }
                 },
                 move |err| error!(error = %err, "Stream error"),
@@ -265,14 +275,16 @@ impl AudioRecorder {
                             })
                             .map(|s| s as i16)
                             .collect();
-                        push_mono_chunk(
+                        if push_mono_chunk(
                             mono,
                             &buffer,
                             &sample_count,
                             &ready_chunk_count,
                             sample_rate,
                             chunk_max_samples,
-                        );
+                        ) {
+                            chunk_notifier(session_id);
+                        }
                     }
                 },
                 move |err| error!(error = %err, "Stream error"),
@@ -300,9 +312,10 @@ impl AudioRecorder {
 
     /// Encode and return the next complete in-memory chunk, if one is ready.
     pub fn take_ready_chunk(&mut self) -> Option<ReadyChunk> {
-        if !self.recording.load(Ordering::Relaxed) || self.active_session_id.is_none() {
+        if !self.recording.load(Ordering::Relaxed) {
             return None;
         }
+        let session_id = self.active_session_id?;
         let chunk_max_samples = self.chunk_max_samples.filter(|&samples| samples > 0)?;
 
         let flushed_chunk_count = self.flushed_samples / chunk_max_samples;
@@ -319,27 +332,26 @@ impl AudioRecorder {
                 debug!(
                     total_samples = total_samples,
                     chunk_size = chunk_max_samples,
-                    "Chunk count is ahead of buffered samples; retrying later"
+                    "Chunk count is ahead of buffered samples; leaving readiness pending"
                 );
                 return None;
             }
             buffer[..chunk_max_samples].to_vec()
         };
 
-        match encode_i16_wav(&chunk_samples, self.sample_rate) {
-            Ok(chunk) => {
-                self.buffer.lock().unwrap().drain(..chunk_max_samples);
-                self.flushed_samples = chunk_end;
-                Some(ReadyChunk {
-                    session_id: self.active_session_id?,
-                    chunk,
-                })
+        let chunk = match encode_i16_wav(&chunk_samples, self.sample_rate) {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Failed to encode in-recording chunk; retaining PCM until stop"
+                );
+                return None;
             }
-            Err(e) => {
-                warn!(error = %e, "Failed to encode in-recording chunk; will retry next cycle");
-                None
-            }
-        }
+        };
+        self.buffer.lock().unwrap().drain(..chunk_max_samples);
+        self.flushed_samples = chunk_end;
+        Some(ReadyChunk { session_id, chunk })
     }
 
     #[instrument(skip(self))]
@@ -519,6 +531,7 @@ mod tests {
             sample_rate: 16000,
             flushed_samples: 0,
             ready_chunk_count: Arc::new(AtomicUsize::new(0)),
+            chunk_notifier: Arc::new(|_| {}),
             chunk_max_samples: Some(chunk_max_samples),
             max_chunk_duration_secs: 0,
             max_chunk_size_bytes: 0,
@@ -549,6 +562,40 @@ mod tests {
         for ready in [first, second, third].into_iter().flatten() {
             assert!(hound::WavReader::new(std::io::Cursor::new(ready.chunk.bytes())).is_ok());
         }
+    }
+
+    #[test]
+    fn each_new_chunk_boundary_is_reported_to_the_callback() {
+        let buffer = Mutex::new(Vec::new());
+        let sample_count = AtomicUsize::new(0);
+        let ready_chunk_count = AtomicUsize::new(0);
+
+        assert!(!push_mono_chunk(
+            vec![1; 5],
+            &buffer,
+            &sample_count,
+            &ready_chunk_count,
+            10,
+            10,
+        ));
+        assert!(push_mono_chunk(
+            vec![1; 5],
+            &buffer,
+            &sample_count,
+            &ready_chunk_count,
+            10,
+            10,
+        ));
+        assert!(push_mono_chunk(
+            vec![2; 10],
+            &buffer,
+            &sample_count,
+            &ready_chunk_count,
+            10,
+            10,
+        ));
+
+        assert_eq!(ready_chunk_count.load(Ordering::Acquire), 2);
     }
 
     #[test]

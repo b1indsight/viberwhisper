@@ -100,10 +100,31 @@ The active states carry only a monotonically increasing `SessionId`; input sourc
 
 The machine consumes source-free requests plus `SessionStarted`, `SessionStartFailed`, `SessionStopped`, and `SessionStopFailed` results. It emits composite `StartSession` and `StopSession` effects instead of exposing recorder/orchestrator startup phases.
 
-`application::listener` executes `StartSession` as an all-or-nothing recorder/orchestrator acquisition with rollback. `StopSession` stops the recorder, submits tail chunks in order, finishes orchestrator convergence, and runs the existing post-processing and text-injection path. The state machine changes the tray to idle when it accepts a stop and restores the recording indicator if the recorder remains active.
+`application::listener` executes `StartSession` as an all-or-nothing recorder/orchestrator
+acquisition with rollback. `StopSession` stops the recorder and submits tail chunks in order, then
+starts a session-scoped background task for orchestrator convergence, post-processing, and text
+injection. The machine remains in `Stopping` until the matching completion event returns through
+the application event loop. The state machine changes the tray to idle when it accepts a stop and
+restores the recording indicator if the recorder remains active.
 
 Exit is represented as `ShutdownRequested`. It cancels recorder/orchestrator work, resets tray state, suppresses final text injection, and exits only after `ReadyToExit` is emitted.
 
 ## Main Integration Notes
 
-`application` loads one `ConfigDocument`, asks `runtime_config` for a typed workflow configuration, and passes each narrow value to its consumer. API and Local backends reuse the same recording/orchestration pipeline; no endpoint rewriting or persisted-document mutation occurs in the application layer. `main.rs` only delegates process startup to the library entry point.
+`application` loads one `ConfigDocument`, asks `runtime_config` for a typed workflow configuration,
+and passes each narrow value to its consumer. Listener mode then creates one main-thread winit
+`EventLoop<AppEvent>` in `ControlFlow::Wait` mode. Hotkey, tray/menu, audio-readiness, and background
+completion producers use `EventLoopProxy` to wake that loop; winit owns AppKit/Win32 dispatch and no
+window is created. CLI-only workflows do not construct the event loop.
+
+`src/application/listener/event_loop.rs` normalizes source events, executes state-machine effects,
+drains ready chunks, and coordinates background finalization. Winit types remain in the application
+layer. `core`, `audio`, and `input` expose only their existing domain values or narrow callbacks.
+Finalization uses an atomic cancellation flag checked before post-processing and immediately before
+the final text injection. Exit records cancellation without waiting for an injection already in
+progress. Cancellation observed before the final check suppresses delivery, while an injection that
+has already begun may complete.
+
+API and Local backends reuse the same recording/orchestration pipeline; no endpoint rewriting or
+persisted-document mutation occurs in the application layer. `main.rs` only delegates process
+startup to the library entry point.

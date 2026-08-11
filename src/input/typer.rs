@@ -1,6 +1,6 @@
 use tracing::info;
 
-pub trait TextTyper {
+pub trait TextTyper: Send + Sync {
     fn type_text(&self, text: &str) -> Result<(), Box<dyn std::error::Error>>;
 }
 

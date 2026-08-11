@@ -29,15 +29,19 @@ pub enum HotkeyEvent {
 
 Note: `Released` is only emitted for `Hold` source (toggle mode uses press-only semantics).
 
-**`HotkeyManager`**
+**`start_hotkey_listener(config, notify)`**
 
 ```rust
-pub struct HotkeyManager {
-    events: Receiver<HotkeyEvent>,
-}
+pub fn start_hotkey_listener(
+    config: &HotkeyConfig,
+    notify: impl Fn(HotkeyEvent) + Send + 'static,
+);
 ```
 
-Spawns an `rdev::listen` thread that maps native events into an ordered channel. Per-binding key-down state suppresses operating-system key-repeat events so one physical toggle press produces one toggle action.
+Starts the process-lifetime `rdev::listen` thread, maps native events, and invokes the supplied
+callback. The application callback forwards each event through winit's `EventLoopProxy`, which wakes
+the main-thread event loop without polling. Per-binding key-down state suppresses operating-system
+key-repeat events so one physical toggle press produces one toggle action.
 
 **`HotkeyConfig`**
 
@@ -62,7 +66,7 @@ Because the core event carries no source, Hold release, Toggle, and tray input c
 
 ### Key Methods
 
-**`HotkeyManager::new(config: &HotkeyConfig) -> Self`**
+**`start_hotkey_listener(config, notify)`**
 
 - `HotkeyConfig::validate(&InputSection)` parses and validates both bindings before construction.
 - Empty strings disable a binding, including both bindings for tray-only control; duplicate non-empty bindings are rejected.
@@ -71,10 +75,8 @@ Because the core event carries no source, Hold release, Toggle, and tray input c
   plus right Alt by layouts that use AltGr. Validation rejects a `LEFTCTRL`/`RIGHTALT` pair so one
   physical AltGr press cannot enqueue both configured recording actions.
 - Spawns the listener thread without blocking application startup.
-
-**`check_event(&self) -> Option<HotkeyEvent>`**
-
-Non-blockingly receives the oldest pending event. Called from the main loop on each iteration; later events remain queued in their original order.
+- Delivers mapped press/release events directly to the supplied non-blocking callback; the listener
+  thread never runs recording state transitions itself.
 
 **`parse_key(s: &str) -> Option<Key>`**
 
@@ -119,12 +121,14 @@ their existing repeat suppression.
 ### `TextTyper` Trait
 
 ```rust
-pub trait TextTyper {
+pub trait TextTyper: Send + Sync {
     fn type_text(&self, text: &str) -> Result<(), Box<dyn std::error::Error>>;
 }
 ```
 
 Platform implementations are in `src/platform/`. See [platform.md](platform.md).
+The thread-safety contract allows final transcription delivery to run outside the native event-loop
+thread.
 
 ### `MockTyper`
 
@@ -144,6 +148,7 @@ pub struct TrayManager {
     status_item: MenuItem,
     exit_item_id: MenuId,
     click_debounce: ClickDebounce,
+    handler_installed: bool,
 }
 ```
 
@@ -165,25 +170,31 @@ asset's explicit red. Windows ignores the template flag and displays the committ
 
 ### Key Methods
 
-**`TrayManager::new() -> Result<Self>`**
+**`TrayManager::new(notify) -> Result<Self>`**
 
 Decodes the embedded idle and recording PNGs, then builds the tray icon with a menu containing:
 title item, status item, separator, and exit item. Corrupt or non-RGBA assets fail tray construction
 with an error, while tests enforce the committed 32×32 dimensions and transparency. Left-click menu
 opening is disabled so left click can toggle recording; right click retains the native context menu.
+Before creating the native icon, construction installs the process-global `tray-icon` and menu
+callbacks with the supplied application callback. `tray-icon 0.21` stores those handlers in one-shot
+global cells, matching the application's single listener and process-lifetime event loop.
 
 **`set_recording(&mut self, recording: bool)`**
 
 Switches the icon, macOS template mode, tooltip, and menu status text based on recording state.
 Native icon/tooltip update failures are logged rather than silently discarded.
 
-**`check_action(&mut self) -> Option<TrayAction>`**
+**`handle_event(&mut self, event: TrayEvent) -> Option<TrayAction>`**
 
-Drains menu events before icon events so Exit has priority. A matching left-button-up event produces `ToggleRecording`; unrelated icon IDs and mouse phases are discarded. Events are drained as one batch using a shared handling timestamp.
+Filters raw events by tray/menu ID and maps a matching left-button-up event to `ToggleRecording`.
+Unrelated icon IDs and mouse phases are discarded; Exit bypasses debounce. Events are handled in
+native delivery order, and once Exit transitions the core to `ShuttingDown`, later recording input
+is rejected.
 
-**`update(&self)`**
-
-Pumps pending AppKit or Win32 events without creating a window. On macOS tray setup also enforces Accessory activation policy. This event pump is required for right-click menu and icon event delivery.
+The main-thread winit loop owns AppKit/Win32 dispatch in `ControlFlow::Wait` mode. `TrayManager` no
+longer exposes a polling receiver or a manual platform event pump. macOS tray setup still enforces
+Accessory activation policy and creates no application window.
 
 ### Click Protection
 

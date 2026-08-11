@@ -40,14 +40,25 @@ the capacity calculation independently testable; production callers pass the mod
 ## Live Recorder
 
 The cpal callback downmixes input to mono `i16`, applies microphone gain, appends PCM to the shared
-buffer, and updates the number of complete chunks. It never performs WAV encoding, channel waits,
-disk I/O, or network I/O.
+buffer, and updates the number of complete chunks. Crossing a new complete-chunk boundary also
+sends one readiness callback containing the active `SessionId`. The existing ready-chunk count
+prevents repeated notifications within the same boundary, while the fixed chunk policy keeps the
+wakeup rate independent of audio sample-buffer traffic. The callback never performs WAV encoding,
+channel waits, disk I/O, network I/O, or session transitions.
 
-The main loop polls `take_ready_chunk()`. For each ready boundary the recorder copies one complete
-PCM slice, encodes it with `hound` into a `Cursor<Vec<u8>>`, drains the encoded samples only after
-successful encoding, and returns `ReadyChunk { session_id, chunk }`. On stop, complete remaining
-slices and the final tail are encoded the same way. `RecorderStopOutcome::Stopped` therefore owns
-`Vec<WavChunk>` rather than file paths.
+The readiness callback becomes an application event that wakes winit. The event-loop handler drains
+`take_ready_chunk()` until it returns `None`. For each ready boundary the recorder copies one
+complete PCM slice, encodes it with `hound` into a `Cursor<Vec<u8>>`, drains the encoded samples only
+after successful encoding, and returns `ReadyChunk { session_id, chunk }`. The in-memory fixed-format
+encoder's error path is handled inside the recorder: it logs the failure, returns `None`, and leaves
+the PCM buffered for stop-time recovery.
+
+Each boundary notification is independent, so a boundary published while the listener is draining
+queues its own wakeup without a pending flag, re-arm protocol, or timer retry. Extra notifications
+are harmless because the listener drains until `take_ready_chunk()` returns `None`, and events
+from an old `SessionId` are ignored after stop or session replacement. On stop, complete remaining
+slices and the final tail are encoded the same way.
+`RecorderStopOutcome::Stopped` therefore owns `Vec<WavChunk>` rather than file paths.
 
 ## Local WAV Reader
 
