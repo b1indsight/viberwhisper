@@ -38,3 +38,4 @@
 2026-08-10: Harden API-mode macOS and Windows packaging with locked inputs, reviewed WiX authoring, pre-tag dry runs, validated portable/installable artifacts, checksums, provenance, and draft-first GitHub Release publication
 2026-08-10: Expand Hold and Toggle hotkeys from F1–F12 to named single keyboard keys, including standalone right Alt/Option, canonical aliases, platform-aware validation, and passthrough warnings
 2026-08-11: Replace fixed-rate listener polling and hand-written platform message pumps with a main-thread winit event loop, per-boundary audio readiness wakeups, and cancellable background transcription delivery
+2026-08-12: Replace macOS osascript text injection with native Accessibility selected-text insertion and an AppKit/CoreGraphics fallback that leaves the transcription on the clipboard, rejects secure controls, and suppresses its own synthetic hotkey events

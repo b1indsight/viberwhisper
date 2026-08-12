@@ -13,7 +13,7 @@ ViberWhisper is a local-first voice-to-text typing tool. The app lets the user t
 ### Platform
 
 This is a **cross-platform (macOS + Windows)** project:
-- **macOS**: Text injection via osascript + clipboard (requires Accessibility permission)
+- **macOS**: Native Accessibility selected-text insertion with an AppKit/CoreGraphics paste fallback that leaves the transcription on the clipboard (requires Accessibility permission)
 - **Windows**: Text injection via Win32 SendInput API
 - **Desktop UI**: System tray/status-bar integration with click-to-toggle recording
 - **Packaging**: GitHub Actions build CI plus release packaging for macOS and Windows
@@ -105,12 +105,16 @@ src/
     wav_file.rs              — Streaming offline WAV chunk reader
   input.rs                   — Input module entry and submodule declarations
   input/
-    hotkey.rs                — HotkeyManager with rdev
+    hotkey.rs                — Process-lifetime rdev listener, event mapper, and filter callback
     typer.rs                 — TextTyper trait + MockTyper
     tray.rs                  — TrayManager for system tray icon and recording control
   platform.rs                — Platform selection and config directory API
   platform/
-    macos.rs                 — MacTyper (osascript + clipboard)
+    macos.rs                 — MacTyper route selection and serialized delivery
+    macos/
+      accessibility.rs      — Focused AX selected-text insertion and secure-control rejection
+      hotkey.rs             — rdev modifier normalization for the listener callback
+      pasteboard.rs         — Clipboard replacement, CoreGraphics Cmd+V, and hotkey suppression
     windows.rs               — WindowsTyper (SendInput API)
   transcriber.rs             — Transcriber traits, errors, and exports
   transcriber/
