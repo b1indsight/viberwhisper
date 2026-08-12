@@ -73,21 +73,26 @@ pub(super) fn run_with_config(
         config.orchestrator,
     ));
 
-    #[cfg(target_os = "macos")]
-    let typer = Arc::new(crate::platform::macos::MacTyper);
-    #[cfg(target_os = "windows")]
-    let typer = Arc::new(crate::platform::windows::WindowsTyper);
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let typer = Arc::new(input::typer::MockTyper);
-
     let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
 
+    #[cfg(target_os = "macos")]
+    let (typer, hotkey_filter) = crate::platform::macos::MacTyper::new();
+    #[cfg(not(target_os = "macos"))]
+    let hotkey_filter = Some;
+
     let hotkey_proxy = proxy.clone();
-    start_hotkey_listener(&config.hotkeys, move |event| {
+    start_hotkey_listener(&config.hotkeys, hotkey_filter, move |event| {
         let _ = hotkey_proxy.send_event(AppEvent::Hotkey(event));
     });
+
+    #[cfg(target_os = "macos")]
+    let typer = Arc::new(typer);
+    #[cfg(target_os = "windows")]
+    let typer = Arc::new(crate::platform::windows::WindowsTyper);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let typer = Arc::new(input::typer::MockTyper);
 
     let audio_proxy = proxy.clone();
     let recorder = AudioRecorder::with_config(&config.audio, move |session_id| {

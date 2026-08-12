@@ -29,19 +29,25 @@ pub enum HotkeyEvent {
 
 Note: `Released` is only emitted for `Hold` source (toggle mode uses press-only semantics).
 
-**`start_hotkey_listener(config, notify)`**
+**`start_hotkey_listener(config, filter, notify)`**
 
 ```rust
-pub fn start_hotkey_listener(
+pub(crate) fn start_hotkey_listener<F>(
     config: &HotkeyConfig,
+    filter: F,
     notify: impl Fn(HotkeyEvent) + Send + 'static,
-);
+) where
+    F: Fn(EventType) -> Option<EventType> + Send + 'static;
 ```
 
 Starts the process-lifetime `rdev::listen` thread, maps native events, and invokes the supplied
 callback. The application callback forwards each event through winit's `EventLoopProxy`, which wakes
 the main-thread event loop without polling. Per-binding key-down state suppresses operating-system
-key-repeat events so one physical toggle press produces one toggle action.
+key-repeat events so one physical toggle press produces one toggle action. The supplied closure is
+the only platform hook: `Some(event)` reaches `EventMapper`, while `None` drops the event from
+ViberWhisper's mapper and resets its key-down bookkeeping. Non-macOS platforms use `Some` directly;
+macOS supplies a pasteboard-owned callback that normalizes modifier direction and returns `None`
+while the native fallback posts synthetic Cmd+V and its generated events can reach the listener.
 
 **`HotkeyConfig`**
 
@@ -66,7 +72,7 @@ Because the core event carries no source, Hold release, Toggle, and tray input c
 
 ### Key Methods
 
-**`start_hotkey_listener(config, notify)`**
+**`start_hotkey_listener(config, filter, notify)`**
 
 - `HotkeyConfig::validate(&InputSection)` parses and validates both bindings before construction.
 - Empty strings disable a binding, including both bindings for tray-only control; duplicate non-empty bindings are rejected.
@@ -77,6 +83,8 @@ Because the core event carries no source, Hold release, Toggle, and tray input c
 - Spawns the listener thread without blocking application startup.
 - Delivers mapped press/release events directly to the supplied non-blocking callback; the listener
   thread never runs recording state transitions itself.
+- Moves the supplied filter closure into the listener thread. macOS obtains its closure together
+  with `MacTyper`; other platforms pass the `Some` constructor as a stateless pass-through callback.
 
 **`parse_key(s: &str) -> Option<Key>`**
 
@@ -103,9 +111,11 @@ Key names identify `rdev::Key` values rather than produced characters. The macOS
 hardware key codes, while the Windows backend maps virtual-key values; letter and punctuation
 bindings can therefore follow the active Windows layout rather than a fixed physical QWERTY
 position. The listener is passive, so printable, editing, navigation, and modifier keys continue to
-affect the focused application or operating system. Windows AltGr also emits left Ctrl at the
-`rdev::Event` boundary, so a standalone `LEFTCTRL` binding may fire from AltGr; the retained event
-type does not contain enough native information to filter that event reliably.
+affect the focused application or operating system. The macOS internal injection window described
+below suppresses only ViberWhisper's mapping callback, not operating-system event delivery. Windows
+AltGr also emits left Ctrl at the `rdev::Event` boundary, so a standalone `LEFTCTRL` binding may
+fire from AltGr; the retained event type does not contain enough native information to filter that
+event reliably.
 
 On macOS, `rdev 0.5.3` derives modifier press/release direction from aggregate modifier flags.
 That direction can be wrong when the listener starts while a modifier is held or when both sides
@@ -113,6 +123,26 @@ of one modifier overlap. Before `EventMapper` sees a macOS modifier event, the l
 uses Core Graphics `CGEventSourceKeyState` with the physical modifier key code to normalize it to
 the current press/release state. Ordinary key events still flow directly through `rdev`, preserving
 their existing repeat suppression.
+
+### macOS Paste Filter
+
+The native paste fallback posts a fixed left-Command/V sequence through CoreGraphics. Without a
+shared boundary, `rdev` could interpret those synthetic events as configured `V`, `LEFTMETA`, or
+`RIGHTMETA` recording hotkeys.
+
+`src/platform/macos/pasteboard.rs` owns an atomic suppression flag shared only with the closure it
+returns during `MacTyper` construction. The paste transaction raises that flag immediately before
+constructing and posting Cmd+V and keeps it raised through a fixed 100 ms synthetic-event filter
+grace. The closure returns `None` for every event observed in that short scope, so the synthetic sequence and
+any interleaved physical input still reach macOS and the focused application but do not enter
+ViberWhisper's mapper. Each `None` resets Hold/Toggle key-down bookkeeping. A private RAII guard
+clears the flag after success, early error, or unwinding.
+
+Outside that scope, the callback delegates macOS modifier events to
+`src/platform/macos/hotkey.rs`, which normalizes press/release direction from physical key state,
+and passes ordinary events through unchanged. There is no sequence acknowledgement protocol: the
+filter protects ViberWhisper's mapper, while CoreGraphics posting and the target application
+determine paste delivery independently. The fallback leaves the transcription on the clipboard.
 
 ---
 

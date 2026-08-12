@@ -17,7 +17,7 @@ Module-level design docs covering structs, methods, and dependencies.
 | [input.md](architecture/input.md) | Global hotkey detection, text injection (`TextTyper`), system tray (`TrayManager`) |
 | [local.md](architecture/local.md) | Local Gemma runtime: installer, Python FastAPI service, process lifecycle, health/status management |
 | [transcriber.md](architecture/transcriber.md) | Transcription trait, `ApiTranscriber` (OpenAI-compatible API), chunking, retry, text merging |
-| [platform.md](architecture/platform.md) | Platform text injection — `MacTyper` (osascript) and `WindowsTyper` (SendInput) |
+| [platform.md](architecture/platform.md) | Platform text injection — native AX/paste fallback on macOS and `SendInput` on Windows |
 | [postprocess.md](architecture/postprocess.md) | Post-processing — concrete processor facade, LLM integration, preheat/conservative sessions |
 
 ## Examples
@@ -55,3 +55,4 @@ Implementation plans and technical specs for each feature.
 | [26-symbol-icon-refresh.md](plan/26-symbol-icon-refresh.md) | Done | Replace placeholder bundle artwork and generated tray dots with one cross-platform voice-input symbol |
 | [27-release-path-hardening.md](plan/27-release-path-hardening.md) | Implemented | Make API-mode macOS and Windows packages reproducible, manually testable, and safe to publish |
 | [28-winit-event-loop.md](plan/28-winit-event-loop.md) | Implemented | Replace fixed listener polling with a main-thread winit event loop and non-blocking finalization |
+| [29-native-macos-text-injection.md](plan/29-native-macos-text-injection.md) | Implemented | Replace macOS osascript injection with direct AX insertion and a clipboard-replacing native paste fallback |

@@ -11,7 +11,7 @@
 - **长录音自动分片**：超过时长/大小限制的录音自动切分，后台并行转写，结果智能合并
 - **LLM 文本后处理**：可选的 LLM 后处理层，自动补标点、去语气词、清理中断与重复
 - **本地推理模式**：通过内置 `local` 子命令拉起 Python FastAPI 服务，使用 Gemma 4 本地模型提供 `/v1/audio/transcriptions` 与 `/v1/chat/completions`
-- **自动文本输入**：识别结果自动输入到当前光标位置（支持中文等 Unicode 字符）
+- **自动文本输入**：识别结果自动输入到当前光标位置；macOS 优先使用原生辅助功能 API，支持中文等 Unicode 字符
 - **状态栏录音控制**：左键点击五柱 V 形声波图标即可开始或停止录音，右键打开退出菜单
 - **灵活配置**：支持自定义热键、模型、语言、API 地址、麦克风增益等
 - **自动清理**：自动保留最新 10 条录音，旧文件自动删除
@@ -19,7 +19,7 @@
 ## 系统要求
 
 - **操作系统**：macOS 或 Windows
-  - macOS：文字输入通过 System Events（osascript）实现，需在「系统设置 → 隐私与安全性 → 辅助功能」中授权终端应用
+  - macOS：优先通过辅助功能 API 写入当前选择；不支持该能力的文本框会使用原生剪贴板与 Cmd+V 兜底。需在「系统设置 → 隐私与安全性 → 辅助功能」中授权正在运行的终端或 ViberWhisper
   - Windows：使用 SendInput API，无需额外权限
 - **Rust**：仅源码构建需要支持 Rust 2024 edition 的 stable toolchain；安装发布包不需要 Rust
 - **Python**：本地模式需要 Python 3.10+；安装时优先使用 `uv`，若未安装则回退到系统 Python（用于 FastAPI + Transformers 服务）
@@ -99,7 +99,7 @@ cargo run -- local start
 5. 或按一下 **F9** 开始录音，再按一下停止（Toggle 模式）
 6. 退出：右键点击托盘图标选择「退出」，或按 **Ctrl+C**
 
-> macOS 首次运行时，系统会弹出辅助功能授权请求，需要允许才能完成文字输入。
+> macOS 需要辅助功能授权才能完成文字输入。未授权、没有焦点输入框或焦点位于密码框时，输入会明确失败且不会改动剪贴板。不支持直接写入所选文字的文本框会使用兜底粘贴：它会用转写文本替换剪贴板内容，并在粘贴后保留该文本，不恢复原内容。
 
 ## CLI 命令
 
@@ -176,6 +176,9 @@ viberwhisper config check
 warning。Windows 的 AltGr 通常表现为左 Ctrl + 右 Alt，因此 `RIGHTALT` 能正常匹配，但单独配置的
 `LEFTCTRL` 也可能被 AltGr 触发；为避免一次按键产生两个录音动作，Windows 会拒绝同时配置
 `LEFTCTRL` 和 `RIGHTALT`。
+
+macOS 的粘贴兜底会在极短的内部注入窗口暂停 ViberWhisper 自己的热键映射，避免合成的 `LEFTMETA`/`V`
+触发录音；这不是系统级按键拦截，事件仍会正常送达当前应用。注入结束后热键按下状态会重置。
 
 当前 `rdev 0.5.3` 后端还有以下明确限制，`config check` 会拒绝对应名称：
 

@@ -1,11 +1,8 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::thread;
 
 use rdev::{Event, EventType, Key, listen};
 use tracing::{debug, error, info, warn};
-
-#[cfg(target_os = "macos")]
-use objc2_core_graphics::{CGEventSource, CGEventSourceStateID};
 
 use crate::core::config::{ConfigKey, InputSection, ValidationIssue};
 
@@ -289,42 +286,6 @@ fn needs_passthrough_warning(key: Key) -> bool {
     )
 }
 
-#[cfg(target_os = "macos")]
-fn macos_modifier_keycode(key: Key) -> Option<u16> {
-    match key {
-        Key::MetaLeft => Some(55),
-        Key::ShiftLeft => Some(56),
-        Key::Alt => Some(58),
-        Key::ControlLeft => Some(59),
-        Key::ShiftRight => Some(60),
-        Key::AltGr => Some(61),
-        Key::ControlRight => Some(62),
-        Key::Function => Some(63),
-        Key::MetaRight => Some(54),
-        _ => None,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn normalize_macos_modifier_event(
-    event_type: EventType,
-    key_is_pressed: impl FnOnce(u16) -> bool,
-) -> EventType {
-    let key = match &event_type {
-        EventType::KeyPress(key) | EventType::KeyRelease(key) => *key,
-        _ => return event_type,
-    };
-    let Some(keycode) = macos_modifier_keycode(key) else {
-        return event_type;
-    };
-
-    if key_is_pressed(keycode) {
-        EventType::KeyPress(key)
-    } else {
-        EventType::KeyRelease(key)
-    }
-}
-
 #[cfg(any(target_os = "windows", test))]
 fn has_windows_altgr_alias_risk(key: Key) -> bool {
     key == Key::ControlLeft
@@ -410,16 +371,38 @@ impl EventMapper {
             _ => None,
         }
     }
+
+    fn reset(&mut self) {
+        self.hold_down = false;
+        self.toggle_down = false;
+    }
+
+    fn map_filtered(&mut self, event_type: Option<EventType>) -> Option<HotkeyEvent> {
+        match event_type {
+            Some(event_type) => self.map(&event_type),
+            None => {
+                self.reset();
+                None
+            }
+        }
+    }
 }
 
 /// Start the process-lifetime global hotkey listener.
 ///
 /// The detached `rdev` thread cannot be stopped independently; process shutdown is its lifetime
-/// boundary.
-pub fn start_hotkey_listener(config: &HotkeyConfig, notify: impl Fn(HotkeyEvent) + Send + 'static) {
+/// boundary. The filter returns `Some` to map an event or `None` to drop it and reset mapper
+/// key-down bookkeeping.
+pub(crate) fn start_hotkey_listener<F>(
+    config: &HotkeyConfig,
+    filter: F,
+    notify: impl Fn(HotkeyEvent) + Send + 'static,
+) where
+    F: Fn(EventType) -> Option<EventType> + Send + 'static,
+{
     let hold_key = config.hold_key;
     let toggle_key = config.toggle_key;
-    spawn_listener(EventMapper::new(hold_key, toggle_key), notify);
+    spawn_listener(EventMapper::new(hold_key, toggle_key), filter, notify);
 
     log_binding_warnings("hold", hold_key, config.hold_label.as_deref());
     log_binding_warnings("toggle", toggle_key, config.toggle_label.as_deref());
@@ -432,23 +415,20 @@ pub fn start_hotkey_listener(config: &HotkeyConfig, notify: impl Fn(HotkeyEvent)
     }
 }
 
-fn spawn_listener(mapper: EventMapper, notify: impl Fn(HotkeyEvent) + Send + 'static) {
+fn spawn_listener<F>(mapper: EventMapper, filter: F, notify: impl Fn(HotkeyEvent) + Send + 'static)
+where
+    F: Fn(EventType) -> Option<EventType> + Send + 'static,
+{
     thread::spawn(move || {
         debug!("rdev listener thread started");
-        let mapper = Arc::new(Mutex::new(mapper));
+        let mapper = Mutex::new(mapper);
         let callback = move |event: Event| {
-            #[cfg(target_os = "macos")]
-            let event_type = normalize_macos_modifier_event(event.event_type, |keycode| {
-                CGEventSource::key_state(CGEventSourceStateID::HIDSystemState, keycode)
-            });
-            #[cfg(not(target_os = "macos"))]
-            let event_type = event.event_type;
+            let event_type = filter(event.event_type);
 
-            let mapped = match mapper.lock() {
-                Ok(mut mapper) => mapper.map(&event_type),
-                Err(poisoned) => poisoned.into_inner().map(&event_type),
-            };
-            if let Some(event) = mapped {
+            let mut mapper = mapper
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(event) = mapper.map_filtered(event_type) {
                 notify(event);
             }
         };
@@ -764,6 +744,21 @@ mod tests {
     }
 
     #[test]
+    fn callback_filter_can_drop_an_event_and_reset_mapper_state() {
+        let mut mapper = EventMapper::new(Some(Key::KeyV), Some(Key::F9));
+
+        assert_eq!(
+            mapper.map_filtered(Some(EventType::KeyPress(Key::KeyV))),
+            Some(HotkeyEvent::Pressed(HotkeySource::Hold))
+        );
+        assert_eq!(mapper.map_filtered(None), None);
+        assert_eq!(
+            mapper.map_filtered(Some(EventType::KeyPress(Key::KeyV))),
+            Some(HotkeyEvent::Pressed(HotkeySource::Hold))
+        );
+    }
+
+    #[test]
     fn maps_standalone_right_alt_hold_press_and_release() {
         let mut mapper = EventMapper::new(Some(Key::AltGr), Some(Key::F9));
 
@@ -776,48 +771,5 @@ mod tests {
             Some(HotkeyEvent::Released(HotkeySource::Hold))
         );
         assert_eq!(mapper.map(&EventType::KeyPress(Key::Alt)), None);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn normalizes_macos_modifier_direction_from_physical_key_state() {
-        let keycodes = [
-            (Key::MetaRight, 54),
-            (Key::MetaLeft, 55),
-            (Key::ShiftLeft, 56),
-            (Key::Alt, 58),
-            (Key::ControlLeft, 59),
-            (Key::ShiftRight, 60),
-            (Key::AltGr, 61),
-            (Key::ControlRight, 62),
-            (Key::Function, 63),
-        ];
-        for (key, expected) in keycodes {
-            assert_eq!(macos_modifier_keycode(key), Some(expected));
-        }
-        assert_eq!(macos_modifier_keycode(Key::F8), None);
-
-        let mut mapper = EventMapper::new(Some(Key::AltGr), None);
-        let startup_release =
-            normalize_macos_modifier_event(EventType::KeyPress(Key::AltGr), |keycode| {
-                assert_eq!(keycode, 61);
-                false
-            });
-        assert_eq!(startup_release, EventType::KeyRelease(Key::AltGr));
-        assert_eq!(mapper.map(&startup_release), None);
-
-        assert_eq!(
-            mapper.map(&normalize_macos_modifier_event(
-                EventType::KeyRelease(Key::AltGr),
-                |_| true
-            )),
-            Some(HotkeyEvent::Pressed(HotkeySource::Hold))
-        );
-        assert_eq!(
-            normalize_macos_modifier_event(EventType::KeyPress(Key::F8), |_| {
-                panic!("ordinary keys do not require a physical-state query")
-            }),
-            EventType::KeyPress(Key::F8)
-        );
     }
 }
