@@ -280,6 +280,7 @@ Rust 侧的 `LocalServiceManager` 负责启动、健康检查、PID 记录、日
 - [serde_json](https://crates.io/crates/serde_json) - JSON 序列化/反序列化
 - [clap](https://crates.io/crates/clap) - CLI 参数解析
 - [tray-icon](https://crates.io/crates/tray-icon) - 系统托盘图标
+- [winit](https://crates.io/crates/winit) - 跨平台原生事件循环
 - [tracing](https://crates.io/crates/tracing) - 结构化日志
 
 ## 开发

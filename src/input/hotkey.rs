@@ -1,4 +1,3 @@
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -413,37 +412,27 @@ impl EventMapper {
     }
 }
 
-pub struct HotkeyManager {
-    events: Receiver<HotkeyEvent>,
-}
+/// Start the process-lifetime global hotkey listener.
+///
+/// The detached `rdev` thread cannot be stopped independently; process shutdown is its lifetime
+/// boundary.
+pub fn start_hotkey_listener(config: &HotkeyConfig, notify: impl Fn(HotkeyEvent) + Send + 'static) {
+    let hold_key = config.hold_key;
+    let toggle_key = config.toggle_key;
+    spawn_listener(EventMapper::new(hold_key, toggle_key), notify);
 
-impl HotkeyManager {
-    pub fn new(config: &HotkeyConfig) -> Self {
-        let hold_key = config.hold_key;
-        let toggle_key = config.toggle_key;
-        let (sender, events) = mpsc::channel();
-        spawn_listener(EventMapper::new(hold_key, toggle_key), sender);
+    log_binding_warnings("hold", hold_key, config.hold_label.as_deref());
+    log_binding_warnings("toggle", toggle_key, config.toggle_label.as_deref());
 
-        log_binding_warnings("hold", hold_key, config.hold_label.as_deref());
-        log_binding_warnings("toggle", toggle_key, config.toggle_label.as_deref());
-
-        if let Some(label) = config.hold_label.as_deref() {
-            info!(hotkey = %label, "hold hotkey registered");
-        }
-        if let Some(label) = config.toggle_label.as_deref() {
-            info!(hotkey = %label, "toggle hotkey registered");
-        }
-
-        Self { events }
+    if let Some(label) = config.hold_label.as_deref() {
+        info!(hotkey = %label, "hold hotkey registered");
     }
-
-    /// Return the oldest pending event without losing later events.
-    pub fn check_event(&self) -> Option<HotkeyEvent> {
-        self.events.try_recv().ok()
+    if let Some(label) = config.toggle_label.as_deref() {
+        info!(hotkey = %label, "toggle hotkey registered");
     }
 }
 
-fn spawn_listener(mapper: EventMapper, sender: Sender<HotkeyEvent>) {
+fn spawn_listener(mapper: EventMapper, notify: impl Fn(HotkeyEvent) + Send + 'static) {
     thread::spawn(move || {
         debug!("rdev listener thread started");
         let mapper = Arc::new(Mutex::new(mapper));
@@ -460,7 +449,7 @@ fn spawn_listener(mapper: EventMapper, sender: Sender<HotkeyEvent>) {
                 Err(poisoned) => poisoned.into_inner().map(&event_type),
             };
             if let Some(event) = mapped {
-                let _ = sender.send(event);
+                notify(event);
             }
         };
 
@@ -477,7 +466,7 @@ mod tests {
     use crate::core::config::{ConfigKey, InputSection};
 
     #[test]
-    fn validates_hotkey_section_before_manager_construction() {
+    fn validates_default_disabled_and_invalid_hotkey_sections() {
         let config = HotkeyConfig::validate(&InputSection::default()).unwrap();
         assert_eq!(config.hold_key, Some(Key::F8));
         assert_eq!(config.toggle_key, Some(Key::F9));
