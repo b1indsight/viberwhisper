@@ -2,7 +2,10 @@
 
 ## Purpose
 
-The `input` module (`src/input/`) handles three concerns: global hotkey detection (`hotkey.rs`), text injection into the focused window (`typer.rs`), and system tray UI (`tray.rs`). Input adapters report user intent; recording lifecycle decisions belong to `core::recording_session`.
+The `input` module (`src/input/`) provides target-neutral drivers and contracts for global hotkey
+detection (`hotkey.rs`), text delivery (`typer.rs`), and the system tray (`tray.rs`). Native policy
+is supplied by the compile-time-selected `platform` backend. Input drivers report native events;
+recording lifecycle decisions belong to `core::recording_session`.
 
 ---
 
@@ -32,22 +35,22 @@ Note: `Released` is only emitted for `Hold` source (toggle mode uses press-only 
 **`start_hotkey_listener(config, filter, notify)`**
 
 ```rust
-pub(crate) fn start_hotkey_listener<F>(
+pub(crate) fn start_hotkey_listener<P, F>(
     config: &HotkeyConfig,
     filter: F,
     notify: impl Fn(HotkeyEvent) + Send + 'static,
 ) where
+    P: HotkeyPolicy,
     F: Fn(EventType) -> Option<EventType> + Send + 'static;
 ```
 
 Starts the process-lifetime `rdev::listen` thread, maps native events, and invokes the supplied
-callback. The application callback forwards each event through winit's `EventLoopProxy`, which wakes
-the main-thread event loop without polling. Per-binding key-down state suppresses operating-system
-key-repeat events so one physical toggle press produces one toggle action. The supplied closure is
-the only platform hook: `Some(event)` reaches `EventMapper`, while `None` drops the event from
-ViberWhisper's mapper and resets its key-down bookkeeping. Non-macOS platforms use `Some` directly;
-macOS supplies a pasteboard-owned callback that normalizes modifier direction and returns `None`
-while the native fallback posts synthetic Cmd+V and its generated events can reach the listener.
+callback. `platform::PlatformRuntime` wraps the event in an opaque `PlatformEvent` and forwards it
+through winit's `EventLoopProxy`, which wakes the main-thread event loop without polling.
+Per-binding key-down state suppresses operating-system key repeat so one physical Toggle press
+produces one action. `P` supplies target validation/warning policy. The filter is constructed by the
+same selected backend that constructs the text writer: `Some(event)` reaches `EventMapper`, while
+`None` drops the event and resets its key-down bookkeeping.
 
 **`HotkeyConfig`**
 
@@ -59,7 +62,9 @@ canonical runtime label.
 
 ### Recording Input Normalization
 
-Hotkey and tray source details stop at the listener integration boundary in `application::listener`. The integration reads the session machine's current state without mutating it and publishes only source-free core requests:
+Hotkey and tray source details stop at `platform::PlatformRuntime`. It converts opaque native
+payloads into Hold/Toggle/Exit `PlatformAction` values. `application::listener` then reads the
+session machine's current state without mutating it and publishes only source-free core requests:
 
 | Raw gesture | Idle | Recording | Transitional/shutdown state |
 |---|---|---|---|
@@ -68,13 +73,17 @@ Hotkey and tray source details stop at the listener integration boundary in `app
 | Toggle press | `StartRequested` | `StopRequested` | ignored |
 | Tray left click | `StartRequested` | `StopRequested` | ignored |
 
-Because the core event carries no source, Hold release, Toggle, and tray input can stop a current session regardless of which input started it. Input modules continue to own native classification, key-repeat suppression, and click debounce; they do not own or copy recording state.
+Because the core event carries no source, Hold release, Toggle, and tray input can stop a current
+session regardless of which input started it. Input drivers and platform policies own native
+classification, key-repeat suppression, and click debounce; they do not own or copy recording
+state.
 
 ### Key Methods
 
 **`start_hotkey_listener(config, filter, notify)`**
 
-- `HotkeyConfig::validate(&InputSection)` parses and validates both bindings before construction.
+- `HotkeyConfig::validate::<P>(&InputSection)` parses and validates both bindings before
+  construction; `platform::validate_hotkeys` supplies the selected `P` to `runtime_config`.
 - Empty strings disable a binding, including both bindings for tray-only control; duplicate non-empty bindings are rejected.
 - Non-function bindings log that `rdev::listen` observes rather than suppresses their native input.
 - On Windows, a `LEFTCTRL` binding logs an additional warning because AltGr is reported as left Ctrl
@@ -83,8 +92,8 @@ Because the core event carries no source, Hold release, Toggle, and tray input c
 - Spawns the listener thread without blocking application startup.
 - Delivers mapped press/release events directly to the supplied non-blocking callback; the listener
   thread never runs recording state transitions itself.
-- Moves the supplied filter closure into the listener thread. macOS obtains its closure together
-  with `MacTyper`; other platforms pass the `Some` constructor as a stateless pass-through callback.
+- Moves the backend-supplied filter closure into the listener thread. macOS constructs it together
+  with `MacTyper`; Windows and the fallback use `Some` as a stateless pass-through callback.
 
 **`parse_key(s: &str) -> Option<Key>`**
 
@@ -94,8 +103,8 @@ locks/system keys, punctuation, and numeric-keypad keys. Explicit aliases normal
 `ALTGR` and `RIGHTOPTION` map to canonical `RIGHTALT`/`Key::AltGr`; `ALT` and `OPTION` map to
 `LEFTALT`/`Key::Alt`.
 
-`parse_key` recognizes the shared vocabulary independently of platform. `HotkeyConfig::validate`
-then returns `hotkey.unsupported` when the current `rdev 0.5.3` backend cannot emit the named
+`parse_key` recognizes the shared vocabulary independently of platform. The selected
+`HotkeyPolicy` then returns `hotkey.unsupported` when the current `rdev 0.5.3` backend cannot emit the named
 variant. On macOS this includes Caps Lock (a status change rather than a press/release pair), right
 Ctrl, forward Delete/Insert/navigation-cluster keys, several lock/system keys, international
 backslash, and numeric-keypad names. On Windows it includes right Meta, Function, and the numeric
@@ -130,8 +139,9 @@ The native paste fallback posts a fixed left-Command/V sequence through CoreGrap
 shared boundary, `rdev` could interpret those synthetic events as configured `V`, `LEFTMETA`, or
 `RIGHTMETA` recording hotkeys.
 
-`src/platform/macos/pasteboard.rs` owns an atomic suppression flag shared only with the closure it
-returns during `MacTyper` construction. The paste transaction raises that flag immediately before
+`MacBackend` constructs `MacTyper` and the filter returned by
+`src/platform/macos/pasteboard.rs` together, so their atomic suppression flag never leaves the
+platform boundary. The paste transaction raises that flag immediately before
 constructing and posting Cmd+V and keeps it raised through a fixed 100 ms synthetic-event filter
 grace. The closure returns `None` for every event observed in that short scope, so the synthetic sequence and
 any interleaved physical input still reach macOS and the focused application but do not enter
@@ -156,13 +166,15 @@ pub trait TextTyper: Send + Sync {
 }
 ```
 
-Platform implementations are in `src/platform/`. See [platform.md](platform.md).
+Platform implementations are in `src/platform/`. `NativePlatform::text_typer` returns the selected
+thread-safe handle without exposing its concrete type. See [platform.md](platform.md).
 The thread-safety contract allows final transcription delivery to run outside the native event-loop
 thread.
 
 ### `MockTyper`
 
-A no-op implementation used in tests and non-GUI environments. Logs the text at `INFO` level instead of injecting it.
+A no-op implementation selected by the explicit fallback backend on unsupported development/test
+targets. It logs text at `INFO` instead of injecting it.
 
 ---
 
@@ -171,14 +183,14 @@ A no-op implementation used in tests and non-GUI environments. Logs the text at 
 ### `TrayManager`
 
 ```rust
-pub struct TrayManager {
+pub struct TrayManager<P: TrayPolicy> {
     tray_icon: TrayIcon,
     icon_idle: Icon,
     icon_recording: Icon,
     status_item: MenuItem,
     exit_item_id: MenuId,
     click_debounce: ClickDebounce,
-    handler_installed: bool,
+    policy: PhantomData<P>,
 }
 ```
 
@@ -194,42 +206,44 @@ RGBA PNGs are embedded in the executable and decoded during tray construction, s
 does not depend on the current directory. Bundle icons use the same geometry from
 `assets/icon-source.svg` on a solid gray-blue `#282c34` rounded-square field.
 
-macOS treats the idle icon as an AppKit template so the system selects a legible menu-bar color for
-light and dark appearances. Recording switches the icon and template flag together, preserving the
-asset's explicit red. Windows ignores the template flag and displays the committed colors.
+`MacTray` treats the idle icon as an AppKit template so the system selects a legible menu-bar color
+for light and dark appearances. Recording switches the icon and template flag together, preserving
+the asset's explicit red. `WindowsTray` uses the committed colors directly.
 
 ### Key Methods
 
-**`TrayManager::new(notify) -> Result<Self>`**
+**`TrayManager::<P>::new(notify) -> Result<Self>`**
 
 Decodes the embedded idle and recording PNGs, then builds the tray icon with a menu containing:
 title item, status item, separator, and exit item. Corrupt or non-RGBA assets fail tray construction
 with an error, while tests enforce the committed 32×32 dimensions and transparency. Left-click menu
 opening is disabled so left click can toggle recording; right click retains the native context menu.
-Before creating the native icon, construction installs the process-global `tray-icon` and menu
-callbacks with the supplied application callback. `tray-icon 0.21` stores those handlers in one-shot
+Before creating the native icon, `P` prepares the native application and construction installs the
+process-global `tray-icon` and menu callbacks with the platform runtime's event callback.
+`tray-icon 0.21` stores those handlers in one-shot
 global cells, matching the application's single listener and process-lifetime event loop.
 
 **`set_recording(&mut self, recording: bool)`**
 
-Switches the icon, macOS template mode, tooltip, and menu status text based on recording state.
-Native icon/tooltip update failures are logged rather than silently discarded.
+Switches the icon, backend-selected template/color mode, tooltip, and menu status text based on
+recording state. Native icon/tooltip update failures are logged rather than silently discarded.
 
 **`handle_event(&mut self, event: TrayEvent) -> Option<TrayAction>`**
 
 Filters raw events by tray/menu ID and maps a matching left-button-up event to `ToggleRecording`.
-Unrelated icon IDs and mouse phases are discarded; Exit bypasses debounce. Events are handled in
-native delivery order, and once Exit transitions the core to `ShuttingDown`, later recording input
-is rejected.
+Unrelated icon IDs and mouse phases are discarded; Exit bypasses debounce. `TrayEvent` and
+`TrayAction` stay behind the opaque platform boundary; `PlatformRuntime::handle_event` returns the
+corresponding semantic `PlatformAction`. Events are handled in native delivery order, and once Exit
+transitions the core to `ShuttingDown`, later recording input is rejected.
 
 The main-thread winit loop owns AppKit/Win32 dispatch in `ControlFlow::Wait` mode. `TrayManager` no
-longer exposes a polling receiver or a manual platform event pump. macOS tray setup still enforces
+longer exposes a polling receiver or a manual platform event pump. `MacTray` still enforces
 Accessory activation policy and creates no application window.
 
 ### Click Protection
 
 - effective debounce window is `max(300 ms, platform double-click interval)`
-- macOS reads `NSEvent::doubleClickInterval()`
-- Windows reads `GetDoubleClickTime()` and suppresses the button-up following a native `DoubleClick`
+- `MacTray` reads `NSEvent::doubleClickInterval()`
+- `WindowsTray` reads `GetDoubleClickTime()` and suppresses the button-up following a native `DoubleClick`
 - the suppression is one-shot; ordinary ignored clicks do not extend the window
 - debounce applies only to tray recording toggles, never Exit or hotkeys

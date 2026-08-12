@@ -28,7 +28,13 @@ alone returns the in-memory defaults.
 
 `runtime_config` selects the API or Local profile, constructs module-owned consumer configs, and aggregates construction errors into `ListenerConfig` or `BackendConfig`. Profile selection is consumed during assembly: `BackendConfig` stores the common transcriber and post-process values directly, plus an optional Local service, rather than duplicating common fields across enum variants. It contains no generic validator registry and no duplicated raw DTO layer.
 
-Each consumer receives a type owned by its module: `HotkeyConfig`, `AudioConfig`, `OrchestratorConfig`, `TranscriberConfig`, `PostProcessConfig`, `LocalPaths`, or `LocalServiceConfig`. Local mode uses `ApiAuth::None`; API mode uses a redacted `SecretValue` when configured and `ApiAuth::None` otherwise. `local start` selects Local for one invocation without mutating the persisted profile.
+Each consumer receives a type owned by its module: `HotkeyConfig`, `AudioConfig`,
+`OrchestratorConfig`, `TranscriberConfig`, `PostProcessConfig`, `LocalPaths`, or
+`LocalServiceConfig`. Hotkey resolution enters through `platform::validate_hotkeys`, so the
+compile-time-selected backend supplies native key availability without adding target branches to
+runtime assembly. Local mode uses `ApiAuth::None`; API mode uses a redacted `SecretValue` when
+configured and `ApiAuth::None` otherwise. `local start` selects Local for one invocation without
+mutating the persisted profile.
 
 ## CLI (`src/core/cli.rs`)
 
@@ -80,7 +86,10 @@ session or reach a newer session.
 
 ## Recording Session (`src/core/recording_session.rs`)
 
-`RecordingSessionMachine` is the sole authority for recording lifecycle transitions. The listener integration maps source-specific hotkey and tray gestures into source-free `StartRequested` and `StopRequested` events before they enter core.
+`RecordingSessionMachine` is the sole authority for recording lifecycle transitions. The selected
+platform runtime maps native hotkey and tray events into Hold/Toggle/Exit `PlatformAction` values;
+the listener integration then maps those actions into source-free `StartRequested`,
+`StopRequested`, and `ShutdownRequested` events before they enter core.
 
 ### States
 
@@ -113,13 +122,15 @@ Exit is represented as `ShutdownRequested`. It cancels recorder/orchestrator wor
 
 `application` loads one `ConfigDocument`, asks `runtime_config` for a typed workflow configuration,
 and passes each narrow value to its consumer. Listener mode then creates one main-thread winit
-`EventLoop<AppEvent>` in `ControlFlow::Wait` mode. Hotkey, tray/menu, audio-readiness, and background
-completion producers use `EventLoopProxy` to wake that loop; winit owns AppKit/Win32 dispatch and no
-window is created. CLI-only workflows do not construct the event loop.
+`EventLoop<AppEvent>` in `ControlFlow::Wait` mode. Opaque platform input, audio-readiness, and
+background completion producers use `EventLoopProxy` to wake that loop; winit owns AppKit/Win32
+dispatch and no window is created. CLI-only workflows do not construct the event loop.
 
-`src/application/listener/event_loop.rs` normalizes source events, executes state-machine effects,
-drains ready chunks, and coordinates background finalization. Winit types remain in the application
-layer. `core`, `audio`, and `input` expose only their existing domain values or narrow callbacks.
+`src/application/listener/event_loop.rs` passes opaque native payloads back through
+`NativePlatform::handle_event`, normalizes returned semantic actions, executes state-machine
+effects, drains ready chunks, and coordinates background finalization. Winit types remain in the
+application layer. `core`, `audio`, and `input` expose only domain values or narrow callbacks;
+platform-specific values remain behind `NativePlatform`.
 Finalization uses an atomic cancellation flag checked before post-processing and immediately before
 the final text injection. Exit records cancellation without waiting for an injection already in
 progress. Cancellation observed before the final check suppresses delivery, while an injection that

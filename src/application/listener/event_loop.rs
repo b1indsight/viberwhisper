@@ -9,22 +9,20 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::WindowId;
 
-use super::{hotkey_session_event, toggle_session_event};
+use super::platform_session_event;
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
 use crate::core::orchestrator::{SessionError, SessionOrchestrator};
 use crate::core::recording_session::{
     RecordingSessionMachine, RecordingState, SessionEffect, SessionEvent,
 };
-use crate::input::hotkey::HotkeyEvent;
-use crate::input::tray::{TrayAction, TrayEvent, TrayManager};
 use crate::input::typer::TextTyper;
+use crate::platform::{NativePlatform, PlatformEvent, PlatformInterface};
 use crate::postprocess::{PostProcessor, PostProcessorSession};
 use crate::session::SessionId;
 
 #[derive(Debug, Clone)]
 pub(super) enum AppEvent {
-    Hotkey(HotkeyEvent),
-    Tray(TrayEvent),
+    Platform(PlatformEvent),
     AudioChunkAvailable { session_id: SessionId },
     FinalizationFinished { session_id: SessionId },
 }
@@ -90,9 +88,8 @@ pub(super) struct ListenerApplication {
     machine: RecordingSessionMachine,
     recorder: AudioRecorder,
     orchestrator: Arc<SessionOrchestrator>,
-    tray: TrayManager,
+    platform: NativePlatform,
     post_processor: PostProcessor,
-    typer: Arc<dyn TextTyper>,
     proxy: EventLoopProxy<AppEvent>,
     finalization: Option<FinalizationTask>,
 }
@@ -101,18 +98,16 @@ impl ListenerApplication {
     pub(super) fn new(
         recorder: AudioRecorder,
         orchestrator: Arc<SessionOrchestrator>,
-        tray: TrayManager,
+        platform: NativePlatform,
         post_processor: PostProcessor,
-        typer: Arc<dyn TextTyper>,
         proxy: EventLoopProxy<AppEvent>,
     ) -> Self {
         Self {
             machine: RecordingSessionMachine::new(),
             recorder,
             orchestrator,
-            tray,
+            platform,
             post_processor,
-            typer,
             proxy,
             finalization: None,
         }
@@ -120,20 +115,11 @@ impl ListenerApplication {
 
     fn handle_app_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::Hotkey(event) => {
-                if let Some(event) = hotkey_session_event(event, self.machine.state()) {
+            AppEvent::Platform(event) => {
+                if let Some(action) = self.platform.handle_event(event)
+                    && let Some(event) = platform_session_event(action, self.machine.state())
+                {
                     self.drive_session(event_loop, event);
-                }
-            }
-            AppEvent::Tray(event) => {
-                if let Some(action) = self.tray.handle_event(event) {
-                    let event = match action {
-                        TrayAction::Exit => Some(SessionEvent::ShutdownRequested),
-                        TrayAction::ToggleRecording => toggle_session_event(self.machine.state()),
-                    };
-                    if let Some(event) = event {
-                        self.drive_session(event_loop, event);
-                    }
                 }
             }
             AppEvent::AudioChunkAvailable { session_id } => {
@@ -201,7 +187,7 @@ impl ListenerApplication {
                         }
                     }
                     SessionEffect::SetTrayRecording(recording) => {
-                        self.tray.set_recording(recording);
+                        self.platform.set_recording(recording);
                     }
                     SessionEffect::ReadyToExit => event_loop.exit(),
                 }
@@ -330,7 +316,7 @@ impl ListenerApplication {
 
         let orchestrator = Arc::clone(&self.orchestrator);
         let mut post_processor = self.post_processor.start_session();
-        let typer = Arc::clone(&self.typer);
+        let typer = self.platform.text_typer();
         let proxy = self.proxy.clone();
         spawn_finalization_worker(
             session_id,

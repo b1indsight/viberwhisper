@@ -57,7 +57,10 @@ pub fn resolve_listener(
     home_dir: &Path,
 ) -> Result<ListenerConfig, ValidationReport> {
     let mut issues = Vec::new();
-    let hotkeys = collect_issues(HotkeyConfig::validate(&document.input), &mut issues);
+    let hotkeys = collect_issues(
+        crate::platform::validate_hotkeys(&document.input),
+        &mut issues,
+    );
     let audio = AudioConfig::from_section(&document.audio);
     let orchestrator = OrchestratorConfig::new(document.transcription.language.clone());
     let backend = collect_issues(

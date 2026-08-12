@@ -1,4 +1,5 @@
 use std::io::Cursor;
+use std::marker::PhantomData;
 #[cfg(not(test))]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +29,20 @@ pub enum TrayAction {
 pub enum TrayEvent {
     Icon(TrayIconEvent),
     Menu(MenuEvent),
+}
+
+/// Target policy for native application setup, timing, and icon presentation.
+pub(crate) trait TrayPolicy: 'static {
+    fn idle_icon_is_template() -> bool;
+
+    #[cfg(not(test))]
+    fn prepare_application() -> Result<(), Box<dyn std::error::Error>>;
+
+    #[cfg(not(test))]
+    fn double_click_interval() -> Option<Duration>;
+
+    #[cfg(not(test))]
+    fn set_icon(tray_icon: &TrayIcon, icon: Icon, is_template: bool) -> tray_icon::Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,23 +122,23 @@ fn effective_debounce_window(platform_interval: Option<Duration>) -> Duration {
 }
 
 #[cfg(not(test))]
-pub struct TrayManager {
+pub struct TrayManager<P: TrayPolicy> {
     tray_icon: TrayIcon,
     icon_idle: Icon,
     icon_recording: Icon,
     status_item: MenuItem,
     exit_item_id: tray_icon::menu::MenuId,
     click_debounce: ClickDebounce,
+    policy: PhantomData<P>,
 }
 
-// Keep test builds away from the native tray backend on Windows.
-// The real `tray_icon` path is exercised in app runs, while tests only need
-// a lightweight stand-in so CI can validate higher-level logic safely.
+// Keep tests away from the process-global native tray backend. App runs and native smoke tests
+// exercise that path; unit tests use deterministic policy and event-classification seams.
 #[cfg(test)]
-pub struct TrayManager;
+pub struct TrayManager<P: TrayPolicy>(PhantomData<P>);
 
 #[cfg(not(test))]
-impl TrayManager {
+impl<P: TrayPolicy> TrayManager<P> {
     /// Construct the process's single tray manager and install its process-lifetime event handlers.
     ///
     /// `tray-icon` stores handlers in one-shot global cells, so another manager in the same process
@@ -131,9 +146,9 @@ impl TrayManager {
     pub fn new(
         notify: impl Fn(TrayEvent) + Send + Sync + 'static,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        prepare_platform_application()?;
-        let (idle_source, idle_is_template) = status_icon_source(false);
-        let (recording_source, _) = status_icon_source(true);
+        P::prepare_application()?;
+        let (idle_source, idle_is_template) = status_icon_source::<P>(false);
+        let (recording_source, _) = status_icon_source::<P>(true);
         let icon_idle = create_icon(idle_source)?;
         let icon_recording = create_icon(recording_source)?;
 
@@ -167,16 +182,17 @@ impl TrayManager {
             status_item,
             exit_item_id: exit_id,
             click_debounce: ClickDebounce::new(effective_debounce_window(
-                platform_double_click_interval(),
+                P::double_click_interval(),
             )),
+            policy: PhantomData,
         })
     }
 
     pub fn set_recording(&mut self, recording: bool) {
         let (icon, is_template) = if recording {
-            (&self.icon_recording, status_icon_source(true).1)
+            (&self.icon_recording, status_icon_source::<P>(true).1)
         } else {
-            (&self.icon_idle, status_icon_source(false).1)
+            (&self.icon_idle, status_icon_source::<P>(false).1)
         };
         let tooltip = if recording {
             "ViberWhisper - 录音中"
@@ -189,7 +205,7 @@ impl TrayManager {
         } else {
             "状态：空闲"
         });
-        if let Err(err) = set_native_icon(&self.tray_icon, icon.clone(), is_template) {
+        if let Err(err) = P::set_icon(&self.tray_icon, icon.clone(), is_template) {
             warn!(error = ?err, "failed to update tray icon");
         }
         if let Err(err) = self.tray_icon.set_tooltip(Some(tooltip)) {
@@ -224,27 +240,12 @@ fn install_native_handlers(notify: impl Fn(TrayEvent) + Send + Sync + 'static) {
     }));
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
-fn prepare_platform_application() -> Result<(), Box<dyn std::error::Error>> {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApp, NSApplicationActivationPolicy};
-
-    let mtm = MainThreadMarker::new().ok_or("tray must be created on the main thread")?;
-    let _ = NSApp(mtm).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    Ok(())
-}
-
-#[cfg(all(not(target_os = "macos"), not(test)))]
-fn prepare_platform_application() -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
-}
-
 #[cfg(test)]
-impl TrayManager {
+impl<P: TrayPolicy> TrayManager<P> {
     pub fn new(
         _notify: impl Fn(TrayEvent) + Send + Sync + 'static,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(TrayManager)
+        Ok(TrayManager(PhantomData))
     }
 
     pub fn set_recording(&mut self, _recording: bool) {}
@@ -254,44 +255,11 @@ impl TrayManager {
     }
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
-fn platform_double_click_interval() -> Option<Duration> {
-    use objc2_app_kit::NSEvent;
-
-    let seconds = NSEvent::doubleClickInterval();
-    seconds
-        .is_finite()
-        .then(|| Duration::from_secs_f64(seconds))
-}
-
-#[cfg(all(target_os = "windows", not(test)))]
-fn platform_double_click_interval() -> Option<Duration> {
-    Some(Duration::from_millis(
-        unsafe { windows_event_loop::GetDoubleClickTime() } as u64,
-    ))
-}
-
-#[cfg(all(not(any(target_os = "macos", target_os = "windows")), not(test)))]
-fn platform_double_click_interval() -> Option<Duration> {
-    None
-}
-
-#[cfg(all(target_os = "windows", not(test)))]
-#[allow(non_snake_case, clippy::upper_case_acronyms)]
-mod windows_event_loop {
-    pub type UINT = u32;
-
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        pub fn GetDoubleClickTime() -> UINT;
-    }
-}
-
-fn status_icon_source(recording: bool) -> (&'static [u8], bool) {
+fn status_icon_source<P: TrayPolicy>(recording: bool) -> (&'static [u8], bool) {
     if recording {
         (STATUS_RECORDING_PNG, false)
     } else {
-        (STATUS_IDLE_PNG, true)
+        (STATUS_IDLE_PNG, P::idle_icon_is_template())
     }
 }
 
@@ -319,22 +287,20 @@ fn decode_icon_png(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), Box<dyn std::err
     Ok((rgba, info.width, info.height))
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
-fn set_native_icon(tray_icon: &TrayIcon, icon: Icon, is_template: bool) -> tray_icon::Result<()> {
-    tray_icon.set_icon_with_as_template(Some(icon), is_template)
-}
-
-#[cfg(all(not(target_os = "macos"), not(test)))]
-fn set_native_icon(tray_icon: &TrayIcon, icon: Icon, _is_template: bool) -> tray_icon::Result<()> {
-    tray_icon.set_icon(Some(icon))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tray_icon::dpi::PhysicalPosition;
     use tray_icon::menu::MenuId;
     use tray_icon::{Rect, TrayIconId};
+
+    struct TemplateTrayPolicy;
+
+    impl TrayPolicy for TemplateTrayPolicy {
+        fn idle_icon_is_template() -> bool {
+            true
+        }
+    }
 
     fn left_up(id: &str) -> TrayIconEvent {
         TrayIconEvent::Click {
@@ -360,8 +326,8 @@ mod tests {
 
     #[test]
     fn idle_uses_template_rendering_and_recording_keeps_explicit_color() {
-        assert!(status_icon_source(false).1);
-        assert!(!status_icon_source(true).1);
+        assert!(status_icon_source::<TemplateTrayPolicy>(false).1);
+        assert!(!status_icon_source::<TemplateTrayPolicy>(true).1);
     }
 
     #[test]
