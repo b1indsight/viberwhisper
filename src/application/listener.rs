@@ -3,9 +3,9 @@ use tracing::info;
 use super::{LocalServiceGuard, config_context, load_config, start_local_backend};
 use crate::core::config::EnvironmentSecretSource;
 use crate::core::recording_session::{RecordingState, SessionEvent};
-use crate::input::hotkey::{HotkeyEvent, HotkeySource};
+use crate::platform::PlatformAction;
 use crate::runtime_config::{self, ListenerConfig, ProfileSelection};
-use crate::{audio, core, input, postprocess, transcriber};
+use crate::{audio, core, postprocess, transcriber};
 
 mod event_loop;
 
@@ -22,17 +22,16 @@ pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
     run_with_config(config)
 }
 
-fn hotkey_session_event(event: HotkeyEvent, state: &RecordingState) -> Option<SessionEvent> {
-    match event {
-        HotkeyEvent::Pressed(HotkeySource::Hold) if matches!(state, RecordingState::Idle) => {
+fn platform_session_event(action: PlatformAction, state: &RecordingState) -> Option<SessionEvent> {
+    match action {
+        PlatformAction::HoldPressed if matches!(state, RecordingState::Idle) => {
             Some(SessionEvent::StartRequested)
         }
-        HotkeyEvent::Released(HotkeySource::Hold)
-            if matches!(state, RecordingState::Recording { .. }) =>
-        {
+        PlatformAction::HoldReleased if matches!(state, RecordingState::Recording { .. }) => {
             Some(SessionEvent::StopRequested)
         }
-        HotkeyEvent::Pressed(HotkeySource::Toggle) => toggle_session_event(state),
+        PlatformAction::ToggleRecording => toggle_session_event(state),
+        PlatformAction::ExitRequested => Some(SessionEvent::ShutdownRequested),
         _ => None,
     }
 }
@@ -54,11 +53,11 @@ pub(super) fn run_with_config(
     use audio::AudioRecorder;
     use core::orchestrator::SessionOrchestrator;
     use event_loop::{AppEvent, ListenerApplication};
-    use input::hotkey::start_hotkey_listener;
-    use input::tray::TrayManager;
     use postprocess::PostProcessor;
     use transcriber::ApiTranscriber;
     use winit::event_loop::{ControlFlow, EventLoop};
+
+    use crate::platform::{NativePlatform, PlatformInterface};
 
     println!("ViberWhisper - Voice-to-Text Input");
     println!("===================================");
@@ -77,32 +76,16 @@ pub(super) fn run_with_config(
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
 
-    #[cfg(target_os = "macos")]
-    let (typer, hotkey_filter) = crate::platform::macos::MacTyper::new();
-    #[cfg(not(target_os = "macos"))]
-    let hotkey_filter = Some;
-
-    let hotkey_proxy = proxy.clone();
-    start_hotkey_listener(&config.hotkeys, hotkey_filter, move |event| {
-        let _ = hotkey_proxy.send_event(AppEvent::Hotkey(event));
-    });
-
-    #[cfg(target_os = "macos")]
-    let typer = Arc::new(typer);
-    #[cfg(target_os = "windows")]
-    let typer = Arc::new(crate::platform::windows::WindowsTyper);
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let typer = Arc::new(input::typer::MockTyper);
+    let platform_proxy = proxy.clone();
+    let platform = NativePlatform::start(&config.hotkeys, move |event| {
+        let _ = platform_proxy.send_event(AppEvent::Platform(event));
+    })?;
 
     let audio_proxy = proxy.clone();
     let recorder = AudioRecorder::with_config(&config.audio, move |session_id| {
         let _ = audio_proxy.send_event(AppEvent::AudioChunkAvailable { session_id });
     });
 
-    let tray_proxy = proxy.clone();
-    let tray = TrayManager::new(move |event| {
-        let _ = tray_proxy.send_event(AppEvent::Tray(event));
-    })?;
     info!("System tray icon started");
 
     if let Some(hotkey) = config.hotkeys.hold_label.as_deref() {
@@ -115,20 +98,20 @@ pub(super) fn run_with_config(
     println!();
 
     let mut application =
-        ListenerApplication::new(recorder, orchestrator, tray, post_processor, typer, proxy);
+        ListenerApplication::new(recorder, orchestrator, platform, post_processor, proxy);
     event_loop.run_app(&mut application)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{hotkey_session_event, toggle_session_event};
+    use super::platform_session_event;
     use crate::core::recording_session::{RecordingState, SessionEvent};
-    use crate::input::hotkey::{HotkeyEvent, HotkeySource};
+    use crate::platform::PlatformAction;
     use crate::session::SessionId;
 
     #[test]
-    fn hotkey_and_toggle_requests_are_state_aware() {
+    fn platform_actions_are_state_aware() {
         let idle = RecordingState::Idle;
         let recording = RecordingState::Recording {
             session_id: SessionId(1),
@@ -138,42 +121,36 @@ mod tests {
         };
 
         assert_eq!(
-            hotkey_session_event(HotkeyEvent::Pressed(HotkeySource::Hold), &idle),
+            platform_session_event(PlatformAction::HoldPressed, &idle),
             Some(SessionEvent::StartRequested)
         );
         assert_eq!(
-            hotkey_session_event(HotkeyEvent::Released(HotkeySource::Hold), &recording),
+            platform_session_event(PlatformAction::HoldReleased, &recording),
             Some(SessionEvent::StopRequested)
         );
         assert_eq!(
-            hotkey_session_event(HotkeyEvent::Pressed(HotkeySource::Toggle), &idle),
+            platform_session_event(PlatformAction::ToggleRecording, &idle),
             Some(SessionEvent::StartRequested)
         );
         assert_eq!(
-            hotkey_session_event(HotkeyEvent::Pressed(HotkeySource::Toggle), &recording),
+            platform_session_event(PlatformAction::ToggleRecording, &recording),
             Some(SessionEvent::StopRequested)
         );
         assert_eq!(
-            toggle_session_event(&idle),
-            Some(SessionEvent::StartRequested)
+            platform_session_event(PlatformAction::ExitRequested, &idle),
+            Some(SessionEvent::ShutdownRequested)
         );
         assert_eq!(
-            toggle_session_event(&recording),
-            Some(SessionEvent::StopRequested)
-        );
-
-        assert_eq!(
-            hotkey_session_event(HotkeyEvent::Pressed(HotkeySource::Hold), &recording),
+            platform_session_event(PlatformAction::HoldPressed, &recording),
             None
         );
         assert_eq!(
-            hotkey_session_event(HotkeyEvent::Released(HotkeySource::Hold), &idle),
+            platform_session_event(PlatformAction::HoldReleased, &idle),
             None
         );
         assert_eq!(
-            hotkey_session_event(HotkeyEvent::Pressed(HotkeySource::Toggle), &starting),
+            platform_session_event(PlatformAction::ToggleRecording, &starting),
             None
         );
-        assert_eq!(toggle_session_event(&starting), None);
     }
 }

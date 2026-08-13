@@ -84,7 +84,7 @@ src/
   lib.rs                     — Crate module root and public application entry export
   application.rs             — Logging, CLI dispatch, config/local/convert workflows
   application/
-    listener.rs              — Hotkey/tray loop, session effects, transcription delivery
+    listener.rs              — Platform-action loop, session effects, transcription delivery
   runtime_config.rs          — Application-level profile and consumer config assembly
   session.rs                 — Shared SessionId value type
   text.rs                    — Shared language-aware transcription text merge
@@ -105,17 +105,20 @@ src/
     wav_file.rs              — Streaming offline WAV chunk reader
   input.rs                   — Input module entry and submodule declarations
   input/
-    hotkey.rs                — Process-lifetime rdev listener, event mapper, and filter callback
+    hotkey.rs                — Target-neutral rdev listener, event mapper, and policy contract
     typer.rs                 — TextTyper trait + MockTyper
-    tray.rs                  — TrayManager for system tray icon and recording control
-  platform.rs                — Platform selection and config directory API
+    tray.rs                  — Policy-driven TrayManager, embedded icons, and click debounce
+  platform.rs                — Compile-time backend selection and common platform facade
   platform/
-    macos.rs                 — MacTyper route selection and serialized delivery
+    backend.rs               — Private platform backend contract
+    runtime.rs               — Opaque events, semantic actions, tray/text runtime ownership
+    fallback.rs              — Unsupported-target development/test adapter
+    macos.rs                 — macOS backend policies and serialized native text delivery
     macos/
       accessibility.rs      — Focused AX selected-text insertion and secure-control rejection
       hotkey.rs             — rdev modifier normalization for the listener callback
       pasteboard.rs         — Clipboard replacement, CoreGraphics Cmd+V, and hotkey suppression
-    windows.rs               — WindowsTyper (SendInput API)
+    windows.rs               — Windows backend policies and SendInput text delivery
   transcriber.rs             — Transcriber traits, errors, and exports
   transcriber/
     api.rs                   — API-backed transcriber implementation

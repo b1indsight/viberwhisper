@@ -14,10 +14,10 @@ Module-level design docs covering structs, methods, and dependencies.
 |---|---|
 | [audio.md](architecture/audio.md) | Audio recording — `AudioRecorder`, cpal stream management, live chunking, WAV output |
 | [core.md](architecture/core.md) | Strict v2 config persistence, runtime assembly, CLI parsing, and `SessionOrchestrator` |
-| [input.md](architecture/input.md) | Global hotkey detection, text injection (`TextTyper`), system tray (`TrayManager`) |
+| [input.md](architecture/input.md) | Target-neutral hotkey/tray drivers and the thread-safe `TextTyper` contract |
 | [local.md](architecture/local.md) | Local Gemma runtime: installer, Python FastAPI service, process lifecycle, health/status management |
 | [transcriber.md](architecture/transcriber.md) | Transcription trait, `ApiTranscriber` (OpenAI-compatible API), chunking, retry, text merging |
-| [platform.md](architecture/platform.md) | Platform text injection — native AX/paste fallback on macOS and `SendInput` on Windows |
+| [platform.md](architecture/platform.md) | Compile-time desktop interface for native input, status icons, config paths, and text delivery |
 | [postprocess.md](architecture/postprocess.md) | Post-processing — concrete processor facade, LLM integration, preheat/conservative sessions |
 
 ## Examples
@@ -56,3 +56,4 @@ Implementation plans and technical specs for each feature.
 | [27-release-path-hardening.md](plan/27-release-path-hardening.md) | Implemented | Make API-mode macOS and Windows packages reproducible, manually testable, and safe to publish |
 | [28-winit-event-loop.md](plan/28-winit-event-loop.md) | Implemented | Replace fixed listener polling with a main-thread winit event loop and non-blocking finalization |
 | [29-native-macos-text-injection.md](plan/29-native-macos-text-injection.md) | Implemented | Replace macOS osascript injection with direct AX insertion and a clipboard-replacing native paste fallback |
+| [30-compile-time-platform-interface.md](plan/30-compile-time-platform-interface.md) | Implemented | Hide native icon, hotkey, and text-delivery details behind one compile-time-selected platform interface |

@@ -14,6 +14,22 @@ pub struct HotkeyConfig {
     pub(crate) toggle_label: Option<String>,
 }
 
+/// Target policy used by the shared parser, validator, and listener diagnostics.
+pub(crate) trait HotkeyPolicy: Send + 'static {
+    fn unsupported_reason(key: Key) -> Option<&'static str>;
+
+    fn pair_conflict(
+        _first: Option<Key>,
+        _second: Option<Key>,
+    ) -> Option<(&'static str, &'static str)> {
+        None
+    }
+
+    fn additional_warning(_key: Key) -> Option<&'static str> {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NamedKey {
     key: Key,
@@ -21,14 +37,16 @@ struct NamedKey {
 }
 
 impl HotkeyConfig {
-    pub(crate) fn validate(section: &InputSection) -> Result<Self, Vec<ValidationIssue>> {
+    pub(crate) fn validate<P: HotkeyPolicy>(
+        section: &InputSection,
+    ) -> Result<Self, Vec<ValidationIssue>> {
         let mut issues = Vec::new();
-        let hold_binding = validate_binding(
+        let hold_binding = validate_binding::<P>(
             ConfigKey::InputHoldHotkey,
             &section.hold_hotkey,
             &mut issues,
         );
-        let toggle_binding = validate_binding(
+        let toggle_binding = validate_binding::<P>(
             ConfigKey::InputToggleHotkey,
             &section.toggle_hotkey,
             &mut issues,
@@ -43,15 +61,14 @@ impl HotkeyConfig {
                 "hold and toggle hotkeys must use different keys",
             ));
         }
-        #[cfg(target_os = "windows")]
-        if has_windows_altgr_binding_conflict(
+        if let Some((code, message)) = P::pair_conflict(
             hold_binding.map(|binding| binding.key),
             toggle_binding.map(|binding| binding.key),
         ) {
             issues.push(ValidationIssue::new(
                 ConfigKey::InputToggleHotkey,
-                "hotkey.altgr_conflict",
-                "LEFTCTRL and RIGHTALT cannot be used together because Windows AltGr emits both keys",
+                code,
+                message,
             ));
         }
 
@@ -67,7 +84,7 @@ impl HotkeyConfig {
     }
 }
 
-fn validate_binding(
+fn validate_binding<P: HotkeyPolicy>(
     key: ConfigKey,
     value: &str,
     issues: &mut Vec<ValidationIssue>,
@@ -86,7 +103,7 @@ fn validate_binding(
     };
     let parsed = parse_named_key(value).expect("parse_key delegates to parse_named_key");
     debug_assert_eq!(parsed.key, parsed_key);
-    if let Some(reason) = unsupported_reason(parsed.key) {
+    if let Some(reason) = P::unsupported_reason(parsed.key) {
         issues.push(ValidationIssue::new(
             key,
             "hotkey.unsupported",
@@ -96,59 +113,6 @@ fn validate_binding(
     }
 
     Some(parsed)
-}
-
-#[cfg(target_os = "macos")]
-fn unsupported_reason(key: Key) -> Option<&'static str> {
-    match key {
-        Key::CapsLock => {
-            Some("macOS reports Caps Lock as a state change, not a physical press/release pair")
-        }
-        Key::ControlRight
-        | Key::Delete
-        | Key::Insert
-        | Key::Home
-        | Key::End
-        | Key::PageUp
-        | Key::PageDown
-        | Key::NumLock
-        | Key::ScrollLock
-        | Key::PrintScreen
-        | Key::Pause
-        | Key::IntlBackslash
-        | Key::KpReturn
-        | Key::KpMinus
-        | Key::KpPlus
-        | Key::KpMultiply
-        | Key::KpDivide
-        | Key::Kp0
-        | Key::Kp1
-        | Key::Kp2
-        | Key::Kp3
-        | Key::Kp4
-        | Key::Kp5
-        | Key::Kp6
-        | Key::Kp7
-        | Key::Kp8
-        | Key::Kp9
-        | Key::KpDelete => Some("the current rdev macOS backend does not emit this named key"),
-        _ => None,
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn unsupported_reason(key: Key) -> Option<&'static str> {
-    match key {
-        Key::MetaRight => Some("the current rdev Windows backend does not emit RIGHTMETA"),
-        Key::Function => Some("Windows does not expose the Fn key to rdev"),
-        Key::KpReturn => Some("the current rdev Windows backend cannot distinguish it from ENTER"),
-        _ => None,
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn unsupported_reason(_key: Key) -> Option<&'static str> {
-    None
 }
 
 /// Parse a configured, named physical key. Empty strings disable a binding.
@@ -286,20 +250,11 @@ fn needs_passthrough_warning(key: Key) -> bool {
     )
 }
 
-#[cfg(any(target_os = "windows", test))]
-fn has_windows_altgr_alias_risk(key: Key) -> bool {
-    key == Key::ControlLeft
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn has_windows_altgr_binding_conflict(first: Option<Key>, second: Option<Key>) -> bool {
-    matches!(
-        (first, second),
-        (Some(Key::ControlLeft), Some(Key::AltGr)) | (Some(Key::AltGr), Some(Key::ControlLeft))
-    )
-}
-
-fn log_binding_warnings(mode: &'static str, key: Option<Key>, label: Option<&str>) {
+fn log_binding_warnings<P: HotkeyPolicy>(
+    mode: &'static str,
+    key: Option<Key>,
+    label: Option<&str>,
+) {
     let (Some(key), Some(label)) = (key, label) else {
         return;
     };
@@ -310,12 +265,11 @@ fn log_binding_warnings(mode: &'static str, key: Option<Key>, label: Option<&str
             "hotkey input is observed but not suppressed and may also affect the focused application or operating system"
         );
     }
-    #[cfg(target_os = "windows")]
-    if has_windows_altgr_alias_risk(key) {
+    if let Some(message) = P::additional_warning(key) {
         warn!(
             mode,
             hotkey = %label,
-            "LEFTCTRL may also be emitted when Windows handles RIGHTALT as AltGr"
+            "{message}"
         );
     }
 }
@@ -393,19 +347,20 @@ impl EventMapper {
 /// The detached `rdev` thread cannot be stopped independently; process shutdown is its lifetime
 /// boundary. The filter returns `Some` to map an event or `None` to drop it and reset mapper
 /// key-down bookkeeping.
-pub(crate) fn start_hotkey_listener<F>(
+pub(crate) fn start_hotkey_listener<P, F>(
     config: &HotkeyConfig,
     filter: F,
     notify: impl Fn(HotkeyEvent) + Send + 'static,
 ) where
+    P: HotkeyPolicy,
     F: Fn(EventType) -> Option<EventType> + Send + 'static,
 {
     let hold_key = config.hold_key;
     let toggle_key = config.toggle_key;
     spawn_listener(EventMapper::new(hold_key, toggle_key), filter, notify);
 
-    log_binding_warnings("hold", hold_key, config.hold_label.as_deref());
-    log_binding_warnings("toggle", toggle_key, config.toggle_label.as_deref());
+    log_binding_warnings::<P>("hold", hold_key, config.hold_label.as_deref());
+    log_binding_warnings::<P>("toggle", toggle_key, config.toggle_label.as_deref());
 
     if let Some(label) = config.hold_label.as_deref() {
         info!(hotkey = %label, "hold hotkey registered");
@@ -445,9 +400,17 @@ mod tests {
     use super::*;
     use crate::core::config::{ConfigKey, InputSection};
 
+    struct TestHotkeyPolicy;
+
+    impl HotkeyPolicy for TestHotkeyPolicy {
+        fn unsupported_reason(_key: Key) -> Option<&'static str> {
+            None
+        }
+    }
+
     #[test]
     fn validates_default_disabled_and_invalid_hotkey_sections() {
-        let config = HotkeyConfig::validate(&InputSection::default()).unwrap();
+        let config = HotkeyConfig::validate::<TestHotkeyPolicy>(&InputSection::default()).unwrap();
         assert_eq!(config.hold_key, Some(Key::F8));
         assert_eq!(config.toggle_key, Some(Key::F9));
 
@@ -455,7 +418,7 @@ mod tests {
             hold_hotkey: String::new(),
             toggle_hotkey: String::new(),
         };
-        let config = HotkeyConfig::validate(&tray_only).unwrap();
+        let config = HotkeyConfig::validate::<TestHotkeyPolicy>(&tray_only).unwrap();
         assert_eq!(config.hold_key, None);
         assert_eq!(config.toggle_key, None);
 
@@ -463,14 +426,14 @@ mod tests {
             hold_hotkey: "F13".to_string(),
             toggle_hotkey: "F13".to_string(),
         };
-        let issues = HotkeyConfig::validate(&invalid).unwrap_err();
+        let issues = HotkeyConfig::validate::<TestHotkeyPolicy>(&invalid).unwrap_err();
         assert_eq!(issues[0].key, ConfigKey::InputHoldHotkey);
 
         let duplicate = InputSection {
             hold_hotkey: "RIGHTALT".to_string(),
             toggle_hotkey: "altgr".to_string(),
         };
-        let issues = HotkeyConfig::validate(&duplicate).unwrap_err();
+        let issues = HotkeyConfig::validate::<TestHotkeyPolicy>(&duplicate).unwrap_err();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].code, "hotkey.duplicate");
     }
@@ -624,7 +587,7 @@ mod tests {
         assert_eq!(parse_key(" rightoption "), Some(Key::AltGr));
         assert_eq!(parse_key("invalid"), None);
 
-        let config = HotkeyConfig::validate(&InputSection {
+        let config = HotkeyConfig::validate::<TestHotkeyPolicy>(&InputSection {
             hold_hotkey: " rightoption ".to_string(),
             toggle_hotkey: "f9".to_string(),
         })
@@ -634,88 +597,10 @@ mod tests {
     }
 
     #[test]
-    fn classifies_passthrough_and_windows_altgr_risks() {
+    fn classifies_passthrough_risks() {
         assert!(!needs_passthrough_warning(Key::F8));
         assert!(needs_passthrough_warning(Key::KeyA));
         assert!(needs_passthrough_warning(Key::AltGr));
-        assert!(has_windows_altgr_alias_risk(Key::ControlLeft));
-        assert!(!has_windows_altgr_alias_risk(Key::AltGr));
-        assert!(has_windows_altgr_binding_conflict(
-            Some(Key::ControlLeft),
-            Some(Key::AltGr)
-        ));
-        assert!(has_windows_altgr_binding_conflict(
-            Some(Key::AltGr),
-            Some(Key::ControlLeft)
-        ));
-        assert!(!has_windows_altgr_binding_conflict(
-            Some(Key::Alt),
-            Some(Key::ControlLeft)
-        ));
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn rejects_left_ctrl_and_right_alt_as_a_windows_binding_pair() {
-        let issues = HotkeyConfig::validate(&InputSection {
-            hold_hotkey: "LEFTCTRL".to_string(),
-            toggle_hotkey: "RIGHTALT".to_string(),
-        })
-        .unwrap_err();
-
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].key, ConfigKey::InputToggleHotkey);
-        assert_eq!(issues[0].code, "hotkey.altgr_conflict");
-    }
-
-    #[test]
-    fn rejects_named_keys_the_current_platform_backend_cannot_emit() {
-        #[cfg(target_os = "macos")]
-        let unsupported = [
-            "CAPSLOCK",
-            "RIGHTCTRL",
-            "DELETE",
-            "INSERT",
-            "HOME",
-            "END",
-            "PAGEUP",
-            "PAGEDOWN",
-            "NUMLOCK",
-            "SCROLLLOCK",
-            "PRINTSCREEN",
-            "PAUSE",
-            "INTLBACKSLASH",
-            "NUMPAD0",
-            "NUMPAD1",
-            "NUMPAD2",
-            "NUMPAD3",
-            "NUMPAD4",
-            "NUMPAD5",
-            "NUMPAD6",
-            "NUMPAD7",
-            "NUMPAD8",
-            "NUMPAD9",
-            "NUMPADENTER",
-            "NUMPADMINUS",
-            "NUMPADPLUS",
-            "NUMPADMULTIPLY",
-            "NUMPADDIVIDE",
-            "NUMPADDELETE",
-        ];
-        #[cfg(target_os = "windows")]
-        let unsupported = ["RIGHTMETA", "FUNCTION", "NUMPADENTER"];
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let unsupported: [&str; 0] = [];
-
-        for name in unsupported {
-            let issues = HotkeyConfig::validate(&InputSection {
-                hold_hotkey: name.to_string(),
-                toggle_hotkey: String::new(),
-            })
-            .unwrap_err();
-            assert_eq!(issues.len(), 1, "name: {name}");
-            assert_eq!(issues[0].code, "hotkey.unsupported", "name: {name}");
-        }
     }
 
     #[test]

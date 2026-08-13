@@ -1,12 +1,109 @@
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use rdev::Key;
+
+use super::backend::{HotkeyFilter, PlatformBackend};
+use crate::input::hotkey::HotkeyPolicy;
+use crate::input::tray::TrayPolicy;
 use crate::input::typer::TextTyper;
 use tracing::{debug, info};
 
 mod accessibility;
 mod hotkey;
 mod pasteboard;
+
+pub(crate) struct MacBackend;
+pub(crate) struct MacHotkeys;
+pub(crate) struct MacTray;
+
+impl PlatformBackend for MacBackend {
+    type Hotkeys = MacHotkeys;
+    type Tray = MacTray;
+
+    fn config_dir() -> Option<PathBuf> {
+        dirs::config_dir().map(|base| base.join("com.b1indsight.viberwhisper"))
+    }
+
+    fn text_typer_and_hotkey_filter() -> (Arc<dyn TextTyper>, HotkeyFilter) {
+        let (typer, filter) = MacTyper::new();
+        (Arc::new(typer), Box::new(filter))
+    }
+}
+
+impl HotkeyPolicy for MacHotkeys {
+    fn unsupported_reason(key: Key) -> Option<&'static str> {
+        match key {
+            Key::CapsLock => {
+                Some("macOS reports Caps Lock as a state change, not a physical press/release pair")
+            }
+            Key::ControlRight
+            | Key::Delete
+            | Key::Insert
+            | Key::Home
+            | Key::End
+            | Key::PageUp
+            | Key::PageDown
+            | Key::NumLock
+            | Key::ScrollLock
+            | Key::PrintScreen
+            | Key::Pause
+            | Key::IntlBackslash
+            | Key::KpReturn
+            | Key::KpMinus
+            | Key::KpPlus
+            | Key::KpMultiply
+            | Key::KpDivide
+            | Key::Kp0
+            | Key::Kp1
+            | Key::Kp2
+            | Key::Kp3
+            | Key::Kp4
+            | Key::Kp5
+            | Key::Kp6
+            | Key::Kp7
+            | Key::Kp8
+            | Key::Kp9
+            | Key::KpDelete => Some("the current rdev macOS backend does not emit this named key"),
+            _ => None,
+        }
+    }
+}
+
+impl TrayPolicy for MacTray {
+    fn idle_icon_is_template() -> bool {
+        true
+    }
+
+    #[cfg(not(test))]
+    fn prepare_application() -> Result<(), Box<dyn std::error::Error>> {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::{NSApp, NSApplicationActivationPolicy};
+
+        let mtm = MainThreadMarker::new().ok_or("tray must be created on the main thread")?;
+        let _ = NSApp(mtm).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    fn double_click_interval() -> Option<Duration> {
+        let seconds = objc2_app_kit::NSEvent::doubleClickInterval();
+        seconds
+            .is_finite()
+            .then(|| Duration::from_secs_f64(seconds))
+    }
+
+    #[cfg(not(test))]
+    fn set_icon(
+        tray_icon: &tray_icon::TrayIcon,
+        icon: tray_icon::Icon,
+        is_template: bool,
+    ) -> tray_icon::Result<()> {
+        tray_icon.set_icon_with_as_template(Some(icon), is_template)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AccessibilityInsert {
@@ -125,7 +222,7 @@ fn route_injection(
 
 /// Native macOS text delivery using focused AX selection first and a clipboard-replacing paste
 /// fallback only when the focused control does not support selected-text assignment.
-pub struct MacTyper {
+struct MacTyper {
     paste: pasteboard::NativePasteWriter,
     delivery: Mutex<()>,
 }
@@ -181,17 +278,50 @@ impl TextTyper for MacTyper {
         Ok(())
     }
 }
-use std::path::PathBuf;
-
-pub(crate) fn config_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|base| base.join("com.b1indsight.viberwhisper"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
 
     use super::*;
+
+    #[test]
+    fn macos_policy_owns_native_hotkey_and_icon_rules() {
+        assert!(MacTray::idle_icon_is_template());
+        for key in [
+            Key::CapsLock,
+            Key::ControlRight,
+            Key::Delete,
+            Key::Insert,
+            Key::Home,
+            Key::End,
+            Key::PageUp,
+            Key::PageDown,
+            Key::NumLock,
+            Key::ScrollLock,
+            Key::PrintScreen,
+            Key::Pause,
+            Key::IntlBackslash,
+            Key::KpReturn,
+            Key::KpMinus,
+            Key::KpPlus,
+            Key::KpMultiply,
+            Key::KpDivide,
+            Key::Kp0,
+            Key::Kp1,
+            Key::Kp2,
+            Key::Kp3,
+            Key::Kp4,
+            Key::Kp5,
+            Key::Kp6,
+            Key::Kp7,
+            Key::Kp8,
+            Key::Kp9,
+            Key::KpDelete,
+        ] {
+            assert!(MacHotkeys::unsupported_reason(key).is_some(), "{key:?}");
+        }
+        assert_eq!(MacHotkeys::unsupported_reason(Key::F8), None);
+    }
 
     struct FakeAccessibility {
         result: RefCell<Option<Result<AccessibilityInsert, AccessibilityError>>>,
