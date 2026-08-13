@@ -16,4 +16,5 @@ pub(crate) trait PlatformBackend: 'static {
 
     fn config_dir() -> Option<PathBuf>;
     fn text_typer_and_hotkey_filter() -> (Arc<dyn TextTyper>, HotkeyFilter);
+    fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>>;
 }

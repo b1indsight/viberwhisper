@@ -3,9 +3,10 @@
 ## Purpose
 
 The `input` module (`src/input/`) provides target-neutral drivers and contracts for global hotkey
-detection (`hotkey.rs`), text delivery (`typer.rs`), and the system tray (`tray.rs`). Native policy
-is supplied by the compile-time-selected `platform` backend. Input drivers report native events;
-recording lifecycle decisions belong to `core::recording_session`.
+detection (`hotkey.rs`), text delivery (`typer.rs`), clipboard replacement (`clipboard.rs`), and
+the system tray (`tray.rs`). Native policy is supplied by the compile-time-selected `platform`
+backend. Input drivers report native events; recording lifecycle decisions belong to
+`core::recording_session`.
 
 ---
 
@@ -189,6 +190,8 @@ pub struct TrayManager<P: TrayPolicy> {
     icon_idle: Icon,
     icon_recording: Icon,
     status_item: MenuItem,
+    history_items: Vec<MenuItem>,
+    history: Vec<String>,
     exit_item_id: MenuId,
     click_debounce: ClickDebounce,
     policy: PhantomData<P>,
@@ -215,10 +218,11 @@ the asset's explicit red. `WindowsTray` uses the committed colors directly.
 
 **`TrayManager::<P>::new(notify) -> Result<Self>`**
 
-Decodes the embedded idle and recording PNGs, then builds the tray icon with a menu containing:
-title item, status item, separator, and exit item. Corrupt or non-RGBA assets fail tray construction
-with an error, while tests enforce the committed 32×32 dimensions and transparency. Left-click menu
-opening is disabled so left click can toggle recording; right click retains the native context menu.
+Decodes the embedded idle and recording PNGs, then builds the tray icon with title, status, a
+disabled `最近识别` heading, five fixed history slots, separators, and Exit.
+Corrupt or non-RGBA assets fail tray construction with an error, while tests enforce the committed
+32×32 dimensions and transparency. Left-click menu opening is disabled so left click can toggle
+recording; right click retains the native context menu.
 Before creating the native icon, `P` prepares the native application and construction installs the
 process-global `tray-icon` and menu callbacks with the platform runtime's event callback.
 `tray-icon 0.21` stores those handlers in one-shot
@@ -229,13 +233,18 @@ global cells, matching the application's single listener and process-lifetime ev
 Switches the icon, backend-selected template/color mode, tooltip, and menu status text based on
 recording state. Native icon/tooltip update failures are logged rather than silently discarded.
 
+**`set_history(&mut self, entries: Vec<String>)` / `push_history(&mut self, text: String)`**
+
+Startup moves in up to five entries; each later append prepends one string and truncates the cache
+to five. The fixed menu slots update their label and enabled state in place. Labels collapse
+whitespace, escape mnemonic ampersands, and truncate after 40 Unicode characters; the parallel
+`history` vector retains the unmodified text.
+
 **`handle_event(&mut self, event: TrayEvent) -> Option<TrayAction>`**
 
 Filters raw events by tray/menu ID and maps a matching left-button-up event to `ToggleRecording`.
-Unrelated icon IDs and mouse phases are discarded; Exit bypasses debounce. `TrayEvent` and
-`TrayAction` stay behind the opaque platform boundary; `PlatformRuntime::handle_event` returns the
-corresponding semantic `PlatformAction`. Events are handled in native delivery order, and once Exit
-transitions the core to `ShuttingDown`, later recording input is rejected.
+A matching fixed history-item ID maps to `CopyHistory(full_text)`. `PlatformRuntime` performs
+the native copy immediately; unrelated IDs and mouse phases are discarded.
 
 The main-thread winit loop owns AppKit/Win32 dispatch in `ControlFlow::Wait` mode. `TrayManager` no
 longer exposes a polling receiver or a manual platform event pump. `MacTray` still enforces
@@ -247,4 +256,4 @@ Accessory activation policy and creates no application window.
 - `MacTray` reads `NSEvent::doubleClickInterval()`
 - `WindowsTray` reads `GetDoubleClickTime()` and suppresses the button-up following a native `DoubleClick`
 - the suppression is one-shot; ordinary ignored clicks do not extend the window
-- debounce applies only to tray recording toggles, never Exit or hotkeys
+- debounce applies only to tray recording toggles, never history, Exit, or hotkeys

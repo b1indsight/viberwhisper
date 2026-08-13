@@ -14,10 +14,10 @@ Module-level design docs covering structs, methods, and dependencies.
 |---|---|
 | [audio.md](architecture/audio.md) | Audio recording — `AudioRecorder`, cpal stream management, live chunking, WAV output |
 | [core.md](architecture/core.md) | Strict v2 config persistence, runtime assembly, CLI parsing, and `SessionOrchestrator` |
-| [input.md](architecture/input.md) | Target-neutral hotkey/tray drivers and the thread-safe `TextTyper` contract |
+| [input.md](architecture/input.md) | Target-neutral hotkey/tray drivers and the thread-safe text-delivery contract |
 | [local.md](architecture/local.md) | Local Gemma runtime: installer, Python FastAPI service, process lifecycle, health/status management |
 | [transcriber.md](architecture/transcriber.md) | Transcription trait, `ApiTranscriber` (OpenAI-compatible API), chunking, retry, text merging |
-| [platform.md](architecture/platform.md) | Compile-time desktop interface for native input, status icons, config paths, and text delivery |
+| [platform.md](architecture/platform.md) | Compile-time desktop interface for native input, status/history menus, config paths, text delivery, and clipboard copy |
 | [postprocess.md](architecture/postprocess.md) | Post-processing — concrete processor facade, LLM integration, preheat/conservative sessions |
 
 ## Examples
@@ -58,4 +58,4 @@ Implementation plans and technical specs for each feature.
 | [29-native-macos-text-injection.md](plan/29-native-macos-text-injection.md) | Implemented | Replace macOS osascript injection with direct AX insertion and a clipboard-replacing native paste fallback |
 | [30-compile-time-platform-interface.md](plan/30-compile-time-platform-interface.md) | Implemented | Hide native icon, hotkey, and text-delivery details behind one compile-time-selected platform interface |
 | [31-macos-chromium-paste-fallback.md](plan/31-macos-chromium-paste-fallback.md) | Implemented | Route identified Chromium browsers through recoverable native paste without activating web accessibility |
-| [32-transcription-history.md](plan/32-transcription-history.md) | Proposed | Persist a bounded transcription history and expose the newest five entries as exact clipboard-copy actions in the tray menu |
+| [32-transcription-history.md](plan/32-transcription-history.md) | In progress | Persist a bounded transcription history and expose the newest five entries as exact clipboard-copy actions in the tray menu |

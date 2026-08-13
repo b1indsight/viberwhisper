@@ -41,8 +41,8 @@ pub(crate) enum PlatformAction {
 /// The only native desktop capability surface consumed by the listener application.
 ///
 /// The runtime is created and retained on the winit main thread because it owns native tray
-/// state. `start` installs process-lifetime callbacks; only the cloned `TextTyper` handle returned
-/// by `text_typer` may cross to a finalization worker.
+/// state. `start` installs process-lifetime callbacks; only the cloned `TextTyper` handle
+/// returned by `text_typer` may cross to a finalization worker.
 pub(crate) trait PlatformInterface: Sized {
     fn start(
         hotkeys: &HotkeyConfig,
@@ -51,6 +51,8 @@ pub(crate) trait PlatformInterface: Sized {
 
     fn handle_event(&mut self, event: PlatformEvent) -> Option<PlatformAction>;
     fn set_recording(&mut self, recording: bool);
+    fn set_history(&mut self, entries: Vec<String>);
+    fn push_history(&mut self, text: String);
     fn text_typer(&self) -> Arc<dyn TextTyper>;
 }
 
@@ -68,6 +70,8 @@ where
 pub(crate) trait PlatformTray {
     fn handle_event(&mut self, event: TrayEvent) -> Option<TrayAction>;
     fn set_recording(&mut self, recording: bool);
+    fn set_history(&mut self, entries: Vec<String>);
+    fn push_history(&mut self, text: String);
 }
 
 impl<P: crate::input::tray::TrayPolicy> PlatformTray for TrayManager<P> {
@@ -77,6 +81,14 @@ impl<P: crate::input::tray::TrayPolicy> PlatformTray for TrayManager<P> {
 
     fn set_recording(&mut self, recording: bool) {
         TrayManager::set_recording(self, recording);
+    }
+
+    fn set_history(&mut self, entries: Vec<String>) {
+        TrayManager::set_history(self, entries);
+    }
+
+    fn push_history(&mut self, text: String) {
+        TrayManager::push_history(self, text);
     }
 }
 
@@ -144,12 +156,28 @@ where
     fn handle_event(&mut self, event: PlatformEvent) -> Option<PlatformAction> {
         match event.0 {
             PlatformEventKind::Hotkey(event) => action_from_hotkey(event),
-            PlatformEventKind::Tray(event) => self.tray.handle_event(event).map(action_from_tray),
+            PlatformEventKind::Tray(event) => match self.tray.handle_event(event) {
+                Some(TrayAction::CopyHistory(text)) => {
+                    if let Err(error) = B::copy_to_clipboard(&text) {
+                        tracing::error!(%error, "Failed to copy transcription history");
+                    }
+                    None
+                }
+                action => action.map(action_from_tray),
+            },
         }
     }
 
     fn set_recording(&mut self, recording: bool) {
         self.tray.set_recording(recording);
+    }
+
+    fn set_history(&mut self, entries: Vec<String>) {
+        self.tray.set_history(entries);
+    }
+
+    fn push_history(&mut self, text: String) {
+        self.tray.push_history(text);
     }
 
     fn text_typer(&self) -> Arc<dyn TextTyper> {
@@ -169,6 +197,7 @@ fn action_from_hotkey(event: HotkeyEvent) -> Option<PlatformAction> {
 fn action_from_tray(action: TrayAction) -> PlatformAction {
     match action {
         TrayAction::ToggleRecording => PlatformAction::ToggleRecording,
+        TrayAction::CopyHistory(_) => unreachable!("history copy is handled by PlatformRuntime"),
         TrayAction::Exit => PlatformAction::ExitRequested,
     }
 }
@@ -232,6 +261,10 @@ mod tests {
         -> (Arc<dyn TextTyper>, super::super::backend::HotkeyFilter) {
             (Arc::new(RecordingTyper), Box::new(Some))
         }
+
+        fn copy_to_clipboard(_text: &str) -> Result<(), Box<dyn std::error::Error>> {
+            Ok(())
+        }
     }
 
     struct FakeTray;
@@ -247,6 +280,10 @@ mod tests {
         fn set_recording(&mut self, recording: bool) {
             RECORDING.store(recording, Ordering::SeqCst);
         }
+
+        fn set_history(&mut self, _entries: Vec<String>) {}
+
+        fn push_history(&mut self, _text: String) {}
     }
 
     struct FakeDrivers;

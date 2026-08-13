@@ -41,3 +41,4 @@
 2026-08-12: Replace macOS osascript text injection with native Accessibility selected-text insertion and an AppKit/CoreGraphics fallback that leaves the transcription on the clipboard, rejects secure controls, and suppresses its own synthetic hotkey events
 2026-08-12: Hide native hotkey, tray/icon, configuration-path, and text-delivery details behind one compile-time-selected platform runtime with opaque events and semantic actions
 2026-08-13: Fix macOS Chromium web-field input by routing identified browsers through native Cmd+V without activating renderer accessibility, while leaving the transcription on the clipboard for manual recovery
+2026-08-13: Add append-only JSONL transcription history with timestamp metadata, trailing-record repair, a 5 MiB cap, and the newest five Unicode-safe summaries as exact tray clipboard-copy actions

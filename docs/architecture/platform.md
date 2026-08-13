@@ -8,6 +8,7 @@ one application-facing runtime for:
 - global hotkey and tray input;
 - status icon creation and recording-state updates;
 - final text delivery to the focused control;
+- history-menu refresh and explicit clipboard replacement;
 - platform-aware hotkey validation; and
 - configuration-directory discovery.
 
@@ -37,7 +38,7 @@ native dependencies remain selected by Cargo target dependency tables.
 - a `HotkeyPolicy` implementation;
 - a `TrayPolicy` implementation;
 - its configuration directory; and
-- one text writer paired with its native hotkey filter.
+- one text writer, one native clipboard function, and the native hotkey filter.
 
 The compiler checks the selected backend's associated policies. There is no runtime OS enum,
 feature flag, or OS-name match in the application layer.
@@ -51,13 +52,15 @@ pub(crate) trait PlatformInterface: Sized {
     fn start(hotkeys, notify) -> Result<Self, Box<dyn Error>>;
     fn handle_event(&mut self, event: PlatformEvent) -> Option<PlatformAction>;
     fn set_recording(&mut self, recording: bool);
+    fn set_history(&mut self, entries: Vec<String>);
+    fn push_history(&mut self, text: String);
     fn text_typer(&self) -> Arc<dyn TextTyper>;
 }
 ```
 
-`NativePlatform::start` constructs the selected text writer/filter pair, starts the
+`NativePlatform::start` constructs the selected text writer and hotkey filter, starts the
 process-lifetime `rdev` listener, creates the tray, and installs the native callbacks. The listener
-application stores this single runtime instead of storing a tray and text writer separately.
+application stores this single runtime instead of storing native drivers separately.
 
 `PlatformEvent` is an opaque wrapper around private hotkey or tray events. Native callbacks enqueue
 it through winit, and the main-thread listener passes it back to `handle_event`. The runtime returns
@@ -72,8 +75,9 @@ pub(crate) enum PlatformAction {
 }
 ```
 
-Toggle hotkey releases, key repeats, unrelated tray/menu IDs, rejected clicks, and native
-double-click tails produce no action. Recording-state decisions remain in
+`TrayAction::CopyHistory` stays inside the runtime and calls the selected backend directly rather
+than entering the recording state machine. Toggle hotkey releases, key repeats, unrelated tray/menu
+IDs, rejected clicks, and native double-click tails produce no action. Recording-state decisions remain in
 `application::listener`; platform actions are mapped there to source-free `SessionEvent` values.
 
 ## Ownership and Event Flow
@@ -92,15 +96,18 @@ tray callback ─┘                                  │
 
 SessionEffect::SetTrayRecording ─> NativePlatform::set_recording
 final transcription              ─> NativePlatform::text_typer ─> worker
+startup history (at most five)   ─> NativePlatform::set_history  ─> tray
+successful appended entry        ─> NativePlatform::push_history ─> tray
+TrayAction::CopyHistory(full text) ─> backend clipboard function
 ```
 
 `NativePlatform` and its tray stay on the winit/main thread. `text_typer()` clones only the
-`Send + Sync` text writer handle for a finalization worker. AppKit/Win32 tray values never cross to
-that worker, and text delivery never blocks the native event loop.
+`Send + Sync` text writer handle for the finalization worker, where history persistence and text
+delivery run. History copy calls the selected backend's native clipboard function directly.
 
 Raw tray events must return through winit before they are classified because click debounce and
 own-ID filtering mutate the main-thread-owned `TrayManager`. Native callback threads only enqueue
-events and never run recording transitions.
+events and never copy text or run recording transitions.
 
 ## Hotkey Policy
 
@@ -120,9 +127,9 @@ the key from reaching the focused application or operating system.
 
 ## Tray and Status Icon Policy
 
-`input::tray::TrayManager<P>` retains the common icon decoding, menu construction, callback
-installation, own-ID filtering, click debounce, tooltip, and menu status behavior. The selected
-`TrayPolicy` supplies only native differences:
+`input::tray::TrayManager<P>` retains common icon decoding, menu construction, recent-five entries,
+callback installation, click debounce, tooltip, and status behavior. The selected `TrayPolicy`
+supplies only native differences:
 
 | Capability | macOS | Windows |
 |---|---|---|
@@ -138,13 +145,14 @@ Both platforms retain the 300 ms minimum debounce window and embedded 32×32 RGB
 
 `platform::config_dir()` delegates through the selected backend. macOS appends
 `com.b1indsight.viberwhisper`; Windows appends `ViberWhisper`; the fallback appends
-`viberwhisper`. `ConfigStore` alone appends `config.json`, so platform code does not know the
-configuration schema or persistence errors.
+`viberwhisper`. `ConfigStore` appends `config.json` and `HistoryStore` appends `history.jsonl`, so
+platform code knows neither document schema nor persistence error policy.
 
 ## macOS Text Delivery
 
-`MacBackend` constructs `MacTyper` together with the filter returned by its
-`NativePasteWriter`. That shared suppression state is private to the platform boundary.
+`MacBackend` constructs `MacTyper` and `MacClipboard` together with the filter returned by its
+`NativePasteWriter`. Paste hotkey suppression and a shared clipboard/delivery mutex remain private
+to the platform boundary.
 
 `MacTyper` serializes non-empty deliveries, sleeps 100 ms so the target can regain focus, enters an
 Objective-C autorelease pool, classifies the frontmost bundle with
@@ -193,6 +201,11 @@ and the retained transcription provides a manual Cmd+V recovery path.
 Accessibility permission is required for both routes. Missing permission is a hard input error and
 leaves the clipboard untouched.
 
+### History clipboard copy
+
+`MacClipboard` shares `MacTyper`'s delivery mutex and reuses the existing AppKit string replacement.
+It does not inspect Accessibility, post keyboard events, or enter hotkey suppression.
+
 ## Windows Text Delivery
 
 `WindowsBackend` constructs the zero-state `WindowsTyper`. `type_text`:
@@ -206,3 +219,7 @@ leaves the clipboard untouched.
 Surrogate pairs therefore produce one down/up pair for each UTF-16 code unit. The private FFI
 module owns the C layouts, flags, `SendInput`, and `GetDoubleClickTime` declarations linked from
 `user32.dll`.
+
+`windows/clipboard.rs` writes `CF_UNICODETEXT` through Win32 using an invisible message-only owner
+window and movable global memory. Small RAII guards close the clipboard, destroy the window, and
+free memory that has not transferred to Windows. This path emits no `SendInput` events.

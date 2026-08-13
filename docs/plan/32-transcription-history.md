@@ -2,9 +2,22 @@
 
 ## Status
 
-**Plan proposed; implementation has not started.** This document is the plan-only artifact for
-review on a draft pull request. Product code, tests, and current-truth documentation remain
-unchanged until the user explicitly approves the plan.
+**Approved and implemented on draft PR #102; interactive native validation remains.** The user
+requested simplification after the first implementation became disproportionate to the feature.
+The implemented store supersedes the document schema described below: `history.jsonl` contains
+one chronological JSON record per line, with exact text and `created_at_unix_ms` metadata. Normal
+saves validate only the trailing typed record and append one line. Invalid trailing JSON or
+metadata is repaired by truncating that line only. Startup reads only the newest five records in
+reverse; later successful saves send only the new text to the tray's bounded in-memory cache.
+Crossing the 5 MiB cap is the only normal path that rewrites the newest complete suffix through a
+temporary file.
+
+Other material simplifications: there is no schema wrapper, companion lock, clipboard-writer
+object, or menu-rebuild state machine. The single running listener owns the file; five fixed menu
+slots update in place and raw menu IDs return to the main thread. Labels use standard Unicode
+characters instead of a new grapheme dependency. Windows calls `CF_UNICODETEXT` directly with the
+required ownership guards. The original approved design below remains a decision record where this
+status section does not explicitly supersede it.
 
 ## Context
 
@@ -280,7 +293,7 @@ Interactive checks on packaged or native development builds:
 
 1. Produce six short transcripts and verify the right-click menu immediately shows only the newest
    five in newest-first order while recording left click and Exit still work.
-2. Restart the app and verify those five entries reload from `history.json`.
+2. Restart the app and verify those five entries reload from `history.jsonl`.
 3. Record multiline, CJK, emoji, and long text; verify the menu stays bounded and selecting its
    abbreviated label places the exact full text on the clipboard.
 4. Verify history copy on both macOS and Windows without automatically pasting or changing focus.
@@ -315,8 +328,10 @@ After explicit plan approval:
 
 - Every non-empty full or partial text selected for delivery is persisted exactly once before the
   automatic typer attempt; delivery failure does not remove it.
-- `history.json` is atomically stored beside `config.json` and its complete encoded size never
-  exceeds 5 MiB after an application write.
+- `history.jsonl` is appended beside `config.json`; every line is a typed record with timestamp
+  metadata, and its complete encoded size never exceeds 5 MiB after an application write.
+- Startup and append validate only the last record; malformed JSON or metadata is repaired by
+  deleting that record without rewriting older records.
 - Capacity pressure removes oldest complete entries, never truncates entry text, and a single
   oversize entry cannot replace a valid previous history file.
 - Missing/invalid/unwritable history and clipboard failures do not stop recording, transcription,

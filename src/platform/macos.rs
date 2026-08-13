@@ -16,6 +16,8 @@ mod application;
 mod hotkey;
 mod pasteboard;
 
+static DESKTOP_WRITE: Mutex<()> = Mutex::new(());
+
 pub(crate) struct MacBackend;
 pub(crate) struct MacHotkeys;
 pub(crate) struct MacTray;
@@ -31,6 +33,16 @@ impl PlatformBackend for MacBackend {
     fn text_typer_and_hotkey_filter() -> (Arc<dyn TextTyper>, HotkeyFilter) {
         let (typer, filter) = MacTyper::new();
         (Arc::new(typer), Box::new(filter))
+    }
+
+    fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let _write = DESKTOP_WRITE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        objc2::rc::autoreleasepool(|_| {
+            pasteboard::replace_with_text(&objc2_app_kit::NSPasteboard::generalPasteboard(), text)
+        })
+        .map_err(Into::into)
     }
 }
 
@@ -256,7 +268,6 @@ fn route_injection(
 /// fallback only when the focused control does not support selected-text assignment.
 struct MacTyper {
     paste: pasteboard::NativePasteWriter,
-    delivery: Mutex<()>,
 }
 
 impl MacTyper {
@@ -265,13 +276,7 @@ impl MacTyper {
         impl Fn(rdev::EventType) -> Option<rdev::EventType> + Send + 'static,
     ) {
         let (paste, hotkey_filter) = pasteboard::NativePasteWriter::new();
-        (
-            Self {
-                paste,
-                delivery: Mutex::new(()),
-            },
-            hotkey_filter,
-        )
+        (Self { paste }, hotkey_filter)
     }
 }
 
@@ -283,8 +288,7 @@ impl TextTyper for MacTyper {
 
         // Serializing the focus delay with delivery prevents a concurrent finalizer from shifting
         // the focus-settling window immediately before another transaction.
-        let _delivery = self
-            .delivery
+        let _write = DESKTOP_WRITE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::thread::sleep(Duration::from_millis(100));

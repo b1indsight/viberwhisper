@@ -112,9 +112,9 @@ The machine consumes source-free requests plus `SessionStarted`, `SessionStartFa
 `application::listener` executes `StartSession` as an all-or-nothing recorder/orchestrator
 acquisition with rollback. `StopSession` stops the recorder and submits tail chunks in order, then
 starts a session-scoped background task for orchestrator convergence, post-processing, and text
-injection. The machine remains in `Stopping` until the matching completion event returns through
-the application event loop. The state machine changes the tray to idle when it accepts a stop and
-restores the recording indicator if the recorder remains active.
+history persistence followed by injection. `HistoryTyper` emits one `HistorySaved` event after a
+successful append, and the main-thread tray prepends that text to its five-entry cache. The machine
+remains in `Stopping` until the separate finalization event returns.
 
 Exit is represented as `ShutdownRequested`. It cancels recorder/orchestrator work, resets tray state, suppresses final text injection, and exits only after `ReadyToExit` is emitted.
 
@@ -128,13 +128,17 @@ dispatch and no window is created. CLI-only workflows do not construct the event
 
 `src/application/listener/event_loop.rs` passes opaque native payloads back through
 `NativePlatform::handle_event`, normalizes returned semantic actions, executes state-machine
-effects, drains ready chunks, and coordinates background finalization. Winit types remain in the
-application layer. `core`, `audio`, and `input` expose only domain values or narrow callbacks;
-platform-specific values remain behind `NativePlatform`.
-Finalization uses an atomic cancellation flag checked before post-processing and immediately before
-the final text injection. Exit records cancellation without waiting for an injection already in
-progress. Cancellation observed before the final check suppresses delivery, while an injection that
-has already begun may complete.
+effects, drains ready chunks, coordinates background finalization, and handles history-copy actions
+without routing them through the recording state machine. Winit types remain in the application
+layer. `core`, `audio`, and `input` expose only domain values or narrow callbacks; platform-specific
+values remain behind `NativePlatform`.
+Finalization uses an atomic cancellation flag checked before post-processing, history persistence,
+and final text injection. History persistence appends one timestamped record to `history.jsonl`;
+before loading or appending, the store validates only the trailing record and truncates that record
+if its JSON or typed metadata is invalid. Normal writes append one line; crossing 5 MiB keeps the
+newest complete suffix through a temporary-file replacement. An invalid older record stops menu
+loading at that boundary without being repaired. Exit does not wait for persistence or injection
+already in progress.
 
 API and Local backends reuse the same recording/orchestration pipeline; no endpoint rewriting or
 persisted-document mutation occurs in the application layer. `main.rs` only delegates process

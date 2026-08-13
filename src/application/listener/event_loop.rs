@@ -24,6 +24,7 @@ use crate::session::SessionId;
 pub(super) enum AppEvent {
     Platform(PlatformEvent),
     AudioChunkAvailable { session_id: SessionId },
+    HistorySaved(String),
     FinalizationFinished { session_id: SessionId },
 }
 
@@ -89,6 +90,7 @@ pub(super) struct ListenerApplication {
     recorder: AudioRecorder,
     orchestrator: Arc<SessionOrchestrator>,
     platform: NativePlatform,
+    typer: Arc<dyn TextTyper>,
     post_processor: PostProcessor,
     proxy: EventLoopProxy<AppEvent>,
     finalization: Option<FinalizationTask>,
@@ -99,6 +101,7 @@ impl ListenerApplication {
         recorder: AudioRecorder,
         orchestrator: Arc<SessionOrchestrator>,
         platform: NativePlatform,
+        typer: Arc<dyn TextTyper>,
         post_processor: PostProcessor,
         proxy: EventLoopProxy<AppEvent>,
     ) -> Self {
@@ -107,6 +110,7 @@ impl ListenerApplication {
             recorder,
             orchestrator,
             platform,
+            typer,
             post_processor,
             proxy,
             finalization: None,
@@ -125,6 +129,7 @@ impl ListenerApplication {
             AppEvent::AudioChunkAvailable { session_id } => {
                 self.drain_audio_chunks(event_loop, session_id);
             }
+            AppEvent::HistorySaved(text) => self.platform.push_history(text),
             AppEvent::FinalizationFinished { session_id } => {
                 let event = finalization_completion_event(&mut self.finalization, session_id);
                 self.drive_session(event_loop, event);
@@ -316,7 +321,7 @@ impl ListenerApplication {
 
         let orchestrator = Arc::clone(&self.orchestrator);
         let mut post_processor = self.post_processor.start_session();
-        let typer = self.platform.text_typer();
+        let typer = Arc::clone(&self.typer);
         let proxy = self.proxy.clone();
         spawn_finalization_worker(
             session_id,
@@ -576,7 +581,6 @@ mod tests {
         machine.handle(stale_event);
         assert!(finalization.is_some());
         assert_eq!(machine.state(), &RecordingState::Stopping { session_id });
-
         let matching_event = finalization_completion_event(&mut finalization, session_id);
         machine.handle(matching_event);
         assert!(finalization.is_none());

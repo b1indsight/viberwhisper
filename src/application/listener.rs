@@ -1,8 +1,9 @@
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{LocalServiceGuard, config_context, load_config, start_local_backend};
 use crate::core::config::EnvironmentSecretSource;
 use crate::core::recording_session::{RecordingState, SessionEvent};
+use crate::history::{HistoryStore, HistoryTyper};
 use crate::platform::PlatformAction;
 use crate::runtime_config::{self, ListenerConfig, ProfileSelection};
 use crate::{audio, core, postprocess, transcriber};
@@ -77,9 +78,36 @@ pub(super) fn run_with_config(
     let proxy = event_loop.create_proxy();
 
     let platform_proxy = proxy.clone();
-    let platform = NativePlatform::start(&config.hotkeys, move |event| {
+    let history_store = HistoryStore::discover()
+        .inspect_err(|error| warn!(%error, "Transcription history is unavailable"))
+        .ok();
+    let recent_history = history_store
+        .as_ref()
+        .and_then(|store| {
+            store
+                .load_recent()
+                .inspect_err(|error| warn!(%error, "Ignoring unusable transcription history"))
+                .ok()
+        })
+        .unwrap_or_default();
+
+    let mut platform = NativePlatform::start(&config.hotkeys, move |event| {
         let _ = platform_proxy.send_event(AppEvent::Platform(event));
     })?;
+    platform.set_history(recent_history);
+    let typer = match history_store {
+        Some(store) => {
+            let history_proxy = proxy.clone();
+            Arc::new(HistoryTyper::new(
+                store,
+                platform.text_typer(),
+                move |text| {
+                    let _ = history_proxy.send_event(AppEvent::HistorySaved(text));
+                },
+            )) as Arc<dyn crate::input::typer::TextTyper>
+        }
+        None => platform.text_typer(),
+    };
 
     let audio_proxy = proxy.clone();
     let recorder = AudioRecorder::with_config(&config.audio, move |session_id| {
@@ -97,8 +125,14 @@ pub(super) fn run_with_config(
     println!("Press Ctrl+C to exit.");
     println!();
 
-    let mut application =
-        ListenerApplication::new(recorder, orchestrator, platform, post_processor, proxy);
+    let mut application = ListenerApplication::new(
+        recorder,
+        orchestrator,
+        platform,
+        typer,
+        post_processor,
+        proxy,
+    );
     event_loop.run_app(&mut application)?;
     Ok(())
 }
