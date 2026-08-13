@@ -12,6 +12,7 @@ use crate::input::typer::TextTyper;
 use tracing::{debug, info};
 
 mod accessibility;
+mod application;
 mod hotkey;
 mod pasteboard;
 
@@ -147,7 +148,19 @@ impl std::fmt::Display for AccessibilityError {
 impl std::error::Error for AccessibilityError {}
 
 trait AccessibilityWriter {
+    fn validate_paste_destination(&self) -> Result<(), AccessibilityError>;
+
     fn insert_selected_text(&self, text: &str) -> Result<AccessibilityInsert, AccessibilityError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrontmostApplicationKind {
+    ChromiumBrowser,
+    Other,
+}
+
+trait FrontmostApplication {
+    fn kind(&self) -> FrontmostApplicationKind;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,11 +210,30 @@ impl std::error::Error for MacInjectionError {}
 
 fn route_injection(
     text: &str,
+    application: &impl FrontmostApplication,
     accessibility: &impl AccessibilityWriter,
     paste: &impl PasteWriter,
 ) -> Result<InjectionOutcome, MacInjectionError> {
     if text.is_empty() {
         return Ok(InjectionOutcome::Noop);
+    }
+
+    if application.kind() == FrontmostApplicationKind::ChromiumBrowser {
+        match accessibility.validate_paste_destination() {
+            Ok(()) => {}
+            Err(AccessibilityError::NoFocusedElement) => {
+                debug!(
+                    "Chromium browser has keyboard focus without an exposed Accessibility target; \
+                     posting native paste"
+                );
+            }
+            Err(error) => return Err(MacInjectionError::Accessibility(error)),
+        }
+
+        return paste
+            .paste(text)
+            .map(|()| InjectionOutcome::Paste)
+            .map_err(MacInjectionError::Paste);
     }
 
     match accessibility.insert_selected_text(text) {
@@ -258,7 +290,12 @@ impl TextTyper for MacTyper {
         std::thread::sleep(Duration::from_millis(100));
 
         let outcome = objc2::rc::autoreleasepool(|_| {
-            route_injection(text, &accessibility::NativeAccessibility, &self.paste)
+            route_injection(
+                text,
+                &application::NativeFrontmostApplication,
+                &accessibility::NativeAccessibility,
+                &self.paste,
+            )
         })?;
         match outcome {
             InjectionOutcome::Noop => {}
@@ -271,7 +308,7 @@ impl TextTyper for MacTyper {
             InjectionOutcome::Paste => {
                 info!(
                     text_bytes = text.len(),
-                    "text delivered through native paste fallback; clipboard contains transcription"
+                    "native paste posted; clipboard contains transcription for manual recovery"
                 );
             }
         }
@@ -323,27 +360,69 @@ mod tests {
         assert_eq!(MacHotkeys::unsupported_reason(Key::F8), None);
     }
 
+    struct FakeApplication {
+        kind: FrontmostApplicationKind,
+        calls: Cell<usize>,
+    }
+
+    impl FakeApplication {
+        fn new(kind: FrontmostApplicationKind) -> Self {
+            Self {
+                kind,
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl FrontmostApplication for FakeApplication {
+        fn kind(&self) -> FrontmostApplicationKind {
+            self.calls.set(self.calls.get() + 1);
+            self.kind
+        }
+    }
+
     struct FakeAccessibility {
-        result: RefCell<Option<Result<AccessibilityInsert, AccessibilityError>>>,
+        insert_result: RefCell<Option<Result<AccessibilityInsert, AccessibilityError>>>,
+        validation_result: RefCell<Option<Result<(), AccessibilityError>>>,
         texts: RefCell<Vec<String>>,
+        validation_calls: Cell<usize>,
     }
 
     impl FakeAccessibility {
-        fn returning(result: Result<AccessibilityInsert, AccessibilityError>) -> Self {
+        fn inserting(result: Result<AccessibilityInsert, AccessibilityError>) -> Self {
             Self {
-                result: RefCell::new(Some(result)),
+                insert_result: RefCell::new(Some(result)),
+                validation_result: RefCell::new(None),
                 texts: RefCell::new(Vec::new()),
+                validation_calls: Cell::new(0),
+            }
+        }
+
+        fn validating(result: Result<(), AccessibilityError>) -> Self {
+            Self {
+                insert_result: RefCell::new(None),
+                validation_result: RefCell::new(Some(result)),
+                texts: RefCell::new(Vec::new()),
+                validation_calls: Cell::new(0),
             }
         }
     }
 
     impl AccessibilityWriter for FakeAccessibility {
+        fn validate_paste_destination(&self) -> Result<(), AccessibilityError> {
+            self.validation_calls.set(self.validation_calls.get() + 1);
+            self.validation_result
+                .borrow_mut()
+                .take()
+                .expect("fake Accessibility validation result used once")
+        }
+
         fn insert_selected_text(
             &self,
             text: &str,
         ) -> Result<AccessibilityInsert, AccessibilityError> {
             self.texts.borrow_mut().push(text.to_string());
-            self.result
+            self.insert_result
                 .borrow_mut()
                 .take()
                 .expect("fake Accessibility result used once")
@@ -366,24 +445,28 @@ mod tests {
 
     #[test]
     fn direct_accessibility_insert_never_uses_paste_fallback() {
-        let accessibility = FakeAccessibility::returning(Ok(AccessibilityInsert::Inserted));
+        let application = FakeApplication::new(FrontmostApplicationKind::Other);
+        let accessibility = FakeAccessibility::inserting(Ok(AccessibilityInsert::Inserted));
         let paste = FakePaste::default();
 
-        let outcome = route_injection("hello", &accessibility, &paste).unwrap();
+        let outcome = route_injection("hello", &application, &accessibility, &paste).unwrap();
 
         assert_eq!(outcome, InjectionOutcome::Accessibility);
+        assert_eq!(application.calls.get(), 1);
+        assert_eq!(accessibility.validation_calls.get(), 0);
         assert_eq!(paste.calls.get(), 0);
     }
 
     #[test]
     fn unsupported_selected_text_uses_paste_once_with_exact_text() {
-        let accessibility = FakeAccessibility::returning(Ok(AccessibilityInsert::Unsupported(
+        let application = FakeApplication::new(FrontmostApplicationKind::Other);
+        let accessibility = FakeAccessibility::inserting(Ok(AccessibilityInsert::Unsupported(
             "selected text is not settable",
         )));
         let paste = FakePaste::default();
         let text = "line 1\n\"quoted\" \\ slash 中文 😀";
 
-        let outcome = route_injection(text, &accessibility, &paste).unwrap();
+        let outcome = route_injection(text, &application, &accessibility, &paste).unwrap();
 
         assert_eq!(outcome, InjectionOutcome::Paste);
         assert_eq!(paste.calls.get(), 1);
@@ -403,11 +486,12 @@ mod tests {
         ];
 
         for error in cases {
-            let accessibility = FakeAccessibility::returning(Err(error));
+            let application = FakeApplication::new(FrontmostApplicationKind::Other);
+            let accessibility = FakeAccessibility::inserting(Err(error));
             let paste = FakePaste::default();
 
             assert!(matches!(
-                route_injection("secret", &accessibility, &paste),
+                route_injection("secret", &application, &accessibility, &paste),
                 Err(MacInjectionError::Accessibility(_))
             ));
             assert_eq!(paste.calls.get(), 0);
@@ -415,15 +499,127 @@ mod tests {
     }
 
     #[test]
+    fn chromium_with_hidden_web_focus_posts_paste_without_selected_text_assignment() {
+        // Chromium can keep keyboard focus in a DOM editor while omitting that editor from the
+        // macOS AX tree. The browser route must still paste and retain the text for recovery.
+        let application = FakeApplication::new(FrontmostApplicationKind::ChromiumBrowser);
+        let accessibility =
+            FakeAccessibility::validating(Err(AccessibilityError::NoFocusedElement));
+        let paste = FakePaste::default();
+
+        let outcome =
+            route_injection("browser text", &application, &accessibility, &paste).unwrap();
+
+        assert_eq!(outcome, InjectionOutcome::Paste);
+        assert_eq!(accessibility.validation_calls.get(), 1);
+        assert!(accessibility.texts.borrow().is_empty());
+        assert_eq!(paste.calls.get(), 1);
+        assert_eq!(paste.texts.borrow().as_slice(), ["browser text"]);
+    }
+
+    #[test]
+    fn chromium_with_exposed_focus_always_pastes_instead_of_assigning_selected_text() {
+        // Chromium reports AXSelectedText assignment synchronously even though its asynchronous
+        // renderer action may not update the DOM, so browser delivery must never call that API.
+        let application = FakeApplication::new(FrontmostApplicationKind::ChromiumBrowser);
+        let accessibility = FakeAccessibility::validating(Ok(()));
+        let paste = FakePaste::default();
+
+        let outcome =
+            route_injection("browser text", &application, &accessibility, &paste).unwrap();
+
+        assert_eq!(outcome, InjectionOutcome::Paste);
+        assert_eq!(accessibility.validation_calls.get(), 1);
+        assert!(accessibility.texts.borrow().is_empty());
+        assert_eq!(paste.calls.get(), 1);
+    }
+
+    #[test]
+    fn chromium_secure_and_hard_validation_errors_never_paste() {
+        let cases = [
+            AccessibilityError::SecureControl,
+            AccessibilityError::PermissionDenied,
+            AccessibilityError::UnexpectedType {
+                operation: "subrole lookup",
+            },
+            AccessibilityError::Native {
+                operation: "focused element lookup",
+                code: -25204,
+            },
+        ];
+
+        for error in cases {
+            let application = FakeApplication::new(FrontmostApplicationKind::ChromiumBrowser);
+            let accessibility = FakeAccessibility::validating(Err(error));
+            let paste = FakePaste::default();
+
+            assert!(matches!(
+                route_injection("secret", &application, &accessibility, &paste),
+                Err(MacInjectionError::Accessibility(_))
+            ));
+            assert!(accessibility.texts.borrow().is_empty());
+            assert_eq!(paste.calls.get(), 0);
+        }
+    }
+
+    #[test]
+    fn chromium_bundle_identifiers_are_matched_without_accepting_lookalikes() {
+        for identifier in [
+            "com.google.Chrome",
+            "com.google.Chrome.beta",
+            "com.google.Chrome.dev",
+            "com.google.Chrome.canary",
+            "org.chromium.Chromium",
+            "com.microsoft.edgemac",
+            "com.microsoft.edgemac.Beta",
+            "com.microsoft.edgemac.Dev",
+            "com.microsoft.edgemac.Canary",
+            "com.brave.Browser",
+            "com.brave.Browser.beta",
+            "com.brave.Browser.nightly",
+            "company.thebrowser.Browser",
+            "com.vivaldi.Vivaldi",
+            "com.operasoftware.Opera",
+        ] {
+            assert!(
+                application::is_chromium_browser_bundle_id(identifier),
+                "expected Chromium browser identifier: {identifier}"
+            );
+        }
+
+        for identifier in [
+            "",
+            "com.apple.Safari",
+            "com.google.Chrome.helper",
+            "com.google.Chrome.evil",
+            "org.chromium.Chromium.helper",
+            "company.thebrowser.Browser.helper",
+        ] {
+            assert!(
+                !application::is_chromium_browser_bundle_id(identifier),
+                "unexpected Chromium browser identifier: {identifier}"
+            );
+        }
+
+        assert_eq!(
+            application::classify_bundle_id(None),
+            FrontmostApplicationKind::Other
+        );
+    }
+
+    #[test]
     fn empty_text_is_a_complete_no_op() {
-        let accessibility = FakeAccessibility::returning(Ok(AccessibilityInsert::Inserted));
+        let application = FakeApplication::new(FrontmostApplicationKind::Other);
+        let accessibility = FakeAccessibility::inserting(Ok(AccessibilityInsert::Inserted));
         let paste = FakePaste::default();
 
         assert_eq!(
-            route_injection("", &accessibility, &paste).unwrap(),
+            route_injection("", &application, &accessibility, &paste).unwrap(),
             InjectionOutcome::Noop
         );
+        assert_eq!(application.calls.get(), 0);
         assert!(accessibility.texts.borrow().is_empty());
+        assert_eq!(accessibility.validation_calls.get(), 0);
         assert_eq!(paste.calls.get(), 0);
     }
 }
