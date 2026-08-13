@@ -58,3 +58,4 @@ Implementation plans and technical specs for each feature.
 | [29-native-macos-text-injection.md](plan/29-native-macos-text-injection.md) | Implemented | Replace macOS osascript injection with direct AX insertion and a clipboard-replacing native paste fallback |
 | [30-compile-time-platform-interface.md](plan/30-compile-time-platform-interface.md) | Implemented | Hide native icon, hotkey, and text-delivery details behind one compile-time-selected platform interface |
 | [31-macos-chromium-paste-fallback.md](plan/31-macos-chromium-paste-fallback.md) | Implemented | Route identified Chromium browsers through recoverable native paste without activating web accessibility |
+| [32-transcription-history.md](plan/32-transcription-history.md) | Proposed | Persist a bounded transcription history and expose the newest five entries as exact clipboard-copy actions in the tray menu |
