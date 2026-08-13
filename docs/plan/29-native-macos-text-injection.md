@@ -9,6 +9,12 @@ Rust suite, checks, Clippy, build, Windows cross-check, diff validation, the nat
 and Python tests pass. Hosted macOS, Windows, and Python CI also pass on code-bearing revision
 `40d8d8650f94`. The interactive application matrix below remains before PR readiness.
 
+Plan 31 narrowly supersedes this plan's blanket rule that `NoFocusedElement` must always prevent
+paste. Identified Chromium-family browsers now use native paste without assigning
+`AXSelectedText`; `NoFocusedElement` is accepted only for those bundles because Chromium can keep
+keyboard focus in a DOM editor while hiding it from the macOS AX tree. All other applications
+retain this plan's original error policy.
+
 The generated `objc2-application-services` crate does not expose Apple's macro-defined AX
 attribute/subrole constants as Rust statics. The implementation therefore passes their documented
 string values through `CFString`; all functions and owned native types still use generated

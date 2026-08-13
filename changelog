@@ -40,3 +40,4 @@
 2026-08-11: Replace fixed-rate listener polling and hand-written platform message pumps with a main-thread winit event loop, per-boundary audio readiness wakeups, and cancellable background transcription delivery
 2026-08-12: Replace macOS osascript text injection with native Accessibility selected-text insertion and an AppKit/CoreGraphics fallback that leaves the transcription on the clipboard, rejects secure controls, and suppresses its own synthetic hotkey events
 2026-08-12: Hide native hotkey, tray/icon, configuration-path, and text-delivery details behind one compile-time-selected platform runtime with opaque events and semantic actions
+2026-08-13: Fix macOS Chromium web-field input by routing identified browsers through native Cmd+V without activating renderer accessibility, while leaving the transcription on the clipboard for manual recovery

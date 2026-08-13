@@ -147,15 +147,30 @@ configuration schema or persistence errors.
 `NativePasteWriter`. That shared suppression state is private to the platform boundary.
 
 `MacTyper` serializes non-empty deliveries, sleeps 100 ms so the target can regain focus, enters an
-Objective-C autorelease pool, and uses two native routes:
+Objective-C autorelease pool, classifies the frontmost bundle with
+`macos/application.rs`, and uses two native routes:
 
-1. `macos/accessibility.rs` resolves the focused AX element, rejects `AXSecureTextField`, checks
-   whether `AXSelectedText` is settable, and assigns the transcription to that attribute. An empty
-   selection inserts at the caret; a non-empty selection is replaced. This path does not touch the
-   clipboard or emit keyboard events.
-2. A present, non-secure control that explicitly lacks settable selected text uses the native paste
-   fallback. Missing Accessibility trust, no focused element, secure controls, invalid AX objects,
-   type mismatches, and messaging failures are hard errors and do not paste into an unknown target.
+1. Ordinary applications use `macos/accessibility.rs` to resolve the focused AX element, reject
+   `AXSecureTextField`, check whether `AXSelectedText` is settable, and assign the transcription to
+   that attribute. An empty selection inserts at the caret; a non-empty selection is replaced.
+   This path does not touch the clipboard or emit keyboard events. A present, non-secure control
+   that explicitly lacks settable selected text uses native paste instead.
+2. Identified Chrome, Chromium, Edge, Brave, Arc, Vivaldi, and Opera bundles always use native
+   paste after checking Accessibility trust and rejecting a secure focused element when Chromium
+   exposes one. `NoFocusedElement` is accepted only on this route because Chromium can hide a DOM
+   editor from macOS while it retains keyboard focus. Browser delivery never assigns
+   `AXSelectedText`: Chromium can accept that AX call while only queueing an asynchronous renderer
+   action that does not update the page.
+
+Missing Accessibility trust, secure controls exposed through AX, invalid AX objects, type
+mismatches, and messaging failures are hard errors. A missing focused element remains a hard error
+outside an identified Chromium-family browser. When Chromium hides its entire focused web subtree,
+macOS cannot distinguish an ordinary DOM editor from a password editor without activating renderer
+accessibility; the paste route then has the same destination boundary as a user-issued Cmd+V.
+
+ViberWhisper does not set Chromium's undocumented `AXEnhancedUserInterface` attribute. It therefore
+avoids the browser's delayed, process-wide screen-reader mode and the CPU/memory cost of maintaining
+web accessibility trees solely for text delivery.
 
 The implementation never reads/writes `AXValue`, builds AppleScript, or launches a subprocess.
 Text uses `CFString`/`NSString`, preserving multiline content, quotes, backslashes, CJK, and emoji.
@@ -171,8 +186,12 @@ and a fixed 100 ms asynchronous-event grace. The operating system and focused ap
 receive every event. A filtered callback resets mapper key-down state; outside the scope,
 `macos/hotkey.rs` normalizes modifier direction and passes ordinary events unchanged.
 
-Accessibility permission is required. Missing permission is a hard input error and leaves the
-clipboard untouched.
+CoreGraphics posting has no destination acknowledgement. Success means the pasteboard write and
+event posting completed, not that the target consumed the command. Logs describe a posted paste,
+and the retained transcription provides a manual Cmd+V recovery path.
+
+Accessibility permission is required for both routes. Missing permission is a hard input error and
+leaves the clipboard untouched.
 
 ## Windows Text Delivery
 

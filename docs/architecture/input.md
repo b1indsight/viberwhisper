@@ -135,9 +135,9 @@ their existing repeat suppression.
 
 ### macOS Paste Filter
 
-The native paste fallback posts a fixed left-Command/V sequence through CoreGraphics. Without a
-shared boundary, `rdev` could interpret those synthetic events as configured `V`, `LEFTMETA`, or
-`RIGHTMETA` recording hotkeys.
+The Chromium route and native-control fallback post a fixed left-Command/V sequence through
+CoreGraphics. Without a shared boundary, `rdev` could interpret those synthetic events as
+configured `V`, `LEFTMETA`, or `RIGHTMETA` recording hotkeys.
 
 `MacBackend` constructs `MacTyper` and the filter returned by
 `src/platform/macos/pasteboard.rs` together, so their atomic suppression flag never leaves the
@@ -152,7 +152,8 @@ Outside that scope, the callback delegates macOS modifier events to
 `src/platform/macos/hotkey.rs`, which normalizes press/release direction from physical key state,
 and passes ordinary events through unchanged. There is no sequence acknowledgement protocol: the
 filter protects ViberWhisper's mapper, while CoreGraphics posting and the target application
-determine paste delivery independently. The fallback leaves the transcription on the clipboard.
+determine paste delivery independently. Every paste route leaves the transcription on the
+clipboard for manual recovery because event posting cannot confirm target consumption.
 
 ---
 

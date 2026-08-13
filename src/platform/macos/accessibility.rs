@@ -108,10 +108,19 @@ fn reject_secure_control(element: &AXUIElement) -> Result<(), AccessibilityError
     }
 }
 
+fn validated_focused_element() -> Result<CFRetained<AXUIElement>, AccessibilityError> {
+    let focused = focused_element()?;
+    reject_secure_control(&focused)?;
+    Ok(focused)
+}
+
 impl AccessibilityWriter for NativeAccessibility {
+    fn validate_paste_destination(&self) -> Result<(), AccessibilityError> {
+        validated_focused_element().map(drop)
+    }
+
     fn insert_selected_text(&self, text: &str) -> Result<AccessibilityInsert, AccessibilityError> {
-        let focused = focused_element()?;
-        reject_secure_control(&focused)?;
+        let focused = validated_focused_element()?;
 
         let selected_text_attribute = CFString::from_static_str(SELECTED_TEXT_ATTRIBUTE);
         let mut settable = 0;
