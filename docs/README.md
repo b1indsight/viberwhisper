@@ -57,4 +57,4 @@ Implementation plans and technical specs for each feature.
 | [28-winit-event-loop.md](plan/28-winit-event-loop.md) | Implemented | Replace fixed listener polling with a main-thread winit event loop and non-blocking finalization |
 | [29-native-macos-text-injection.md](plan/29-native-macos-text-injection.md) | Implemented | Replace macOS osascript injection with direct AX insertion and a clipboard-replacing native paste fallback |
 | [30-compile-time-platform-interface.md](plan/30-compile-time-platform-interface.md) | Implemented | Hide native icon, hotkey, and text-delivery details behind one compile-time-selected platform interface |
-| [31-macos-chromium-paste-fallback.md](plan/31-macos-chromium-paste-fallback.md) | Implementation | Route identified Chromium browsers through recoverable native paste without activating web accessibility |
+| [31-macos-chromium-paste-fallback.md](plan/31-macos-chromium-paste-fallback.md) | Implemented | Route identified Chromium browsers through recoverable native paste without activating web accessibility |

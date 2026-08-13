@@ -2,7 +2,7 @@
 
 ## Status
 
-**Implemented locally; automated validation complete.** The user approved the plan and its
+**Implemented and validated.** The user approved the plan and its
 hidden-web-tree secure-field boundary after reviewing draft PR #101. The implementation identifies
 the approved Chromium-family bundle IDs, validates exposed AX focus only for trust and secure
 controls, accepts browser-only `NoFocusedElement`, and always posts the existing recoverable native
@@ -11,8 +11,8 @@ paste instead of assigning browser `AXSelectedText`.
 Focused regression tests and the complete 121-test Rust suite pass, as do formatting, native
 `cargo check`, Clippy with warnings denied, native build, the Windows GNU target check, and diff
 validation. `Cargo.lock` did not change. The existing pasteboard implementation required no code
-change. The PR remains draft pending the workflow review gate, hosted CI, and the interactive
-Chrome/TextEdit matrix.
+change. The independent review gate returned no findings, hosted macOS, Windows, and Python CI all
+passed, and the user confirmed the interactive result before PR readiness.
 
 ## Context
 
