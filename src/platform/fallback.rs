@@ -23,6 +23,14 @@ impl PlatformBackend for FallbackBackend {
     fn text_typer_and_hotkey_filter() -> (Arc<dyn TextTyper>, HotkeyFilter) {
         (Arc::new(MockTyper), Box::new(Some))
     }
+
+    fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+        tracing::info!(
+            text_bytes = text.len(),
+            "mock clipboard received history text"
+        );
+        Ok(())
+    }
 }
 
 impl HotkeyPolicy for FallbackHotkeys {

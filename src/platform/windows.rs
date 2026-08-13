@@ -9,6 +9,8 @@ use crate::input::tray::TrayPolicy;
 use crate::input::typer::TextTyper;
 use tracing::info;
 
+mod clipboard;
+
 pub(crate) struct WindowsBackend;
 pub(crate) struct WindowsHotkeys;
 pub(crate) struct WindowsTray;
@@ -25,6 +27,10 @@ impl PlatformBackend for WindowsBackend {
 
     fn text_typer_and_hotkey_filter() -> (Arc<dyn TextTyper>, HotkeyFilter) {
         (Arc::new(WindowsTyper), Box::new(Some))
+    }
+
+    fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+        clipboard::set_text(text).map_err(Into::into)
     }
 }
 
@@ -159,6 +165,7 @@ mod ffi {
     #[link(name = "user32")]
     unsafe extern "system" {
         pub fn SendInput(nInputs: u32, pInputs: *mut INPUT, cbSize: i32) -> u32;
+        #[cfg(not(test))]
         pub fn GetDoubleClickTime() -> u32;
     }
 

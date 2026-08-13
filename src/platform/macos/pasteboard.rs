@@ -43,7 +43,7 @@ const PASTE_EVENT_SPECS: [NativeEventSpec; 4] = [
     },
 ];
 
-fn replace_with_text(pasteboard: &NSPasteboard, text: &str) -> Result<(), String> {
+pub(super) fn replace_with_text(pasteboard: &NSPasteboard, text: &str) -> Result<(), String> {
     pasteboard.clearContents();
     let text = NSString::from_str(text);
     // SAFETY: AppKit exports this process-lifetime immutable type identifier.

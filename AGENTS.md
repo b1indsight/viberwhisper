@@ -4,7 +4,7 @@ This file provides guidance to coding agents working with code in this repositor
 
 ## Project Overview
 
-This is a Rust 2024 desktop utility named "viberwhisper". It runs as a background voice-to-text input app with global hotkeys, tray UI, chunked transcription, optional LLM cleanup, and cross-platform text injection.
+This is a Rust 2024 desktop utility named "viberwhisper". It runs as a background voice-to-text input app with global hotkeys, tray UI, chunked transcription, optional LLM cleanup, bounded local history, and cross-platform text injection.
 
 ### Project Background
 
@@ -15,7 +15,7 @@ ViberWhisper is a local-first voice-to-text typing tool. The app lets the user t
 This is a **cross-platform (macOS + Windows)** project:
 - **macOS**: Native Accessibility selected-text insertion for ordinary controls, with AppKit/CoreGraphics paste for Chromium browsers and unsupported controls; paste leaves the transcription on the clipboard (requires Accessibility permission)
 - **Windows**: Text injection via Win32 SendInput API
-- **Desktop UI**: System tray/status-bar integration with click-to-toggle recording
+- **Desktop UI**: System tray/status-bar integration with click-to-toggle recording and recent-history copy actions
 - **Packaging**: GitHub Actions build CI plus release packaging for macOS and Windows
 
 ### Core Functionality
@@ -25,10 +25,11 @@ This is a **cross-platform (macOS + Windows)** project:
 3. **Long Audio Chunking**: Automatically splits long recordings into chunks for parallel transcription
 4. **Session Orchestrator**: Background transcription with convergence timeout and partial failure handling
 5. **LLM Post-processing**: Optional text cleanup via LLM (punctuation, filler removal, interruption cleanup)
-6. **Text Injection**: Output recognized text at the current cursor position on macOS and Windows
-7. **System Tray UI**: Status indicator (idle/recording), left-click recording toggle, and right-click exit menu
-8. **CLI Utilities**: Config management and offline WAV transcription commands
-9. **Packaging and Release Automation**: CI workflows plus app bundle / installer release support
+6. **Persistent Transcription History**: Append finalized text and timestamp metadata to bounded local JSONL, repair an invalid trailing record, and expose the newest five entries from the tray
+7. **Text Injection**: Output recognized text at the current cursor position on macOS and Windows
+8. **System Tray UI**: Status indicator (idle/recording), left-click recording toggle, and right-click history/exit menu
+9. **CLI Utilities**: Config management and offline WAV transcription commands
+10. **Packaging and Release Automation**: CI workflows plus app bundle / installer release support
 
 ### User Flow
 
@@ -36,7 +37,8 @@ This is a **cross-platform (macOS + Windows)** project:
 2. **Hold mode**: Hold F8 to record, release to stop
 3. **Toggle mode**: Press F9 to start, press again to stop
 4. The app records audio and processes it in the background
-5. The final text is injected into the active input field
+5. The finalized text is saved to local history and injected into the active input field
+6. The five newest entries are available from the right-click tray menu and copy their full text to the clipboard
 
 ## Common Commands
 
@@ -88,6 +90,7 @@ src/
   runtime_config.rs          — Application-level profile and consumer config assembly
   session.rs                 — Shared SessionId value type
   text.rs                    — Shared language-aware transcription text merge
+  history.rs                 — Bounded JSONL transcription history persistence and tail repair
   core.rs                    — Core module entry and submodule declarations
   core/
     config.rs                — Config facade, errors, validation, and safe value types
@@ -111,7 +114,7 @@ src/
   platform.rs                — Compile-time backend selection and common platform facade
   platform/
     backend.rs               — Private platform backend contract
-    runtime.rs               — Opaque events, semantic actions, tray/text runtime ownership
+    runtime.rs               — Opaque actions plus tray/text runtime ownership
     fallback.rs              — Unsupported-target development/test adapter
     macos.rs                 — macOS backend policies and serialized native text delivery
     macos/
@@ -120,6 +123,8 @@ src/
       hotkey.rs             — rdev modifier normalization for the listener callback
       pasteboard.rs         — Clipboard replacement, CoreGraphics Cmd+V, and hotkey suppression
     windows.rs               — Windows backend policies and SendInput text delivery
+    windows/
+      clipboard.rs           — Windows Unicode clipboard adapter
   transcriber.rs             — Transcriber traits, errors, and exports
   transcriber/
     api.rs                   — API-backed transcriber implementation

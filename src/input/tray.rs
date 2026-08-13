@@ -13,14 +13,18 @@ use tray_icon::menu::{MenuEvent, MenuId};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent, TrayIconId};
 
+use crate::history::RECENT_HISTORY_LIMIT;
+
 const MIN_DEBOUNCE_WINDOW: Duration = Duration::from_millis(300);
+const HISTORY_LABEL_GRAPHEME_LIMIT: usize = 40;
 const STATUS_IDLE_PNG: &[u8] = include_bytes!("../../assets/status-idle.png");
 const STATUS_RECORDING_PNG: &[u8] = include_bytes!("../../assets/status-recording.png");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(test, allow(dead_code))]
 pub enum TrayAction {
     ToggleRecording,
+    CopyHistory(String),
     Exit,
 }
 
@@ -115,6 +119,28 @@ fn is_exit_menu_event(exit_item_id: &MenuId, event: &MenuEvent) -> bool {
     event.id == *exit_item_id
 }
 
+fn push_recent(entries: &mut Vec<String>, text: String) {
+    entries.insert(0, text);
+    entries.truncate(RECENT_HISTORY_LIMIT);
+}
+
+fn format_history_label(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return "（空白）".to_string();
+    }
+
+    let mut characters = normalized.chars();
+    let mut label: String = characters
+        .by_ref()
+        .take(HISTORY_LABEL_GRAPHEME_LIMIT)
+        .collect();
+    if characters.next().is_some() {
+        label.push('…');
+    }
+    label.replace('&', "&&")
+}
+
 fn effective_debounce_window(platform_interval: Option<Duration>) -> Duration {
     platform_interval
         .unwrap_or(MIN_DEBOUNCE_WINDOW)
@@ -127,6 +153,8 @@ pub struct TrayManager<P: TrayPolicy> {
     icon_idle: Icon,
     icon_recording: Icon,
     status_item: MenuItem,
+    history_items: Vec<MenuItem>,
+    history: Vec<String>,
     exit_item_id: tray_icon::menu::MenuId,
     click_debounce: ClickDebounce,
     policy: PhantomData<P>,
@@ -156,16 +184,24 @@ impl<P: TrayPolicy> TrayManager<P> {
         let title_item = MenuItem::new("ViberWhisper", false, None);
         let status_item = MenuItem::new("状态：空闲", false, None);
         let separator = PredefinedMenuItem::separator();
+        let history_title_item = MenuItem::new("最近识别", false, None);
+        let history_items: Vec<_> = (0..RECENT_HISTORY_LIMIT)
+            .map(|index| MenuItem::new(if index == 0 { "暂无识别历史" } else { "" }, false, None))
+            .collect();
+        let history_separator = PredefinedMenuItem::separator();
         let exit_item = MenuItem::new("退出", true, None);
         let exit_id = exit_item.id().clone();
 
         menu.append(&title_item)?;
         menu.append(&status_item)?;
         menu.append(&separator)?;
+        menu.append(&history_title_item)?;
+        for item in &history_items {
+            menu.append(item)?;
+        }
+        menu.append(&history_separator)?;
         menu.append(&exit_item)?;
 
-        // tray-icon stores its handler choice in one-shot global cells. Install the
-        // process-lifetime callbacks before the native icon can emit the first event.
         install_native_handlers(notify);
         let tray_icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -180,6 +216,8 @@ impl<P: TrayPolicy> TrayManager<P> {
             icon_idle,
             icon_recording,
             status_item,
+            history_items,
+            history: Vec::new(),
             exit_item_id: exit_id,
             click_debounce: ClickDebounce::new(effective_debounce_window(
                 P::double_click_interval(),
@@ -213,10 +251,40 @@ impl<P: TrayPolicy> TrayManager<P> {
         }
     }
 
+    pub fn set_history(&mut self, entries: Vec<String>) {
+        self.history = entries.into_iter().take(RECENT_HISTORY_LIMIT).collect();
+        self.update_history_items();
+    }
+
+    pub fn push_history(&mut self, text: String) {
+        push_recent(&mut self.history, text);
+        self.update_history_items();
+    }
+
+    fn update_history_items(&self) {
+        for (index, item) in self.history_items.iter().enumerate() {
+            if let Some(text) = self.history.get(index) {
+                item.set_text(format_history_label(text));
+                item.set_enabled(true);
+            } else {
+                item.set_text(if index == 0 { "暂无识别历史" } else { "" });
+                item.set_enabled(false);
+            }
+        }
+    }
+
     pub fn handle_event(&mut self, event: TrayEvent) -> Option<TrayAction> {
         match event {
             TrayEvent::Menu(event) => {
-                is_exit_menu_event(&self.exit_item_id, &event).then_some(TrayAction::Exit)
+                if is_exit_menu_event(&self.exit_item_id, &event) {
+                    return Some(TrayAction::Exit);
+                }
+                self.history_items
+                    .iter()
+                    .position(|item| item.id() == &event.id)
+                    .and_then(|index| self.history.get(index))
+                    .cloned()
+                    .map(TrayAction::CopyHistory)
             }
             TrayEvent::Icon(event) => {
                 let phase = classify_icon_event(self.tray_icon.id(), &event);
@@ -249,6 +317,10 @@ impl<P: TrayPolicy> TrayManager<P> {
     }
 
     pub fn set_recording(&mut self, _recording: bool) {}
+
+    pub fn set_history(&mut self, _entries: Vec<String>) {}
+
+    pub fn push_history(&mut self, _text: String) {}
 
     pub fn handle_event(&mut self, _event: TrayEvent) -> Option<TrayAction> {
         None
@@ -388,5 +460,34 @@ mod tests {
                 id: MenuId::new("status")
             }
         ));
+    }
+
+    #[test]
+    fn history_label_is_single_line_mnemonic_safe_and_unicode_bounded() {
+        assert_eq!(
+            format_history_label("one\n  two\t& three"),
+            "one two && three"
+        );
+        assert_eq!(format_history_label(" \n\t "), "（空白）");
+
+        let long_emoji = "😀".repeat(41);
+        assert_eq!(
+            format_history_label(&long_emoji),
+            format!("{}…", "😀".repeat(40))
+        );
+        assert_eq!(format_history_label(&"中".repeat(40)), "中".repeat(40));
+    }
+
+    #[test]
+    fn recent_history_is_newest_first_and_bounded_to_five() {
+        let mut history = (2..=6)
+            .rev()
+            .map(|index| format!("entry {index}"))
+            .collect();
+        push_recent(&mut history, "entry 7".to_string());
+        assert_eq!(
+            history,
+            ["entry 7", "entry 6", "entry 5", "entry 4", "entry 3"]
+        );
     }
 }

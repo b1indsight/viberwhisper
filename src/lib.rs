@@ -1,6 +1,7 @@
 mod application;
 mod audio;
 mod core;
+mod history;
 mod input;
 mod local;
 mod platform;
