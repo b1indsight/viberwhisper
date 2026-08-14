@@ -1,4 +1,6 @@
-use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// ViberWhisper - 语音转文字输入工具
 #[derive(Parser, Debug)]
@@ -31,6 +33,84 @@ pub enum Commands {
         /// 可选：输出文件路径（默认打印到 stdout）
         #[arg(short, long)]
         output: Option<String>,
+    },
+    /// STT prompt 数据集采集、校对与回归
+    PromptLab {
+        #[command(subcommand)]
+        action: PromptLabCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PromptLabCommand {
+    /// 使用现有托盘和热键录制测试样本
+    Record {
+        /// 数据集根目录（同一时间只能由一个进程使用）
+        #[arg(long)]
+        dataset: PathBuf,
+    },
+    /// 查看或修正录音样本
+    Sample {
+        #[command(subcommand)]
+        action: PromptLabSampleCommand,
+    },
+    /// 数据集级操作
+    Dataset {
+        #[command(subcommand)]
+        action: PromptLabDatasetCommand,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PromptLabSampleStatus {
+    Pending,
+    Ready,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PromptLabSampleCommand {
+    /// 列出样本
+    List {
+        #[arg(long)]
+        dataset: PathBuf,
+        #[arg(long)]
+        status: Option<PromptLabSampleStatus>,
+    },
+    /// 以 JSON 显示一个样本
+    Show {
+        #[arg(long)]
+        dataset: PathBuf,
+        id: String,
+    },
+    /// 写入人工标准文本和专有名词标注
+    Correct {
+        #[arg(long)]
+        dataset: PathBuf,
+        id: String,
+        #[arg(
+            long,
+            conflicts_with = "reference_file",
+            required_unless_present = "reference_file"
+        )]
+        reference: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "reference",
+            required_unless_present = "reference"
+        )]
+        reference_file: Option<PathBuf>,
+        /// JSON 格式的专有名词标注数组；省略表示没有专有名词
+        #[arg(long)]
+        proper_nouns_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PromptLabDatasetCommand {
+    /// 校验 manifest、sidecar、WAV 和摘要
+    Validate {
+        #[arg(long)]
+        dataset: PathBuf,
     },
 }
 
@@ -122,5 +202,71 @@ mod tests {
                 action: LocalCommand::Start
             })
         ));
+    }
+
+    #[test]
+    fn parses_prompt_lab_sample_correction_inputs() {
+        let cli = Cli::try_parse_from([
+            "viberwhisper",
+            "prompt-lab",
+            "sample",
+            "correct",
+            "--dataset",
+            "/tmp/lab",
+            "sample-1-1",
+            "--reference-file",
+            "expected.txt",
+            "--proper-nouns-file",
+            "terms.json",
+        ])
+        .unwrap();
+
+        let Some(Commands::PromptLab {
+            action:
+                PromptLabCommand::Sample {
+                    action:
+                        PromptLabSampleCommand::Correct {
+                            dataset,
+                            id,
+                            reference,
+                            reference_file,
+                            proper_nouns_file,
+                        },
+                },
+        }) = cli.command
+        else {
+            panic!("expected prompt-lab sample correct");
+        };
+        assert_eq!(dataset, std::path::PathBuf::from("/tmp/lab"));
+        assert_eq!(id, "sample-1-1");
+        assert!(reference.is_none());
+        assert_eq!(
+            reference_file.as_deref(),
+            Some(std::path::Path::new("expected.txt"))
+        );
+        assert_eq!(
+            proper_nouns_file.as_deref(),
+            Some(std::path::Path::new("terms.json"))
+        );
+    }
+
+    #[test]
+    fn correction_rejects_two_reference_sources() {
+        let error = Cli::try_parse_from([
+            "viberwhisper",
+            "prompt-lab",
+            "sample",
+            "correct",
+            "--dataset",
+            "/tmp/lab",
+            "sample-1-1",
+            "--reference",
+            "inline",
+            "--reference-file",
+            "expected.txt",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

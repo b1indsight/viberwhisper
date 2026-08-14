@@ -59,4 +59,4 @@ Implementation plans and technical specs for each feature.
 | [30-compile-time-platform-interface.md](plan/30-compile-time-platform-interface.md) | Implemented | Hide native icon, hotkey, and text-delivery details behind one compile-time-selected platform interface |
 | [31-macos-chromium-paste-fallback.md](plan/31-macos-chromium-paste-fallback.md) | Implemented | Route identified Chromium browsers through recoverable native paste without activating web accessibility |
 | [32-transcription-history.md](plan/32-transcription-history.md) | In progress | Persist a bounded transcription history and expose the newest five entries as exact clipboard-copy actions in the tray menu |
-| [33-stt-prompt-regression-suite.md](plan/33-stt-prompt-regression-suite.md) | Approved | Capture corrected audio datasets and rerun STT prompts with local metrics plus agent-reviewed LLM scoring in JSON |
+| [33-stt-prompt-regression-suite.md](plan/33-stt-prompt-regression-suite.md) | In progress | Capture corrected audio datasets and rerun STT prompts with local metrics plus agent-reviewed LLM scoring in JSON |

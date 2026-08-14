@@ -2,10 +2,11 @@
 
 ## Status
 
-**Approved on 2026-08-14; implementation has not started.** No product or test code has been
-written for this feature yet. This document defines a local dataset-capture and regression workflow
-for the prompt sent directly to the STT endpoint. It does not evaluate or modify the existing LLM
-post-processing prompt.
+**In progress.** The dataset schema, native prompt-lab recording mode, raw-STT capture path, sample
+curation commands, and dataset validation are implemented in the first code change. Regression
+execution, metrics, agent review application, comparison, and final validation remain. This feature
+targets the prompt sent directly to the STT endpoint; it does not evaluate or modify the existing
+LLM post-processing prompt.
 
 ## Context
 

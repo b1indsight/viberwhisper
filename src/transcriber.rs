@@ -1,6 +1,7 @@
 pub mod api;
 #[cfg(test)]
 pub use api::MockTranscriber;
+pub(crate) use api::TranscriberMetadata;
 pub use api::{ApiTranscriber, Transcriber, TranscriberConfig};
 
 use std::fmt;

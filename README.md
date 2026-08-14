@@ -13,6 +13,7 @@
 - **本地推理模式**：通过内置 `local` 子命令拉起 Python FastAPI 服务，使用 Gemma 4 本地模型提供 `/v1/audio/transcriptions` 与 `/v1/chat/completions`
 - **自动文本输入**：识别结果自动输入到当前光标位置；macOS 原生控件优先使用辅助功能 API，Chromium 浏览器使用可恢复的剪贴板粘贴，支持中文等 Unicode 字符
 - **本地识别历史**：最终用于输入的文本以 JSONL 追加到应用数据目录，右键菜单直接显示最近 5 条，点击即可复制完整原文
+- **STT Prompt 测试集采集**：专用录音模式保存完整 WAV 与原始 STT 结果，并提供逐条校正和专有名词标注命令
 - **状态栏录音控制**：左键点击五柱 V 形声波图标即可开始或停止录音，右键打开识别历史和退出菜单
 - **灵活配置**：支持自定义热键、模型、语言、API 地址、麦克风增益等
 - **自动清理**：自动保留最新 10 条录音，旧文件自动删除
@@ -147,7 +148,28 @@ viberwhisper config set <key> <value>
 # 离线转写 WAV 文件
 viberwhisper convert input.wav
 viberwhisper convert input.wav --output output.txt
+
+# 采集 STT prompt 测试样本（使用现有托盘与 Hold/Toggle 热键）
+viberwhisper prompt-lab record --dataset /path/to/my-stt-dataset
+
+# 查看、校正并验证样本
+viberwhisper prompt-lab sample list --dataset /path/to/my-stt-dataset --status pending
+viberwhisper prompt-lab sample show --dataset /path/to/my-stt-dataset <sample-id>
+viberwhisper prompt-lab sample correct --dataset /path/to/my-stt-dataset <sample-id> \
+  --reference-file expected.txt --proper-nouns-file proper-nouns.json
+viberwhisper prompt-lab dataset validate --dataset /path/to/my-stt-dataset
 ```
+
+`prompt-lab record` 只保存当前 STT profile 返回的原始结果，不执行 LLM 后处理、不写普通
+`history.jsonl`，也不向当前输入框注入文字。每次完成的录音在数据集的 `audio/` 下保存一个完整
+WAV，并在 `samples/` 下保存同 ID 的 JSON；初始识别不是标准答案，必须通过 `sample correct`
+写入人工参考文本后才会成为 `ready`。专有名词文件是由 `canonical`、`accepted`、
+`case_sensitive` 和 `expected_occurrences` 组成的 JSON 数组；省略该文件表示该样本没有专有名词。
+
+数据集中的录音、初始识别和人工参考文本均为本机明文。录音会发送给当前配置的 STT 服务；在后续
+调试任务中，编码代理也会读取参考文本与候选结果。请只采集愿意通过这些路径处理的内容。首个版本
+要求同一数据集同一时间只由一个 `prompt-lab` 进程使用，不提供锁、原子写入或中断自动恢复；
+`dataset validate` 会报告损坏 JSON、截断 WAV、摘要不匹配和无侧车录音，需人工清理或重录。
 
 ## 配置说明
 
