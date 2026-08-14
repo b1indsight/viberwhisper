@@ -59,6 +59,41 @@ pub enum PromptLabCommand {
         #[command(subcommand)]
         action: PromptLabDatasetCommand,
     },
+    /// 使用候选 STT prompt 对全部 ready 样本执行回归
+    Evaluate {
+        #[arg(long)]
+        dataset: PathBuf,
+        #[arg(long, conflicts_with = "no_prompt")]
+        prompt_file: Option<PathBuf>,
+        #[arg(long, conflicts_with = "prompt_file")]
+        no_prompt: bool,
+        #[arg(long)]
+        max_wer_percent: f64,
+        #[arg(long)]
+        min_llm_score: f64,
+        #[arg(long)]
+        min_proper_noun_percent: f64,
+        #[arg(long)]
+        compare_to: Option<PathBuf>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// 将编码代理的逐样本语义复核写入规范 JSON 报告
+    Report {
+        #[command(subcommand)]
+        action: PromptLabReportCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PromptLabReportCommand {
+    /// 验证并应用完整的代理复核 JSON
+    ApplyReview {
+        #[arg(long)]
+        report: PathBuf,
+        #[arg(long)]
+        review: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -268,5 +303,101 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn parses_prompt_lab_evaluation_thresholds_and_paths() {
+        let cli = Cli::try_parse_from([
+            "viberwhisper",
+            "prompt-lab",
+            "evaluate",
+            "--dataset",
+            "/tmp/lab",
+            "--prompt-file",
+            "candidate.txt",
+            "--max-wer-percent",
+            "8",
+            "--min-llm-score",
+            "95",
+            "--min-proper-noun-percent",
+            "98",
+            "--compare-to",
+            "baseline.json",
+            "--output",
+            "candidate.json",
+        ])
+        .unwrap();
+
+        let Some(Commands::PromptLab {
+            action:
+                PromptLabCommand::Evaluate {
+                    dataset,
+                    prompt_file,
+                    no_prompt,
+                    max_wer_percent,
+                    min_llm_score,
+                    min_proper_noun_percent,
+                    compare_to,
+                    output,
+                },
+        }) = cli.command
+        else {
+            panic!("expected prompt-lab evaluate");
+        };
+        assert_eq!(dataset, PathBuf::from("/tmp/lab"));
+        assert_eq!(prompt_file, Some(PathBuf::from("candidate.txt")));
+        assert!(!no_prompt);
+        assert_eq!(max_wer_percent, 8.0);
+        assert_eq!(min_llm_score, 95.0);
+        assert_eq!(min_proper_noun_percent, 98.0);
+        assert_eq!(compare_to, Some(PathBuf::from("baseline.json")));
+        assert_eq!(output, Some(PathBuf::from("candidate.json")));
+    }
+
+    #[test]
+    fn evaluation_rejects_prompt_file_with_no_prompt() {
+        let error = Cli::try_parse_from([
+            "viberwhisper",
+            "prompt-lab",
+            "evaluate",
+            "--dataset",
+            "/tmp/lab",
+            "--prompt-file",
+            "candidate.txt",
+            "--no-prompt",
+            "--max-wer-percent",
+            "8",
+            "--min-llm-score",
+            "95",
+            "--min-proper-noun-percent",
+            "98",
+        ])
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn parses_prompt_lab_agent_review_application() {
+        let cli = Cli::try_parse_from([
+            "viberwhisper",
+            "prompt-lab",
+            "report",
+            "apply-review",
+            "--report",
+            "run.json",
+            "--review",
+            "review.json",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::PromptLab {
+                action: PromptLabCommand::Report {
+                    action: PromptLabReportCommand::ApplyReview { .. }
+                }
+            })
+        ));
     }
 }

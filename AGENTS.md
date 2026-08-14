@@ -29,7 +29,8 @@ This is a **cross-platform (macOS + Windows)** project:
 7. **Text Injection**: Output recognized text at the current cursor position on macOS and Windows
 8. **System Tray UI**: Status indicator (idle/recording), left-click recording toggle, and right-click history/exit menu
 9. **CLI Utilities**: Config management and offline WAV transcription commands
-10. **Packaging and Release Automation**: CI workflows plus app bundle / installer release support
+10. **STT Prompt Regression**: Capture paired WAV/reference datasets, rerun all ready audio with a temporary prompt, and finalize JSON metrics with coding-agent semantic review
+11. **Packaging and Release Automation**: CI workflows plus app bundle / installer release support
 
 ### User Flow
 
@@ -87,10 +88,18 @@ src/
   application.rs             — Logging, CLI dispatch, config/local/convert workflows
   application/
     listener.rs              — Platform-action loop, session effects, transcription delivery
+    prompt_lab.rs            — Dataset capture, regression, and agent-review CLI assembly
   runtime_config.rs          — Application-level profile and consumer config assembly
   session.rs                 — Shared SessionId value type
   text.rs                    — Shared language-aware transcription text merge
   history.rs                 — Bounded JSONL transcription history persistence and tail repair
+  prompt_lab.rs              — STT prompt-lab domain facade and exports
+  prompt_lab/
+    capture.rs               — Session WAV archive worker and raw-STT sample publication
+    dataset.rs               — Versioned samples, correction, validation, and scoring identity
+    metrics.rs               — Versioned WER alignment and proper-noun matching
+    regression.rs            — Fresh full-dataset STT execution and canonical JSON reports
+    review.rs                — Coding-agent review validation and final threshold gates
   core.rs                    — Core module entry and submodule declarations
   core/
     config.rs                — Config facade, errors, validation, and safe value types

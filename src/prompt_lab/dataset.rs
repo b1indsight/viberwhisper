@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::transcriber::TranscriberMetadata;
 
@@ -292,7 +293,16 @@ pub(crate) struct DatasetIssue {
 pub(crate) struct DatasetValidation {
     pub(crate) ready_count: usize,
     pub(crate) pending_count: usize,
+    pub(crate) invalid_count: usize,
     pub(crate) issues: Vec<DatasetIssue>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ScoringDataset {
+    pub(crate) digest: String,
+    pub(crate) samples: Vec<SampleRecord>,
+    pub(crate) pending_count: usize,
+    pub(crate) invalid_count: usize,
 }
 
 #[derive(Debug)]
@@ -464,10 +474,44 @@ impl DatasetStore {
         Ok(self.samples_dir().join(format!("{id}.json")))
     }
 
+    pub(crate) fn scoring_snapshot(&self, scoring_policy_version: &str) -> Result<ScoringDataset> {
+        let validation = self.validate()?;
+        let mut entries = fs::read_dir(self.samples_dir())?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut samples = Vec::new();
+        for entry in entries {
+            let path = entry.path();
+            if entry.file_type()?.is_symlink()
+                || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+            {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let Ok(sample) = self.load_sample(id) else {
+                continue;
+            };
+            if self.validate_audio(&sample).is_ok()
+                && sample.reference.status == ReferenceStatus::Ready
+            {
+                samples.push(sample);
+            }
+        }
+        let digest = scoring_digest(scoring_policy_version, &samples)?;
+        Ok(ScoringDataset {
+            digest,
+            samples,
+            pending_count: validation.pending_count,
+            invalid_count: validation.invalid_count,
+        })
+    }
+
     pub(crate) fn validate(&self) -> Result<DatasetValidation> {
         let mut report = DatasetValidation {
             ready_count: 0,
             pending_count: 0,
+            invalid_count: 0,
             issues: Vec::new(),
         };
         let mut referenced_audio = HashSet::new();
@@ -478,6 +522,7 @@ impl DatasetStore {
             if entry.file_type()?.is_symlink()
                 || path.extension().and_then(|ext| ext.to_str()) != Some("json")
             {
+                report.invalid_count += 1;
                 report.issues.push(issue(
                     "sample_file",
                     &path,
@@ -491,6 +536,7 @@ impl DatasetStore {
             {
                 Ok(sample) => sample,
                 Err(error) => {
+                    report.invalid_count += 1;
                     report
                         .issues
                         .push(issue("sample_json", &path, &error.to_string()));
@@ -513,6 +559,7 @@ impl DatasetStore {
                     ReferenceStatus::Pending => report.pending_count += 1,
                 },
                 Err(error) => {
+                    report.invalid_count += 1;
                     report
                         .issues
                         .push(issue("sample_invalid", &path, &error.to_string()))
@@ -629,6 +676,44 @@ fn validate_id(id: &str) -> Result<()> {
     }
 }
 
+fn scoring_digest(scoring_policy_version: &str, samples: &[SampleRecord]) -> Result<String> {
+    #[derive(Serialize)]
+    struct DigestSample<'a> {
+        id: &'a str,
+        audio_sha256: &'a str,
+        reference: &'a str,
+        proper_nouns: &'a [ProperNounAnnotation],
+    }
+
+    #[derive(Serialize)]
+    struct DigestInput<'a> {
+        sample_schema_version: u32,
+        scoring_policy_version: &'a str,
+        samples: Vec<DigestSample<'a>>,
+    }
+
+    let samples = samples
+        .iter()
+        .map(|sample| {
+            let reference = sample.reference.text.as_deref().ok_or_else(|| {
+                DatasetError::Invalid(format!("ready sample {} has no reference", sample.id))
+            })?;
+            Ok(DigestSample {
+                id: &sample.id,
+                audio_sha256: &sample.audio.sha256,
+                reference,
+                proper_nouns: &sample.reference.proper_nouns,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let input = DigestInput {
+        sample_schema_version: SAMPLE_SCHEMA_VERSION,
+        scoring_policy_version,
+        samples,
+    };
+    Ok(sha256_bytes(&serde_json::to_vec(&input)?))
+}
+
 fn validate_annotations(text: &str, annotations: &[ProperNounAnnotation]) -> Result<()> {
     let mut all_forms = HashSet::new();
     for annotation in annotations {
@@ -665,7 +750,15 @@ fn validate_annotations(text: &str, annotations: &[ProperNounAnnotation]) -> Res
                 )));
             }
         }
-        let count = count_non_overlapping_forms(text, &forms, annotation.case_sensitive);
+    }
+    for (annotation, count) in
+        annotations
+            .iter()
+            .zip(super::metrics::count_proper_noun_occurrences(
+                text,
+                annotations,
+            ))
+    {
         if count != annotation.expected_occurrences as usize {
             return Err(DatasetError::Invalid(format!(
                 "proper noun {} expected_occurrences is {}, but reference contains {count}",
@@ -676,30 +769,10 @@ fn validate_annotations(text: &str, annotations: &[ProperNounAnnotation]) -> Res
     Ok(())
 }
 
-fn count_non_overlapping_forms(text: &str, forms: &[&str], case_sensitive: bool) -> usize {
-    let text = normalize_case(text, case_sensitive);
-    let mut forms = forms
-        .iter()
-        .map(|form| normalize_case(form, case_sensitive))
-        .collect::<Vec<_>>();
-    forms.sort_by_key(|form| std::cmp::Reverse(form.len()));
-    let mut occupied = vec![false; text.len()];
-    let mut count = 0;
-    for form in forms {
-        for (start, _) in text.match_indices(&form) {
-            let end = start + form.len();
-            if !occupied[start..end].iter().any(|value| *value) {
-                occupied[start..end].fill(true);
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
 fn normalize_case(value: &str, case_sensitive: bool) -> String {
+    let value = value.nfkc().collect::<String>();
     if case_sensitive {
-        value.to_string()
+        value
     } else {
         value.to_lowercase()
     }
@@ -730,6 +803,12 @@ fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -868,6 +947,28 @@ mod tests {
     }
 
     #[test]
+    fn correction_uses_scoring_boundaries_for_proper_noun_occurrences() {
+        let directory = tempdir().unwrap();
+        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
+        let id = captured_sample(&store, 42);
+
+        let error = store
+            .correct_sample(
+                &id,
+                "MyCodexTool",
+                vec![ProperNounAnnotation {
+                    canonical: "Codex".to_string(),
+                    accepted: Vec::new(),
+                    case_sensitive: true,
+                    expected_occurrences: 1,
+                }],
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("contains 0"));
+    }
+
+    #[test]
     fn validation_reports_malformed_and_unreferenced_files() {
         let directory = tempdir().unwrap();
         let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
@@ -878,6 +979,7 @@ mod tests {
 
         assert_eq!(report.ready_count, 0);
         assert_eq!(report.pending_count, 0);
+        assert_eq!(report.invalid_count, 1);
         assert_eq!(report.issues.len(), 2);
         assert!(
             report
@@ -955,5 +1057,29 @@ mod tests {
         assert_ne!(first.id, second.id);
         assert!(first.audio_path.starts_with(store.root()));
         assert!(second.audio_path.starts_with(store.root()));
+    }
+
+    #[test]
+    fn scoring_digest_ignores_capture_text_but_changes_with_reference() {
+        let directory = tempdir().unwrap();
+        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
+        let id = captured_sample(&store, 42);
+        store.correct_sample(&id, "使用 Codex", Vec::new()).unwrap();
+        let first = store.scoring_snapshot("policy-v1").unwrap().digest;
+
+        let sidecar = store.sample_path(&id).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+        value["capture"]["transcription"]["text"] = serde_json::json!("另一个初始结果");
+        fs::write(&sidecar, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let capture_changed = store.scoring_snapshot("policy-v1").unwrap().digest;
+
+        store
+            .correct_sample(&id, "使用 Codex 完成任务", Vec::new())
+            .unwrap();
+        let reference_changed = store.scoring_snapshot("policy-v1").unwrap().digest;
+
+        assert_eq!(capture_changed, first);
+        assert_ne!(reference_changed, first);
     }
 }

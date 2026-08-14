@@ -19,6 +19,7 @@ Module-level design docs covering structs, methods, and dependencies.
 | [transcriber.md](architecture/transcriber.md) | Transcription trait, `ApiTranscriber` (OpenAI-compatible API), chunking, retry, text merging |
 | [platform.md](architecture/platform.md) | Compile-time desktop interface for native input, status/history menus, config paths, text delivery, and clipboard copy |
 | [postprocess.md](architecture/postprocess.md) | Post-processing — concrete processor facade, LLM integration, preheat/conservative sessions |
+| [prompt-lab.md](architecture/prompt-lab.md) | STT prompt dataset capture, deterministic local metrics, agent review, and JSON report lifecycle |
 
 ## Examples
 
@@ -59,4 +60,4 @@ Implementation plans and technical specs for each feature.
 | [30-compile-time-platform-interface.md](plan/30-compile-time-platform-interface.md) | Implemented | Hide native icon, hotkey, and text-delivery details behind one compile-time-selected platform interface |
 | [31-macos-chromium-paste-fallback.md](plan/31-macos-chromium-paste-fallback.md) | Implemented | Route identified Chromium browsers through recoverable native paste without activating web accessibility |
 | [32-transcription-history.md](plan/32-transcription-history.md) | In progress | Persist a bounded transcription history and expose the newest five entries as exact clipboard-copy actions in the tray menu |
-| [33-stt-prompt-regression-suite.md](plan/33-stt-prompt-regression-suite.md) | In progress | Capture corrected audio datasets and rerun STT prompts with local metrics plus agent-reviewed LLM scoring in JSON |
+| [33-stt-prompt-regression-suite.md](plan/33-stt-prompt-regression-suite.md) | Implemented | Capture corrected audio datasets and rerun STT prompts with local metrics plus agent-reviewed LLM scoring in JSON |

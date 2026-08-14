@@ -13,7 +13,7 @@
 - **本地推理模式**：通过内置 `local` 子命令拉起 Python FastAPI 服务，使用 Gemma 4 本地模型提供 `/v1/audio/transcriptions` 与 `/v1/chat/completions`
 - **自动文本输入**：识别结果自动输入到当前光标位置；macOS 原生控件优先使用辅助功能 API，Chromium 浏览器使用可恢复的剪贴板粘贴，支持中文等 Unicode 字符
 - **本地识别历史**：最终用于输入的文本以 JSONL 追加到应用数据目录，右键菜单直接显示最近 5 条，点击即可复制完整原文
-- **STT Prompt 测试集采集**：专用录音模式保存完整 WAV 与原始 STT 结果，并提供逐条校正和专有名词标注命令
+- **STT Prompt 回归调试**：采集并校正 WAV 测试集，全量重跑临时候选 prompt，以 WER、代理语义评分和专有名词准确率独立把关
 - **状态栏录音控制**：左键点击五柱 V 形声波图标即可开始或停止录音，右键打开识别历史和退出菜单
 - **灵活配置**：支持自定义热键、模型、语言、API 地址、麦克风增益等
 - **自动清理**：自动保留最新 10 条录音，旧文件自动删除
@@ -158,6 +158,16 @@ viberwhisper prompt-lab sample show --dataset /path/to/my-stt-dataset <sample-id
 viberwhisper prompt-lab sample correct --dataset /path/to/my-stt-dataset <sample-id> \
   --reference-file expected.txt --proper-nouns-file proper-nouns.json
 viberwhisper prompt-lab dataset validate --dataset /path/to/my-stt-dataset
+
+# 用临时候选 prompt 全量重跑所有 ready 历史录音
+viberwhisper prompt-lab evaluate --dataset /path/to/my-stt-dataset \
+  --prompt-file candidate.txt \
+  --max-wer-percent 8 --min-llm-score 95 --min-proper-noun-percent 98
+
+# 将编码代理给出的逐样本语义复核应用到同一份报告
+viberwhisper prompt-lab report apply-review \
+  --report /path/to/my-stt-dataset/runs/<run-id>.json \
+  --review /path/to/<run-id>.agent-review.json
 ```
 
 `prompt-lab record` 只保存当前 STT profile 返回的原始结果，不执行 LLM 后处理、不写普通
@@ -170,6 +180,32 @@ WAV，并在 `samples/` 下保存同 ID 的 JSON；初始识别不是标准答�
 调试任务中，编码代理也会读取参考文本与候选结果。请只采集愿意通过这些路径处理的内容。首个版本
 要求同一数据集同一时间只由一个 `prompt-lab` 进程使用，不提供锁、原子写入或中断自动恢复；
 `dataset validate` 会报告损坏 JSON、截断 WAV、摘要不匹配和无侧车录音，需人工清理或重录。
+
+### STT Prompt 回归调试
+
+`prompt-lab evaluate` 每次都会按稳定 ID 顺序重新读取并转写全部 `ready` WAV，不复用旧 STT
+结果，也不把人工参考文本发给 STT。`--prompt-file` 的原文只覆盖本次进程内的
+`transcription.prompt`，不会修改 `config.json`；省略它会使用当前配置作为基线，`--no-prompt`
+则明确不发送 multipart prompt。`--compare-to` 可指向一份已完成且数据集、后端与评分版本兼容的
+旧报告；不兼容会在任何 STT 请求前失败。报告默认直接写入数据集的 `runs/`，只生成 JSON，
+不生成 Markdown 或网页报告。
+
+三项指标各自独立，不合成加权总分：
+
+- **词错误率（WER）**：NFKC 规范化后，中文使用固定 Jieba 词典且关闭 HMM，其他文本使用
+  Unicode 词边界；数据集值是替换、删除、插入总数除以参考词总数的微平均，可超过 100%。
+- **语义差异评分**：编码代理只依据每条人工参考文本和本次 STT 结果，按固定 rubric 给出
+  `0..=100` 整数、简短原因和结构化差异；程序不配置或调用 Judge API/model。
+- **专有名词准确率**：按 canonical/accepted 形式、大小写策略、词边界和期望出现次数计算匹配数
+  的微平均。整个 ready 集必须至少标注一次专有名词，否则回归会拒绝启动。
+
+首次评估成功后，规范报告状态为 `awaiting_agent_review`，此时只有 WER 和专有名词指标，不能判定
+通过。编码代理读取该 JSON，生成覆盖全部样本的 versioned review JSON，再执行 `apply-review`；
+程序验证 run ID、rubric、完整样本覆盖、`0..=100` 分数及差异结构后，直接改写同一份报告，计算
+语义均分和三个门禁。只有 `WER <= max`、`LLM >= min`、`专有名词 >= min` 同时成立时
+`meets_targets` 才为 `true`。若未通过，编码代理根据逐条差异修改候选 prompt 并再次全量回归，
+直到达到目标或判断 prompt 已无法继续改善。单条 STT 失败不会跳过后续样本，但报告会标记为
+`incomplete`、命令返回非零，且该报告不能接受复核或作为比较基线。
 
 ## 配置说明
 

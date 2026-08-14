@@ -107,6 +107,11 @@ impl TranscriberConfig {
             temperature: self.temperature,
         }
     }
+
+    pub(crate) fn with_prompt(mut self, prompt: Option<String>) -> Self {
+        self.prompt = prompt;
+        self
+    }
 }
 
 /// Generic HTTP-based transcriber compatible with OpenAI-style multipart audio endpoints.
@@ -313,6 +318,22 @@ mod tests {
         assert_eq!(metadata.language.as_deref(), Some("zh"));
         assert_eq!(metadata.temperature, 0.0);
         assert!(metadata.prompt.is_some());
+    }
+
+    #[test]
+    fn prompt_override_changes_only_the_in_memory_transcriber_prompt() {
+        let config = validated_config("https://api.example.test/v1/audio/transcriptions");
+        let before = config.metadata();
+
+        let after = config
+            .with_prompt(Some("candidate prompt".to_string()))
+            .metadata();
+
+        assert_eq!(after.endpoint, before.endpoint);
+        assert_eq!(after.model, before.model);
+        assert_eq!(after.language, before.language);
+        assert_eq!(after.temperature, before.temperature);
+        assert_eq!(after.prompt.as_deref(), Some("candidate prompt"));
     }
 
     // --- structured error tests against a local HTTP stub ---

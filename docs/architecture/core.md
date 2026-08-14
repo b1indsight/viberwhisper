@@ -50,6 +50,8 @@ No subcommand runs the recording listener. Other commands are:
 | `prompt-lab record` | Reuse native recording controls to archive WAV/raw-STT sample pairs |
 | `prompt-lab sample list/show/correct` | Inspect and curate human references and proper nouns |
 | `prompt-lab dataset validate` | Verify dataset schemas, WAV readability, paths, and digests |
+| `prompt-lab evaluate` | Freshly transcribe every ready WAV and write local metrics to JSON |
+| `prompt-lab report apply-review` | Validate coding-agent scores and finalize all three gates |
 
 `config set` parses the canonical field type and saves the updated document without running cross-field business validation. This permits incremental configuration; `config check` or the command that consumes a profile reports incomplete runtime configuration. Secret and schema fields are read-only. Legacy aliases are rejected.
 
@@ -149,3 +151,9 @@ already in progress.
 API and Local backends reuse the same recording/orchestration pipeline; no endpoint rewriting or
 persisted-document mutation occurs in the application layer. `main.rs` only delegates process
 startup to the library entry point.
+
+Prompt-lab evaluation is a CLI-only workflow: it does not construct winit, a post-processor,
+history, or native typing. It resolves the configured backend, replaces only the consumed
+`TranscriberConfig` prompt in memory, sequentially feeds verified historical WAVs through the
+production offline chunk reader and transcriber, and writes one JSON report. Coding-agent review is
+a separate local JSON validation/rewrite step and makes no inference request.

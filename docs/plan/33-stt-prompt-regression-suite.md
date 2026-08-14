@@ -2,11 +2,10 @@
 
 ## Status
 
-**In progress.** The dataset schema, native prompt-lab recording mode, raw-STT capture path, sample
-curation commands, and dataset validation are implemented in the first code change. Regression
-execution, metrics, agent review application, comparison, and final validation remain. This feature
-targets the prompt sent directly to the STT endpoint; it does not evaluate or modify the existing
-LLM post-processing prompt.
+**Implemented.** The two-change implementation provides native dataset capture and curation,
+fresh full-dataset STT regression, versioned WER/proper-noun metrics, coding-agent semantic review,
+three independent gates, compatible-run comparison, and JSON-only reports. It targets the prompt
+sent directly to the STT endpoint and never evaluates or modifies the LLM post-processing prompt.
 
 ## Context
 

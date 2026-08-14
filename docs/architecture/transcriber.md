@@ -15,13 +15,20 @@ pub trait Transcriber: Send + Sync {
 
 `WavChunk` is produced by either `AudioRecorder` or `WavChunkReader`. Realtime ordered merging is
 owned by `SessionOrchestrator`; offline conversion iterates `WavChunkReader` and uses the shared
-`text::merge_texts` helper.
+`text::merge_texts` helper. Prompt-lab regression follows the same offline chunk reader and merge
+path but deliberately bypasses post-processing.
 
 ## `ApiTranscriber`
 
 `ApiTranscriber` is compatible with OpenAI-style multipart transcription endpoints. Construction
 consumes endpoint, authentication, model, language, prompt, and temperature. Retry policy is owned
 by the module; chunk duration and size limits are owned by the audio producer.
+
+`TranscriberConfig::with_prompt` consumes one already resolved config and replaces only its prompt
+in memory. Prompt-lab uses this for configured baselines, prompt files, and explicit no-prompt runs;
+the persisted config document is never mutated. `metadata()` returns endpoint/model/language/prompt/
+temperature for dataset and run JSON while removing endpoint userinfo, query, and fragment data and
+never exposing `ApiAuth`.
 
 Each request builds a multipart form containing `model`, `temperature`,
 `response_format=verbose_json`, optional `language` and `prompt`, plus an `audio.wav` file part. The
