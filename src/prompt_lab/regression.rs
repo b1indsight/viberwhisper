@@ -376,10 +376,13 @@ impl EvaluationReport {
                     let expected_wer = score_wer(&sample.reference, hypothesis);
                     let expected_proper_nouns =
                         score_proper_nouns(hypothesis, &sample.proper_noun_annotations);
-                    if serde_json::to_value(sample.wer.as_ref())?
-                        != serde_json::to_value(Some(expected_wer))?
-                        || serde_json::to_value(sample.proper_nouns.as_ref())?
-                            != serde_json::to_value(Some(expected_proper_nouns))?
+                    if !sample
+                        .wer
+                        .as_ref()
+                        .is_some_and(|actual| same_wer_score(actual, &expected_wer))
+                        || !sample.proper_nouns.as_ref().is_some_and(|actual| {
+                            same_proper_noun_score(actual, &expected_proper_nouns)
+                        })
                     {
                         return Err(RegressionError::Invalid(format!(
                             "sample {} metrics do not match its reference and hypothesis",
@@ -614,10 +617,26 @@ fn same_wer_aggregate(left: &WerAggregate, right: &WerAggregate) -> bool {
         && float_eq(left.wer_percent, right.wer_percent)
 }
 
+fn same_wer_score(left: &WerScore, right: &WerScore) -> bool {
+    left.reference_words == right.reference_words
+        && left.substitutions == right.substitutions
+        && left.deletions == right.deletions
+        && left.insertions == right.insertions
+        && float_eq(left.wer_percent, right.wer_percent)
+        && left.alignment == right.alignment
+}
+
 fn same_proper_noun_aggregate(left: &ProperNounAggregate, right: &ProperNounAggregate) -> bool {
     left.matched_occurrences == right.matched_occurrences
         && left.expected_occurrences == right.expected_occurrences
         && float_eq(left.accuracy_percent, right.accuracy_percent)
+}
+
+fn same_proper_noun_score(left: &ProperNounScore, right: &ProperNounScore) -> bool {
+    left.matched_occurrences == right.matched_occurrences
+        && left.expected_occurrences == right.expected_occurrences
+        && float_eq(left.accuracy_percent, right.accuracy_percent)
+        && left.annotations == right.annotations
 }
 
 fn float_eq(left: f64, right: f64) -> bool {

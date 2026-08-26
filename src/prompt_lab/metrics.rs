@@ -34,7 +34,7 @@ pub(crate) struct WerScore {
     pub(crate) alignment: Vec<WerEdit>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProperNounAnnotationScore {
     pub(crate) canonical: String,
