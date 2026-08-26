@@ -57,15 +57,18 @@ baseline. References never enter an STT request.
 
 ## Metrics
 
-The scoring policy is versioned as `stt-prompt-scoring-v1`:
+The scoring policy is versioned as `stt-prompt-scoring-v2`:
 
 - WER applies NFKC first. A reference containing Han characters selects the bundled Jieba
   dictionary with HMM disabled for both sides; other references use Unicode word boundaries.
   Punctuation is excluded, tokens are case-folded, Levenshtein backtracking records every equal,
   substitution, deletion, and insertion, and the aggregate is a micro-average.
 - Proper-noun matching applies NFKC, canonical plus accepted forms, each annotation's case policy,
-  alphanumeric token boundaries, expected-count caps, and global longest-first overlap consumption.
-  The aggregate is matched expected occurrences divided by all expected occurrences.
+  expected-count caps, and global longest-first overlap consumption. Outer form edges use separate
+  Han and other Unicode-alphanumeric word classes, so an exact Latin/digit form can touch Han text
+  while a same-class character still blocks embedding in a larger token. The edge rule also applies
+  to dotted and multiword forms. The aggregate is matched expected occurrences divided by all
+  expected occurrences.
 - Semantic similarity is not computed locally. The coding agent applies rubric
   `semantic-equivalence-v1` to each reference/hypothesis pair and supplies an integer score, reason,
   and structured differences. The aggregate is the unweighted sample mean.
@@ -75,9 +78,12 @@ The scoring policy is versioned as `stt-prompt-scoring-v1`:
 A successful local run directly writes schema-v1 JSON with status `awaiting_agent_review` and null
 LLM/gate fields. Agent review input must use the exact run ID and rubric, contain each sample ID once,
 use scores in `0..=100`, and provide non-empty reasons plus differences for every score below 100.
-The review module validates the entire input and unchanged report contract before any write, embeds
-the review content, calculates the mean and inclusive gates, then directly rewrites that report as
-`complete`. Invalid input leaves the report byte-for-byte unchanged.
+The review module validates the entire input and unchanged report contract before any write. Metric
+counts, alignments, annotations, and matched forms must exactly equal fresh derivations; only the
+derived percentages use a bounded floating-point comparison so JSON round trips cannot invalidate
+an otherwise unchanged report. The module then embeds the review content, calculates the mean and
+inclusive gates, and directly rewrites that report as `complete`. Invalid input leaves the report
+byte-for-byte unchanged.
 
 `meets_targets` is true only when WER is at or below its maximum and both 100-point metrics are at
 or above their minima. There is no combined score. Optional comparison requires a complete report

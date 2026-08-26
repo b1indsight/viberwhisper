@@ -16,7 +16,7 @@ use crate::text::merge_texts;
 use crate::transcriber::Transcriber;
 
 pub(crate) const REPORT_SCHEMA_VERSION: u32 = 1;
-pub(crate) const SCORING_POLICY_VERSION: &str = "stt-prompt-scoring-v1";
+pub(crate) const SCORING_POLICY_VERSION: &str = "stt-prompt-scoring-v2";
 pub(crate) const AGENT_REVIEW_RUBRIC_VERSION: &str = "semantic-equivalence-v1";
 
 type Result<T> = std::result::Result<T, RegressionError>;
@@ -1267,6 +1267,31 @@ mod tests {
         let error = evaluate(&store, &SequenceTranscriber::new([]), candidate_request).unwrap_err();
 
         assert!(error.to_string().contains("not compatible"));
+    }
+
+    #[test]
+    fn v1_comparison_is_rejected_before_v2_transcription() {
+        assert_eq!(SCORING_POLICY_VERSION, "stt-prompt-scoring-v2");
+        let directory = tempdir().unwrap();
+        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
+        add_ready_sample(&store, 1, "使用 Codex", "Codex");
+        let baseline_path = directory.path().join("baseline.json");
+        let baseline = evaluate(
+            &store,
+            &SequenceTranscriber::new([Ok("使用 Codex".to_string())]),
+            request(baseline_path.clone()),
+        )
+        .unwrap();
+        let review_path = directory.path().join("review.json");
+        write_review(&review_path, &baseline.report.run_id, 100, false);
+        let mut baseline = apply_review(&baseline_path, &review_path).unwrap();
+        baseline.scoring_policy_version = "stt-prompt-scoring-v1".to_string();
+        let mut candidate_request = request(directory.path().join("candidate.json"));
+        candidate_request.compare_to = Some(baseline);
+
+        let error = evaluate(&store, &SequenceTranscriber::new([]), candidate_request).unwrap_err();
+
+        assert!(error.to_string().contains("policy or rubric version"));
     }
 
     #[test]

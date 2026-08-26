@@ -2,7 +2,10 @@
 
 ## Status
 
-**Approved on 2026-08-26.** Implementation may proceed on child changes in the same PR.
+**Implemented on 2026-08-27.** The two planned child changes were completed without material design
+deviations. Native formatting, tests, checks, Clippy, build, and the Windows GNU cross-check passed,
+and the private six-sample workflow produced a complete reviewed v2 baseline plus a complete
+compatible candidate comparison.
 
 ## Context
 
