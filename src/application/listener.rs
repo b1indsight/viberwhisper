@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::{LocalServiceGuard, config_context, load_config, start_local_backend};
@@ -5,6 +6,7 @@ use crate::core::config::EnvironmentSecretSource;
 use crate::core::recording_session::{RecordingState, SessionEvent};
 use crate::history::{HistoryStore, HistoryTyper};
 use crate::platform::PlatformAction;
+use crate::prompt_lab::{DatasetStore, PromptLabCapture, SttSnapshot};
 use crate::runtime_config::{self, ListenerConfig, ProfileSelection};
 use crate::{audio, core, postprocess, transcriber};
 
@@ -46,14 +48,31 @@ fn toggle_session_event(state: &RecordingState) -> Option<SessionEvent> {
 }
 
 /// Runs the listener using an already resolved workflow configuration.
-pub(super) fn run_with_config(
+pub(super) fn run_with_config(config: ListenerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_mode(config, ListenerMode::Delivery)
+}
+
+pub(super) fn run_capture(
+    config: ListenerConfig,
+    store: DatasetStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_mode(config, ListenerMode::Capture(Arc::new(store)))
+}
+
+enum ListenerMode {
+    Delivery,
+    Capture(Arc<DatasetStore>),
+}
+
+fn run_with_mode(
     mut config: ListenerConfig,
+    mode: ListenerMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::Arc;
 
     use audio::AudioRecorder;
     use core::orchestrator::SessionOrchestrator;
-    use event_loop::{AppEvent, ListenerApplication};
+    use event_loop::{AppEvent, ListenerApplication, ListenerOutput};
     use postprocess::PostProcessor;
     use transcriber::ApiTranscriber;
     use winit::event_loop::{ControlFlow, EventLoop};
@@ -67,7 +86,10 @@ pub(super) fn run_with_config(
     let local_manager = start_local_backend(&mut config.backend)?;
     let _local_manager = LocalServiceGuard::new(local_manager);
 
-    let post_processor = PostProcessor::new(config.backend.post_process);
+    let capture_stt = match &mode {
+        ListenerMode::Delivery => None,
+        ListenerMode::Capture(_) => Some(SttSnapshot::from(config.backend.transcriber.metadata())),
+    };
     let orchestrator = Arc::new(SessionOrchestrator::new(
         Arc::new(ApiTranscriber::new(config.backend.transcriber)?),
         config.orchestrator,
@@ -78,35 +100,45 @@ pub(super) fn run_with_config(
     let proxy = event_loop.create_proxy();
 
     let platform_proxy = proxy.clone();
-    let history_store = HistoryStore::discover()
-        .inspect_err(|error| warn!(%error, "Transcription history is unavailable"))
-        .ok();
-    let recent_history = history_store
-        .as_ref()
-        .and_then(|store| {
-            store
-                .load_recent()
-                .inspect_err(|error| warn!(%error, "Ignoring unusable transcription history"))
-                .ok()
-        })
-        .unwrap_or_default();
-
     let mut platform = NativePlatform::start(&config.hotkeys, move |event| {
         let _ = platform_proxy.send_event(AppEvent::Platform(event));
     })?;
-    platform.set_history(recent_history);
-    let typer = match history_store {
-        Some(store) => {
-            let history_proxy = proxy.clone();
-            Arc::new(HistoryTyper::new(
-                store,
-                platform.text_typer(),
-                move |text| {
-                    let _ = history_proxy.send_event(AppEvent::HistorySaved(text));
-                },
-            )) as Arc<dyn crate::input::typer::TextTyper>
+    let output = match mode {
+        ListenerMode::Delivery => {
+            let history_store = HistoryStore::discover()
+                .inspect_err(|error| warn!(%error, "Transcription history is unavailable"))
+                .ok();
+            let recent_history = history_store
+                .as_ref()
+                .and_then(|store| {
+                    store
+                        .load_recent()
+                        .inspect_err(
+                            |error| warn!(%error, "Ignoring unusable transcription history"),
+                        )
+                        .ok()
+                })
+                .unwrap_or_default();
+            platform.set_history(recent_history);
+            let typer = match history_store {
+                Some(store) => {
+                    let history_proxy = proxy.clone();
+                    Arc::new(HistoryTyper::new(
+                        store,
+                        platform.text_typer(),
+                        move |text| {
+                            let _ = history_proxy.send_event(AppEvent::HistorySaved(text));
+                        },
+                    )) as Arc<dyn crate::input::typer::TextTyper>
+                }
+                None => platform.text_typer(),
+            };
+            ListenerOutput::delivery(typer, PostProcessor::new(config.backend.post_process))
         }
-        None => platform.text_typer(),
+        ListenerMode::Capture(store) => ListenerOutput::capture(
+            PromptLabCapture::new(store),
+            capture_stt.expect("capture mode snapshots STT metadata"),
+        ),
     };
 
     let audio_proxy = proxy.clone();
@@ -115,6 +147,12 @@ pub(super) fn run_with_config(
     });
 
     info!("System tray icon started");
+
+    if matches!(output, ListenerOutput::Capture { .. }) {
+        println!(
+            "Prompt-lab capture mode: audio and raw STT results are saved; text is not typed."
+        );
+    }
 
     if let Some(hotkey) = config.hotkeys.hold_label.as_deref() {
         println!("Hold {hotkey} to record, release to transcribe.");
@@ -125,14 +163,7 @@ pub(super) fn run_with_config(
     println!("Press Ctrl+C to exit.");
     println!();
 
-    let mut application = ListenerApplication::new(
-        recorder,
-        orchestrator,
-        platform,
-        typer,
-        post_processor,
-        proxy,
-    );
+    let mut application = ListenerApplication::new(recorder, orchestrator, platform, output, proxy);
     event_loop.run_app(&mut application)?;
     Ok(())
 }

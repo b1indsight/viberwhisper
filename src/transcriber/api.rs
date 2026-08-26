@@ -37,6 +37,15 @@ pub struct TranscriberConfig {
     temperature: f32,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TranscriberMetadata {
+    pub(crate) endpoint: String,
+    pub(crate) model: String,
+    pub(crate) language: Option<String>,
+    pub(crate) prompt: Option<String>,
+    pub(crate) temperature: f32,
+}
+
 impl TranscriberConfig {
     pub(crate) fn validate(
         endpoint: &str,
@@ -82,6 +91,26 @@ impl TranscriberConfig {
             }),
             _ => Err(issues),
         }
+    }
+
+    pub(crate) fn metadata(&self) -> TranscriberMetadata {
+        let mut endpoint = self.endpoint.clone();
+        let _ = endpoint.set_username("");
+        let _ = endpoint.set_password(None);
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
+        TranscriberMetadata {
+            endpoint: endpoint.to_string(),
+            model: self.model.clone(),
+            language: self.language.clone(),
+            prompt: self.prompt.clone(),
+            temperature: self.temperature,
+        }
+    }
+
+    pub(crate) fn with_prompt(mut self, prompt: Option<String>) -> Self {
+        self.prompt = prompt;
+        self
     }
 }
 
@@ -271,6 +300,40 @@ mod tests {
             &TranscriptionSection::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn metadata_omits_endpoint_credentials_and_query_parameters() {
+        let config = validated_config(
+            "https://user:password@api.example.test/v1/audio/transcriptions?token=secret#fragment",
+        );
+
+        let metadata = config.metadata();
+
+        assert_eq!(
+            metadata.endpoint,
+            "https://api.example.test/v1/audio/transcriptions"
+        );
+        assert_eq!(metadata.model, "whisper-large-v3-turbo");
+        assert_eq!(metadata.language.as_deref(), Some("zh"));
+        assert_eq!(metadata.temperature, 0.0);
+        assert!(metadata.prompt.is_some());
+    }
+
+    #[test]
+    fn prompt_override_changes_only_the_in_memory_transcriber_prompt() {
+        let config = validated_config("https://api.example.test/v1/audio/transcriptions");
+        let before = config.metadata();
+
+        let after = config
+            .with_prompt(Some("candidate prompt".to_string()))
+            .metadata();
+
+        assert_eq!(after.endpoint, before.endpoint);
+        assert_eq!(after.model, before.model);
+        assert_eq!(after.language, before.language);
+        assert_eq!(after.temperature, before.temperature);
+        assert_eq!(after.prompt.as_deref(), Some("candidate prompt"));
     }
 
     // --- structured error tests against a local HTTP stub ---

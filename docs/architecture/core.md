@@ -47,6 +47,11 @@ No subcommand runs the recording listener. Other commands are:
 | `config list/get/set` | Use canonical dotted keys from the single field catalog |
 | `local install/start/stop/status` | Manage the Local runtime; stop only requires Local paths |
 | `convert <wav>` | Resolve the persisted backend and transcribe a WAV file |
+| `prompt-lab record` | Reuse native recording controls to archive WAV/raw-STT sample pairs |
+| `prompt-lab sample list/show/correct` | Inspect and curate human references and proper nouns |
+| `prompt-lab dataset validate` | Verify dataset schemas, WAV readability, paths, and digests |
+| `prompt-lab evaluate` | Freshly transcribe every ready WAV and write local metrics to JSON |
+| `prompt-lab report apply-review` | Validate coding-agent scores and finalize all three gates |
 
 `config set` parses the canonical field type and saves the updated document without running cross-field business validation. This permits incremental configuration; `config check` or the command that consumes a profile reports incomplete runtime configuration. Secret and schema fields are read-only. Legacy aliases are rejected.
 
@@ -111,9 +116,12 @@ The machine consumes source-free requests plus `SessionStarted`, `SessionStartFa
 
 `application::listener` executes `StartSession` as an all-or-nothing recorder/orchestrator
 acquisition with rollback. `StopSession` stops the recorder and submits tail chunks in order, then
-starts a session-scoped background task for orchestrator convergence, post-processing, and text
-history persistence followed by injection. `HistoryTyper` emits one `HistorySaved` event after a
-successful append, and the main-thread tray prepends that text to its five-entry cache. The machine
+starts a session-scoped background task for orchestrator convergence and the selected application
+output. Normal delivery performs post-processing and text history persistence followed by
+injection. Prompt-lab capture instead finalizes its archived WAV and stores the raw merged STT
+result plus credential-free request metadata in the matching sample sidecar; it constructs no
+post-processor or history typer. `HistoryTyper` emits one `HistorySaved` event after a successful
+normal append, and the main-thread tray prepends that text to its five-entry cache. The machine
 remains in `Stopping` until the separate finalization event returns.
 
 Exit is represented as `ShutdownRequested`. It cancels recorder/orchestrator work, resets tray state, suppresses final text injection, and exits only after `ReadyToExit` is emitted.
@@ -143,3 +151,9 @@ already in progress.
 API and Local backends reuse the same recording/orchestration pipeline; no endpoint rewriting or
 persisted-document mutation occurs in the application layer. `main.rs` only delegates process
 startup to the library entry point.
+
+Prompt-lab evaluation is a CLI-only workflow: it does not construct winit, a post-processor,
+history, or native typing. It resolves the configured backend, replaces only the consumed
+`TranscriberConfig` prompt in memory, sequentially feeds verified historical WAVs through the
+production offline chunk reader and transcriber, and writes one JSON report. Coding-agent review is
+a separate local JSON validation/rewrite step and makes no inference request.

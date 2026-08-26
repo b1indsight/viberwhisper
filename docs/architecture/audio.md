@@ -60,6 +60,14 @@ from an old `SessionId` are ignored after stop or session replacement. On stop, 
 slices and the final tail are encoded the same way.
 `RecorderStopOutcome::Stopped` therefore owns `Vec<WavChunk>` rather than file paths.
 
+Prompt-lab recording optionally clones these immutable chunks into a session-owned, capacity-two
+archive channel after they leave the recorder. Its worker validates one stable integer 16-bit WAV
+format, decodes the chunks in arrival order, and writes their PCM samples into one final dataset
+WAV. Stop-time chunks use the same path. The callback remains free of disk work, and normal listener
+mode does not construct the archive channel or worker. Closing a completed session finalizes the WAV
+before its digest and JSON sidecar are written; an interrupted process may leave a partial or
+unreferenced WAV for dataset validation to report.
+
 ## Local WAV Reader
 
 `WavChunkReader::open(path, duration_limit, size_limit)` opens the source once. Its `chunks()` method

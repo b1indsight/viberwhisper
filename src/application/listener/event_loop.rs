@@ -18,6 +18,7 @@ use crate::core::recording_session::{
 use crate::input::typer::TextTyper;
 use crate::platform::{NativePlatform, PlatformEvent, PlatformInterface};
 use crate::postprocess::{PostProcessor, PostProcessorSession};
+use crate::prompt_lab::{CaptureTranscription, PromptLabCapture, SttSnapshot};
 use crate::session::SessionId;
 
 #[derive(Debug, Clone)]
@@ -90,10 +91,59 @@ pub(super) struct ListenerApplication {
     recorder: AudioRecorder,
     orchestrator: Arc<SessionOrchestrator>,
     platform: NativePlatform,
-    typer: Arc<dyn TextTyper>,
-    post_processor: PostProcessor,
+    output: ListenerOutput,
     proxy: EventLoopProxy<AppEvent>,
     finalization: Option<FinalizationTask>,
+}
+
+pub(super) enum ListenerOutput {
+    Delivery {
+        typer: Arc<dyn TextTyper>,
+        post_processor: PostProcessor,
+    },
+    Capture {
+        capture: Box<PromptLabCapture>,
+        stt: SttSnapshot,
+    },
+}
+
+impl ListenerOutput {
+    pub(super) fn delivery(typer: Arc<dyn TextTyper>, post_processor: PostProcessor) -> Self {
+        Self::Delivery {
+            typer,
+            post_processor,
+        }
+    }
+
+    pub(super) fn capture(capture: PromptLabCapture, stt: SttSnapshot) -> Self {
+        Self::Capture {
+            capture: Box::new(capture),
+            stt,
+        }
+    }
+
+    fn start_session(&mut self, session_id: SessionId) -> Result<(), String> {
+        match self {
+            Self::Delivery { .. } => Ok(()),
+            Self::Capture { capture, .. } => capture
+                .start_now(session_id)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    fn archive_chunk(&mut self, session_id: SessionId, chunk: &crate::audio::WavChunk) {
+        if let Self::Capture { capture, .. } = self
+            && let Err(error) = capture.push(session_id, chunk.clone())
+        {
+            error!(session_id = session_id.0, error = %error, "Failed to archive audio chunk");
+        }
+    }
+
+    fn cancel_session(&mut self, session_id: SessionId) {
+        if let Self::Capture { capture, .. } = self {
+            capture.cancel(session_id);
+        }
+    }
 }
 
 impl ListenerApplication {
@@ -101,8 +151,7 @@ impl ListenerApplication {
         recorder: AudioRecorder,
         orchestrator: Arc<SessionOrchestrator>,
         platform: NativePlatform,
-        typer: Arc<dyn TextTyper>,
-        post_processor: PostProcessor,
+        output: ListenerOutput,
         proxy: EventLoopProxy<AppEvent>,
     ) -> Self {
         Self {
@@ -110,8 +159,7 @@ impl ListenerApplication {
             recorder,
             orchestrator,
             platform,
-            typer,
-            post_processor,
+            output,
             proxy,
             finalization: None,
         }
@@ -174,11 +222,13 @@ impl ListenerApplication {
                         }
                     }
                     SessionEffect::SubmitChunk { session_id, chunk } => {
+                        self.output.archive_chunk(session_id, &chunk);
                         if let Err(error) = self.orchestrator.on_chunk_ready(session_id, chunk) {
                             warn!(session_id = session_id.0, error = %error, "Chunk was rejected");
                         }
                     }
                     SessionEffect::CancelRecorder { session_id } => {
+                        self.output.cancel_session(session_id);
                         let outcome = self.recorder.cancel_recording(session_id);
                         debug!(
                             session_id = session_id.0,
@@ -204,7 +254,29 @@ impl ListenerApplication {
         match self.recorder.start_recording(session_id) {
             RecorderStartOutcome::Started { session_id } => {
                 match self.orchestrator.start_session(session_id) {
-                    Ok(()) => SessionEvent::SessionStarted { session_id },
+                    Ok(()) => match self.output.start_session(session_id) {
+                        Ok(()) => SessionEvent::SessionStarted { session_id },
+                        Err(error) => {
+                            let cancel_outcome = self.recorder.cancel_recording(session_id);
+                            debug!(
+                                session_id = session_id.0,
+                                ?cancel_outcome,
+                                "Recorder startup rollback handled"
+                            );
+                            if let Err(abort_error) = self.orchestrator.abort_session(session_id) {
+                                debug!(
+                                    session_id = session_id.0,
+                                    error = %abort_error,
+                                    "Orchestrator startup rollback had no matching session"
+                                );
+                            }
+                            error!(
+                                session_id = session_id.0,
+                                error, "Failed to start prompt-lab capture"
+                            );
+                            SessionEvent::SessionStartFailed { session_id, error }
+                        }
+                    },
                     Err(error) => {
                         let active_session_id = match &error {
                             crate::core::orchestrator::SessionStartError::ActiveSession {
@@ -213,6 +285,7 @@ impl ListenerApplication {
                             } => *active,
                         };
                         let cancel_outcome = self.recorder.cancel_recording(session_id);
+                        self.output.cancel_session(active_session_id);
                         debug!(
                             session_id = session_id.0,
                             ?cancel_outcome,
@@ -242,6 +315,7 @@ impl ListenerApplication {
                 requested_session_id,
                 active_session_id,
             } => {
+                self.output.cancel_session(active_session_id);
                 let cancel_outcome = self.recorder.cancel_recording(active_session_id);
                 debug!(
                     session_id = active_session_id.0,
@@ -292,6 +366,7 @@ impl ListenerApplication {
                     );
                 }
                 for chunk in chunks {
+                    self.output.archive_chunk(session_id, &chunk);
                     if let Err(error) = self.orchestrator.on_chunk_ready(session_id, chunk) {
                         warn!(session_id = session_id.0, error = %error, "Stop-time chunk was rejected");
                     }
@@ -319,24 +394,67 @@ impl ListenerApplication {
             gate: Arc::clone(&gate),
         });
 
-        let orchestrator = Arc::clone(&self.orchestrator);
-        let mut post_processor = self.post_processor.start_session();
-        let typer = Arc::clone(&self.typer);
-        let proxy = self.proxy.clone();
-        spawn_finalization_worker(
-            session_id,
-            move || {
-                finish_transcription(
-                    orchestrator.finish_session(session_id),
-                    &mut post_processor,
-                    typer.as_ref(),
-                    gate.as_ref(),
+        match &mut self.output {
+            ListenerOutput::Delivery {
+                typer,
+                post_processor,
+            } => {
+                let orchestrator = Arc::clone(&self.orchestrator);
+                let mut post_processor = post_processor.start_session();
+                let typer = Arc::clone(typer);
+                let proxy = self.proxy.clone();
+                spawn_finalization_worker(
+                    session_id,
+                    move || {
+                        finish_transcription(
+                            orchestrator.finish_session(session_id),
+                            &mut post_processor,
+                            typer.as_ref(),
+                            gate.as_ref(),
+                        );
+                    },
+                    move |session_id| {
+                        let _ = proxy.send_event(AppEvent::FinalizationFinished { session_id });
+                    },
                 );
-            },
-            move |session_id| {
-                let _ = proxy.send_event(AppEvent::FinalizationFinished { session_id });
-            },
-        );
+            }
+            ListenerOutput::Capture { capture, stt } => {
+                let capture_session = capture.take(session_id);
+                let stt = stt.clone();
+                let orchestrator = Arc::clone(&self.orchestrator);
+                let proxy = self.proxy.clone();
+                spawn_finalization_worker(
+                    session_id,
+                    move || {
+                        let transcription =
+                            capture_transcription(orchestrator.finish_session(session_id), stt);
+                        match capture_session {
+                            Ok(capture_session) => match capture_session.finish(transcription) {
+                                Ok(sample) => println!(
+                                    "Captured {}\naudio: {}\nsidecar: {}",
+                                    sample.id,
+                                    sample.audio_path.display(),
+                                    sample.sidecar_path.display()
+                                ),
+                                Err(error) => error!(
+                                    session_id = session_id.0,
+                                    error = %error,
+                                    "Failed to finalize prompt-lab capture"
+                                ),
+                            },
+                            Err(error) => error!(
+                                session_id = session_id.0,
+                                error = %error,
+                                "Prompt-lab capture session was unavailable"
+                            ),
+                        }
+                    },
+                    move |session_id| {
+                        let _ = proxy.send_event(AppEvent::FinalizationFinished { session_id });
+                    },
+                );
+            }
+        }
     }
 
     fn cancel_finalization(&mut self) {
@@ -431,6 +549,32 @@ fn finish_transcription(
     }
 }
 
+fn capture_transcription(
+    result: Result<String, SessionError>,
+    stt: SttSnapshot,
+) -> CaptureTranscription {
+    match result {
+        Ok(text) if text.is_empty() => CaptureTranscription::failed("STT returned empty text", stt),
+        Ok(text) => CaptureTranscription::success(text, stt),
+        Err(error) => {
+            let partial_text = match &error {
+                SessionError::PartialFailure { partial_text, .. }
+                | SessionError::ConvergenceTimeout { partial_text, .. }
+                    if !partial_text.is_empty() =>
+                {
+                    Some(partial_text.clone())
+                }
+                _ => None,
+            };
+            let message = error.to_string();
+            match partial_text {
+                Some(text) => CaptureTranscription::partial(text, message, stt),
+                None => CaptureTranscription::failed(message, stt),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -441,12 +585,60 @@ mod tests {
 
     use crate::core::recording_session::{RecordingSessionMachine, RecordingState, SessionEvent};
     use crate::input::typer::TextTyper;
+    use crate::prompt_lab::SttSnapshot;
     use crate::session::SessionId;
+    use crate::transcriber::TranscribeError;
 
     use super::{
-        FinalizationGate, FinalizationTask, finalization_completion_event,
+        FinalizationGate, FinalizationTask, capture_transcription, finalization_completion_event,
         spawn_finalization_worker,
     };
+
+    fn stt_snapshot() -> SttSnapshot {
+        SttSnapshot {
+            endpoint: "https://api.example.test/v1/audio/transcriptions".to_string(),
+            model: "whisper-test".to_string(),
+            language: Some("zh".to_string()),
+            temperature: 0.0,
+            prompt: Some("候选提示词".to_string()),
+        }
+    }
+
+    #[test]
+    fn capture_transcription_preserves_raw_success_without_post_processing() {
+        let result = capture_transcription(Ok(" 原始转写 ".to_string()), stt_snapshot());
+
+        assert_eq!(result.text.as_deref(), Some(" 原始转写 "));
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn capture_transcription_keeps_partial_text_and_failure_details() {
+        let result = capture_transcription(
+            Err(crate::core::orchestrator::SessionError::PartialFailure {
+                errors: vec![(0, TranscribeError::Network("request failed".to_string()))],
+                partial_text: "部分结果".to_string(),
+            }),
+            stt_snapshot(),
+        );
+
+        assert_eq!(result.text.as_deref(), Some("部分结果"));
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("1 chunk(s) failed")
+        );
+    }
+
+    #[test]
+    fn capture_transcription_records_empty_success_as_failure() {
+        let result = capture_transcription(Ok(String::new()), stt_snapshot());
+
+        assert!(result.text.is_none());
+        assert_eq!(result.error.as_deref(), Some("STT returned empty text"));
+    }
 
     struct CountingTyper(AtomicUsize);
 

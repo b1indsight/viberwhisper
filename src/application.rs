@@ -1,4 +1,5 @@
 mod listener;
+mod prompt_lab;
 
 use std::path::PathBuf;
 
@@ -55,6 +56,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Convert { input, output }) => {
             handle_convert(&input, output.as_deref())?;
+        }
+        Some(Commands::PromptLab { action }) => {
+            prompt_lab::handle(action)?;
         }
     }
 
