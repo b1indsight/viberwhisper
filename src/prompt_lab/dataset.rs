@@ -969,6 +969,28 @@ mod tests {
     }
 
     #[test]
+    fn correction_counts_latin_proper_nouns_next_to_han_text() {
+        let directory = tempdir().unwrap();
+        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
+        let id = captured_sample(&store, 42);
+
+        store
+            .correct_sample(
+                &id,
+                "使用Codex检查",
+                vec![ProperNounAnnotation {
+                    canonical: "Codex".to_string(),
+                    accepted: Vec::new(),
+                    case_sensitive: true,
+                    expected_occurrences: 1,
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(store.validate().unwrap().ready_count, 1);
+    }
+
+    #[test]
     fn validation_reports_malformed_and_unreferenced_files() {
         let directory = tempdir().unwrap();
         let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();

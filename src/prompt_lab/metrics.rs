@@ -34,7 +34,7 @@ pub(crate) struct WerScore {
     pub(crate) alignment: Vec<WerEdit>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProperNounAnnotationScore {
     pub(crate) canonical: String,
@@ -300,12 +300,23 @@ fn form_matches(text: &[char], form: &[char], case_sensitive: bool) -> bool {
 }
 
 fn has_required_boundaries(text: &[char], start: usize, end: usize, form: &[char]) -> bool {
-    if !form.iter().all(|character| character.is_alphanumeric()) {
-        return true;
-    }
-    let starts_at_boundary = start == 0 || !text[start - 1].is_alphanumeric();
-    let ends_at_boundary = end == text.len() || !text[end].is_alphanumeric();
+    let starts_at_boundary =
+        has_word_boundary(form[0], start.checked_sub(1).map(|index| text[index]));
+    let ends_at_boundary = has_word_boundary(form[form.len() - 1], text.get(end).copied());
     starts_at_boundary && ends_at_boundary
+}
+
+fn has_word_boundary(edge: char, neighbor: Option<char>) -> bool {
+    !edge.is_alphanumeric()
+        || neighbor.is_none_or(|neighbor| !characters_share_word_class(edge, neighbor))
+}
+
+fn characters_share_word_class(left: char, right: char) -> bool {
+    if is_han(left) || is_han(right) {
+        is_han(left) && is_han(right)
+    } else {
+        left.is_alphanumeric() && right.is_alphanumeric()
+    }
 }
 
 fn normalize(text: &str) -> String {
@@ -403,6 +414,72 @@ mod tests {
 
         assert_eq!(embedded.matched_occurrences, 0);
         assert_eq!(standalone.matched_occurrences, 1);
+    }
+
+    #[test]
+    fn proper_nouns_match_at_han_latin_boundaries() {
+        let annotations = vec![
+            ProperNounAnnotation {
+                canonical: "OpenAI".to_string(),
+                accepted: vec!["Open AI".to_string()],
+                case_sensitive: false,
+                expected_occurrences: 2,
+            },
+            ProperNounAnnotation {
+                canonical: "Cargo.toml".to_string(),
+                accepted: Vec::new(),
+                case_sensitive: true,
+                expected_occurrences: 1,
+            },
+            ProperNounAnnotation {
+                canonical: "Visual Studio Code".to_string(),
+                accepted: Vec::new(),
+                case_sensitive: true,
+                expected_occurrences: 1,
+            },
+            ProperNounAnnotation {
+                canonical: "V3".to_string(),
+                accepted: Vec::new(),
+                case_sensitive: true,
+                expected_occurrences: 1,
+            },
+        ];
+
+        // Chinese STT commonly omits spaces around Latin names while preserving their spelling.
+        let score = score_proper_nouns(
+            "测试OPENAI的流程和OPEN AI模型，在Visual Studio Code中打开Cargo.toml，版本V3发布",
+            &annotations,
+        );
+
+        assert_eq!(score.matched_occurrences, 5);
+        assert!(
+            score
+                .annotations
+                .iter()
+                .all(|annotation| annotation.matched_occurrences == annotation.expected_occurrences)
+        );
+    }
+
+    #[test]
+    fn punctuated_and_multiword_forms_reject_latin_token_embedding() {
+        let annotations = vec![
+            ProperNounAnnotation {
+                canonical: "Cargo.toml".to_string(),
+                accepted: Vec::new(),
+                case_sensitive: true,
+                expected_occurrences: 1,
+            },
+            ProperNounAnnotation {
+                canonical: "Visual Studio Code".to_string(),
+                accepted: Vec::new(),
+                case_sensitive: true,
+                expected_occurrences: 1,
+            },
+        ];
+
+        let score = score_proper_nouns("MyCargo.tomlFile MyVisual Studio CodeTool", &annotations);
+
+        assert_eq!(score.matched_occurrences, 0);
     }
 
     #[test]

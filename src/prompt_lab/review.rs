@@ -195,6 +195,7 @@ fn validate_sample_review(sample: &AgentReviewSampleInput) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use tempfile::tempdir;
 
@@ -287,14 +288,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn complete_agent_review_finalizes_report_and_all_gates() {
-        let directory = tempdir().unwrap();
-        let report_path = directory.path().join("run.json");
-        let review_path = directory.path().join("review.json");
-        awaiting_report().write(&report_path).unwrap();
+    fn write_perfect_review(path: &Path) {
         fs::write(
-            &review_path,
+            path,
             serde_json::to_vec_pretty(&serde_json::json!({
                 "schema_version": 1,
                 "run_id": "run-test-1",
@@ -309,6 +305,15 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn complete_agent_review_finalizes_report_and_all_gates() {
+        let directory = tempdir().unwrap();
+        let report_path = directory.path().join("run.json");
+        let review_path = directory.path().join("review.json");
+        awaiting_report().write(&report_path).unwrap();
+        write_perfect_review(&review_path);
 
         let report = apply_review(&report_path, &review_path).unwrap();
 
@@ -317,6 +322,62 @@ mod tests {
         assert_eq!(report.meets_targets, Some(true));
         assert!(report.gates.as_ref().unwrap().wer);
         assert!(EvaluationReport::read(&report_path).is_ok());
+    }
+
+    #[test]
+    fn fractional_metrics_survive_report_round_trip_before_review() {
+        let directory = tempdir().unwrap();
+        let report_path = directory.path().join("run.json");
+        let review_path = directory.path().join("review.json");
+        let mut report = awaiting_report();
+        let reference = "one two three four five six seven eight nine ten eleven twelve Codex";
+        let hypothesis =
+            "changed words three four five six seven eight nine ten eleven twelve Codex";
+        // Two errors over thirteen words reproduces the JSON float round trip that blocked
+        // applying a review to a real prompt-lab report in a later process.
+        let wer = score_wer(reference, hypothesis);
+        report.thresholds.max_wer_percent = 20.0;
+        report.aggregates.wer = WerAggregate {
+            reference_words: wer.reference_words,
+            substitutions: wer.substitutions,
+            deletions: wer.deletions,
+            insertions: wer.insertions,
+            wer_percent: wer.wer_percent,
+        };
+        report.samples[0].reference = reference.to_string();
+        report.samples[0].hypothesis = Some(hypothesis.to_string());
+        report.samples[0].wer = Some(wer);
+        report.write(&report_path).unwrap();
+        write_perfect_review(&review_path);
+
+        let report = apply_review(&report_path, &review_path).unwrap();
+
+        assert_eq!(report.status, RunStatus::Complete);
+        assert_eq!(report.meets_targets, Some(true));
+        assert!(EvaluationReport::read(&report_path).is_ok());
+    }
+
+    #[test]
+    fn exact_metric_tampering_is_rejected_without_rewriting_report() {
+        let directory = tempdir().unwrap();
+        let report_path = directory.path().join("run.json");
+        let review_path = directory.path().join("review.json");
+        let mut report = awaiting_report();
+        // Keep the aggregate consistent with the forged sample so only recomputation from the
+        // reference/hypothesis can catch the structural metric tampering.
+        let wer = report.samples[0].wer.as_mut().unwrap();
+        wer.substitutions = 1;
+        wer.wer_percent = 50.0;
+        report.aggregates.wer.substitutions = 1;
+        report.aggregates.wer.wer_percent = 50.0;
+        report.write(&report_path).unwrap();
+        let before = fs::read(&report_path).unwrap();
+        write_perfect_review(&review_path);
+
+        let error = apply_review(&report_path, &review_path).unwrap_err();
+
+        assert!(error.to_string().contains("metrics do not match"));
+        assert_eq!(fs::read(&report_path).unwrap(), before);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::text::merge_texts;
 use crate::transcriber::Transcriber;
 
 pub(crate) const REPORT_SCHEMA_VERSION: u32 = 1;
-pub(crate) const SCORING_POLICY_VERSION: &str = "stt-prompt-scoring-v1";
+pub(crate) const SCORING_POLICY_VERSION: &str = "stt-prompt-scoring-v2";
 pub(crate) const AGENT_REVIEW_RUBRIC_VERSION: &str = "semantic-equivalence-v1";
 
 type Result<T> = std::result::Result<T, RegressionError>;
@@ -376,10 +376,13 @@ impl EvaluationReport {
                     let expected_wer = score_wer(&sample.reference, hypothesis);
                     let expected_proper_nouns =
                         score_proper_nouns(hypothesis, &sample.proper_noun_annotations);
-                    if serde_json::to_value(sample.wer.as_ref())?
-                        != serde_json::to_value(Some(expected_wer))?
-                        || serde_json::to_value(sample.proper_nouns.as_ref())?
-                            != serde_json::to_value(Some(expected_proper_nouns))?
+                    if !sample
+                        .wer
+                        .as_ref()
+                        .is_some_and(|actual| same_wer_score(actual, &expected_wer))
+                        || !sample.proper_nouns.as_ref().is_some_and(|actual| {
+                            same_proper_noun_score(actual, &expected_proper_nouns)
+                        })
                     {
                         return Err(RegressionError::Invalid(format!(
                             "sample {} metrics do not match its reference and hypothesis",
@@ -614,10 +617,26 @@ fn same_wer_aggregate(left: &WerAggregate, right: &WerAggregate) -> bool {
         && float_eq(left.wer_percent, right.wer_percent)
 }
 
+fn same_wer_score(left: &WerScore, right: &WerScore) -> bool {
+    left.reference_words == right.reference_words
+        && left.substitutions == right.substitutions
+        && left.deletions == right.deletions
+        && left.insertions == right.insertions
+        && float_eq(left.wer_percent, right.wer_percent)
+        && left.alignment == right.alignment
+}
+
 fn same_proper_noun_aggregate(left: &ProperNounAggregate, right: &ProperNounAggregate) -> bool {
     left.matched_occurrences == right.matched_occurrences
         && left.expected_occurrences == right.expected_occurrences
         && float_eq(left.accuracy_percent, right.accuracy_percent)
+}
+
+fn same_proper_noun_score(left: &ProperNounScore, right: &ProperNounScore) -> bool {
+    left.matched_occurrences == right.matched_occurrences
+        && left.expected_occurrences == right.expected_occurrences
+        && float_eq(left.accuracy_percent, right.accuracy_percent)
+        && left.annotations == right.annotations
 }
 
 fn float_eq(left: f64, right: f64) -> bool {
@@ -1248,6 +1267,31 @@ mod tests {
         let error = evaluate(&store, &SequenceTranscriber::new([]), candidate_request).unwrap_err();
 
         assert!(error.to_string().contains("not compatible"));
+    }
+
+    #[test]
+    fn v1_comparison_is_rejected_before_v2_transcription() {
+        assert_eq!(SCORING_POLICY_VERSION, "stt-prompt-scoring-v2");
+        let directory = tempdir().unwrap();
+        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
+        add_ready_sample(&store, 1, "使用 Codex", "Codex");
+        let baseline_path = directory.path().join("baseline.json");
+        let baseline = evaluate(
+            &store,
+            &SequenceTranscriber::new([Ok("使用 Codex".to_string())]),
+            request(baseline_path.clone()),
+        )
+        .unwrap();
+        let review_path = directory.path().join("review.json");
+        write_review(&review_path, &baseline.report.run_id, 100, false);
+        let mut baseline = apply_review(&baseline_path, &review_path).unwrap();
+        baseline.scoring_policy_version = "stt-prompt-scoring-v1".to_string();
+        let mut candidate_request = request(directory.path().join("candidate.json"));
+        candidate_request.compare_to = Some(baseline);
+
+        let error = evaluate(&store, &SequenceTranscriber::new([]), candidate_request).unwrap_err();
+
+        assert!(error.to_string().contains("policy or rubric version"));
     }
 
     #[test]
