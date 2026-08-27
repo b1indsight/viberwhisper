@@ -39,6 +39,12 @@ one sidecar containing raw merged STT output and sanitized endpoint/model/langua
 prompt metadata. A valid WAV is retained even when STT is partial or failed. Only `sample correct`
 can replace the pending reference with validated human text and proper-noun annotations.
 
+Capture and evaluation use the shared pre-upload silent-chunk gate. A silent capture is still
+archived, but its empty STT result keeps the existing failed/pending diagnostic state rather than
+persisting provider hallucination text. Because ready samples require a non-empty human reference,
+silence can exercise the capture path manually but does not enter WER, proper-noun, or semantic
+scoring.
+
 Persistence is intentionally direct rather than atomic. A process interruption can leave a
 truncated WAV/JSON or an unreferenced file; `dataset validate` reports it and performs no repair.
 

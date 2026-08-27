@@ -12,6 +12,7 @@ writes intermediate chunk files.
 src/audio/
   chunk.rs     — WavChunk, ChunkError, WAV encoding, and shared capacity calculation
   recorder.rs  — cpal microphone capture and live WavChunk production
+  signal.rs    — compact normalized RMS-window check for effectively silent chunks
   wav_file.rs  — streaming local-WAV reader and fallible chunk iterator
 ```
 
@@ -20,6 +21,22 @@ src/audio/
 `WavChunk` owns an `Arc<[u8]>` containing one complete WAV payload. It deliberately contains no
 path, session id, index, retry policy, or transcription state. Clones share the immutable bytes,
 which lets retries create fresh multipart readers without copying the payload.
+
+## Audible-Window Classification
+
+`contains_audible_window` decodes one complete `WavChunk` and applies the same target-neutral
+policy to live and offline audio. Integer samples are normalized by their declared bit depth;
+floating-point samples are interpreted at full scale. Energy is measured across complete channel
+frames so duration does not change with channel count.
+
+The classifier uses 50 ms RMS windows and considers a chunk audible as soon as any complete or
+trailing window exceeds -50 dBFS. The wider window smooths brief fluctuations, while the
+any-window rule keeps short utterances on the normal STT path. The classifier exits at the first
+audible window. These values are fixed module policy rather than persisted configuration.
+
+Malformed WAV decoding returns `hound::Error`; invalid specifications, non-finite samples, and
+unrepresentable window sizes are treated as audible. The transcriber also fails open on the decode
+error, so uncertain local analysis always preserves the previous upload/error behavior.
 
 ## Chunk Capacity
 
@@ -82,5 +99,5 @@ The iterator has no chunk-count cap. A decode error is yielded once and is termi
 | Crate | Usage |
 |---|---|
 | `cpal` | Cross-platform microphone capture |
-| `hound` | WAV decoding and in-memory encoding |
+| `hound` | WAV decoding, in-memory encoding, and normalized signal classification |
 | `tracing` | Structured recorder diagnostics |
