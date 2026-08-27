@@ -23,6 +23,10 @@ The `.app` receives an ad-hoc signature, but releases are not yet Developer ID s
 Authenticode signed. Document and test the expected Gatekeeper and SmartScreen prompts; never
 describe these artifacts as platform-signed.
 
+The Windows packaging job records acceptance of the [WiX 7 OSMF EULA](https://docs.firegiant.com/wix/osmf/)
+on its ephemeral runner before building the MSI. Before dispatching that workflow, the maintainer
+must confirm the current EULA and satisfy any applicable maintenance-fee obligation.
+
 ## 1. Prepare the Version PR
 
 Choose the version according to SemVer, then update:
