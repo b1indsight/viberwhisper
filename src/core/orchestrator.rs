@@ -762,24 +762,13 @@ mod tests {
                 index: 1,
                 state: ChunkState::Flushed,
             },
-            ChunkEntry {
-                index: 2,
-                state: ChunkState::Flushed,
-            },
         ];
 
         apply_worker_event(
             &mut chunks,
             WorkerEvent::Completed {
-                index: 2,
-                result: Ok("second".to_string()),
-            },
-        );
-        apply_worker_event(
-            &mut chunks,
-            WorkerEvent::Completed {
                 index: 1,
-                result: Ok(String::new()),
+                result: Ok("second".to_string()),
             },
         );
         apply_worker_event(
@@ -859,16 +848,6 @@ mod tests {
 
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
         assert_eq!(result.unwrap(), "hello world");
-    }
-
-    #[test]
-    fn empty_chunk_results_finish_as_an_empty_success() {
-        let orch = default_orchestrator(Arc::new(FixedTranscriber(String::new())));
-
-        orch.start_session(SessionId(1)).unwrap();
-        orch.on_chunk_ready(SessionId(1), test_chunk()).unwrap();
-
-        assert_eq!(orch.finish_session(SessionId(1)).unwrap(), "");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 ## Status
 
-**Implemented on 2026-08-27.** The two planned child changes and one review-follow-up child change
+**Implemented on 2026-08-27.** The two planned child changes and two review-follow-up child changes
 were completed. Formatting, tests, checks, Clippy, the native build, and the Windows GNU
 cross-check passed. The private silent diagnostic was suppressed before upload with empty output.
 A private speech sample crossed the gate and reached the configured STT endpoint; the endpoint
@@ -13,7 +13,9 @@ Review simplified the approved 20 ms plus accumulated-100 ms policy to one 50 ms
 -50 dBFS. This deliberately trades more false-positive uploads for less code and a lower risk of
 suppressing short utterances: any audible window opens the gate, while invalid or uncertain local
 analysis also fails open. The provider-independent boundary, threshold, empty-result contract, and
-all workflow coverage remain unchanged.
+all workflow coverage remain unchanged. The second review follow-up removed duplicate malformed-WAV
+and orchestration-only tests, retaining focused signal/transcriber coverage and the existing
+end-to-end empty-result coverage.
 
 ## Context
 

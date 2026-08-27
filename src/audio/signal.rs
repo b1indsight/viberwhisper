@@ -123,11 +123,4 @@ mod tests {
 
         assert!(contains_audible_window(&chunk).unwrap());
     }
-
-    #[test]
-    fn malformed_wav_is_not_classified_as_silence() {
-        let malformed = WavChunk::from_encoded_bytes(b"not a wav".to_vec());
-
-        assert!(contains_audible_window(&malformed).is_err());
-    }
 }
