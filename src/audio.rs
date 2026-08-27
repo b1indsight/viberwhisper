@@ -23,8 +23,10 @@ impl AudioConfig {
 
 pub mod chunk;
 pub mod recorder;
+mod signal;
 pub mod wav_file;
 pub use chunk::WavChunk;
 pub(crate) use chunk::max_frames_per_chunk;
 pub use recorder::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
+pub(crate) use signal::contains_sustained_signal;
 pub use wav_file::WavChunkReader;
