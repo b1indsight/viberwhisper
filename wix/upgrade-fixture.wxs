@@ -28,7 +28,7 @@
     </StandardDirectory>
 
     <Component Id="MainExecutable" Directory="INSTALLFOLDER" Guid="AA05F0E0-9660-4AEB-8B09-42CF6356D601">
-      <File Id="ViberWhisperExe" Source="$(var.ExePath)" KeyPath="yes">
+      <File Id="ViberWhisperExe" Source="$(var.ExePath)" Name="viberwhisper.exe" KeyPath="yes">
         <Shortcut
           Id="StartMenuShortcut"
           Directory="ProgramMenuFolder"

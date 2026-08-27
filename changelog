@@ -46,3 +46,4 @@
 2026-08-27: Harden prompt-lab report review across JSON floating-point round trips and score mixed-script proper nouns with versioned Han/Latin boundary semantics
 2026-08-27: Suppress WAV chunks with no audible 50 ms energy window before STT upload, preserving empty no-output behavior across realtime, offline, Local, and prompt-lab workflows
 2026-08-27: Record WiX 7 OSMF EULA acceptance explicitly before Windows release packaging
+2026-08-27: Preserve the canonical executable name in the Windows installer upgrade fixture
