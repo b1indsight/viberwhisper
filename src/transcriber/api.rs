@@ -1,4 +1,4 @@
-use crate::audio::{WavChunk, contains_sustained_signal};
+use crate::audio::{WavChunk, contains_audible_window};
 use crate::core::config::{ApiAuth, ConfigKey, TranscriptionSection, ValidationIssue};
 use crate::transcriber::TranscribeError;
 use std::io::Cursor;
@@ -277,7 +277,7 @@ impl Transcriber for ApiTranscriber {
     #[instrument(name = "api_stt", skip(self, chunk), fields(bytes = chunk.len()))]
     fn transcribe(&self, chunk: &WavChunk) -> Result<String, TranscribeError> {
         info!("Starting transcription");
-        match contains_sustained_signal(chunk) {
+        match contains_audible_window(chunk) {
             Ok(false) => {
                 info!("Skipping effectively silent audio chunk");
                 return Ok(String::new());

@@ -28,5 +28,5 @@ pub mod wav_file;
 pub use chunk::WavChunk;
 pub(crate) use chunk::max_frames_per_chunk;
 pub use recorder::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
-pub(crate) use signal::contains_sustained_signal;
+pub(crate) use signal::contains_audible_window;
 pub use wav_file::WavChunkReader;

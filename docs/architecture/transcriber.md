@@ -38,16 +38,16 @@ reader and request body.
 ## Silent-Chunk Gate
 
 Before constructing a request, `ApiTranscriber::transcribe` asks the audio module whether the WAV
-contains sustained signal. An effectively silent chunk returns `Ok("")` without HTTP or retry. A
-classification error logs a warning and fails open into the unchanged upload path, so local WAV
-analysis cannot silently discard input.
+contains an audible 50 ms RMS window. An effectively silent chunk returns `Ok("")` without HTTP or
+retry. A classification error logs a warning and fails open into the unchanged upload path, so
+local WAV analysis cannot silently discard input.
 
 The gate is deliberately per chunk because live chunks are uploaded while recording is still in
 progress. Existing ordered merging ignores empty segments, so silent chunks can surround voiced
 chunks without changing voiced order. If every chunk is silent, realtime finalization skips
 post-processing, history persistence, and injection; offline conversion also short-circuits before
 post-processing. API mode, Local mode, prompt-lab capture/evaluation, and offline conversion all
-share this one transcriber boundary. The gate detects sustained low energy, not general non-speech
+share this one transcriber boundary. The gate detects near-silent energy, not general non-speech
 noise, and does not inspect provider-specific response metadata or recognized text.
 
 ## Retry Budget

@@ -14,7 +14,6 @@ pub struct WavChunk {
 pub enum ChunkError {
     InvalidSpec(&'static str),
     ArithmeticOverflow,
-    NonFiniteSample,
     UnexpectedEndOfFile,
     Wav(hound::Error),
 }
@@ -24,7 +23,6 @@ impl fmt::Display for ChunkError {
         match self {
             Self::InvalidSpec(field) => write!(f, "invalid WAV spec: {field} must be non-zero"),
             Self::ArithmeticOverflow => write!(f, "chunk capacity arithmetic overflow"),
-            Self::NonFiniteSample => write!(f, "WAV contains a non-finite sample"),
             Self::UnexpectedEndOfFile => write!(f, "WAV input ended before its declared length"),
             Self::Wav(error) => write!(f, "WAV error: {error}"),
         }
@@ -35,10 +33,7 @@ impl Error for ChunkError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Wav(error) => Some(error),
-            Self::InvalidSpec(_)
-            | Self::ArithmeticOverflow
-            | Self::NonFiniteSample
-            | Self::UnexpectedEndOfFile => None,
+            Self::InvalidSpec(_) | Self::ArithmeticOverflow | Self::UnexpectedEndOfFile => None,
         }
     }
 }
