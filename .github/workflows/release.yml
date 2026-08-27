@@ -221,6 +221,10 @@ jobs:
         shell: pwsh
         run: dotnet tool install --global wix --version $env:WIX_VERSION
 
+      - name: Accept pinned WiX Toolset EULA
+        shell: pwsh
+        run: wix eula accept wix7
+
       - name: Build locked static-CRT executable
         shell: pwsh
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
