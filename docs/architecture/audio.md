@@ -12,6 +12,7 @@ writes intermediate chunk files.
 src/audio/
   chunk.rs     — WavChunk, ChunkError, WAV encoding, and shared capacity calculation
   recorder.rs  — cpal microphone capture and live WavChunk production
+  signal.rs    — normalized windowed-RMS classification for effectively silent chunks
   wav_file.rs  — streaming local-WAV reader and fallible chunk iterator
 ```
 
@@ -20,6 +21,22 @@ src/audio/
 `WavChunk` owns an `Arc<[u8]>` containing one complete WAV payload. It deliberately contains no
 path, session id, index, retry policy, or transcription state. Clones share the immutable bytes,
 which lets retries create fresh multipart readers without copying the payload.
+
+## Sustained-Signal Classification
+
+`contains_sustained_signal` decodes one complete `WavChunk` and applies the same target-neutral
+policy to live and offline audio. Integer samples are normalized by their declared bit depth;
+floating-point samples are interpreted at full scale. Energy is measured across complete channel
+frames so duration does not change with channel count.
+
+The classifier uses 20 ms RMS windows. A chunk contains sustained signal after at least 100 ms of
+windows exceed -50 dBFS. Active windows accumulate across natural pauses, while a single impulse
+cannot open the gate. The classifier exits as soon as the active-frame requirement is met. These
+values are fixed module policy rather than persisted configuration.
+
+Malformed WAVs, incomplete channel frames, non-finite float samples, and arithmetic failures return
+`ChunkError`; the classifier never guesses that invalid input is silence. The transcriber owns the
+fail-open decision so a local analysis failure preserves the previous upload/error behavior.
 
 ## Chunk Capacity
 
@@ -82,5 +99,5 @@ The iterator has no chunk-count cap. A decode error is yielded once and is termi
 | Crate | Usage |
 |---|---|
 | `cpal` | Cross-platform microphone capture |
-| `hound` | WAV decoding and in-memory encoding |
+| `hound` | WAV decoding, in-memory encoding, and normalized signal classification |
 | `tracing` | Structured recorder diagnostics |

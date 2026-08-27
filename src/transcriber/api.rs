@@ -1,4 +1,4 @@
-use crate::audio::WavChunk;
+use crate::audio::{WavChunk, contains_sustained_signal};
 use crate::core::config::{ApiAuth, ConfigKey, TranscriptionSection, ValidationIssue};
 use crate::transcriber::TranscribeError;
 use std::io::Cursor;
@@ -277,6 +277,19 @@ impl Transcriber for ApiTranscriber {
     #[instrument(name = "api_stt", skip(self, chunk), fields(bytes = chunk.len()))]
     fn transcribe(&self, chunk: &WavChunk) -> Result<String, TranscribeError> {
         info!("Starting transcription");
+        match contains_sustained_signal(chunk) {
+            Ok(false) => {
+                info!("Skipping effectively silent audio chunk");
+                return Ok(String::new());
+            }
+            Ok(true) => {}
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Could not classify audio signal; preserving upload behavior"
+                );
+            }
+        }
         let text = self.upload_chunk_with_retry(chunk)?;
         info!(result = %text, "Transcription complete");
         Ok(text)
@@ -286,6 +299,7 @@ impl Transcriber for ApiTranscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::chunk::encode_i16_wav;
     use crate::core::config::{ApiAuth, SecretValue, TranscriptionSection};
 
     fn validated_config(endpoint: &str) -> TranscriberConfig {
@@ -410,6 +424,47 @@ mod tests {
 
     fn test_chunk() -> WavChunk {
         WavChunk::from_encoded_bytes(b"fake wav bytes".to_vec())
+    }
+
+    fn silent_chunk() -> WavChunk {
+        encode_i16_wav(&vec![0; 3_200], 16_000).unwrap()
+    }
+
+    fn audible_chunk() -> WavChunk {
+        encode_i16_wav(&vec![200; 1_600], 16_000).unwrap()
+    }
+
+    #[test]
+    fn silent_chunk_returns_empty_without_an_http_request() {
+        let (port, requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\":\"hallucination\"}");
+        let transcriber = transcriber_for_port(port);
+
+        let result = transcriber.transcribe(&silent_chunk());
+
+        assert_eq!(result.unwrap(), "");
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn audible_chunk_still_uses_the_normal_upload_path() {
+        let (port, requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\":\"spoken\"}");
+        let transcriber = transcriber_for_port(port);
+
+        let result = transcriber.transcribe(&audible_chunk());
+
+        assert_eq!(result.unwrap(), "spoken");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn signal_classification_failure_preserves_the_upload_path() {
+        let (port, requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\":\"fallback\"}");
+        let transcriber = transcriber_for_port(port);
+
+        let result = transcriber.transcribe(&test_chunk());
+
+        assert_eq!(result.unwrap(), "fallback");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]

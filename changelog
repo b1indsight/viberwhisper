@@ -44,3 +44,4 @@
 2026-08-13: Add append-only JSONL transcription history with timestamp metadata, trailing-record repair, a 5 MiB cap, and the newest five Unicode-safe summaries as exact tray clipboard-copy actions
 2026-08-14: Add an STT prompt lab with paired WAV/raw-transcript capture, human reference correction, full historical regression, WER and proper-noun metrics, coding-agent semantic review, compatible-run deltas, and JSON-only reports
 2026-08-27: Harden prompt-lab report review across JSON floating-point round trips and score mixed-script proper nouns with versioned Han/Latin boundary semantics
+2026-08-27: Suppress sustained low-energy WAV chunks before STT upload, preserving empty no-output behavior across realtime, offline, Local, and prompt-lab workflows

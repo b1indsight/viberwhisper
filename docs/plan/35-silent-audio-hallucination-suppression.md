@@ -2,7 +2,12 @@
 
 ## Status
 
-**Proposed.** Awaiting plan approval before implementation.
+**Implemented on 2026-08-27.** The two planned child changes were completed without material design
+deviations. Formatting, tests, checks, Clippy, the native build, and the Windows GNU cross-check
+passed. The private silent diagnostic was suppressed before upload with empty output. A private
+speech sample crossed the gate and reached the configured STT endpoint; the endpoint then returned
+401 for the current API key, while the local HTTP regression independently verified the complete
+audible upload/response path.
 
 ## Context
 

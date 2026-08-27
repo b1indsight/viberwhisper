@@ -289,17 +289,21 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<(), Box<dyn std::
         chunk_texts.push(transcriber.transcribe(&chunk?)?);
     }
     let stt_text = text::merge_texts(&chunk_texts, config.language.as_deref());
-    let text = match post_processor.process(&stt_text) {
-        Ok(processed) if !processed.is_empty() => processed,
-        Ok(_) => {
-            // Empty post-process output is not useful; keep the STT text.
-            warn!("Post-processing returned empty text, using original STT text");
-            stt_text
-        }
-        Err(e) => {
-            // Runtime LLM errors should not discard a successful STT result.
-            warn!(error = %e, "Post-processing failed, using original STT text");
-            stt_text
+    let text = if stt_text.is_empty() {
+        stt_text
+    } else {
+        match post_processor.process(&stt_text) {
+            Ok(processed) if !processed.is_empty() => processed,
+            Ok(_) => {
+                // Empty post-process output is not useful; keep the STT text.
+                warn!("Post-processing returned empty text, using original STT text");
+                stt_text
+            }
+            Err(e) => {
+                // Runtime LLM errors should not discard a successful STT result.
+                warn!(error = %e, "Post-processing failed, using original STT text");
+                stt_text
+            }
         }
     };
     match output {
