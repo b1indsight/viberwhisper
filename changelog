@@ -48,3 +48,4 @@
 2026-08-27: Record WiX 7 OSMF EULA acceptance explicitly before Windows release packaging
 2026-08-27: Preserve the canonical executable name in the Windows installer upgrade fixture
 2026-08-31: Enforce Rust formatting and Windows-native Clippy with warnings denied in normal hosted CI
+2026-09-01: Prepend validated signing, packaged-runtime, checksum, and provenance guidance to GitHub-generated Release Notes

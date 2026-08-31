@@ -2,8 +2,8 @@
 
 ## Status
 
-**Proposed; awaiting explicit plan approval.** This independent PR changes Release Notes
-composition only. It is based directly on `master`, not on another feature PR.
+**Implemented.** This independent PR changes Release Notes composition only. It is based directly
+on `master`, not on another feature PR.
 
 ## Context
 
@@ -105,8 +105,10 @@ rebase and use the Action references present on the new `master` without claimin
 | Path | Planned change |
 |---|---|
 | `.github/release-notes.md` | Store mandatory release-wide distribution guidance |
+| `.github/workflows/ci.yml` | Run focused release-notes contract fixtures in normal CI |
 | `.github/workflows/release.yml` | Read and prepend the header while retaining generated notes |
 | `scripts/validate-release-contract.sh` | Require and semantically validate the header |
+| `scripts/test-release-notes-contract.sh` | Exercise missing, empty, and incomplete header fixtures |
 | `docs/releasing.md` | Document composed notes and required statements |
 | `docs/plan/39-release-notes-automation.md` | Preserve design and implementation status |
 | `docs/README.md` | Index this plan |
@@ -160,12 +162,13 @@ be added independently if maintainers adopt consistent labels.
 
 ## Acceptance Criteria
 
-- [ ] A tracked non-empty notes header states macOS signing/notarization status, Windows
+- [x] A tracked non-empty notes header states macOS signing/notarization status, Windows
       Authenticode status, API-only scope, Local-mode source requirement, checksums, and provenance.
-- [ ] Release preflight fails clearly when any required guidance category is absent.
-- [ ] The publish job prepends the header to GitHub-generated notes before creating the draft.
-- [ ] Existing assets, checksums, attestations, tag verification, draft-first publication, and
+- [x] Release preflight fails clearly when any required guidance category is absent.
+- [x] The publish job prepends the header to GitHub-generated notes before creating the draft.
+- [x] Existing assets, checksums, attestations, tag verification, draft-first publication, and
       immutability behavior is preserved.
-- [ ] No PR labeling convention, product version source, signing claim, or package content changes.
-- [ ] Local contract/workflow validation and hosted PR CI pass.
-- [ ] Runbook, plan status, index, and changelog match the implemented behavior.
+- [x] No PR labeling convention, product version source, signing claim, or package content changes.
+- [x] Local contract and workflow validation pass.
+- [ ] Hosted PR CI passes after the implementation push.
+- [x] Runbook, plan status, index, and changelog match the implemented behavior.
