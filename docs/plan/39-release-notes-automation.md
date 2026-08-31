@@ -170,5 +170,5 @@ be added independently if maintainers adopt consistent labels.
       immutability behavior is preserved.
 - [x] No PR labeling convention, product version source, signing claim, or package content changes.
 - [x] Local contract and workflow validation pass.
-- [ ] Hosted PR CI passes after the implementation push.
+- [x] Hosted PR CI passes after the implementation push.
 - [x] Runbook, plan status, index, and changelog match the implemented behavior.
