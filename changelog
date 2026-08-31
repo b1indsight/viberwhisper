@@ -47,3 +47,4 @@
 2026-08-27: Suppress WAV chunks with no audible 50 ms energy window before STT upload, preserving empty no-output behavior across realtime, offline, Local, and prompt-lab workflows
 2026-08-27: Record WiX 7 OSMF EULA acceptance explicitly before Windows release packaging
 2026-08-27: Preserve the canonical executable name in the Windows installer upgrade fixture
+2026-08-31: Enforce Rust formatting and Windows-native Clippy with warnings denied in normal hosted CI

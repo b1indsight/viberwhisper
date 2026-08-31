@@ -41,7 +41,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Validate release package contract
         shell: bash
@@ -62,6 +62,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+
+      - name: Format
+        run: cargo fmt --check
 
       - name: Build
         run: cargo build --locked
@@ -99,6 +102,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo registry and target
         uses: actions/cache@v4
@@ -116,6 +121,9 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --locked -- -D warnings
 
       - name: Discord failure alert
         if: failure()
