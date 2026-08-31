@@ -63,4 +63,4 @@ Implementation plans and technical specs for each feature.
 | [33-stt-prompt-regression-suite.md](plan/33-stt-prompt-regression-suite.md) | Implemented | Capture corrected audio datasets and rerun STT prompts with local metrics plus agent-reviewed LLM scoring in JSON |
 | [34-prompt-lab-scoring-hardening.md](plan/34-prompt-lab-scoring-hardening.md) | Implemented | Preserve report validation across JSON float round trips and score Latin proper nouns next to Han text |
 | [35-silent-audio-hallucination-suppression.md](plan/35-silent-audio-hallucination-suppression.md) | Implemented | Suppress effectively silent WAV chunks before STT upload and preserve empty no-output behavior |
-| [36-ci-platform-quality-gates.md](plan/36-ci-platform-quality-gates.md) | Proposed | Enforce formatting and Windows-specific Clippy in normal hosted CI |
+| [36-ci-platform-quality-gates.md](plan/36-ci-platform-quality-gates.md) | Implemented | Enforce formatting and Windows-specific Clippy in normal hosted CI |

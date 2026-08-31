@@ -2,8 +2,9 @@
 
 ## Status
 
-**Proposed; awaiting explicit plan approval.** This is the first PR in a four-PR maintenance
-series. It changes only the two requested Rust CI gates.
+**Implemented on 2026-08-31.** Normal hosted CI now enforces formatting on macOS and runs
+Windows-native Clippy with warnings denied. Existing build, test, package-contract, Python, and
+Discord notification behavior remains unchanged.
 
 ## Context
 
@@ -135,9 +136,9 @@ accepted because it validates code that macOS Clippy cannot select.
 
 ## Acceptance Criteria
 
-- [ ] macOS CI requests `rustfmt` and passes `cargo fmt --check`.
-- [ ] Windows CI requests Clippy and passes `cargo clippy --locked -- -D warnings`.
-- [ ] Existing CI build, test, package-contract, Python, and notification behavior is preserved.
-- [ ] No GitHub Action version, release workflow, application behavior, or package content changes.
-- [ ] Local workflow checks and all hosted PR checks pass.
-- [ ] The plan status, index, and changelog match the implemented scope.
+- [x] macOS CI requests `rustfmt` and passes `cargo fmt --check`.
+- [x] Windows CI requests Clippy and passes `cargo clippy --locked -- -D warnings`.
+- [x] Existing CI build, test, package-contract, Python, and notification behavior is preserved.
+- [x] No GitHub Action version, release workflow, application behavior, or package content changes.
+- [x] Local workflow checks and all hosted PR checks pass.
+- [x] The plan status, index, and changelog match the implemented scope.
