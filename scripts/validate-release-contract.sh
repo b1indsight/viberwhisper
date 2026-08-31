@@ -6,6 +6,7 @@ repository_root=$(cd "${script_dir}/.." && pwd)
 cd "${repository_root}"
 
 required_files=(
+  .github/release-notes.md
   .github/workflows/release.yml
   Cargo.lock
   Cargo.toml
@@ -25,6 +26,48 @@ for required_file in "${required_files[@]}"; do
     exit 1
   fi
 done
+
+release_notes_file=${RELEASE_NOTES_FILE:-.github/release-notes.md}
+if [[ ! -s "${release_notes_file}" ]]; then
+  echo "Release notes header is missing or empty: ${release_notes_file}" >&2
+  exit 1
+fi
+release_notes_text=$(tr '\n' ' ' < "${release_notes_file}")
+
+require_release_notes_marker() {
+  local description=$1
+  local pattern=$2
+
+  if ! grep -Eiq -- "${pattern}" <<< "${release_notes_text}"; then
+    echo "Release notes header is missing required guidance: ${description}." >&2
+    exit 1
+  fi
+}
+
+require_release_notes_marker \
+  "macOS ad-hoc signing" \
+  'ad-hoc[[:space:]]+signed'
+require_release_notes_marker \
+  "missing Developer ID signing" \
+  'not[[:space:]]+Developer[[:space:]]+ID[[:space:]]+signed'
+require_release_notes_marker \
+  "missing notarization" \
+  'not[[:space:]]+notarized'
+require_release_notes_marker \
+  "missing Windows Authenticode signing" \
+  'not[[:space:]]+Authenticode[[:space:]]+signed'
+require_release_notes_marker \
+  "API-only packaged scope" \
+  'API[[:space:]]+inference[[:space:]]+profile[[:space:]]+only'
+require_release_notes_marker \
+  "Local-mode source checkout requirement" \
+  'Local[[:space:]]+mode.*requires[[:space:]]+a[[:space:]]+source[[:space:]]+checkout'
+require_release_notes_marker \
+  "SHA256SUMS verification" \
+  'SHA256SUMS'
+require_release_notes_marker \
+  "GitHub artifact provenance" \
+  'GitHub[[:space:]]+artifact[[:space:]]+provenance'
 
 metadata_file=$(mktemp)
 trap 'rm -f "${metadata_file}"' EXIT

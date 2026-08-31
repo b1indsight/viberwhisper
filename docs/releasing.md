@@ -23,6 +23,10 @@ The `.app` receives an ad-hoc signature, but releases are not yet Developer ID s
 Authenticode signed. Document and test the expected Gatekeeper and SmartScreen prompts; never
 describe these artifacts as platform-signed.
 
+The stable distribution guidance shown at the start of every GitHub Release is tracked in
+`.github/release-notes.md`. Keep its signing, packaged-runtime, checksum, and provenance statements
+in sync with this runbook. Release preflight rejects a missing, empty, or incomplete header.
+
 The Windows packaging job records acceptance of the [WiX 7 OSMF EULA](https://docs.firegiant.com/wix/osmf/)
 on its ephemeral runner before building the MSI. Before dispatching that workflow, the maintainer
 must confirm the current EULA and satisfy any applicable maintenance-fee obligation.
@@ -51,8 +55,9 @@ cargo clippy --locked -- -D warnings
 
 Submit this through a normal PR against `master`. The existing CI runs a lightweight package
 contract check: locked Cargo metadata, stable/MSI-compatible version rules, required release inputs,
-and plist/WiX XML syntax. It does not build DMG or MSI artifacts. Do not create a release tag from
-an unmerged change.
+required distribution-guidance markers, and plist/WiX XML syntax. Focused fixtures also confirm that
+each missing guidance category is rejected. CI does not build DMG or MSI artifacts. Do not create a
+release tag from an unmerged change.
 
 ## 2. Validate Packaging Before Tagging
 
@@ -127,7 +132,8 @@ After both package jobs succeed, the publish job:
 1. accepts exactly four non-empty distribution files;
 2. creates and verifies `SHA256SUMS`;
 3. records GitHub build provenance for all five assets;
-4. creates a draft release and uploads every asset;
+4. creates a draft release whose tracked distribution header precedes GitHub-generated change
+   notes, and uploads every asset;
 5. revalidates that the remote tag still resolves to the workflow event commit;
 6. publishes the complete draft with generated notes.
 
@@ -157,7 +163,8 @@ Before announcing the release, perform manual smoke checks:
 - when an older test build exists, verify the new MSI upgrades it and leaves no installer-owned
   files after uninstall;
 - confirm the portable archives start from an extracted directory;
-- confirm release notes state that packages are unsigned and API-mode only.
+- confirm release notes begin with the tracked distribution header and retain the generated change
+  list.
 
 ## 6. Recover from Failure
 
