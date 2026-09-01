@@ -67,3 +67,4 @@ Implementation plans and technical specs for each feature.
 | [37-github-actions-node24.md](plan/37-github-actions-node24.md) | Implemented | Upgrade workflow Actions to Node 24-compatible, full-SHA-pinned releases with Dependabot maintenance |
 | [38-release-environment-approval.md](plan/38-release-environment-approval.md) | Implemented | Pause tagged publication behind a protected GitHub Environment approval |
 | [39-release-notes-automation.md](plan/39-release-notes-automation.md) | Implemented | Prepend validated distribution guidance to automatically generated Release Notes |
+| [40-windows-gui-launcher.md](plan/40-windows-gui-launcher.md) | Proposed | Launch the Windows tray application without a console while preserving the existing CLI executable |
