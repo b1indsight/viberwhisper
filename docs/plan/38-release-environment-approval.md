@@ -2,8 +2,8 @@
 
 ## Status
 
-**Implemented; hosted validation pending.** This independent PR adds one publication approval
-boundary. It is based directly on `master`, not on another feature PR.
+**Implemented and validated.** This independent PR adds one publication approval boundary. It is
+based directly on `master`, not on another feature PR.
 
 ## Context
 
@@ -144,5 +144,12 @@ immutable Releases remain the integrity controls.
       only `v*` tags.
 - [x] Existing tag, permissions, asset, checksum, attestation, draft-first, concurrency, and
       immutability behavior is preserved.
-- [ ] Normal CI and one full `publish=false` dry run pass without creating a Release.
+- [x] Normal CI and one full `publish=false` dry run pass without creating a Release.
 - [x] Runbook, plan status, index, and changelog match the final configuration.
+
+## Validation Evidence
+
+- PR CI passed on macOS and Windows, along with Python lint and tests.
+- [`publish=false` run 33470119101](https://github.com/b1indsight/viberwhisper/actions/runs/33470119101)
+  completed metadata and both packaging jobs, skipped `Publish GitHub Release`, and created no new
+  Release.
