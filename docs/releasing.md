@@ -97,6 +97,18 @@ updates** and **Restrict deletions** enabled and no routine bypass. Keep that ru
 release tags. The workflow resolves annotated tags to their commit both before draft creation and
 again before publication, but the ruleset closes the remaining update window outside those checks.
 
+Also keep the `release` GitHub Environment configured with `b1indsight` as its sole required
+reviewer, self-review allowed, no wait timer or secrets, and a custom deployment policy that accepts
+only tags matching `v*`. The Environment is an explicit confirmation boundary after candidate
+artifacts exist; the tag ruleset and workflow preflight remain the controls that protect tag
+identity and release eligibility. Audit the repository-side policy before publishing:
+
+```bash
+gh api repos/b1indsight/viberwhisper/environments/release
+gh api repos/b1indsight/viberwhisper/environments/release/deployment-branch-policies
+gh api repos/b1indsight/viberwhisper/environments/release/secrets
+```
+
 Create one annotated tag whose name exactly matches `v` plus the Cargo version, then push only that
 tag. Replace the example version and commit with the reviewed values:
 
@@ -127,7 +139,15 @@ gh run list --workflow release.yml --limit 5
 gh run view <run-id> --log-failed
 ```
 
-After both package jobs succeed, the publish job:
+After the metadata and both package jobs succeed, the `publish` job waits for approval before any
+of its steps start. Open the workflow run in GitHub, inspect the three completed jobs, and download
+the `release-macos` and `release-windows` candidate artifacts if a manual inspection is warranted.
+Confirm that the run uses the intended immutable tag and commit, then choose **Review deployments**
+and approve the `release` Environment. Reject the deployment if the tag, commit, logs, or artifacts
+are unexpected; rejection prevents publication, leaves the seven-day workflow artifacts available
+for investigation, and requires a new workflow run when the release is ready to retry.
+
+After approval, the publish job:
 
 1. accepts exactly four non-empty distribution files;
 2. creates and verifies `SHA256SUMS`;
@@ -171,6 +191,9 @@ Before announcing the release, perform manual smoke checks:
 - If packaging fails before release creation, fix the source in a new PR. If no release exists and
   the tag still points to the intended immutable commit, rerun failed jobs; otherwise publish a new
   patch version.
+- If the Environment deployment is rejected, inspect the retained workflow artifacts and logs. Once
+  the concern is resolved, dispatch a new run from the same tag only when it still passes every
+  preflight condition; otherwise publish a new patch version.
 - If publication leaves a draft, inspect its assets and workflow logs. A maintainer may remove that
   unpublished draft in the GitHub UI and rerun the same tag workflow. Do not delete or move the tag.
 - If a release was already published, do not replace its tag or assets. Correct the problem in a
