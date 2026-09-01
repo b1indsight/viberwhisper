@@ -2,7 +2,7 @@
 
 ## Status
 
-**Proposed; awaiting explicit plan approval.** This independent PR adds one publication approval
+**Implemented; hosted validation pending.** This independent PR adds one publication approval
 boundary. It is based directly on `master`, not on another feature PR.
 
 ## Context
@@ -137,12 +137,12 @@ immutable Releases remain the integrity controls.
 
 ## Acceptance Criteria
 
-- [ ] Only the `publish` job references the `release` Environment.
-- [ ] `publish=true` cannot start publication steps without approval after packaging succeeds.
-- [ ] `publish=false` skips publication without waiting for approval.
-- [ ] The Environment requires `b1indsight`, allows self-review, has no timer/secrets, and accepts
+- [x] Only the `publish` job references the `release` Environment.
+- [x] `publish=true` cannot start publication steps without approval after packaging succeeds.
+- [x] `publish=false` skips publication without waiting for approval.
+- [x] The Environment requires `b1indsight`, allows self-review, has no timer/secrets, and accepts
       only `v*` tags.
-- [ ] Existing tag, permissions, asset, checksum, attestation, draft-first, concurrency, and
+- [x] Existing tag, permissions, asset, checksum, attestation, draft-first, concurrency, and
       immutability behavior is preserved.
 - [ ] Normal CI and one full `publish=false` dry run pass without creating a Release.
-- [ ] Runbook, plan status, index, and changelog match the final configuration.
+- [x] Runbook, plan status, index, and changelog match the final configuration.

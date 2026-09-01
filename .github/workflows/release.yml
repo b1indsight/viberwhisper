@@ -418,6 +418,7 @@ jobs:
     if: inputs.publish && github.ref_type == 'tag'
     needs: [preflight, package-macos, package-windows]
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
       id-token: write
