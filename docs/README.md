@@ -64,6 +64,6 @@ Implementation plans and technical specs for each feature.
 | [34-prompt-lab-scoring-hardening.md](plan/34-prompt-lab-scoring-hardening.md) | Implemented | Preserve report validation across JSON float round trips and score Latin proper nouns next to Han text |
 | [35-silent-audio-hallucination-suppression.md](plan/35-silent-audio-hallucination-suppression.md) | Implemented | Suppress effectively silent WAV chunks before STT upload and preserve empty no-output behavior |
 | [36-ci-platform-quality-gates.md](plan/36-ci-platform-quality-gates.md) | Implemented | Enforce formatting and Windows-specific Clippy in normal hosted CI |
-| [37-github-actions-node24.md](plan/37-github-actions-node24.md) | Proposed | Upgrade workflow Actions to Node 24-compatible, full-SHA-pinned releases with Dependabot maintenance |
+| [37-github-actions-node24.md](plan/37-github-actions-node24.md) | Implemented | Upgrade workflow Actions to Node 24-compatible, full-SHA-pinned releases with Dependabot maintenance |
 | [38-release-environment-approval.md](plan/38-release-environment-approval.md) | Implemented | Pause tagged publication behind a protected GitHub Environment approval |
 | [39-release-notes-automation.md](plan/39-release-notes-automation.md) | Implemented | Prepend validated distribution guidance to automatically generated Release Notes |

@@ -2,8 +2,8 @@
 
 ## Status
 
-**Proposed; awaiting explicit plan approval.** This independent PR upgrades workflow dependencies
-only. It is based directly on `master`, not on another feature PR.
+**Implemented locally on 2026-09-01; hosted validation pending.** This independent PR upgrades
+workflow dependencies only. It is based directly on `master`, not on another feature PR.
 
 ## Context
 
@@ -51,10 +51,29 @@ This applies consistently to normal CI, Discord PR feedback, and release packagi
 release workflow SHA pinning remains the model; mutable tags in other workflows are removed.
 Third-party setup Actions that are composite or otherwise do not embed Node still receive a
 reviewed current release and full-SHA pin, without claiming Node runtime behavior they do not have.
+For `dtolnay/rust-toolchain`, which publishes maintained toolchain branches instead of releases,
+the reviewed `stable` branch snapshot is pinned and labeled accordingly.
 
 No Action is upgraded merely to the repository's default branch. Version comments must match the
 resolved tag, and existing `with:` inputs remain unchanged unless the selected major explicitly
 requires a narrow migration.
+
+The implementation selects these reviewed upstream references:
+
+| Action | Reviewed reference | Commit SHA | Runtime |
+|---|---|---|---|
+| `actions/checkout` | `v7.0.1` | `3d3c42e5aac5ba805825da76410c181273ba90b1` | Node 24 |
+| `actions/setup-python` | `v7.0.0` | `5fda3b95a4ea91299a34e894583c3862153e4b97` | Node 24 |
+| `astral-sh/setup-uv` | `v10.0.1` | `20cfd1bf945f4377ade1205e4dbc17946fc9a30d` | Node 24 |
+| `dtolnay/rust-toolchain` | `stable` snapshot | `4360b52568e2003a75bf9bc1d59f33a8e3fc893c` | Composite |
+| `actions/cache` | `v6.1.0` | `55cc8345863c7cc4c66a329aec7e433d2d1c52a9` | Node 24 |
+| `actions/github-script` | `v9.0.0` | `3a2844b7e9c422d3c10d287c895573f7108da1b3` | Node 24 |
+| `actions/upload-artifact` | `v7.0.1` | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` | Node 24 |
+| `actions/download-artifact` | `v8.0.1` | `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c` | Node 24 |
+| `actions/attest` | `v4.2.2` | `1e69f48acb82d1966a394da916b4c1698aa569d6` | Node 24 |
+
+`setup-uv` v10 changes the `prune-cache` default from `true` to `false`; the workflow sets it to
+`true` explicitly so the existing cache lifecycle is preserved across the major-version upgrade.
 
 ### Keep pins maintainable
 
@@ -134,11 +153,11 @@ visibility without making production references mutable.
 
 ## Acceptance Criteria
 
-- [ ] Every workflow Action uses a reviewed full commit SHA with an accurate version comment.
-- [ ] JavaScript-backed Actions use stable Node 24-compatible releases.
+- [x] Every workflow Action uses a reviewed full commit SHA with an accurate version comment.
+- [x] JavaScript-backed Actions use stable Node 24-compatible releases.
 - [ ] No ordinary CI or release dry-run job emits a Node 20 deprecation warning.
-- [ ] Dependabot proposes weekly `github-actions` updates from the repository root.
-- [ ] Existing workflow inputs, permissions, commands, artifacts, and publication behavior remain
+- [x] Dependabot proposes weekly `github-actions` updates from the repository root.
+- [x] Existing workflow inputs, permissions, commands, artifacts, and publication behavior remain
       unchanged.
 - [ ] Normal hosted CI and one complete `publish=false` release dry run pass.
-- [ ] Plan status, plan index, and changelog match the implementation.
+- [x] Plan status, plan index, and changelog match the implementation.
