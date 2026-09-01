@@ -2,8 +2,8 @@
 
 ## Status
 
-**Implemented locally on 2026-09-01; hosted validation pending.** This independent PR upgrades
-workflow dependencies only. It is based directly on `master`, not on another feature PR.
+**Implemented and validated on 2026-09-01.** This independent PR upgrades workflow dependencies
+only. It is based directly on `master`, not on another feature PR.
 
 ## Context
 
@@ -155,9 +155,19 @@ visibility without making production references mutable.
 
 - [x] Every workflow Action uses a reviewed full commit SHA with an accurate version comment.
 - [x] JavaScript-backed Actions use stable Node 24-compatible releases.
-- [ ] No ordinary CI or release dry-run job emits a Node 20 deprecation warning.
+- [x] No ordinary CI or release dry-run job emits a Node 20 deprecation warning.
 - [x] Dependabot proposes weekly `github-actions` updates from the repository root.
 - [x] Existing workflow inputs, permissions, commands, artifacts, and publication behavior remain
       unchanged.
-- [ ] Normal hosted CI and one complete `publish=false` release dry run pass.
+- [x] Normal hosted CI and one complete `publish=false` release dry run pass.
 - [x] Plan status, plan index, and changelog match the implementation.
+
+## Validation Evidence
+
+- Local YAML parsing, Dependabot policy assertions, `actionlint` 1.7.12, full-SHA/comment checks,
+  release-contract validation, release-notes fixtures, formatting, and whitespace checks passed.
+- [PR CI run 33505264353](https://github.com/b1indsight/viberwhisper/actions/runs/33505264353)
+  passed Python, macOS, and Windows jobs.
+- [`publish=false` release run 33505314102](https://github.com/b1indsight/viberwhisper/actions/runs/33505314102)
+  passed metadata and both packaging jobs, skipped publication, and created no Release.
+- All seven jobs across those runs had zero Node 20 deprecation annotations.
