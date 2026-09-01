@@ -50,3 +50,4 @@
 2026-08-31: Enforce Rust formatting and Windows-native Clippy with warnings denied in normal hosted CI
 2026-09-01: Prepend validated signing, packaged-runtime, checksum, and provenance guidance to GitHub-generated Release Notes
 2026-09-01: Require explicit approval through a protected, tag-scoped GitHub Environment before publishing release artifacts
+2026-09-01: Upgrade maintained GitHub Actions to Node 24-compatible full-SHA pins and add weekly workflow dependency proposals

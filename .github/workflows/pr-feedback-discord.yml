@@ -17,7 +17,7 @@ jobs:
       !endsWith(github.actor, '[bot]')
     steps:
       - name: Build and send Discord notification
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_CHANNEL_NAME: ${{ secrets.DISCORD_CHANNEL_NAME }}
