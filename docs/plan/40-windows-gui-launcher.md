@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed.
+**Implemented on 2026-09-02.** Windows packages now carry separate CUI and GUI executable entry
+points, the Start Menu targets the GUI launcher, fatal GUI startup errors use a native dialog, and
+hosted Windows checks validate the PE subsystems plus the complete installer and portable layout.
 
 ## Context
 
@@ -76,15 +78,19 @@ Split the process initialization in `application.rs` into a small shared tracing
 two explicit public entry points:
 
 - `run()` initializes tracing, parses `Cli`, and dispatches all existing console workflows; and
-- `run_desktop()` initializes tracing and enters the configured listener directly.
+- `run_desktop()` installs valid output sinks, initializes tracing, and enters the configured
+  listener directly.
 
 The listener, runtime configuration, local-backend startup, tray, recording, transcription, and
 history code remain shared. The new binary must not duplicate application assembly or synthesize
 CLI arguments to reach the listener.
 
-The desktop process boundary catches a fatal startup error and reports it through a small native
-Windows error-dialog helper before returning a failing exit code. This preserves actionable
-configuration, microphone, and tray initialization failures after stderr is no longer visible.
+Before tracing or shared listener code can write output, the Windows desktop process redirects its
+stdout and stderr handles to `NUL`. This keeps existing diagnostics harmless in the GUI-subsystem
+process without allocating a console or changing CLI output. The desktop process boundary catches
+a fatal startup error and reports it through a small native Windows error-dialog helper before
+returning a failing exit code. This preserves actionable configuration, microphone, and tray
+initialization failures after stderr is no longer visible.
 The helper belongs to the Windows platform module and uses the existing direct Win32 FFI style;
 it does not add a new dependency or introduce a general dialog abstraction.
 
@@ -93,7 +99,8 @@ it does not add a new dependency or introduce a general dialog abstraction.
 Extend `wix/main.wxs` to accept separate CLI and desktop executable paths. Preserve the existing
 `MainExecutable` component GUID and `viberwhisper.exe` key path so the established installer
 component identity does not drift. Add a new component and stable GUID for
-`viberwhisper-app.exe`, and move the advertised Start Menu shortcut to that file.
+`viberwhisper-app.exe`, and move a non-advertised Start Menu shortcut to that file. The direct
+shortcut target keeps installed-package validation and diagnostics deterministic.
 
 Do not modify the frozen `wix/upgrade-fixture.wxs` baseline. The hosted major-upgrade test must
 prove that upgrading the old one-executable fixture installs both current executables, replaces
@@ -213,11 +220,11 @@ the Windows release job names and enables the second target explicitly.
 
 ## Acceptance Criteria
 
-- [ ] MSI Start Menu and portable GUI launches create no console window.
-- [ ] `viberwhisper.exe` retains working CLI output and exit behavior.
-- [ ] Fatal desktop startup failures remain visible through a native Windows error dialog.
-- [ ] The MSI installs, upgrades, and uninstalls both executables, and its shortcut targets the GUI
+- [x] MSI Start Menu and portable GUI launchers use the Windows GUI subsystem.
+- [x] `viberwhisper.exe` retains working CLI output and exit behavior.
+- [x] Fatal desktop startup failures remain visible through a native Windows error dialog.
+- [x] The MSI installs, upgrades, and uninstalls both executables, and its shortcut targets the GUI
       launcher.
-- [ ] Windows CI asserts both PE subsystems rather than inferring behavior from program output.
-- [ ] The portable ZIP and all current documentation describe the two-entry layout consistently.
-- [ ] macOS packaging and ordinary default Cargo commands remain unchanged.
+- [x] Windows CI asserts both PE subsystems rather than inferring behavior from program output.
+- [x] The portable ZIP and all current documentation describe the two-entry layout consistently.
+- [x] macOS packaging and ordinary default Cargo commands remain unchanged.

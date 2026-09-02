@@ -225,16 +225,17 @@ jobs:
         shell: pwsh
         run: wix eula accept wix7
 
-      - name: Build locked static-CRT executable
+      - name: Build locked static-CRT executables
         shell: pwsh
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc --features windows-app
 
-      - name: Smoke-test executable and runtime dependencies
+      - name: Smoke-test executable subsystems and runtime dependencies
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $exe = "target/x86_64-pc-windows-msvc/release/viberwhisper.exe"
-          & $exe --help | Out-Host
+          $cliExe = "target/x86_64-pc-windows-msvc/release/viberwhisper.exe"
+          $appExe = "target/x86_64-pc-windows-msvc/release/viberwhisper-app.exe"
+          & $cliExe --help | Out-Host
           if ($LASTEXITCODE -ne 0) { throw "viberwhisper --help failed" }
 
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -242,10 +243,23 @@ jobs:
           $dumpbin = (& $vswhere -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1)
           if (!$dumpbin) { throw "dumpbin.exe not found" }
 
-          $dependencies = (& $dumpbin /dependents $exe | Out-String)
-          $dependencies | Write-Host
-          if ($dependencies -match '(?im)^\s*(VCRUNTIME|MSVCP)[^\s]*\.dll\s*$') {
-            throw "Release executable still depends on the dynamic MSVC runtime"
+          $cliHeaders = (& $dumpbin /headers $cliExe | Out-String)
+          $appHeaders = (& $dumpbin /headers $appExe | Out-String)
+          $cliHeaders | Write-Host
+          $appHeaders | Write-Host
+          if ($cliHeaders -notmatch '(?im)^\s*3\s+subsystem\s+\(Windows CUI\)\s*$') {
+            throw "viberwhisper.exe is not a Windows CUI executable"
+          }
+          if ($appHeaders -notmatch '(?im)^\s*2\s+subsystem\s+\(Windows GUI\)\s*$') {
+            throw "viberwhisper-app.exe is not a Windows GUI executable"
+          }
+
+          foreach ($candidate in @($cliExe, $appExe)) {
+            $dependencies = (& $dumpbin /dependents $candidate | Out-String)
+            $dependencies | Write-Host
+            if ($dependencies -match '(?im)^\s*(VCRUNTIME|MSVCP)[^\s]*\.dll\s*$') {
+              throw "$candidate still depends on the dynamic MSVC runtime"
+            }
           }
 
       - name: Build and validate MSI
@@ -253,20 +267,22 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force release-assets | Out-Null
-          $exe = (Resolve-Path "target/x86_64-pc-windows-msvc/release/viberwhisper.exe").Path
+          $cliExe = (Resolve-Path "target/x86_64-pc-windows-msvc/release/viberwhisper.exe").Path
+          $appExe = (Resolve-Path "target/x86_64-pc-windows-msvc/release/viberwhisper-app.exe").Path
           $msi = "release-assets/$env:ASSET_PREFIX.msi"
           $releaseVersion = "${{ needs.preflight.outputs.version }}"
           $fixtureMsi = Join-Path $env:RUNNER_TEMP "ViberWhisper-upgrade-fixture.msi"
           $fixtureExe = Join-Path $env:RUNNER_TEMP "viberwhisper-fixture.exe"
           $fixtureMarker = Join-Path $env:RUNNER_TEMP "legacy-fixture.txt"
-          Copy-Item $exe $fixtureExe
+          Copy-Item $cliExe $fixtureExe
           [IO.File]::AppendAllText($fixtureExe, "`nVIBERWHISPER-UPGRADE-FIXTURE`n")
           Set-Content -Path $fixtureMarker -NoNewline -Value "remove this during major upgrade"
 
           wix build wix/main.wxs `
             -arch x64 `
             -d "ProductVersion=$releaseVersion" `
-            -d "ExePath=$exe" `
+            -d "CliExePath=$cliExe" `
+            -d "AppExePath=$appExe" `
             -pdbtype none `
             -o $msi
           if ($LASTEXITCODE -ne 0) { throw "WiX build failed" }
@@ -289,9 +305,11 @@ jobs:
           )
           if ($process.ExitCode -ne 0) { throw "MSI administrative extraction failed: $($process.ExitCode)" }
 
-          $installedExe = @(Get-ChildItem $extract -Recurse -File -Filter viberwhisper.exe)
+          $installedCli = @(Get-ChildItem $extract -Recurse -File -Filter viberwhisper.exe)
+          $installedApp = @(Get-ChildItem $extract -Recurse -File -Filter viberwhisper-app.exe)
           $installedLicense = @(Get-ChildItem $extract -Recurse -File -Filter LICENSE)
-          if ($installedExe.Count -ne 1) { throw "Expected one installed executable, found $($installedExe.Count)" }
+          if ($installedCli.Count -ne 1) { throw "Expected one installed CLI executable, found $($installedCli.Count)" }
+          if ($installedApp.Count -ne 1) { throw "Expected one installed desktop executable, found $($installedApp.Count)" }
           if ($installedLicense.Count -ne 1) { throw "Expected one installed license, found $($installedLicense.Count)" }
           if (Get-ChildItem $extract -Recurse -Directory | Where-Object Name -eq "server") {
             throw "Python server payload must not be included in this release"
@@ -305,10 +323,13 @@ jobs:
           $fixtureVersion = "0.0.0"
           $fixtureMsi = Join-Path $env:RUNNER_TEMP "ViberWhisper-upgrade-fixture.msi"
           $releaseMsi = (Resolve-Path "release-assets/$env:ASSET_PREFIX.msi").Path
-          $releaseExe = (Resolve-Path "target/x86_64-pc-windows-msvc/release/viberwhisper.exe").Path
-          $releaseDigest = (Get-FileHash -Algorithm SHA256 $releaseExe).Hash
+          $releaseCli = (Resolve-Path "target/x86_64-pc-windows-msvc/release/viberwhisper.exe").Path
+          $releaseApp = (Resolve-Path "target/x86_64-pc-windows-msvc/release/viberwhisper-app.exe").Path
+          $releaseCliDigest = (Get-FileHash -Algorithm SHA256 $releaseCli).Hash
+          $releaseAppDigest = (Get-FileHash -Algorithm SHA256 $releaseApp).Hash
           $installDir = Join-Path $env:ProgramFiles "ViberWhisper"
-          $installedExe = Join-Path $installDir "viberwhisper.exe"
+          $installedCli = Join-Path $installDir "viberwhisper.exe"
+          $installedApp = Join-Path $installDir "viberwhisper-app.exe"
           $installedLicense = Join-Path $installDir "LICENSE"
           $legacyMarker = Join-Path $installDir "legacy-fixture.txt"
           $shortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\ViberWhisper.lnk"
@@ -345,11 +366,14 @@ jobs:
             if ($fixtureEntries[0].DisplayVersion -ne $fixtureVersion) {
               throw "Fixture ARP version is $($fixtureEntries[0].DisplayVersion), expected $fixtureVersion"
             }
-            if (!(Test-Path $installedExe) -or !(Test-Path $installedLicense) -or
+            if (!(Test-Path $installedCli) -or !(Test-Path $installedLicense) -or
                 !(Test-Path $legacyMarker) -or !(Test-Path $shortcut)) {
               throw "Fixture install did not create the frozen baseline payload and shortcut"
             }
-            if ((Get-FileHash -Algorithm SHA256 $installedExe).Hash -eq $releaseDigest) {
+            if (Test-Path $installedApp) {
+              throw "Frozen fixture unexpectedly contains the current desktop executable"
+            }
+            if ((Get-FileHash -Algorithm SHA256 $installedCli).Hash -eq $releaseCliDigest) {
               throw "Fixture executable must be distinguishable from the release payload"
             }
 
@@ -359,11 +383,19 @@ jobs:
             if ($releaseEntries[0].DisplayVersion -ne $releaseVersion) {
               throw "Release ARP version is $($releaseEntries[0].DisplayVersion), expected $releaseVersion"
             }
-            if ((Get-FileHash -Algorithm SHA256 $installedExe).Hash -ne $releaseDigest) {
-              throw "Major upgrade did not replace the fixture executable with the release payload"
+            if ((Get-FileHash -Algorithm SHA256 $installedCli).Hash -ne $releaseCliDigest) {
+              throw "Major upgrade did not replace the fixture CLI with the release payload"
+            }
+            if (!(Test-Path $installedApp) -or
+                (Get-FileHash -Algorithm SHA256 $installedApp).Hash -ne $releaseAppDigest) {
+              throw "Major upgrade did not install the desktop executable"
             }
             if (Test-Path $legacyMarker) { throw "Major upgrade left the fixture-only file behind" }
-            & $installedExe --help | Out-Host
+            $shortcutTarget = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
+            if (![string]::Equals($shortcutTarget, $installedApp, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Start Menu shortcut targets $shortcutTarget instead of $installedApp"
+            }
+            & $installedCli --help | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "Installed executable smoke test failed" }
 
             Invoke-Msi -Action x -Package $releaseEntries[0].PSChildName -Log (Join-Path $env:RUNNER_TEMP "release-uninstall.log")
@@ -388,6 +420,7 @@ jobs:
           $portable = "portable/ViberWhisper"
           New-Item -ItemType Directory -Force $portable | Out-Null
           Copy-Item "target/x86_64-pc-windows-msvc/release/viberwhisper.exe" $portable
+          Copy-Item "target/x86_64-pc-windows-msvc/release/viberwhisper-app.exe" $portable
           Copy-Item LICENSE $portable
           Compress-Archive -Path $portable -DestinationPath "release-assets/$env:ASSET_PREFIX.zip"
 
@@ -395,9 +428,10 @@ jobs:
           $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path "release-assets/$env:ASSET_PREFIX.zip"))
           try {
             $names = @($zip.Entries | ForEach-Object FullName)
-            if ($names -notcontains "ViberWhisper/viberwhisper.exe") { throw "Portable executable missing" }
+            if ($names -notcontains "ViberWhisper/viberwhisper.exe") { throw "Portable CLI executable missing" }
+            if ($names -notcontains "ViberWhisper/viberwhisper-app.exe") { throw "Portable desktop executable missing" }
             if ($names -notcontains "ViberWhisper/LICENSE") { throw "Portable license missing" }
-            if ($names.Count -ne 2) { throw "Unexpected portable archive entries: $($names -join ', ')" }
+            if ($names.Count -ne 3) { throw "Unexpected portable archive entries: $($names -join ', ')" }
           } finally {
             $zip.Dispose()
           }

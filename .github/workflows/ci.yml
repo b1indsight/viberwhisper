@@ -119,13 +119,13 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --locked
+        run: cargo build --locked --features windows-app
 
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --features windows-app
 
       - name: Clippy
-        run: cargo clippy --locked -- -D warnings
+        run: cargo clippy --locked --all-targets --features windows-app -- -D warnings
 
       - name: Discord failure alert
         if: failure()

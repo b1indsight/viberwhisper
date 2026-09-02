@@ -33,8 +33,9 @@
 
 - macOS：`ViberWhisper-v<version>-macos-universal.dmg`，同时支持 Apple Silicon 与 Intel；
   `.tar.gz` 是保留应用权限的便携 `.app` 归档。
-- Windows：`ViberWhisper-v<version>-windows-x86_64.msi`；`.zip` 是包含
-  `viberwhisper.exe` 和 `LICENSE` 的便携版本。
+- Windows：`ViberWhisper-v<version>-windows-x86_64.msi`；开始菜单使用不显示命令行窗口的
+  桌面入口。`.zip` 便携版本包含用于双击启动的 `viberwhisper-app.exe`、用于命令行操作的
+  `viberwhisper.exe` 和 `LICENSE`。
 - `SHA256SUMS` 包含四个发行文件的 SHA-256，可用于下载后校验；GitHub Release 同时提供
   artifact provenance。
 
@@ -111,7 +112,8 @@ cargo run -- local start
 
 ### 4. 使用
 
-1. 启动程序，系统托盘/状态栏会出现五柱声波图标，不再显示悬浮窗
+1. 启动程序，系统托盘/状态栏会出现五柱声波图标，不再显示悬浮窗；Windows 安装版从开始
+   菜单启动，便携版双击 `viberwhisper-app.exe`，均不会打开命令行窗口
 2. 将光标定位到任意文本输入框（浏览器、编辑器、聊天框等）
 3. 左键点击状态图标开始录音（五柱声波变红），再次点击停止
 4. 也可以**按住 F8**开始录音，松开后自动转录并输入文字（Hold 模式）

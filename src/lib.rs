@@ -12,4 +12,4 @@ mod session;
 mod text;
 mod transcriber;
 
-pub use application::run;
+pub use application::{run, run_desktop};

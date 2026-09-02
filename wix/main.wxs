@@ -20,6 +20,7 @@
 
     <Feature Id="Main" Title="ViberWhisper" Level="1">
       <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="DesktopExecutable" />
       <ComponentRef Id="LicenseFile" />
     </Feature>
   </Package>
@@ -30,7 +31,11 @@
     </StandardDirectory>
 
     <Component Id="MainExecutable" Directory="INSTALLFOLDER" Guid="AA05F0E0-9660-4AEB-8B09-42CF6356D601">
-      <File Id="ViberWhisperExe" Source="$(var.ExePath)" KeyPath="yes">
+      <File Id="ViberWhisperExe" Source="$(var.CliExePath)" KeyPath="yes" />
+    </Component>
+
+    <Component Id="DesktopExecutable" Directory="INSTALLFOLDER" Guid="FF395E81-F43D-435C-8447-45BE975A1682">
+      <File Id="ViberWhisperAppExe" Source="$(var.AppExePath)" KeyPath="yes">
         <Shortcut
           Id="StartMenuShortcut"
           Directory="ProgramMenuFolder"
@@ -38,7 +43,7 @@
           Description="Voice-to-text input tool"
           WorkingDirectory="INSTALLFOLDER"
           Icon="ViberWhisper.ico"
-          Advertise="yes" />
+          Advertise="no" />
       </File>
     </Component>
 

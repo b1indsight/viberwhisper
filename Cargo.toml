@@ -6,12 +6,20 @@ authors = ["b1indsight"]
 description = "Local-first voice-to-text input for macOS and Windows"
 license = "MIT"
 repository = "https://github.com/b1indsight/viberwhisper"
+default-run = "viberwhisper"
 
 [features]
 integration = []
+windows-app = []
+
+[[bin]]
+name = "viberwhisper-app"
+path = "src/bin/viberwhisper-app.rs"
+required-features = ["windows-app"]
+test = false
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy", "integration"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy", "integration", "windows-app"))'] }
 
 [dependencies]
 rdev = "0.5"

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::{fs::OpenOptions, io, os::windows::io::AsRawHandle};
 
 use rdev::Key;
 
@@ -16,6 +17,44 @@ pub(crate) struct WindowsHotkeys;
 pub(crate) struct WindowsTray;
 
 struct WindowsTyper;
+
+pub(super) fn prepare_desktop_output() -> io::Result<()> {
+    redirect_standard_handle(ffi::STD_OUTPUT_HANDLE)?;
+    redirect_standard_handle(ffi::STD_ERROR_HANDLE)
+}
+
+fn redirect_standard_handle(identifier: u32) -> io::Result<()> {
+    let sink = OpenOptions::new().write(true).open("NUL")?;
+    // SAFETY: `sink` owns a valid Windows handle. SetStdHandle stores the handle value for later
+    // process-wide use, so the file is deliberately kept alive for the rest of the process.
+    if unsafe { ffi::SetStdHandle(identifier, sink.as_raw_handle()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    std::mem::forget(sink);
+    Ok(())
+}
+
+pub(super) fn show_startup_error(error: &dyn std::error::Error) {
+    let title = nul_terminated_utf16("ViberWhisper startup failed");
+    let message = nul_terminated_utf16(&format!("ViberWhisper could not start:\n\n{error}"));
+    // SAFETY: Both buffers are live, NUL-terminated UTF-16 for the duration of the call, and a
+    // null owner is valid for a process-level startup error dialog.
+    unsafe {
+        ffi::MessageBoxW(
+            std::ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            ffi::MB_OK | ffi::MB_ICONERROR | ffi::MB_SETFOREGROUND,
+        );
+    }
+}
+
+fn nul_terminated_utf16(text: &str) -> Vec<u16> {
+    text.encode_utf16()
+        .map(|unit| if unit == 0 { 0xfffd } else { unit })
+        .chain(std::iter::once(0))
+        .collect()
+}
 
 impl PlatformBackend for WindowsBackend {
     type Hotkeys = WindowsHotkeys;
@@ -133,11 +172,17 @@ impl TextTyper for WindowsTyper {
 
 #[allow(clippy::upper_case_acronyms)]
 mod ffi {
+    use std::ffi::c_void;
     use std::mem::ManuallyDrop;
 
     pub const INPUT_KEYBOARD: u32 = 1;
     pub const KEYEVENTF_UNICODE: u32 = 0x0004;
     pub const KEYEVENTF_KEYUP: u32 = 0x0002;
+    pub const MB_OK: u32 = 0x0000;
+    pub const MB_ICONERROR: u32 = 0x0010;
+    pub const MB_SETFOREGROUND: u32 = 0x0001_0000;
+    pub const STD_OUTPUT_HANDLE: u32 = -11_i32 as u32;
+    pub const STD_ERROR_HANDLE: u32 = -12_i32 as u32;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -167,6 +212,17 @@ mod ffi {
         pub fn SendInput(nInputs: u32, pInputs: *mut INPUT, cbSize: i32) -> u32;
         #[cfg(not(test))]
         pub fn GetDoubleClickTime() -> u32;
+        pub fn MessageBoxW(
+            hWnd: *mut c_void,
+            lpText: *const u16,
+            lpCaption: *const u16,
+            uType: u32,
+        ) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn SetStdHandle(nStdHandle: u32, hHandle: *mut c_void) -> i32;
     }
 
     pub fn make_key_input(scan_code: u16, key_up: bool) -> INPUT {
