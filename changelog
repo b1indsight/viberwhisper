@@ -51,3 +51,4 @@
 2026-09-01: Prepend validated signing, packaged-runtime, checksum, and provenance guidance to GitHub-generated Release Notes
 2026-09-01: Require explicit approval through a protected, tag-scoped GitHub Environment before publishing release artifacts
 2026-09-01: Upgrade maintained GitHub Actions to Node 24-compatible full-SHA pins and add weekly workflow dependency proposals
+2026-09-02: Add a console-free Windows desktop launcher while preserving the existing CLI executable, with native startup errors and verified MSI/portable entry points

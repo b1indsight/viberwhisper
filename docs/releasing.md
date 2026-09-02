@@ -15,7 +15,9 @@ Each release contains:
 - `SHA256SUMS`
 
 The macOS artifacts contain one universal `.app`; the Windows artifacts contain the x86_64 Rust
-executable and license. Python/Gemma files under `server/` are deliberately excluded, so packaged
+CLI executable, the console-free desktop launcher, and license. The MSI Start Menu shortcut and
+portable double-click flow use `viberwhisper-app.exe`; terminal commands continue to use
+`viberwhisper.exe`. Python/Gemma files under `server/` are deliberately excluded, so packaged
 artifacts support the API inference profile only. Run Local mode from a source checkout until a
 future release explicitly adds a packaged Python runtime.
 
@@ -67,9 +69,10 @@ with `publish=false` for the full two-platform validation:
 
 - macOS: locked arm64/x86_64 builds, universal app assembly, metadata and deployment-target checks,
   ad-hoc signature verification, DMG mount inspection, and portable archive inspection;
-- Windows: locked static-CRT build, CLI smoke test, dependency inspection, modern WiX build, MSI
-  validation/administrative extraction, real fixture install-to-upgrade-to-uninstall lifecycle,
-  shortcut/ARP checks, and portable ZIP inspection.
+- Windows: locked static-CRT build, CLI smoke test, CUI/GUI subsystem and dependency inspection,
+  modern WiX build, MSI validation/administrative extraction, real fixture
+  install-to-upgrade-to-uninstall lifecycle, shortcut-target/ARP checks, and portable ZIP
+  inspection.
 
 Dry runs upload seven-day workflow artifacts but cannot publish because the `publish` job is
 disabled unless the explicit boolean input is true and the selected ref is the exact version tag.
@@ -179,10 +182,12 @@ Before announcing the release, perform manual smoke checks:
 
 - mount the DMG, copy the app to `/Applications`, launch it, and verify the tray icon plus
   microphone/accessibility prompts;
-- install the MSI on a clean Windows x86_64 machine, launch from the Start Menu, then uninstall;
+- install the MSI on a clean Windows x86_64 machine, launch from the Start Menu, verify the tray
+  appears without a console window or flash, then uninstall;
 - when an older test build exists, verify the new MSI upgrades it and leaves no installer-owned
   files after uninstall;
-- confirm the portable archives start from an extracted directory;
+- confirm the portable archives start from an extracted directory, including a console-free
+  `viberwhisper-app.exe` launch and normal `viberwhisper.exe --help` output on Windows;
 - confirm release notes begin with the tracked distribution header and retain the generated change
   list.
 

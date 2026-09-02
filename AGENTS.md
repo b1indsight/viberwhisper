@@ -84,7 +84,9 @@ recovery commands are maintained in [`docs/releasing.md`](docs/releasing.md). Do
 ```
 src/
   main.rs                    — Thin process entry point delegating to viberwhisper::run
-  lib.rs                     — Crate module root and public application entry export
+  bin/
+    viberwhisper-app.rs      — Feature-gated Windows GUI-subsystem desktop entry point
+  lib.rs                     — Crate module root and public CLI/desktop application entry exports
   application.rs             — Logging, CLI dispatch, config/local/convert workflows
   application/
     listener.rs              — Platform-action loop, session effects, transcription delivery

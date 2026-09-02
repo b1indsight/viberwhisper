@@ -29,6 +29,24 @@ pub(crate) fn config_dir() -> Option<PathBuf> {
     SelectedBackend::config_dir()
 }
 
+/// Gives the desktop process valid output handles without requiring a visible console.
+pub(crate) fn prepare_desktop_output() -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    return windows::prepare_desktop_output();
+
+    #[cfg(not(target_os = "windows"))]
+    Ok(())
+}
+
+/// Reports a fatal error at the desktop process boundary where stderr may not be visible.
+pub(crate) fn report_desktop_startup_error(error: &dyn std::error::Error) {
+    #[cfg(target_os = "windows")]
+    windows::show_startup_error(error);
+
+    #[cfg(not(target_os = "windows"))]
+    eprintln!("ViberWhisper failed to start: {error}");
+}
+
 /// Resolves persisted hotkey names with the policy selected for this build target.
 pub(crate) fn validate_hotkeys(
     section: &InputSection,

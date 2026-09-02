@@ -128,6 +128,15 @@ Exit is represented as `ShutdownRequested`. It cancels recorder/orchestrator wor
 
 ## Main Integration Notes
 
+`src/main.rs` remains the console process entry and delegates to `application::run`, which parses
+CLI commands and preserves stdout, stderr, waiting, and exit behavior. Windows release packages
+also build the feature-gated `src/bin/viberwhisper-app.rs` as a GUI-subsystem executable. That
+entry delegates to `application::run_desktop`, bypasses CLI parsing, and enters the same configured
+listener directly. Before tracing starts, the Windows GUI entry redirects stdout and stderr to
+`NUL`, providing valid handles without allocating a console. Fatal desktop startup errors cross
+the Windows platform boundary into a native error dialog because ordinary diagnostics are not
+visible. macOS packaging continues to expose only the established `.app` entry.
+
 `application` loads one `ConfigDocument`, asks `runtime_config` for a typed workflow configuration,
 and passes each narrow value to its consumer. Listener mode then creates one main-thread winit
 `EventLoop<AppEvent>` in `ControlFlow::Wait` mode. Opaque platform input, audio-readiness, and
@@ -149,8 +158,8 @@ loading at that boundary without being repaired. Exit does not wait for persiste
 already in progress.
 
 API and Local backends reuse the same recording/orchestration pipeline; no endpoint rewriting or
-persisted-document mutation occurs in the application layer. `main.rs` only delegates process
-startup to the library entry point.
+persisted-document mutation occurs in the application layer. Both process entry files only
+delegate startup to explicit library entry points.
 
 Prompt-lab evaluation is a CLI-only workflow: it does not construct winit, a post-processor,
 history, or native typing. It resolves the configured backend, replaces only the consumed

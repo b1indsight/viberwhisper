@@ -391,8 +391,8 @@ mod tests {
 
             assert_eq!((width, height), (32, 32));
             assert_eq!(rgba.len(), (width * height * 4) as usize);
-            assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] == 0));
-            assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] == 255));
+            assert!(rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] == 0));
+            assert!(rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] == 255));
         }
     }
 

@@ -2,6 +2,7 @@ mod listener;
 mod prompt_lab;
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::Parser;
 use tracing::warn;
@@ -34,13 +35,7 @@ impl Drop for LocalServiceGuard {
 
 /// Initializes process-wide services, parses the CLI, and runs the selected workflow.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("viberwhisper=info")),
-        )
-        .with_target(false)
-        .init();
+    init_tracing();
 
     let cli = Cli::parse();
 
@@ -63,6 +58,34 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Starts the desktop listener directly and presents fatal startup errors without a console.
+pub fn run_desktop() -> ExitCode {
+    if let Err(error) = crate::platform::prepare_desktop_output() {
+        crate::platform::report_desktop_startup_error(&error);
+        return ExitCode::FAILURE;
+    }
+
+    init_tracing();
+
+    match listener::run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            crate::platform::report_desktop_startup_error(error.as_ref());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("viberwhisper=info")),
+        )
+        .with_target(false)
+        .init();
 }
 
 fn handle_local(action: LocalCommand) -> Result<(), Box<dyn std::error::Error>> {
