@@ -5,7 +5,7 @@
     Manufacturer="b1indsight"
     Version="$(var.ProductVersion)"
     UpgradeCode="F7DC481B-9922-476B-960F-B813EEC6B4E9"
-    Scope="perMachine"
+    Scope="perUserOrMachine"
     InstallerVersion="500"
     Compressed="yes">
     <SummaryInformation Description="Local-first voice-to-text input for macOS and Windows" />
@@ -43,7 +43,7 @@
           Description="Voice-to-text input tool"
           WorkingDirectory="INSTALLFOLDER"
           Icon="ViberWhisper.ico"
-          Advertise="no" />
+          Advertise="yes" />
       </File>
     </Component>
 

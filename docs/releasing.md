@@ -17,9 +17,13 @@ Each release contains:
 The macOS artifacts contain one universal `.app`; the Windows artifacts contain the x86_64 Rust
 CLI executable, the console-free desktop launcher, and license. The MSI Start Menu shortcut and
 portable double-click flow use `viberwhisper-app.exe`; terminal commands continue to use
-`viberwhisper.exe`. Python/Gemma files under `server/` are deliberately excluded, so packaged
-artifacts support the API inference profile only. Run Local mode from a source checkout until a
-future release explicitly adds a packaged Python runtime.
+`viberwhisper.exe`. A normal MSI invocation installs for the current user without administrator
+credentials; an explicit per-machine invocation remains available for same-context upgrades of
+older machine-wide installations. WiX dual-purpose packages can still publish the Installed Apps
+entry under HKLM for a per-user installation; the MSI context, payload, and shortcut remain scoped
+to the installing user. Python/Gemma files under `server/` are deliberately excluded,
+so packaged artifacts support the API inference profile only. Run Local mode from a source
+checkout until a future release explicitly adds a packaged Python runtime.
 
 The `.app` receives an ad-hoc signature, but releases are not yet Developer ID signed/notarized or
 Authenticode signed. Document and test the expected Gatekeeper and SmartScreen prompts; never
@@ -71,8 +75,8 @@ with `publish=false` for the full two-platform validation:
   ad-hoc signature verification, DMG mount inspection, and portable archive inspection;
 - Windows: locked static-CRT build, CLI smoke test, CUI/GUI subsystem and dependency inspection,
   modern WiX build, MSI validation/administrative extraction, real fixture
-  install-to-upgrade-to-uninstall lifecycle, shortcut-target/ARP checks, and portable ZIP
-  inspection.
+  per-machine upgrade lifecycle, default per-user install/uninstall lifecycle,
+  shortcut-target, installer-context, and machine ARP checks, and portable ZIP inspection.
 
 Dry runs upload seven-day workflow artifacts but cannot publish because the `publish` job is
 disabled unless the explicit boolean input is true and the selected ref is the exact version tag.
@@ -182,10 +186,12 @@ Before announcing the release, perform manual smoke checks:
 
 - mount the DMG, copy the app to `/Applications`, launch it, and verify the tray icon plus
   microphone/accessibility prompts;
-- install the MSI on a clean Windows x86_64 machine, launch from the Start Menu, verify the tray
-  appears without a console window or flash, then uninstall;
-- when an older test build exists, verify the new MSI upgrades it and leaves no installer-owned
-  files after uninstall;
+- install and uninstall the MSI as a standard user on a clean Windows x86_64 machine, confirm
+  neither action requests administrator credentials, launch from the Start Menu, and verify the
+  tray appears without a console window or flash;
+- when an older per-machine test build exists, explicitly upgrade in the per-machine context and
+  verify no installer-owned files remain after uninstall; switching that installation to the new
+  per-user default requires uninstalling it first;
 - confirm the portable archives start from an extracted directory, including a console-free
   `viberwhisper-app.exe` launch and normal `viberwhisper.exe --help` output on Windows;
 - confirm release notes begin with the tracked distribution header and retain the generated change
