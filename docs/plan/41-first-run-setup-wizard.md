@@ -2,8 +2,8 @@
 
 ## Status
 
-Draft for issue #48. This document is the only change in the planning phase; implementation starts
-after explicit approval on the draft PR.
+Approved and implemented on draft PR #117. Automated validation is recorded in the PR; packaged
+macOS and Windows dialog smoke tests remain manual release checks.
 
 ## Context
 
@@ -76,17 +76,25 @@ The wizard advances through these steps:
 3. **Post-processing** — enable or disable cleanup. When enabled, collect the chat-completions URL,
    model, and optional password-field API key. Disabling cleanup keeps its saved provider values so
    re-enabling it later does not discard settings.
-4. **Hotkeys** — choose Hold F8, Toggle F9, or Both. A single-mode choice clears the other binding;
-   Both preserves the current dual-mode default. Run the existing platform hotkey validation before
-   advancing.
+4. **Hotkeys** — show both current bindings first (Hold F8 and Toggle F9 for a new configuration) and
+   default to keeping them. When the user chooses to edit, capture the next physical key press for
+   Hold and then for Toggle, show both candidate bindings together, and apply them only after final
+   confirmation. Run the existing platform hotkey validation before confirmation, including
+   duplicate and unsupported-key checks. An existing disabled mode remains supported when the user
+   keeps the current configuration; the simplified sequential editor itself collects two keys.
 5. **Microphone** — enumerate input devices, present System Default plus numbered device names, and
    store either `None` or the selected name. If device enumeration fails, show the error and allow
    retry or System Default.
-6. **Verification** — show a start prompt, record while a second modal dialog is open, and stop when
-   the user confirms. Transcribe every returned chunk with the candidate STT configuration, merge
-   the raw text with the canonical text merger, and, when cleanup is enabled, also run the candidate
-   post-processor. Show the raw and final text and offer Retry, Save, or Back to settings. A failed
-   recording/request can be retried or explicitly saved without verification.
+6. **Verification** — show the candidate Hold and Toggle bindings before entering verification, then
+   explain in that confirmation that choosing Yes closes the window, waits for a candidate hotkey,
+   asks the user to say “测试”, and shows a result after the matching stop action. Use the bindings'
+   normal runtime semantics instead of dialog clicks: Hold press/release starts/stops, and successive
+   Toggle presses start/stop. Run the stoppable global hook in a short-lived helper process, drain
+   complete audio chunks while waiting for the stop hotkey, and transcribe every returned chunk with
+   the candidate STT configuration. Merge raw text with the canonical text merger and, when cleanup
+   is enabled, also run the candidate post-processor. Show the raw and final text and offer Retry,
+   Save, or Back to settings. A failed recording/request can be retried or explicitly saved without
+   verification.
 7. **Save** — resolve the candidate one final time and atomically write `config.json`. Report the
    canonical path, then start the normal listener for implicit startup or exit successfully for the
    explicit `setup` command.
@@ -101,12 +109,13 @@ included in error text, logged, or exposed through `Debug`.
 
 ## Configuration and ownership changes
 
-### Startup probe
+### Startup load
 
-Extend `ConfigStore` with a non-mutating startup probe that distinguishes Missing, Loaded, and
-Invalid rather than changing `load()` semantics used by existing commands. The application layer
-combines that state with `runtime_config::resolve_listener`; `core::config` remains responsible only
-for persistence and schema parsing.
+Make `ConfigStore::load` return `Result<Option<ConfigDocument>, ConfigError>` as the single read and
+parse path. `None` identifies a missing file, `Some` carries a loaded document, and invalid files
+remain errors. Ordinary callers explicitly select defaults while the application setup layer
+combines absence or errors with `runtime_config::resolve_listener`; `core::config` remains
+responsible only for persistence and schema parsing.
 
 The setup coordinator lives in `src/application/setup.rs`. It owns navigation and maps UI answers
 into a candidate `ConfigDocument`, but delegates field mutation and secret handling to narrow
@@ -125,7 +134,9 @@ document. Existing `config get/list` output continues to report only secret sour
 Add optional `audio.input_device` to the strict schema, field catalog, example configuration, and
 `AudioConfig`. `None` means the operating-system default. A configured name is matched exactly
 against `cpal` input devices whenever recording starts; absence returns a specific operational
-error instead of silently recording from another microphone.
+error instead of silently recording from another microphone. A failure to read one device's display
+name is logged and skipped without hiding other readable devices; failure to enumerate the device
+collection remains an operational error.
 
 cpal exposes a display name rather than a cross-reboot stable device identifier. If the host
 reports duplicate names, the first exact match is used and the wizard warns about the ambiguity.
@@ -141,7 +152,7 @@ and later record from another policy path.
 run / run_desktop / setup command
               |
               v
-       startup configuration probe
+        startup configuration load
           | ready          | missing / invalid
           v                v
   resolve + listener   SetupCoordinator
@@ -157,9 +168,9 @@ run / run_desktop / setup command
 
 `SetupVerifier` is a boundary owned by the setup application module. Production verification uses
 `AudioRecorder`, `ApiTranscriber`, the optional `PostProcessor`, and the shared text merger. Tests
-use deterministic fakes. Verification stays synchronous because the modal wizard has no event loop
-to keep responsive; cpal's audio callback continues to collect samples while the stop dialog is
-open.
+use deterministic fakes. A short-lived helper owns the otherwise process-lifetime global keyboard
+hook and reports one Start/Stop pair to the synchronous verifier. While it waits, the verifier polls
+and drains each complete recorder chunk before stopping on the second hotkey event.
 
 ## File impact
 
@@ -167,13 +178,15 @@ open.
 | --- | --- |
 | `Cargo.toml`, `Cargo.lock` | Add the cross-platform modal-dialog dependency. |
 | `src/core/cli.rs` | Add the explicit `setup` command. |
-| `src/core/config/store.rs` | Add the non-mutating Missing/Loaded/Invalid startup probe. |
+| `src/core/config/store.rs` | Return optional documents from the single non-mutating load and parse path. |
 | `src/core/config/document.rs`, `fields.rs` | Persist optional input-device name and expose narrow setup-only secret mutation without making CLI secret fields writable. |
 | `src/audio.rs`, `src/audio/recorder.rs` | Enumerate/resolve named input devices and make both normal and test recording honor `AudioConfig`. |
 | `src/runtime_config.rs` | Carry selected-device configuration through listener resolution; retain current provider and secret precedence. |
 | `src/application.rs` | Route implicit listener startup and the explicit command through setup bootstrap. |
 | `src/application/setup.rs` | Own wizard state, dialog abstraction, candidate editing, verification, and save/skip/cancel outcomes. |
+| `src/application/setup/hotkey.rs` | Own short-lived capture/verification helper IPC and the one-session hotkey state. |
 | `src/application/listener.rs` | Accept the already-resolved configuration returned by bootstrap without changing listener behavior. |
+| `src/input/hotkey.rs`, `src/platform.rs` | Reuse canonical event mapping and target-specific key normalization in the verification helper. |
 | `config.example.json`, `README.md` | Document first-run behavior, rerunning setup, device-name semantics, plaintext disk secrets, and skip behavior. |
 | `docs/architecture/core.md`, `docs/architecture/audio.md` | Record bootstrap/config ownership and named-device resolution. |
 | `changelog` | Add the user-visible setup wizard entry. |
@@ -184,15 +197,17 @@ expected because the selected dialog library supplies the platform adapters.
 
 ## Test-first implementation order
 
-1. Add failing `ConfigStore` probe tests for missing, valid, and invalid documents; implement the
-   probe without changing `load()`.
+1. Add failing `ConfigStore::load` tests for missing, valid, and invalid documents; make ordinary
+   callers explicitly select defaults and setup distinguish a missing file.
 2. Add schema/catalog round-trip tests for `audio.input_device` and tests proving setup can replace
    disk secrets while public field mutation still rejects them.
 3. Add fake-device tests for System Default, exact-name selection, missing names, duplicate names,
-   and enumeration errors; update `AudioRecorder` to use the shared resolver.
+   individual unreadable names, and enumeration errors; update `AudioRecorder` to use the shared
+   resolver.
 4. Add table-driven setup-coordinator tests for first run, prefilled repair, environment-secret
-   precedence, each hotkey choice, Back/Cancel, Skip, verification retry, explicit save without
-   verification, and final save. Implement the UI-independent coordinator.
+   precedence, sequential hotkey capture and final confirmation, Back/Cancel, Skip, verification
+   retry, explicit save without verification, and final save. Implement the UI-independent
+   coordinator.
 5. Add verifier tests around recorder outcomes, multi-chunk merge, STT failures, optional cleanup,
    and redacted errors using fake recorder/transcriber/post-processor boundaries.
 6. Add the native dialog adapter and wire both listener entry points plus `viberwhisper setup` to
@@ -220,14 +235,17 @@ Manual macOS and Windows checks:
 2. Repeat through the packaged/no-console entry point and confirm every dialog appears in front.
 3. Enable cleanup and verify both raw STT and cleaned output are shown.
 4. Supply each API key through the environment and confirm setup neither displays nor persists it.
-5. Choose Hold-only, Toggle-only, and Both, then exercise the resulting hotkeys.
-6. Disconnect a named microphone and confirm recording reports the selected-device error rather
+5. Keep the displayed default hotkeys, then capture custom Hold and Toggle keys sequentially. Reject
+   the final summary once and confirm the second pair, ensuring only the confirmed pair is saved.
+6. Verify that both Hold press/release and two Toggle presses control test recording without a stop
+   dialog, including a test longer than one chunk boundary.
+7. Disconnect a named microphone and confirm recording reports the selected-device error rather
    than falling back silently.
-7. Exercise Skip, Cancel, Back, failed STT retry, and explicit save-without-verification paths and
+8. Exercise Skip, Cancel, Back, failed STT retry, and explicit save-without-verification paths and
    confirm unexpected paths do not modify `config.json`.
-8. Start from malformed and runtime-invalid documents, confirm recovery is offered, and confirm the
+9. Start from malformed and runtime-invalid documents, confirm recovery is offered, and confirm the
    old file is unchanged until a replacement is explicitly saved.
-9. Run `viberwhisper setup` over a valid configuration and confirm existing optional values and disk
+10. Run `viberwhisper setup` over a valid configuration and confirm existing optional values and disk
    secrets are retained when their inputs are left blank.
 
 ## Risks and controls
@@ -258,4 +276,3 @@ Manual macOS and Windows checks:
 - [ ] Normal recording honors the persisted device name and reports a missing selected device.
 - [ ] `viberwhisper setup` can rerun the flow for a valid configuration.
 - [ ] Automated checks pass on macOS and Windows, and the packaged no-console smoke test passes.
-

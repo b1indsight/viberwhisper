@@ -29,6 +29,16 @@ impl Default for ConfigDocument {
     }
 }
 
+impl ConfigDocument {
+    pub(crate) fn set_transcription_api_key(&mut self, value: Option<String>) {
+        self.inference.api.transcription.api_key = value;
+    }
+
+    pub(crate) fn set_post_process_api_key(&mut self, value: Option<String>) {
+        self.inference.api.post_process.api_key = value;
+    }
+}
+
 fn deserialize_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -76,13 +86,18 @@ impl Default for InputSection {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AudioSection {
+    #[serde(default)]
+    pub(crate) input_device: Option<String>,
     #[serde(deserialize_with = "deserialize_finite_f32")]
     pub(crate) mic_gain: f32,
 }
 
 impl Default for AudioSection {
     fn default() -> Self {
-        Self { mic_gain: 1.0 }
+        Self {
+            input_device: None,
+            mic_gain: 1.0,
+        }
     }
 }
 

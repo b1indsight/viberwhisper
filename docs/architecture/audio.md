@@ -56,6 +56,14 @@ the capacity calculation independently testable; production callers pass the mod
 
 ## Live Recorder
 
+`AudioConfig` carries an optional input-device display name. `None` resolves through cpal's system
+default input device. A configured value enumerates input devices and selects the first exact name
+match each time recording starts. Devices whose individual display names cannot be read are logged
+and skipped; a missing configured name is still an operational error rather than a silent fallback.
+The setup wizard uses the recorder module's device enumeration and the same resolver for its
+verification recording. Its hotkey-controlled verification loop drains ready chunks while the
+session remains active, matching the normal listener's bounded PCM-buffer behavior.
+
 The cpal callback downmixes input to mono `i16`, applies microphone gain, appends PCM to the shared
 buffer, and updates the number of complete chunks. Crossing a new complete-chunk boundary also
 sends one readiness callback containing the active `SessionId`. The existing ready-chunk count

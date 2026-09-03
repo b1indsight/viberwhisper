@@ -45,6 +45,7 @@ define_config_fields! {
     SchemaVersion => { name: "schema_version", writable: false },
     InputHoldHotkey => { name: "input.hold_hotkey", writable: true },
     InputToggleHotkey => { name: "input.toggle_hotkey", writable: true },
+    AudioInputDevice => { name: "audio.input_device", writable: true },
     AudioMicGain => { name: "audio.mic_gain", writable: true },
     TranscriptionLanguage => { name: "transcription.language", writable: true },
     TranscriptionPrompt => { name: "transcription.prompt", writable: true },
@@ -150,6 +151,7 @@ impl ConfigDocument {
             ConfigKey::SchemaVersion => FieldValue::Value(self.schema_version.to_string()),
             ConfigKey::InputHoldHotkey => FieldValue::Value(self.input.hold_hotkey.clone()),
             ConfigKey::InputToggleHotkey => FieldValue::Value(self.input.toggle_hotkey.clone()),
+            ConfigKey::AudioInputDevice => optional_field(&self.audio.input_device),
             ConfigKey::AudioMicGain => FieldValue::Value(self.audio.mic_gain.to_string()),
             ConfigKey::TranscriptionLanguage => optional_field(&self.transcription.language),
             ConfigKey::TranscriptionPrompt => optional_field(&self.transcription.prompt),
@@ -206,6 +208,7 @@ impl ConfigDocument {
         match key {
             ConfigKey::InputHoldHotkey => self.input.hold_hotkey = value.to_string(),
             ConfigKey::InputToggleHotkey => self.input.toggle_hotkey = value.to_string(),
+            ConfigKey::AudioInputDevice => self.audio.input_device = parse_optional(value),
             ConfigKey::AudioMicGain => {
                 self.audio.mic_gain = parse_f32(value).map_err(invalid)?;
             }

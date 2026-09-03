@@ -26,11 +26,12 @@ impl ConfigStore {
         &self.path
     }
 
-    pub fn load(&self) -> Result<ConfigDocument, ConfigError> {
+    /// Loads the persisted document, returning `None` when the file does not exist.
+    pub fn load(&self) -> Result<Option<ConfigDocument>, ConfigError> {
         let contents = match fs::read_to_string(&self.path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(ConfigDocument::default());
+                return Ok(None);
             }
             Err(source) => {
                 return Err(ConfigError::Io {
@@ -40,10 +41,12 @@ impl ConfigStore {
             }
         };
 
-        serde_json::from_str(&contents).map_err(|source| ConfigError::InvalidDocument {
-            path: self.path.clone(),
-            source,
-        })
+        serde_json::from_str(&contents)
+            .map(Some)
+            .map_err(|source| ConfigError::InvalidDocument {
+                path: self.path.clone(),
+                source,
+            })
     }
 
     pub fn save(&self, document: &ConfigDocument) -> Result<(), ConfigError> {

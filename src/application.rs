@@ -1,5 +1,6 @@
 mod listener;
 mod prompt_lab;
+mod setup;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -35,13 +36,19 @@ impl Drop for LocalServiceGuard {
 
 /// Initializes process-wide services, parses the CLI, and runs the selected workflow.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    if setup::run_hotkey_capture_helper_if_requested()? {
+        return Ok(());
+    }
     init_tracing();
 
     let cli = Cli::parse();
 
     match cli.command {
         None => {
-            listener::run()?;
+            run_listener_with_setup()?;
+        }
+        Some(Commands::Setup) => {
+            setup::run_explicit()?;
         }
         Some(Commands::Config { action }) => {
             handle_config(action)?;
@@ -62,6 +69,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Starts the desktop listener directly and presents fatal startup errors without a console.
 pub fn run_desktop() -> ExitCode {
+    match setup::run_hotkey_capture_helper_if_requested() {
+        Ok(true) => return ExitCode::SUCCESS,
+        Ok(false) => {}
+        Err(_) => return ExitCode::FAILURE,
+    }
     if let Err(error) = crate::platform::prepare_desktop_output() {
         crate::platform::report_desktop_startup_error(&error);
         return ExitCode::FAILURE;
@@ -69,13 +81,20 @@ pub fn run_desktop() -> ExitCode {
 
     init_tracing();
 
-    match listener::run() {
+    match run_listener_with_setup() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             crate::platform::report_desktop_startup_error(error.as_ref());
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_listener_with_setup() -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(config) = setup::listener_config()? {
+        listener::run_with_config(config)?;
+    }
+    Ok(())
 }
 
 fn init_tracing() {
@@ -207,7 +226,7 @@ fn print_python_runtime(runtime: &PythonRuntime) {
 
 fn load_config() -> Result<(ConfigStore, ConfigDocument), Box<dyn std::error::Error>> {
     let store = ConfigStore::discover()?;
-    let document = store.load()?;
+    let document = store.load()?.unwrap_or_default();
     Ok((store, document))
 }
 
@@ -250,7 +269,7 @@ fn handle_config(action: ConfigAction) -> Result<(), Box<dyn std::error::Error>>
         return Ok(());
     }
 
-    let mut document = store.load()?;
+    let mut document = store.load()?.unwrap_or_default();
     let secrets = EnvironmentSecretSource;
     let (config_dir, home_dir) = config_context(&store)?;
     match action {

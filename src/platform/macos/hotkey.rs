@@ -35,7 +35,7 @@ fn normalize_modifier_event(
     }
 }
 
-pub(super) fn normalize_event(event_type: EventType) -> EventType {
+pub(crate) fn normalize_event(event_type: EventType) -> EventType {
     normalize_modifier_event(event_type, |keycode| {
         CGEventSource::key_state(CGEventSourceStateID::HIDSystemState, keycode)
     })

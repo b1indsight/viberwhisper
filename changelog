@@ -53,3 +53,4 @@
 2026-09-01: Upgrade maintained GitHub Actions to Node 24-compatible full-SHA pins and add weekly workflow dependency proposals
 2026-09-02: Add a console-free Windows desktop launcher while preserving the existing CLI executable, with native startup errors and verified MSI/portable entry points
 2026-09-02: Default Windows MSI installation to the current user without administrator privileges while preserving explicit per-machine upgrades
+2026-09-03: Add a cross-platform first-run setup wizard with STT/LLM credentials, sequential single-key hotkey capture, resilient microphone-name selection, hotkey-controlled live transcription verification, and an explicit setup command

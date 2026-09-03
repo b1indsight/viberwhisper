@@ -63,10 +63,20 @@ viberwhisper config path
 - macOS：`~/Library/Application Support/com.b1indsight.viberwhisper/config.json`
 - Windows：`%APPDATA%\ViberWhisper\config.json`
 
-配置文件不存在时使用内置默认值。可将 [`config.example.json`](config.example.json) 复制到上述路径，或使用
-`config set` 创建完整配置。已有文件必须包含 `schema_version: 2` 和当前完整结构；缺字段、未知字段、损坏
-JSON 或其他 schema 版本都会明确报错，不会静默回退默认值。已退役的 `chunking`、`session` 和
-`inference.api.provider` 均视为未知字段。
+正常监听启动时，如果配置文件不存在、无法读取或不能通过运行时校验，程序会显示跨平台的首次配置向导。
+向导依次收集 STT、可选 LLM、热键和麦克风设置，并可录制一段真实语音验证转写。热键步骤先显示当前值；
+需要修改时依次记录 Hold 和 Toggle 按键，最终确认后才应用。验证录音也使用这两个候选热键的正常语义，
+验证确认窗口会说明关闭后如何说“测试”并结束录音，不通过对话框点击开始或停止。完成向导后才会原子
+写入 `config.json`。选择跳过只会让本次启动使用内置默认值，不创建或覆盖文件。以后可随时重新运行：
+
+```bash
+viberwhisper setup
+```
+
+也可将 [`config.example.json`](config.example.json) 复制到上述路径，或使用 `config set` 修改普通字段。
+已有文件必须包含 `schema_version: 2` 和当前结构；新增的可选 `audio.input_device` 缺失时兼容为系统默认设备。
+其他缺字段、未知字段、损坏 JSON 或 schema 版本错误都会明确进入恢复向导。已退役的 `chunking`、`session`
+和 `inference.api.provider` 均视为未知字段。
 
 API 密钥优先从环境变量读取，其次才读取配置文件中的对应 secret 字段：
 
@@ -76,7 +86,8 @@ export POST_PROCESS_API_KEY=your_key_here
 ```
 
 环境变量中的密钥只参与运行时解析，绝不会写回磁盘。`config get/list` 只显示密钥来源状态，不显示值；
-secret key 也不能通过 `config set` 修改。
+secret key 也不能通过 `config set` 修改。向导密码框输入的密钥可以保存，但会在本机配置文件中以明文存在，
+保存前会再次提示。
 
 #### 识别历史文件
 
@@ -220,7 +231,11 @@ CLI 只接受下表中的 canonical dotted key；`hotkey`、`model`、`local_mod
 |------|------|--------|------|
 | `input.hold_hotkey` | 字符串 | `F8` | 按住录音的具名单键；空字符串可禁用 |
 | `input.toggle_hotkey` | 字符串 | `F9` | 切换录音的具名单键；空字符串可禁用 |
+| `audio.input_device` | 字符串或 `null` | `null` | 输入设备的精确名称；`null` 使用系统默认设备 |
 | `audio.mic_gain` | 数字 | `1.0` | 麦克风增益倍数 |
+
+指定设备在录音时不可用会明确报错，不会静默切换到其他麦克风。cpal 只提供设备显示名称；若系统返回重名
+设备，将使用第一个精确匹配项。可重新运行 `viberwhisper setup` 选择其他设备。
 
 #### 单键热键名称
 

@@ -15,12 +15,18 @@ The config package intentionally has four files:
 | `store.rs` | platform path discovery plus fail-closed load and atomic save |
 | `src/core/config.rs` | facade, config errors, validation report, secret-safe value types |
 
-`ConfigDocument` accepts only the current complete canonical document with `schema_version: 2`.
-Missing or unknown fields, wrong versions, invalid JSON, and non-finite floats are errors. Retired
-fields such as `chunking`, `session`, and `inference.api.provider` are not accepted. A missing file
-alone returns the in-memory defaults.
+`ConfigDocument` accepts the canonical document with `schema_version: 2`. Missing or unknown fields,
+wrong versions, invalid JSON, and non-finite floats are errors, except that the optional
+`audio.input_device` added after the initial v2 schema defaults to the system device when absent.
+Retired fields such as `chunking`, `session`, and `inference.api.provider` are not accepted. A
+missing file is represented as `None` by `ConfigStore::load`; ordinary callers explicitly select
+the in-memory defaults while setup uses the absence to trigger the first-run flow.
 
-`ConfigStore::discover()` gets the application directory from `platform::config_dir()` and appends `config.json`. Reads and writes therefore use the same canonical path independent of the launch working directory. Writes use a temporary file in the destination directory followed by atomic publication.
+`ConfigStore::discover()` gets the application directory from `platform::config_dir()` and appends
+`config.json`. Reads and writes therefore use the same canonical path independent of the launch
+working directory. Writes use a temporary file in the destination directory followed by atomic
+publication. `ConfigStore::load` is the single read and parse path: `None` distinguishes a missing
+file, `Some` carries a loaded document, and malformed or unreadable files remain errors.
 
 `EnvironmentSecretSource` reads only `TRANSCRIPTION_API_KEY` and `POST_PROCESS_API_KEY` through the runtime assembly layer. Environment values override disk secrets but are never copied into `ConfigDocument`; CLI output reports only `unset`, `disk`, `environment`, or `environment overrides disk`.
 
@@ -38,10 +44,19 @@ mutating the persisted profile.
 
 ## CLI (`src/core/cli.rs`)
 
+The no-subcommand listener and the no-console desktop entry point pass through
+`application::setup` before constructing runtime services. A valid listener document bypasses the
+wizard; missing or invalid configuration opens the same modal flow on macOS and Windows. The
+explicit `setup` command reruns it without starting the listener after saving. Interactive hotkey
+editing launches a short-lived helper instance of the same executable so the existing `rdev`
+listener can capture one physical key and terminate without leaving a second global listener in the
+main process. Other CLI workflows keep their existing configuration behavior.
+
 No subcommand runs the recording listener. Other commands are:
 
 | Command | Description |
 |---|---|
+| `setup` | Run the modal configuration and verification flow on demand |
 | `config path` | Print the canonical file path |
 | `config check` | Resolve the active listener profile and report construction issues |
 | `config list/get/set` | Use canonical dotted keys from the single field catalog |

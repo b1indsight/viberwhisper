@@ -13,7 +13,7 @@ use tracing::{debug, info};
 
 mod accessibility;
 mod application;
-mod hotkey;
+pub(super) mod hotkey;
 mod pasteboard;
 
 static DESKTOP_WRITE: Mutex<()> = Mutex::new(());

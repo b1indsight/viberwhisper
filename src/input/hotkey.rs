@@ -120,6 +120,32 @@ pub fn parse_key(value: &str) -> Option<Key> {
     parse_named_key(value).map(|named| named.key)
 }
 
+/// Converts a captured physical key into the canonical configuration spelling.
+pub(crate) fn canonical_key_name(key: Key) -> Option<String> {
+    let debug_name = format!("{key:?}");
+    let candidate = if let Some(letter) = debug_name.strip_prefix("Key") {
+        letter.to_string()
+    } else if let Some(digit) = debug_name
+        .strip_prefix("Num")
+        .filter(|value| value.len() == 1 && value.as_bytes()[0].is_ascii_digit())
+    {
+        digit.to_string()
+    } else {
+        match key {
+            Key::ControlLeft => "LEFTCTRL".to_string(),
+            Key::ControlRight => "RIGHTCTRL".to_string(),
+            Key::ShiftLeft => "LEFTSHIFT".to_string(),
+            Key::ShiftRight => "RIGHTSHIFT".to_string(),
+            Key::MetaLeft => "LEFTMETA".to_string(),
+            Key::MetaRight => "RIGHTMETA".to_string(),
+            Key::KpReturn => "NUMPADENTER".to_string(),
+            Key::Unknown(_) => return None,
+            _ => debug_name.to_ascii_uppercase(),
+        }
+    };
+    parse_named_key(&candidate).map(|named| named.canonical.to_string())
+}
+
 fn parse_named_key(value: &str) -> Option<NamedKey> {
     let (key, canonical) = match value.trim().to_ascii_uppercase().as_str() {
         "F1" => (Key::F1, "F1"),
@@ -287,7 +313,7 @@ pub enum HotkeyEvent {
 }
 
 #[derive(Debug)]
-struct EventMapper {
+pub(crate) struct EventMapper {
     hold_key: Option<Key>,
     toggle_key: Option<Key>,
     hold_down: bool,
@@ -295,7 +321,7 @@ struct EventMapper {
 }
 
 impl EventMapper {
-    fn new(hold_key: Option<Key>, toggle_key: Option<Key>) -> Self {
+    pub(crate) fn new(hold_key: Option<Key>, toggle_key: Option<Key>) -> Self {
         Self {
             hold_key,
             toggle_key,
@@ -304,7 +330,7 @@ impl EventMapper {
         }
     }
 
-    fn map(&mut self, event_type: &EventType) -> Option<HotkeyEvent> {
+    pub(crate) fn map(&mut self, event_type: &EventType) -> Option<HotkeyEvent> {
         match event_type {
             EventType::KeyPress(key) if Some(*key) == self.hold_key && !self.hold_down => {
                 self.hold_down = true;
@@ -439,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_every_canonical_named_key() {
+    fn parses_and_emits_every_canonical_named_key() {
         let cases = [
             ("F1", Key::F1),
             ("F2", Key::F2),
@@ -550,7 +576,9 @@ mod tests {
 
         for (name, expected) in cases {
             assert_eq!(parse_key(name), Some(expected), "name: {name}");
+            assert_eq!(canonical_key_name(expected).as_deref(), Some(name));
         }
+        assert_eq!(canonical_key_name(Key::Unknown(42)), None);
     }
 
     #[test]

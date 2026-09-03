@@ -9,6 +9,8 @@ mod windows;
 
 use std::path::PathBuf;
 
+use rdev::EventType;
+
 use crate::core::config::{InputSection, ValidationIssue};
 use crate::input::hotkey::HotkeyConfig;
 
@@ -52,4 +54,13 @@ pub(crate) fn validate_hotkeys(
     section: &InputSection,
 ) -> Result<HotkeyConfig, Vec<ValidationIssue>> {
     HotkeyConfig::validate::<<SelectedBackend as PlatformBackend>::Hotkeys>(section)
+}
+
+/// Applies the target's physical-key normalization without starting the desktop runtime.
+pub(crate) fn normalize_setup_hotkey_event(event_type: EventType) -> EventType {
+    #[cfg(target_os = "macos")]
+    return macos::hotkey::normalize_event(event_type);
+
+    #[cfg(not(target_os = "macos"))]
+    event_type
 }
