@@ -99,8 +99,8 @@ it does not add a new dependency or introduce a general dialog abstraction.
 Extend `wix/main.wxs` to accept separate CLI and desktop executable paths. Preserve the existing
 `MainExecutable` component GUID and `viberwhisper.exe` key path so the established installer
 component identity does not drift. Add a new component and stable GUID for
-`viberwhisper-app.exe`, and move a non-advertised Start Menu shortcut to that file. The direct
-shortcut target keeps installed-package validation and diagnostics deterministic.
+`viberwhisper-app.exe`, and move an advertised Start Menu shortcut to that file. Advertising keeps
+the executable as the component key path and lets Windows Installer repair a missing target.
 
 Do not modify the frozen `wix/upgrade-fixture.wxs` baseline. The hosted major-upgrade test must
 prove that upgrading the old one-executable fixture installs both current executables, replaces

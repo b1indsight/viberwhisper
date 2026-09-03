@@ -315,7 +315,7 @@ jobs:
             throw "Python server payload must not be included in this release"
           }
 
-      - name: Test MSI install, upgrade, shortcut, and uninstall
+      - name: Test MSI user install, machine upgrade, shortcut, and uninstall
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -327,14 +327,19 @@ jobs:
           $releaseApp = (Resolve-Path "target/x86_64-pc-windows-msvc/release/viberwhisper-app.exe").Path
           $releaseCliDigest = (Get-FileHash -Algorithm SHA256 $releaseCli).Hash
           $releaseAppDigest = (Get-FileHash -Algorithm SHA256 $releaseApp).Hash
-          $installDir = Join-Path $env:ProgramFiles "ViberWhisper"
-          $installedCli = Join-Path $installDir "viberwhisper.exe"
-          $installedApp = Join-Path $installDir "viberwhisper-app.exe"
-          $installedLicense = Join-Path $installDir "LICENSE"
-          $legacyMarker = Join-Path $installDir "legacy-fixture.txt"
-          $shortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\ViberWhisper.lnk"
+          $machineInstallDir = Join-Path $env:ProgramFiles "ViberWhisper"
+          $machineCli = Join-Path $machineInstallDir "viberwhisper.exe"
+          $machineApp = Join-Path $machineInstallDir "viberwhisper-app.exe"
+          $machineLicense = Join-Path $machineInstallDir "LICENSE"
+          $legacyMarker = Join-Path $machineInstallDir "legacy-fixture.txt"
+          $machineShortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\ViberWhisper.lnk"
+          $userInstallDir = Join-Path $env:LOCALAPPDATA "Programs\ViberWhisper"
+          $userCli = Join-Path $userInstallDir "viberwhisper.exe"
+          $userApp = Join-Path $userInstallDir "viberwhisper-app.exe"
+          $userLicense = Join-Path $userInstallDir "LICENSE"
+          $userShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\ViberWhisper.lnk"
 
-          function Get-ViberWhisperEntries {
+          function Get-ViberWhisperMachineEntries {
             @(
               Get-ItemProperty @(
                 "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -348,63 +353,166 @@ jobs:
             param(
               [Parameter(Mandatory = $true)][ValidateSet("i", "x")][string]$Action,
               [Parameter(Mandatory = $true)][string]$Package,
-              [Parameter(Mandatory = $true)][string]$Log
+              [Parameter(Mandatory = $true)][string]$Log,
+              [string[]]$Properties = @()
             )
-            $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            $arguments = @(
               "/$Action", $Package, "/qn", "/norestart", "/l*v", $Log
-            )
+            ) + $Properties
+            $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList $arguments
             if ($process.ExitCode -notin @(0, 1641, 3010)) {
               Get-Content $Log -Tail 200 -ErrorAction SilentlyContinue | Out-Host
               throw "msiexec /$Action failed with exit code $($process.ExitCode)"
             }
           }
 
+          Add-Type -TypeDefinition @"
+          using System.Runtime.InteropServices;
+          using System.Text;
+
+          public static class WindowsInstallerNative {
+              [DllImport("msi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+              public static extern uint MsiGetShortcutTargetW(
+                  string shortcutPath,
+                  [Out] StringBuilder productCode,
+                  [Out] StringBuilder featureId,
+                  [Out] StringBuilder componentCode);
+
+              [DllImport("msi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+              public static extern int MsiGetComponentPathW(
+                  string productCode,
+                  string componentCode,
+                  [Out] StringBuilder path,
+                  ref uint pathLength);
+
+              [DllImport("msi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+              public static extern int MsiQueryProductStateW(string productCode);
+
+          }
+          "@
+
+          function Get-AdvertisedShortcutInfo {
+            param([Parameter(Mandatory = $true)][string]$Shortcut)
+
+            $productCode = [Text.StringBuilder]::new(39)
+            $featureId = [Text.StringBuilder]::new(256)
+            $componentCode = [Text.StringBuilder]::new(39)
+            $result = [WindowsInstallerNative]::MsiGetShortcutTargetW(
+              $Shortcut, $productCode, $featureId, $componentCode
+            )
+            if ($result -ne 0) {
+              throw "MsiGetShortcutTarget failed for $Shortcut with error $result"
+            }
+
+            $target = [Text.StringBuilder]::new(32768)
+            [uint32]$targetLength = $target.Capacity
+            $installState = [WindowsInstallerNative]::MsiGetComponentPathW(
+              $productCode.ToString(), $componentCode.ToString(), $target, [ref]$targetLength
+            )
+            if ($installState -ne 3) {
+              throw "Shortcut component is not installed locally (state $installState)"
+            }
+            [PSCustomObject]@{
+              ProductCode = $productCode.ToString()
+              Target = $target.ToString()
+            }
+          }
+
+          function Get-ProductInstallContexts {
+            param([Parameter(Mandatory = $true)][string]$ProductCode)
+
+            $installer = New-Object -ComObject WindowsInstaller.Installer
+            foreach ($product in $installer.ProductsEx($ProductCode, "", 3)) {
+              [uint32]$product.Context()
+            }
+          }
+
+          $userProductCode = $null
           try {
+            Invoke-Msi -Action i -Package $releaseMsi -Log (Join-Path $env:RUNNER_TEMP "user-install.log")
+            if (!(Test-Path $userCli) -or !(Test-Path $userApp) -or
+                !(Test-Path $userLicense) -or !(Test-Path $userShortcut)) {
+              throw "Default install did not create the per-user payload and shortcut"
+            }
+            $userShortcutInfo = Get-AdvertisedShortcutInfo $userShortcut
+            $userProductCode = $userShortcutInfo.ProductCode
+            if (![string]::Equals($userShortcutInfo.Target, $userApp, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Per-user Start Menu shortcut targets $($userShortcutInfo.Target) instead of $userApp"
+            }
+            $userContexts = @(Get-ProductInstallContexts $userProductCode)
+            if ($userContexts.Count -ne 1 -or $userContexts[0] -notin @(1, 2)) {
+              throw "Default install has unexpected MSI contexts: $($userContexts -join ', ')"
+            }
+
+            Invoke-Msi -Action x -Package $userProductCode -Log (Join-Path $env:RUNNER_TEMP "user-uninstall.log")
+            if ((Test-Path $userInstallDir) -or (Test-Path $userShortcut)) {
+              throw "User uninstall left installer-owned resources behind"
+            }
+            if ([WindowsInstallerNative]::MsiQueryProductStateW($userProductCode) -ne -1) {
+              throw "User uninstall left the MSI product registered"
+            }
+            $userProductCode = $null
+
             Invoke-Msi -Action i -Package $fixtureMsi -Log (Join-Path $env:RUNNER_TEMP "fixture-install.log")
-            $fixtureEntries = @(Get-ViberWhisperEntries)
+            $fixtureEntries = @(Get-ViberWhisperMachineEntries)
             if ($fixtureEntries.Count -ne 1) { throw "Expected one fixture ARP entry" }
             if ($fixtureEntries[0].DisplayVersion -ne $fixtureVersion) {
               throw "Fixture ARP version is $($fixtureEntries[0].DisplayVersion), expected $fixtureVersion"
             }
-            if (!(Test-Path $installedCli) -or !(Test-Path $installedLicense) -or
-                !(Test-Path $legacyMarker) -or !(Test-Path $shortcut)) {
+            if (!(Test-Path $machineCli) -or !(Test-Path $machineLicense) -or
+                !(Test-Path $legacyMarker) -or !(Test-Path $machineShortcut)) {
               throw "Fixture install did not create the frozen baseline payload and shortcut"
             }
-            if (Test-Path $installedApp) {
+            if (Test-Path $machineApp) {
               throw "Frozen fixture unexpectedly contains the current desktop executable"
             }
-            if ((Get-FileHash -Algorithm SHA256 $installedCli).Hash -eq $releaseCliDigest) {
+            if ((Get-FileHash -Algorithm SHA256 $machineCli).Hash -eq $releaseCliDigest) {
               throw "Fixture executable must be distinguishable from the release payload"
             }
 
-            Invoke-Msi -Action i -Package $releaseMsi -Log (Join-Path $env:RUNNER_TEMP "release-upgrade.log")
-            $releaseEntries = @(Get-ViberWhisperEntries)
+            Invoke-Msi `
+              -Action i `
+              -Package $releaseMsi `
+              -Log (Join-Path $env:RUNNER_TEMP "release-upgrade.log") `
+              -Properties @("ALLUSERS=1", "MSIINSTALLPERUSER=")
+            $releaseEntries = @(Get-ViberWhisperMachineEntries)
             if ($releaseEntries.Count -ne 1) { throw "Expected one ARP entry after major upgrade" }
             if ($releaseEntries[0].DisplayVersion -ne $releaseVersion) {
               throw "Release ARP version is $($releaseEntries[0].DisplayVersion), expected $releaseVersion"
             }
-            if ((Get-FileHash -Algorithm SHA256 $installedCli).Hash -ne $releaseCliDigest) {
+            if ((Get-FileHash -Algorithm SHA256 $machineCli).Hash -ne $releaseCliDigest) {
               throw "Major upgrade did not replace the fixture CLI with the release payload"
             }
-            if (!(Test-Path $installedApp) -or
-                (Get-FileHash -Algorithm SHA256 $installedApp).Hash -ne $releaseAppDigest) {
+            if (!(Test-Path $machineApp) -or
+                (Get-FileHash -Algorithm SHA256 $machineApp).Hash -ne $releaseAppDigest) {
               throw "Major upgrade did not install the desktop executable"
             }
             if (Test-Path $legacyMarker) { throw "Major upgrade left the fixture-only file behind" }
-            $shortcutTarget = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
-            if (![string]::Equals($shortcutTarget, $installedApp, [StringComparison]::OrdinalIgnoreCase)) {
-              throw "Start Menu shortcut targets $shortcutTarget instead of $installedApp"
+            $shortcutInfo = Get-AdvertisedShortcutInfo $machineShortcut
+            if (![string]::Equals($shortcutInfo.Target, $machineApp, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Start Menu shortcut targets $($shortcutInfo.Target) instead of $machineApp"
             }
-            & $installedCli --help | Out-Host
+            & $machineCli --help | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "Installed executable smoke test failed" }
 
             Invoke-Msi -Action x -Package $releaseEntries[0].PSChildName -Log (Join-Path $env:RUNNER_TEMP "release-uninstall.log")
-            if ((Test-Path $installDir) -or (Test-Path $shortcut)) {
-              throw "Uninstall left installer-owned files or the Start Menu shortcut behind"
+            if ((Test-Path $machineInstallDir) -or (Test-Path $machineShortcut)) {
+              throw "Machine uninstall left installer-owned resources behind"
             }
-            if (@(Get-ViberWhisperEntries).Count -ne 0) { throw "Uninstall left an ARP entry behind" }
+            if (@(Get-ViberWhisperMachineEntries).Count -ne 0) {
+              throw "Machine uninstall left an ARP entry behind"
+            }
+
           } finally {
-            foreach ($entry in @(Get-ViberWhisperEntries)) {
+            if ($userProductCode -and
+                [WindowsInstallerNative]::MsiQueryProductStateW($userProductCode) -ne -1) {
+              try {
+                Invoke-Msi -Action x -Package $userProductCode -Log (Join-Path $env:RUNNER_TEMP "cleanup-user.log")
+              } catch {
+                Write-Warning "Best-effort user MSI cleanup failed: $_"
+              }
+            }
+            foreach ($entry in @(Get-ViberWhisperMachineEntries)) {
               try {
                 Invoke-Msi -Action x -Package $entry.PSChildName -Log (Join-Path $env:RUNNER_TEMP "cleanup-$($entry.PSChildName).log")
               } catch {
