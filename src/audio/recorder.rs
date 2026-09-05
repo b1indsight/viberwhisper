@@ -19,7 +19,9 @@ enum RecorderError {
     DefaultInputConfig(cpal::DefaultStreamConfigError),
     BuildStream(cpal::BuildStreamError),
     PlayStream(cpal::PlayStreamError),
+    EnumerateInputDevices(cpal::DevicesError),
     NoInputDevice,
+    InputDeviceNotFound(String),
     UnsupportedSampleFormat,
     NotRecording,
     NoAudioData,
@@ -32,7 +34,13 @@ impl fmt::Display for RecorderError {
             Self::DefaultInputConfig(error) => write!(f, "input configuration error: {error}"),
             Self::BuildStream(error) => write!(f, "failed to build input stream: {error}"),
             Self::PlayStream(error) => write!(f, "failed to start input stream: {error}"),
+            Self::EnumerateInputDevices(error) => {
+                write!(f, "failed to enumerate input devices: {error}")
+            }
             Self::NoInputDevice => write!(f, "no input device available"),
+            Self::InputDeviceNotFound(name) => {
+                write!(f, "configured input device `{name}` is not available")
+            }
             Self::UnsupportedSampleFormat => write!(f, "unsupported sample format"),
             Self::NotRecording => write!(f, "not currently recording"),
             Self::NoAudioData => write!(f, "no audio data recorded"),
@@ -47,7 +55,9 @@ impl error::Error for RecorderError {
             Self::DefaultInputConfig(error) => Some(error),
             Self::BuildStream(error) => Some(error),
             Self::PlayStream(error) => Some(error),
+            Self::EnumerateInputDevices(error) => Some(error),
             Self::NoInputDevice
+            | Self::InputDeviceNotFound(_)
             | Self::UnsupportedSampleFormat
             | Self::NotRecording
             | Self::NoAudioData => None,
@@ -85,6 +95,7 @@ pub struct AudioRecorder {
     buffer: Arc<Mutex<Vec<i16>>>,
     stream: Option<cpal::Stream>,
     sample_count: Arc<AtomicUsize>,
+    input_device: Option<String>,
     gain: f32,
     sample_rate: u32,
     /// Number of samples already emitted as chunks during the current recording.
@@ -98,6 +109,72 @@ pub struct AudioRecorder {
     max_chunk_duration_secs: u32,
     /// Production policy: max chunk size in bytes, including the encoded WAV header.
     max_chunk_size_bytes: u64,
+}
+
+fn selected_device_index<T: AsRef<str>>(
+    names: &[T],
+    requested: Option<&str>,
+) -> Result<Option<usize>, String> {
+    let Some(requested) = requested else {
+        return Ok(None);
+    };
+    names
+        .iter()
+        .position(|name| name.as_ref() == requested)
+        .map(Some)
+        .ok_or_else(|| format!("configured input device `{requested}` is not available"))
+}
+
+fn readable_named_devices<D, E>(
+    devices: impl IntoIterator<Item = D>,
+    mut read_name: impl FnMut(&D) -> Result<String, E>,
+) -> Vec<(D, String)>
+where
+    E: fmt::Display,
+{
+    devices
+        .into_iter()
+        .filter_map(|device| match read_name(&device) {
+            Ok(name) => Some((device, name)),
+            Err(error) => {
+                warn!(error = %error, "Skipping input device with unreadable name");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Enumerates the display names accepted by the recorder's persisted device selection.
+pub(crate) fn input_device_names() -> Result<Vec<String>, String> {
+    let host = cpal::default_host();
+    let devices = host.input_devices().map_err(|error| error.to_string())?;
+    Ok(readable_named_devices(devices, |device| device.name())
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect())
+}
+
+fn resolve_input_device(
+    host: &cpal::Host,
+    requested: Option<&str>,
+) -> Result<cpal::Device, RecorderError> {
+    let Some(requested) = requested else {
+        return host
+            .default_input_device()
+            .ok_or(RecorderError::NoInputDevice);
+    };
+    let devices = host
+        .input_devices()
+        .map_err(RecorderError::EnumerateInputDevices)?;
+    let mut named_devices = readable_named_devices(devices, |device| device.name());
+    let names: Vec<_> = named_devices
+        .iter()
+        .map(|(_, name)| name.as_str())
+        .collect();
+    let index = selected_device_index(&names, Some(requested))
+        .map_err(|_| RecorderError::InputDeviceNotFound(requested.to_string()))?
+        .expect("a requested device always resolves to an index");
+    Ok(named_devices.remove(index).0)
 }
 
 /// Shared logic for both I16 and F32 audio callbacks: append mono samples and
@@ -165,6 +242,7 @@ impl AudioRecorder {
             buffer: Arc::new(Mutex::new(Vec::new())),
             stream: None,
             sample_count: Arc::new(AtomicUsize::new(0)),
+            input_device: config.input_device.clone(),
             gain,
             sample_rate: 44100,
             flushed_samples: 0,
@@ -196,9 +274,7 @@ impl AudioRecorder {
     #[instrument(skip(self))]
     fn try_start_recording(&mut self, session_id: SessionId) -> Result<(), RecorderError> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or(RecorderError::NoInputDevice)?;
+        let device = resolve_input_device(&host, self.input_device.as_deref())?;
         let config = device.default_input_config()?;
 
         let sample_rate = config.sample_rate().0;
@@ -520,6 +596,42 @@ pub enum RecorderCancelOutcome {
 mod tests {
     use super::*;
 
+    #[test]
+    fn named_device_selection_is_exact_and_deterministic() {
+        let names = ["Built-in Mic", "USB Mic", "USB Mic"];
+        assert_eq!(selected_device_index(&names, None).unwrap(), None);
+        assert_eq!(
+            selected_device_index(&names, Some("USB Mic")).unwrap(),
+            Some(1)
+        );
+        assert!(selected_device_index(&names, Some("usb mic")).is_err());
+    }
+
+    #[test]
+    fn unreadable_device_names_do_not_hide_a_matching_device() {
+        // Disconnected virtual devices can remain enumerable even when their display name is no
+        // longer readable; a healthy configured microphone must still be selectable.
+        let names = [
+            Err("stale device"),
+            Ok("USB Mic"),
+            Err("disconnected device"),
+            Ok("USB Mic"),
+        ];
+        let readable = readable_named_devices(0..names.len(), |index| {
+            names[*index].map(str::to_string).map_err(str::to_string)
+        });
+
+        assert_eq!(
+            readable,
+            vec![(1, "USB Mic".to_string()), (3, "USB Mic".to_string())]
+        );
+        let readable_names: Vec<_> = readable.iter().map(|(_, name)| name.as_str()).collect();
+        assert_eq!(
+            selected_device_index(&readable_names, Some("USB Mic")).unwrap(),
+            Some(0)
+        );
+    }
+
     fn recorder_for_buffer(samples: Vec<i16>, chunk_max_samples: usize) -> AudioRecorder {
         AudioRecorder {
             recording: Arc::new(AtomicBool::new(true)),
@@ -527,6 +639,7 @@ mod tests {
             buffer: Arc::new(Mutex::new(samples)),
             stream: None,
             sample_count: Arc::new(AtomicUsize::new(0)),
+            input_device: None,
             gain: 1.0,
             sample_rate: 16000,
             flushed_samples: 0,

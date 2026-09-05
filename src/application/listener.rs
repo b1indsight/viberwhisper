@@ -1,29 +1,15 @@
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use super::{LocalServiceGuard, config_context, load_config, start_local_backend};
-use crate::core::config::EnvironmentSecretSource;
+use super::{LocalServiceGuard, start_local_backend};
 use crate::core::recording_session::{RecordingState, SessionEvent};
 use crate::history::{HistoryStore, HistoryTyper};
 use crate::platform::PlatformAction;
 use crate::prompt_lab::{DatasetStore, PromptLabCapture, SttSnapshot};
-use crate::runtime_config::{self, ListenerConfig, ProfileSelection};
+use crate::runtime_config::ListenerConfig;
 use crate::{audio, core, postprocess, transcriber};
 
 mod event_loop;
-
-pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (store, document) = load_config()?;
-    let (config_dir, home_dir) = config_context(&store)?;
-    let config = runtime_config::resolve_listener(
-        &document,
-        &EnvironmentSecretSource,
-        ProfileSelection::Configured,
-        &config_dir,
-        &home_dir,
-    )?;
-    run_with_config(config)
-}
 
 fn platform_session_event(action: PlatformAction, state: &RecordingState) -> Option<SessionEvent> {
     match action {

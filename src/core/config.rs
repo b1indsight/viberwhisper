@@ -174,6 +174,14 @@ mod tests {
     }
 
     #[test]
+    fn existing_v2_documents_default_the_new_optional_input_device() {
+        let previous_v2 =
+            include_str!("../../config.example.json").replace("    \"input_device\": null,\n", "");
+        let document: ConfigDocument = serde_json::from_str(&previous_v2).unwrap();
+        assert_eq!(document.audio.input_device, None);
+    }
+
+    #[test]
     fn retired_policy_fields_are_rejected() {
         // The current schema is the only accepted shape: removed policy knobs must not be
         // mistaken for live settings that still affect runtime behavior.
@@ -215,22 +223,22 @@ mod tests {
     }
 
     #[test]
-    fn store_uses_one_injected_path_for_defaults_save_and_load() {
+    fn store_uses_one_injected_path_for_missing_save_and_load() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("nested").join("config.json");
         let store = ConfigStore::at(path.clone());
         assert_eq!(store.path(), path.as_path());
-        assert_eq!(store.load().unwrap(), ConfigDocument::default());
+        assert_eq!(store.load().unwrap(), None);
         assert!(!path.parent().unwrap().exists());
 
         let document: ConfigDocument =
             serde_json::from_str(include_str!("../../config.example.json")).unwrap();
         store.save(&document).unwrap();
-        assert_eq!(store.load().unwrap(), document);
+        assert_eq!(store.load().unwrap(), Some(document));
 
         let defaults = ConfigDocument::default();
         store.save(&defaults).unwrap();
-        assert_eq!(store.load().unwrap(), defaults);
+        assert_eq!(store.load().unwrap(), Some(defaults));
     }
 
     #[test]
@@ -245,12 +253,31 @@ mod tests {
     }
 
     #[test]
+    fn load_distinguishes_missing_loaded_and_invalid_documents() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let store = ConfigStore::at(path.clone());
+
+        assert_eq!(store.load().unwrap(), None);
+
+        store.save(&ConfigDocument::default()).unwrap();
+        assert_eq!(store.load().unwrap(), Some(ConfigDocument::default()));
+
+        std::fs::write(path, "not json").unwrap();
+        assert!(matches!(
+            store.load().unwrap_err(),
+            ConfigError::InvalidDocument { .. }
+        ));
+    }
+
+    #[test]
     fn field_catalog_uses_canonical_keys_and_rejects_legacy_aliases() {
         let keys: Vec<_> = ConfigDocument::field_keys()
             .iter()
             .map(|key| key.as_str())
             .collect();
         assert!(keys.contains(&"input.hold_hotkey"));
+        assert!(keys.contains(&"audio.input_device"));
         assert!(keys.contains(&"inference.api.transcription.api_url"));
         assert!(keys.contains(&"inference.local.server_port"));
         assert!(!keys.contains(&"hold_hotkey"));
@@ -264,7 +291,7 @@ mod tests {
         ] {
             assert!(!keys.contains(&retired));
         }
-        assert_eq!(keys.len(), 21);
+        assert_eq!(keys.len(), 22);
 
         let document = ConfigDocument::default();
         let secrets = MapSecrets(HashMap::new());
@@ -305,6 +332,18 @@ mod tests {
             FieldValue::Value("2.5".to_string())
         );
         assert!(document.set_field("audio.mic_gain", "NaN").is_err());
+        document
+            .set_field("audio.input_device", "External USB Mic")
+            .unwrap();
+        assert_eq!(
+            document.get_field("audio.input_device", &secrets).unwrap(),
+            FieldValue::Value("External USB Mic".to_string())
+        );
+        document.set_field("audio.input_device", "null").unwrap();
+        assert_eq!(
+            document.get_field("audio.input_device", &secrets).unwrap(),
+            FieldValue::Unset
+        );
     }
 
     #[test]

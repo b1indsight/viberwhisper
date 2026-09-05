@@ -5,6 +5,7 @@
     "toggle_hotkey": "F9"
   },
   "audio": {
+    "input_device": null,
     "mic_gain": 3.0
   },
   "transcription": {

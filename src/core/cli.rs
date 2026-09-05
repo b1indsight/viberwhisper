@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-/// ViberWhisper - 语音转文字输入工具
+/// ViberWhisper - voice-to-text typing utility
 #[derive(Parser, Debug)]
 #[command(
     name = "viberwhisper",
@@ -16,25 +16,27 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// 配置管理（查看、读取、修改配置项）
+    /// Run the first-run setup wizard
+    Setup,
+    /// Manage configuration (list, read, and update settings)
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// 本地 Gemma 推理服务管理
+    /// Manage the local Gemma inference service
     Local {
         #[command(subcommand)]
         action: LocalCommand,
     },
-    /// 转换音频文件为文字
+    /// Transcribe an audio file
     Convert {
-        /// 输入的 WAV 文件路径
+        /// Path to the input WAV file
         input: String,
-        /// 可选：输出文件路径（默认打印到 stdout）
+        /// Optional output path (prints to stdout by default)
         #[arg(short, long)]
         output: Option<String>,
     },
-    /// STT prompt 数据集采集、校对与回归
+    /// Capture, correct, and evaluate STT prompt datasets
     PromptLab {
         #[command(subcommand)]
         action: PromptLabCommand,
@@ -43,23 +45,23 @@ pub enum Commands {
 
 #[derive(Subcommand, Debug)]
 pub enum PromptLabCommand {
-    /// 使用现有托盘和热键录制测试样本
+    /// Record test samples using the existing tray and hotkeys
     Record {
-        /// 数据集根目录（同一时间只能由一个进程使用）
+        /// Dataset root (only one process may access it at a time)
         #[arg(long)]
         dataset: PathBuf,
     },
-    /// 查看或修正录音样本
+    /// Inspect or correct recorded samples
     Sample {
         #[command(subcommand)]
         action: PromptLabSampleCommand,
     },
-    /// 数据集级操作
+    /// Run dataset-wide operations
     Dataset {
         #[command(subcommand)]
         action: PromptLabDatasetCommand,
     },
-    /// 使用候选 STT prompt 对全部 ready 样本执行回归
+    /// Evaluate all ready samples with a candidate STT prompt
     Evaluate {
         #[arg(long)]
         dataset: PathBuf,
@@ -78,7 +80,7 @@ pub enum PromptLabCommand {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// 将编码代理的逐样本语义复核写入规范 JSON 报告
+    /// Write per-sample coding-agent semantic reviews to a canonical JSON report
     Report {
         #[command(subcommand)]
         action: PromptLabReportCommand,
@@ -87,7 +89,7 @@ pub enum PromptLabCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum PromptLabReportCommand {
-    /// 验证并应用完整的代理复核 JSON
+    /// Validate and apply a complete agent-review JSON document
     ApplyReview {
         #[arg(long)]
         report: PathBuf,
@@ -104,20 +106,20 @@ pub enum PromptLabSampleStatus {
 
 #[derive(Subcommand, Debug)]
 pub enum PromptLabSampleCommand {
-    /// 列出样本
+    /// List samples
     List {
         #[arg(long)]
         dataset: PathBuf,
         #[arg(long)]
         status: Option<PromptLabSampleStatus>,
     },
-    /// 以 JSON 显示一个样本
+    /// Show a sample as JSON
     Show {
         #[arg(long)]
         dataset: PathBuf,
         id: String,
     },
-    /// 写入人工标准文本和专有名词标注
+    /// Write the human reference and proper-noun annotations
     Correct {
         #[arg(long)]
         dataset: PathBuf,
@@ -134,7 +136,7 @@ pub enum PromptLabSampleCommand {
             required_unless_present = "reference"
         )]
         reference_file: Option<PathBuf>,
-        /// JSON 格式的专有名词标注数组；省略表示没有专有名词
+        /// Path to a JSON array of proper-noun annotations; omit when there are none
         #[arg(long)]
         proper_nouns_file: Option<PathBuf>,
     },
@@ -142,7 +144,7 @@ pub enum PromptLabSampleCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum PromptLabDatasetCommand {
-    /// 校验 manifest、sidecar、WAV 和摘要
+    /// Validate the manifest, sidecars, WAV files, and summary
     Validate {
         #[arg(long)]
         dataset: PathBuf,
@@ -151,35 +153,35 @@ pub enum PromptLabDatasetCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigAction {
-    /// 显示当前平台使用的配置文件路径
+    /// Show the configuration file path for the current platform
     Path,
-    /// 检查当前 profile 的运行配置
+    /// Validate the current profile's runtime configuration
     Check,
-    /// 列出所有配置项及当前值
+    /// List all configuration keys and their current values
     List,
-    /// 读取指定配置项的值
+    /// Read a configuration value
     Get {
-        /// Canonical dotted key（如 input.hold_hotkey）
+        /// Canonical dotted key (for example, input.hold_hotkey)
         key: String,
     },
-    /// 设置指定配置项的值
+    /// Set a configuration value
     Set {
         /// Canonical dotted key
         key: String,
-        /// 新值
+        /// New value
         value: String,
     },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum LocalCommand {
-    /// 安装本地推理服务依赖与模型
+    /// Install the local inference service dependencies and model
     Install,
-    /// 启动本地推理服务并运行主监听循环
+    /// Start the local inference service and run the main listener loop
     Start,
-    /// 停止本地推理服务
+    /// Stop the local inference service
     Stop,
-    /// 查看本地推理服务状态
+    /// Show the local inference service status
     Status,
 }
 
@@ -191,6 +193,12 @@ mod tests {
     fn test_cli_no_subcommand() {
         let cli = Cli::try_parse_from(["viberwhisper"]).unwrap();
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn test_cli_setup() {
+        let cli = Cli::try_parse_from(["viberwhisper", "setup"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Setup)));
     }
 
     #[test]
