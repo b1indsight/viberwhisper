@@ -4,7 +4,7 @@ This file provides guidance to coding agents working with code in this repositor
 
 ## Project Overview
 
-This is a Rust 2024 desktop utility named "viberwhisper". It runs as a background voice-to-text input app with global hotkeys, tray UI, chunked transcription, optional LLM cleanup, bounded local history, and cross-platform text injection.
+This is a Rust 2024 desktop utility named "viberwhisper". It runs as a background voice-to-text input app with first-run setup, configurable global hotkeys, tray UI, chunked transcription, optional LLM cleanup, bounded local history, and cross-platform text injection.
 
 ### Project Background
 
@@ -20,26 +20,27 @@ This is a **cross-platform (macOS + Windows)** project:
 
 ### Core Functionality
 
-1. **Dual-mode Voice Recording**: Hold F8 (hold mode) or toggle F9 (toggle mode) to record
+1. **Configurable Dual-mode Voice Recording**: Hold F8 (hold mode) or toggle F9 (toggle mode) by default, with both bindings configurable as named single keys
 2. **Voice Recognition**: Convert audio to text via OpenAI-compatible STT API, with Groq support in the transcriber layer
-3. **Long Audio Chunking**: Automatically splits long recordings into chunks for parallel transcription
+3. **Long Audio Chunking and Silence Filtering**: Automatically split long recordings into chunks for parallel transcription and skip effectively silent chunks before API submission
 4. **Session Orchestrator**: Background transcription with convergence timeout and partial failure handling
 5. **LLM Post-processing**: Optional text cleanup via LLM (punctuation, filler removal, interruption cleanup)
 6. **Persistent Transcription History**: Append finalized text and timestamp metadata to bounded local JSONL, repair an invalid trailing record, and expose the newest five entries from the tray
 7. **Text Injection**: Output recognized text at the current cursor position on macOS and Windows
 8. **System Tray UI**: Status indicator (idle/recording), left-click recording toggle, and right-click history/exit menu
-9. **CLI Utilities**: Config management and offline WAV transcription commands
+9. **Setup and CLI Utilities**: First-run/on-demand setup plus config management and offline WAV transcription commands
 10. **STT Prompt Regression**: Capture paired WAV/reference datasets, rerun all ready audio with a temporary prompt, and finalize JSON metrics with coding-agent semantic review
 11. **Packaging and Release Automation**: CI workflows plus app bundle / installer release support
 
 ### User Flow
 
-1. User focuses any text input field
-2. **Hold mode**: Hold F8 to record, release to stop
-3. **Toggle mode**: Press F9 to start, press again to stop
-4. The app records audio and processes it in the background
-5. The finalized text is saved to local history and injected into the active input field
-6. The five newest entries are available from the right-click tray menu and copy their full text to the clipboard
+1. On first launch, the setup flow collects API, audio-device, and hotkey settings and writes the canonical configuration
+2. User focuses any text input field
+3. **Hold mode**: Hold F8 to record, release to stop
+4. **Toggle mode**: Press F9 to start, press again to stop
+5. The app records audio and processes it in the background
+6. The finalized text is saved to local history and injected into the active input field
+7. The five newest entries are available from the right-click tray menu and copy their full text to the clipboard
 
 ## Common Commands
 
@@ -90,7 +91,12 @@ src/
   application.rs             — Logging, CLI dispatch, config/convert workflows
   application/
     listener.rs              — Platform-action loop, session effects, transcription delivery
+    listener/
+      event_loop.rs          — Winit application handler driving platform and session events
     prompt_lab.rs            — Dataset capture, regression, and agent-review CLI assembly
+    setup.rs                 — First-run and on-demand setup orchestration
+    setup/
+      hotkey.rs              — Isolated hotkey capture and binding verification helper
   runtime_config.rs          — Application-level API consumer config assembly
   session.rs                 — Shared SessionId value type
   text.rs                    — Shared language-aware transcription text merge
@@ -116,6 +122,7 @@ src/
   audio/
     chunk.rs                 — In-memory WavChunk encoding and capacity policy
     recorder.rs              — AudioRecorder with cpal stream and live chunking
+    signal.rs                — WAV signal-energy detection for silent-chunk filtering
     wav_file.rs              — Streaming offline WAV chunk reader
   input.rs                   — Input module entry and submodule declarations
   input/
