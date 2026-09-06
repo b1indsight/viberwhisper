@@ -22,7 +22,7 @@ use macos::MacBackend as SelectedBackend;
 use windows::WindowsBackend as SelectedBackend;
 
 use backend::PlatformBackend;
-pub(crate) use runtime::{PlatformAction, PlatformEvent, PlatformInterface};
+pub(crate) use runtime::{PlatformAction, PlatformEvent};
 
 pub(crate) type NativePlatform = runtime::PlatformRuntime<SelectedBackend>;
 

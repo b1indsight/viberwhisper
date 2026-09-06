@@ -45,18 +45,19 @@ feature flag, or OS-name match in the application layer.
 
 ## Application Interface
 
-`platform/runtime.rs` implements the common `PlatformInterface`:
+`platform/runtime.rs` exposes the application capabilities as inherent methods on
+`PlatformRuntime<B, D>`. The listener uses the concrete `NativePlatform` alias selected for the
+build target. `PlatformBackend` supplies native policy and operations; `RuntimeDrivers` provides
+the injection boundary used by runtime tests.
 
-```rust
-pub(crate) trait PlatformInterface: Sized {
-    fn start(hotkeys, notify) -> Result<Self, Box<dyn Error>>;
-    fn handle_event(&mut self, event: PlatformEvent) -> Option<PlatformAction>;
-    fn set_recording(&mut self, recording: bool);
-    fn set_history(&mut self, entries: Vec<String>);
-    fn push_history(&mut self, text: String);
-    fn text_typer(&self) -> Arc<dyn TextTyper>;
-}
-```
+| Method | Capability |
+| --- | --- |
+| `start(hotkeys, notify)` | Construct the runtime and connect native callbacks; returns `anyhow::Result<Self>` |
+| `handle_event(event)` | Handle an opaque event and return an optional recording or exit action |
+| `set_recording(recording)` | Update the tray recording indicator |
+| `set_history(entries)` | Populate the recent-history menu |
+| `push_history(text)` | Add a newly saved transcription to the menu |
+| `text_typer()` | Clone the thread-safe text-delivery handle |
 
 `NativePlatform::start` constructs the selected text writer and hotkey filter, starts the
 process-lifetime `rdev` listener, creates the tray, and installs the native callbacks. The listener
