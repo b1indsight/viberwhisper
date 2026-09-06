@@ -156,6 +156,7 @@ docs/
 assets/                      — App icons and bundle metadata
 Cargo.toml                   — Project configuration and dependencies
 config.example.json          — Example configuration template
+CONTRIBUTING.md              — Contributor setup, validation, and pull request workflow
 changelog                    — Project changelog
 ```
 

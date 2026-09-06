@@ -1,9 +1,10 @@
 # ViberWhisper Documentation
 
-## Maintainer Guides
+## Contributor and Maintainer Guides
 
 | Document | Description |
 |---|---|
+| [../CONTRIBUTING.md](../CONTRIBUTING.md) | Development setup, quality checks, STT prompt regression, cross-platform guidance, and pull request workflow |
 | [releasing.md](releasing.md) | Prepare, dry-run, publish, verify, and recover macOS/Windows releases |
 
 ## Architecture
