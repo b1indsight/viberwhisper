@@ -2,38 +2,17 @@ mod listener;
 mod prompt_lab;
 mod setup;
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 use clap::Parser;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::core::cli::{Cli, Commands, ConfigAction, LocalCommand};
+use crate::core::cli::{Cli, Commands, ConfigAction};
 use crate::core::config::{ConfigDocument, ConfigStore, EnvironmentSecretSource};
-use crate::local::{
-    LocalPaths, LocalServiceManager, PythonRuntime, dependencies_installed, detect_python_runtime,
-    download_model, install_requirements, model_weights_present, setup_venv, verify_install,
-};
-use crate::runtime_config::{self, BackendConfig, ProfileSelection};
+use crate::runtime_config;
 use crate::{audio, postprocess, text, transcriber};
-
-struct LocalServiceGuard(Option<LocalServiceManager>);
-
-impl LocalServiceGuard {
-    fn new(manager: Option<LocalServiceManager>) -> Self {
-        Self(manager)
-    }
-}
-
-impl Drop for LocalServiceGuard {
-    fn drop(&mut self) {
-        if let Some(manager) = self.0.as_mut() {
-            manager.release();
-        }
-    }
-}
 
 /// Initializes process-wide services, parses the CLI, and runs the selected workflow.
 pub fn run() -> Result<()> {
@@ -53,9 +32,6 @@ pub fn run() -> Result<()> {
         }
         Some(Commands::Config { action }) => {
             handle_config(action)?;
-        }
-        Some(Commands::Local { action }) => {
-            handle_local(action)?;
         }
         Some(Commands::Convert { input, output }) => {
             handle_convert(&input, output.as_deref())?;
@@ -109,178 +85,10 @@ fn init_tracing() {
         .init();
 }
 
-fn handle_local(action: LocalCommand) -> Result<()> {
-    let (store, document) = load_config()?;
-    let (config_dir, home_dir) = config_context(&store)?;
-    match action {
-        LocalCommand::Install => {
-            let paths = runtime_config::resolve_local_paths(&document, &config_dir, &home_dir)?;
-            ensure_local_install(&paths, true)?;
-            println!("Local Gemma runtime is installed.");
-            Ok(())
-        }
-        LocalCommand::Start => {
-            let config = runtime_config::resolve_listener(
-                &document,
-                &EnvironmentSecretSource,
-                ProfileSelection::Local,
-                &config_dir,
-                &home_dir,
-            )?;
-            listener::run_with_config(config)
-        }
-        LocalCommand::Stop => {
-            let paths = runtime_config::resolve_local_paths(&document, &config_dir, &home_dir)?;
-            let mut manager = LocalServiceManager::for_paths(paths);
-            manager.stop();
-            println!("Local Gemma service stopped.");
-            Ok(())
-        }
-        LocalCommand::Status => {
-            let config = runtime_config::resolve_local_service(&document, &config_dir, &home_dir)?;
-            let manager = LocalServiceManager::from_config(config);
-            let status = manager.status()?;
-            println!("running: {}", status.running);
-            println!("port: {}", status.port);
-            println!(
-                "pid: {}",
-                status
-                    .pid
-                    .map(|pid| pid.to_string())
-                    .unwrap_or_else(|| "n/a".to_string())
-            );
-            println!(
-                "memory: {}",
-                status
-                    .memory_usage
-                    .unwrap_or_else(|| "unavailable".to_string())
-            );
-            println!("health: {}", status.health);
-            Ok(())
-        }
-    }
-}
-
-fn start_local_backend(backend: &mut BackendConfig) -> Result<Option<LocalServiceManager>> {
-    let Some(config) = backend.local_service.take() else {
-        return Ok(None);
-    };
-    ensure_local_install(&config.paths, false)?;
-    let mut manager = LocalServiceManager::from_config(config);
-    manager.start()?;
-    Ok(Some(manager))
-}
-
-fn ensure_local_install(paths: &LocalPaths, install_deps: bool) -> Result<()> {
-    let hf_endpoint =
-        std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string());
-    let runtime = detect_python_runtime()?;
-
-    log_python_runtime(&runtime);
-
-    info!(
-        step = 1,
-        total_steps = 4,
-        "Creating local Python virtual environment"
-    );
-    setup_venv(&paths.venv_dir)?;
-
-    if install_deps {
-        let requirements = local_requirements_path();
-        info!(
-            step = 2,
-            total_steps = 4,
-            "Installing local Python dependencies"
-        );
-        install_requirements(&paths.venv_dir, &requirements)?;
-    } else if !dependencies_installed(&paths.venv_dir) {
-        bail!("Python dependencies are not installed. Run `viberwhisper local install` first.");
-    } else {
-        info!(
-            step = 2,
-            total_steps = 4,
-            "Local Python dependencies already installed"
-        );
-    }
-
-    if !model_weights_present(&paths.model_dir) {
-        info!(
-            step = 3,
-            total_steps = 4,
-            model = "google/gemma-4-E2B-it",
-            "Downloading local model; set HF_ENDPOINT to use a mirror"
-        );
-    } else {
-        info!(
-            step = 3,
-            total_steps = 4,
-            model = "google/gemma-4-E2B-it",
-            "Local model already present"
-        );
-    }
-    download_model(&paths.model_dir, &hf_endpoint)?;
-
-    info!(
-        step = 4,
-        total_steps = 4,
-        "Verifying local runtime installation"
-    );
-    verify_install(&paths.venv_dir, &paths.model_dir)?;
-
-    Ok(())
-}
-
-fn log_python_runtime(runtime: &PythonRuntime) {
-    let (major, minor) = runtime.version;
-    info!(
-        python = %runtime.python.display(),
-        version_major = major,
-        version_minor = minor,
-        minimum_version = "3.10",
-        "Detected local Python runtime"
-    );
-    match &runtime.uv {
-        Some(uv) => info!(runner = "uv", path = %uv.display(), "Selected local package runner"),
-        None => info!(runner = "system-python", "Selected local package runner"),
-    }
-}
-
 fn load_config() -> Result<(ConfigStore, ConfigDocument)> {
     let store = ConfigStore::discover()?;
     let document = store.load()?.unwrap_or_default();
     Ok((store, document))
-}
-
-fn config_context(store: &ConfigStore) -> Result<(PathBuf, PathBuf)> {
-    let config_dir = store
-        .path()
-        .parent()
-        .ok_or_else(|| anyhow!("configuration path has no parent directory"))?
-        .to_path_buf();
-    let home_dir = dirs::home_dir().ok_or_else(|| anyhow!("could not determine home directory"))?;
-    Ok((config_dir, home_dir))
-}
-
-fn local_requirements_path() -> PathBuf {
-    find_server_file("requirements.txt")
-}
-
-/// Locates a file inside the `server/` directory, trying the packaged location
-/// (next to the executable) first, then falling back to the development source tree.
-fn find_server_file(filename: &str) -> PathBuf {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(exe_dir) = exe.parent()
-    {
-        let candidate = exe_dir.join("server").join(filename);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-
-    // Fallback: compile-time source tree (works with `cargo run`).
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("server")
-        .join(filename)
 }
 
 fn handle_config(action: ConfigAction) -> Result<()> {
@@ -292,11 +100,10 @@ fn handle_config(action: ConfigAction) -> Result<()> {
 
     let mut document = store.load()?.unwrap_or_default();
     let secrets = EnvironmentSecretSource;
-    let (config_dir, home_dir) = config_context(&store)?;
     match action {
         ConfigAction::Path => unreachable!(),
         ConfigAction::Check => {
-            runtime_config::check(&document, &secrets, &config_dir, &home_dir)?;
+            runtime_config::check(&document, &secrets)?;
             println!("Configuration is valid.");
         }
         ConfigAction::List => {
@@ -329,16 +136,8 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
 
     info!(input, "Transcribing audio file");
 
-    let (store, document) = load_config()?;
-    let (config_dir, home_dir) = config_context(&store)?;
-    let mut config = runtime_config::resolve_convert(
-        &document,
-        &EnvironmentSecretSource,
-        &config_dir,
-        &home_dir,
-    )?;
-    let local_manager = start_local_backend(&mut config.backend)?;
-    let _local_manager = LocalServiceGuard::new(local_manager);
+    let (_, document) = load_config()?;
+    let config = runtime_config::resolve_convert(&document, &EnvironmentSecretSource)?;
     let transcriber = ApiTranscriber::new(config.backend.transcriber)?;
     let post_processor = PostProcessor::new(config.backend.post_process);
 

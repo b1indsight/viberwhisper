@@ -57,11 +57,11 @@ require_release_notes_marker \
   "missing Windows Authenticode signing" \
   'not[[:space:]]+Authenticode[[:space:]]+signed'
 require_release_notes_marker \
-  "API-only packaged scope" \
-  'API[[:space:]]+inference[[:space:]]+profile[[:space:]]+only'
+  "OpenAI-compatible endpoint scope" \
+  'OpenAI-compatible[[:space:]]+endpoints'
 require_release_notes_marker \
-  "Local-mode source checkout requirement" \
-  'Local[[:space:]]+mode.*requires[[:space:]]+a[[:space:]]+source[[:space:]]+checkout'
+  "localhost endpoint support" \
+  'localhost'
 require_release_notes_marker \
   "SHA256SUMS verification" \
   'SHA256SUMS'

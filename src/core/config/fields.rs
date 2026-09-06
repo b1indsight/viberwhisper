@@ -1,6 +1,6 @@
 use std::fmt;
 
-use super::{ConfigDocument, InferenceProfile, SecretSource};
+use super::{ConfigDocument, SecretSource};
 
 macro_rules! define_config_fields {
     ($(
@@ -54,16 +54,12 @@ define_config_fields! {
     PostProcessPreheatEnabled => { name: "post_process.preheat_enabled", writable: true },
     PostProcessPrompt => { name: "post_process.prompt", writable: true },
     PostProcessTemperature => { name: "post_process.temperature", writable: true },
-    InferenceActive => { name: "inference.active", writable: true },
     ApiTranscriptionUrl => { name: "inference.api.transcription.api_url", writable: true },
     ApiTranscriptionModel => { name: "inference.api.transcription.model", writable: true },
     ApiTranscriptionKey => { name: "inference.api.transcription.api_key", writable: false },
     ApiPostProcessUrl => { name: "inference.api.post_process.api_url", writable: true },
     ApiPostProcessModel => { name: "inference.api.post_process.model", writable: true },
     ApiPostProcessKey => { name: "inference.api.post_process.api_key", writable: false },
-    LocalDataDir => { name: "inference.local.data_dir", writable: true },
-    LocalServerPort => { name: "inference.local.server_port", writable: true },
-    LocalQuantization => { name: "inference.local.quantization", writable: true },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,13 +164,6 @@ impl ConfigDocument {
             ConfigKey::PostProcessTemperature => {
                 FieldValue::Value(self.post_process.temperature.to_string())
             }
-            ConfigKey::InferenceActive => FieldValue::Value(
-                match self.inference.active {
-                    InferenceProfile::Api => "api",
-                    InferenceProfile::Local => "local",
-                }
-                .to_string(),
-            ),
             ConfigKey::ApiTranscriptionUrl => {
                 FieldValue::Value(self.inference.api.transcription.api_url.clone())
             }
@@ -186,13 +175,6 @@ impl ConfigDocument {
             }
             ConfigKey::ApiPostProcessModel => {
                 optional_field(&self.inference.api.post_process.model)
-            }
-            ConfigKey::LocalDataDir => optional_field(&self.inference.local.data_dir),
-            ConfigKey::LocalServerPort => {
-                FieldValue::Value(self.inference.local.server_port.to_string())
-            }
-            ConfigKey::LocalQuantization => {
-                FieldValue::Value(self.inference.local.quantization.clone())
             }
             ConfigKey::ApiTranscriptionKey | ConfigKey::ApiPostProcessKey => unreachable!(),
         })
@@ -227,13 +209,6 @@ impl ConfigDocument {
             ConfigKey::PostProcessTemperature => {
                 self.post_process.temperature = parse_f32(value).map_err(invalid)?;
             }
-            ConfigKey::InferenceActive => {
-                self.inference.active = match value.to_ascii_lowercase().as_str() {
-                    "api" => InferenceProfile::Api,
-                    "local" => InferenceProfile::Local,
-                    _ => return Err(invalid("expected `api` or `local`".to_string())),
-                };
-            }
             ConfigKey::ApiTranscriptionUrl => {
                 self.inference.api.transcription.api_url = value.to_string()
             }
@@ -246,11 +221,6 @@ impl ConfigDocument {
             ConfigKey::ApiPostProcessModel => {
                 self.inference.api.post_process.model = parse_optional(value)
             }
-            ConfigKey::LocalDataDir => self.inference.local.data_dir = parse_optional(value),
-            ConfigKey::LocalServerPort => {
-                self.inference.local.server_port = parse_number::<u16>(value).map_err(invalid)?;
-            }
-            ConfigKey::LocalQuantization => self.inference.local.quantization = value.to_string(),
             ConfigKey::SchemaVersion
             | ConfigKey::ApiTranscriptionKey
             | ConfigKey::ApiPostProcessKey => unreachable!(),

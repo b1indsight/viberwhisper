@@ -3,7 +3,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::{info, warn};
 
-use super::{LocalServiceGuard, start_local_backend};
 use crate::core::recording_session::{RecordingState, SessionEvent};
 use crate::history::{HistoryStore, HistoryTyper};
 use crate::platform::PlatformAction;
@@ -49,7 +48,7 @@ enum ListenerMode {
     Capture(Arc<DatasetStore>),
 }
 
-fn run_with_mode(mut config: ListenerConfig, mode: ListenerMode) -> Result<()> {
+fn run_with_mode(config: ListenerConfig, mode: ListenerMode) -> Result<()> {
     use std::sync::Arc;
 
     use audio::AudioRecorder;
@@ -62,9 +61,6 @@ fn run_with_mode(mut config: ListenerConfig, mode: ListenerMode) -> Result<()> {
     use crate::platform::{NativePlatform, PlatformInterface};
 
     info!("ViberWhisper voice-to-text listener starting");
-
-    let local_manager = start_local_backend(&mut config.backend)?;
-    let _local_manager = LocalServiceGuard::new(local_manager);
 
     let capture_stt = match &mode {
         ListenerMode::Delivery => None,

@@ -1,27 +1,17 @@
 //! Application-level configuration assembly.
 //!
-//! This module selects the active inference profile, constructs consumer configs,
-//! and aggregates construction issues into the few top-level workflow configs.
+//! This module constructs API consumer configs and aggregates construction issues into the few
+//! top-level workflow configs.
 //! Persistence and business rules stay elsewhere.
-
-use std::path::Path;
 
 use crate::audio::{AudioConfig, MAX_CHUNK_DURATION_SECS, MAX_CHUNK_SIZE_BYTES};
 use crate::core::config::{
-    ApiAuth, ConfigDocument, InferenceProfile, SecretSource, SecretValue, ValidationIssue,
-    ValidationReport,
+    ApiAuth, ConfigDocument, SecretSource, SecretValue, ValidationIssue, ValidationReport,
 };
 use crate::core::orchestrator::OrchestratorConfig;
 use crate::input::hotkey::HotkeyConfig;
-use crate::local::{LocalPaths, LocalServiceConfig, MODEL_NAME as LOCAL_MODEL_NAME};
 use crate::postprocess::PostProcessConfig;
 use crate::transcriber::TranscriberConfig;
-
-/// Chooses whether listener assembly follows the configured profile or forces Local.
-pub enum ProfileSelection {
-    Configured,
-    Local,
-}
 
 /// Runtime dependencies shared by the listener workflow.
 pub struct ListenerConfig {
@@ -31,12 +21,11 @@ pub struct ListenerConfig {
     pub backend: BackendConfig,
 }
 
-/// Runtime backend dependencies after the configured profile has been selected.
+/// Runtime dependencies for transcription and optional post-processing.
 #[derive(Debug)]
 pub struct BackendConfig {
     pub(crate) transcriber: TranscriberConfig,
     pub(crate) post_process: PostProcessConfig,
-    pub(crate) local_service: Option<LocalServiceConfig>,
 }
 
 /// Runtime dependencies and chunking policy for one offline WAV conversion.
@@ -52,9 +41,6 @@ pub struct ConvertConfig {
 pub fn resolve_listener(
     document: &ConfigDocument,
     secrets: &dyn SecretSource,
-    selection: ProfileSelection,
-    config_dir: &Path,
-    home_dir: &Path,
 ) -> Result<ListenerConfig, ValidationReport> {
     let mut issues = Vec::new();
     let hotkeys = collect_issues(
@@ -63,10 +49,7 @@ pub fn resolve_listener(
     );
     let audio = AudioConfig::from_section(&document.audio);
     let orchestrator = OrchestratorConfig::new(document.transcription.language.clone());
-    let backend = collect_issues(
-        resolve_backend(document, secrets, selection, config_dir, home_dir),
-        &mut issues,
-    );
+    let backend = collect_issues(resolve_api_backend(document, secrets), &mut issues);
 
     match (hotkeys, backend) {
         (Some(hotkeys), Some(backend)) if issues.is_empty() => Ok(ListenerConfig {
@@ -79,21 +62,12 @@ pub fn resolve_listener(
     }
 }
 
-/// Resolve the selected transcription backend for one offline conversion.
+/// Resolve the transcription backend for one offline conversion.
 pub fn resolve_convert(
     document: &ConfigDocument,
     secrets: &dyn SecretSource,
-    config_dir: &Path,
-    home_dir: &Path,
 ) -> Result<ConvertConfig, ValidationReport> {
-    let backend = resolve_backend(
-        document,
-        secrets,
-        ProfileSelection::Configured,
-        config_dir,
-        home_dir,
-    )
-    .map_err(report)?;
+    let backend = resolve_api_backend(document, secrets).map_err(report)?;
     Ok(ConvertConfig {
         backend,
         language: document.transcription.language.clone(),
@@ -102,57 +76,12 @@ pub fn resolve_convert(
     })
 }
 
-/// Resolve Local filesystem paths without requiring the service to be valid.
-pub fn resolve_local_paths(
-    document: &ConfigDocument,
-    config_dir: &Path,
-    home_dir: &Path,
-) -> Result<LocalPaths, ValidationReport> {
-    LocalPaths::resolve(&document.inference.local, config_dir, home_dir).map_err(report)
-}
-
-/// Resolve Local paths and service settings together.
-pub fn resolve_local_service(
-    document: &ConfigDocument,
-    config_dir: &Path,
-    home_dir: &Path,
-) -> Result<LocalServiceConfig, ValidationReport> {
-    let paths = resolve_local_paths(document, config_dir, home_dir)?;
-    LocalServiceConfig::validate(&document.inference.local, paths).map_err(report)
-}
-
-/// Check the configuration used by the active listener profile.
+/// Check the configuration used by the listener.
 pub fn check(
     document: &ConfigDocument,
     secrets: &dyn SecretSource,
-    config_dir: &Path,
-    home_dir: &Path,
 ) -> Result<(), ValidationReport> {
-    resolve_listener(
-        document,
-        secrets,
-        ProfileSelection::Configured,
-        config_dir,
-        home_dir,
-    )
-    .map(|_| ())
-}
-
-fn resolve_backend(
-    document: &ConfigDocument,
-    secrets: &dyn SecretSource,
-    selection: ProfileSelection,
-    config_dir: &Path,
-    home_dir: &Path,
-) -> Result<BackendConfig, Vec<ValidationIssue>> {
-    let selected = match selection {
-        ProfileSelection::Configured => document.inference.active,
-        ProfileSelection::Local => InferenceProfile::Local,
-    };
-    match selected {
-        InferenceProfile::Api => resolve_api_backend(document, secrets),
-        InferenceProfile::Local => resolve_local_backend(document, config_dir, home_dir),
-    }
+    resolve_listener(document, secrets).map(|_| ())
 }
 
 fn resolve_api_backend(
@@ -192,57 +121,7 @@ fn resolve_api_backend(
         (Some(transcriber), Some(post_process)) if issues.is_empty() => Ok(BackendConfig {
             transcriber,
             post_process,
-            local_service: None,
         }),
-        _ => Err(issues),
-    }
-}
-
-fn resolve_local_backend(
-    document: &ConfigDocument,
-    config_dir: &Path,
-    home_dir: &Path,
-) -> Result<BackendConfig, Vec<ValidationIssue>> {
-    let mut issues = Vec::new();
-    let paths = collect_issues(
-        LocalPaths::resolve(&document.inference.local, config_dir, home_dir),
-        &mut issues,
-    );
-    let service = paths.and_then(|paths| {
-        collect_issues(
-            LocalServiceConfig::validate(&document.inference.local, paths),
-            &mut issues,
-        )
-    });
-    let base_url = format!("http://127.0.0.1:{}", document.inference.local.server_port);
-    let transcription_url = format!("{base_url}/v1/audio/transcriptions");
-    let transcriber = collect_issues(
-        TranscriberConfig::validate(
-            &transcription_url,
-            ApiAuth::None,
-            LOCAL_MODEL_NAME,
-            &document.transcription,
-        ),
-        &mut issues,
-    );
-    let post_process_url = format!("{base_url}/v1/chat/completions");
-    let post_process = collect_issues(
-        PostProcessConfig::validate(
-            Some(&post_process_url),
-            ApiAuth::None,
-            Some(LOCAL_MODEL_NAME),
-            &document.post_process,
-        ),
-        &mut issues,
-    );
-    match (service, transcriber, post_process) {
-        (Some(service), Some(transcriber), Some(post_process)) if issues.is_empty() => {
-            Ok(BackendConfig {
-                transcriber,
-                post_process,
-                local_service: Some(service),
-            })
-        }
         _ => Err(issues),
     }
 }
@@ -280,7 +159,6 @@ mod tests {
     use super::*;
     use crate::core::config::{ConfigDocument, SecretSource};
     use std::collections::HashMap;
-    use std::path::Path;
 
     struct MapSecrets(HashMap<&'static str, &'static str>);
 
@@ -295,45 +173,13 @@ mod tests {
         let document = ConfigDocument::default();
         let secrets = MapSecrets(HashMap::from([("TRANSCRIPTION_API_KEY", "token")]));
 
-        let config = resolve_listener(
-            &document,
-            &secrets,
-            ProfileSelection::Configured,
-            Path::new("/config/viberwhisper"),
-            Path::new("/home/test"),
-        )
-        .unwrap();
+        let config = resolve_listener(&document, &secrets).unwrap();
 
-        assert!(config.backend.local_service.is_none());
         assert_eq!(config.hotkeys.hold_label.as_deref(), Some("F8"));
     }
 
     #[test]
-    fn local_override_does_not_mutate_persisted_profile() {
-        let document = ConfigDocument::default();
-        let secrets = MapSecrets(HashMap::new());
-
-        let config = resolve_listener(
-            &document,
-            &secrets,
-            ProfileSelection::Local,
-            Path::new("/config/viberwhisper"),
-            Path::new("/home/test"),
-        )
-        .unwrap();
-
-        assert!(config.backend.local_service.is_some());
-        assert_eq!(
-            document
-                .get_field("inference.active", &secrets)
-                .unwrap()
-                .to_string(),
-            "api"
-        );
-    }
-
-    #[test]
-    fn api_backend_allows_unauthenticated_compatible_endpoints() {
+    fn api_backend_allows_unauthenticated_localhost_endpoints() {
         let mut document = ConfigDocument::default();
         document.post_process.enabled = true;
         document.inference.api.post_process.api_url =
@@ -341,15 +187,8 @@ mod tests {
         document.inference.api.post_process.model = Some("local-model".to_string());
         let secrets = MapSecrets(HashMap::new());
 
-        let config = resolve_convert(
-            &document,
-            &secrets,
-            Path::new("/config/viberwhisper"),
-            Path::new("/home/test"),
-        )
-        .unwrap();
+        let config = resolve_convert(&document, &secrets).unwrap();
 
-        assert!(config.backend.local_service.is_none());
         assert_eq!(config.max_chunk_duration_secs, 30);
         assert_eq!(config.max_chunk_size_bytes, 23 * 1024 * 1024);
     }
@@ -367,42 +206,18 @@ mod tests {
             "environment-token",
         )]));
 
-        let backend = resolve_convert(
-            &document,
-            &secrets,
-            Path::new("/config/viberwhisper"),
-            Path::new("/home/test"),
-        )
-        .unwrap();
+        let backend = resolve_convert(&document, &secrets).unwrap();
         let debug = format!("{backend:?}");
         assert!(!debug.contains("environment-token"));
         assert!(!debug.contains("disk-token"));
     }
 
     #[test]
-    fn check_ignores_the_inactive_profile() {
+    fn check_validates_the_api_configuration() {
         let mut document = ConfigDocument::default();
-        document.inference.active = InferenceProfile::Local;
         document.inference.api.transcription.api_url = "not a URL".to_string();
         document.inference.api.transcription.model.clear();
 
-        check(
-            &document,
-            &MapSecrets(HashMap::new()),
-            Path::new("/config/viberwhisper"),
-            Path::new("/home/test"),
-        )
-        .unwrap();
-
-        document.inference.active = InferenceProfile::Api;
-        assert!(
-            check(
-                &document,
-                &MapSecrets(HashMap::new()),
-                Path::new("/config/viberwhisper"),
-                Path::new("/home/test"),
-            )
-            .is_err()
-        );
+        assert!(check(&document, &MapSecrets(HashMap::new())).is_err());
     }
 }

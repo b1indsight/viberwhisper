@@ -311,10 +311,6 @@ jobs:
           if ($installedCli.Count -ne 1) { throw "Expected one installed CLI executable, found $($installedCli.Count)" }
           if ($installedApp.Count -ne 1) { throw "Expected one installed desktop executable, found $($installedApp.Count)" }
           if ($installedLicense.Count -ne 1) { throw "Expected one installed license, found $($installedLicense.Count)" }
-          if (Get-ChildItem $extract -Recurse -Directory | Where-Object Name -eq "server") {
-            throw "Python server payload must not be included in this release"
-          }
-
       - name: Test MSI user install, machine upgrade, shortcut, and uninstall
         shell: pwsh
         run: |

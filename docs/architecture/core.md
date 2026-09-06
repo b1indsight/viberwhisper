@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The `core` module contains strict v2 configuration persistence, CLI parsing, recording lifecycle state, and transcription orchestration. Application-level configuration assembly lives in `src/runtime_config.rs` so business consumers never receive the full persisted document.
+The `core` module contains strict v3 configuration persistence, CLI parsing, recording lifecycle state, and transcription orchestration. Application-level configuration assembly lives in `src/runtime_config.rs` so business consumers never receive the full persisted document.
 
 ## Config (`src/core/config/`)
 
@@ -10,14 +10,14 @@ The config package intentionally has four files:
 
 | File | Responsibility |
 |---|---|
-| `document.rs` | `ConfigDocument`, nested v2 serde schema, and defaults |
+| `document.rs` | `ConfigDocument`, nested v3 serde schema, and defaults |
 | `fields.rs` | one canonical `ConfigKey` catalog used by list/get/set |
 | `store.rs` | platform path discovery plus fail-closed load and atomic save |
 | `src/core/config.rs` | facade, config errors, validation report, secret-safe value types |
 
-`ConfigDocument` accepts the canonical document with `schema_version: 2`. Missing or unknown fields,
-wrong versions, invalid JSON, and non-finite floats are errors, except that the optional
-`audio.input_device` added after the initial v2 schema defaults to the system device when absent.
+`ConfigDocument` accepts the canonical document with `schema_version: 3`. Missing or unknown fields,
+wrong versions, invalid JSON, and non-finite floats are errors, except that optional
+`audio.input_device` defaults to the system device when absent.
 Retired fields such as `chunking`, `session`, and `inference.api.provider` are not accepted. A
 missing file is represented as `None` by `ConfigStore::load`; ordinary callers explicitly select
 the in-memory defaults while setup uses the absence to trigger the first-run flow.
@@ -32,15 +32,17 @@ file, `Some` carries a loaded document, and malformed or unreadable files remain
 
 ## Runtime assembly (`src/runtime_config.rs`)
 
-`runtime_config` selects the API or Local profile, constructs module-owned consumer configs, and aggregates construction errors into `ListenerConfig` or `BackendConfig`. Profile selection is consumed during assembly: `BackendConfig` stores the common transcriber and post-process values directly, plus an optional Local service, rather than duplicating common fields across enum variants. It contains no generic validator registry and no duplicated raw DTO layer.
+`runtime_config` constructs module-owned API consumer configs and aggregates construction errors into
+`ListenerConfig` or `BackendConfig`. `BackendConfig` stores the transcriber and post-process values
+directly; there is no profile selector or service-lifecycle state. It contains no generic validator
+registry and no duplicated raw DTO layer.
 
 Each consumer receives a type owned by its module: `HotkeyConfig`, `AudioConfig`,
-`OrchestratorConfig`, `TranscriberConfig`, `PostProcessConfig`, `LocalPaths`, or
-`LocalServiceConfig`. Hotkey resolution enters through `platform::validate_hotkeys`, so the
+`OrchestratorConfig`, `TranscriberConfig`, or `PostProcessConfig`. Hotkey resolution enters through
+`platform::validate_hotkeys`, so the
 compile-time-selected backend supplies native key availability without adding target branches to
-runtime assembly. Local mode uses `ApiAuth::None`; API mode uses a redacted `SecretValue` when
-configured and `ApiAuth::None` otherwise. `local start` selects Local for one invocation without
-mutating the persisted profile.
+runtime assembly. API authentication uses a redacted `SecretValue` when configured and
+`ApiAuth::None` otherwise, which also permits user-managed compatible localhost endpoints.
 
 ## CLI (`src/core/cli.rs`)
 
@@ -58,17 +60,16 @@ No subcommand runs the recording listener. Other commands are:
 |---|---|
 | `setup` | Run the modal configuration and verification flow on demand |
 | `config path` | Print the canonical file path |
-| `config check` | Resolve the active listener profile and report construction issues |
+| `config check` | Resolve the listener API configuration and report construction issues |
 | `config list/get/set` | Use canonical dotted keys from the single field catalog |
-| `local install/start/stop/status` | Manage the Local runtime; stop only requires Local paths |
-| `convert <wav>` | Resolve the persisted backend and transcribe a WAV file |
+| `convert <wav>` | Resolve the configured API backend and transcribe a WAV file |
 | `prompt-lab record` | Reuse native recording controls to archive WAV/raw-STT sample pairs |
 | `prompt-lab sample list/show/correct` | Inspect and curate human references and proper nouns |
 | `prompt-lab dataset validate` | Verify dataset schemas, WAV readability, paths, and digests |
 | `prompt-lab evaluate` | Freshly transcribe every ready WAV and write local metrics to JSON |
 | `prompt-lab report apply-review` | Validate coding-agent scores and finalize all three gates |
 
-`config set` parses the canonical field type and saves the updated document without running cross-field business validation. This permits incremental configuration; `config check` or the command that consumes a profile reports incomplete runtime configuration. Secret and schema fields are read-only. Legacy aliases are rejected.
+`config set` parses the canonical field type and saves the updated document without running cross-field business validation. This permits incremental configuration; `config check` or the command that consumes the API configuration reports incomplete runtime configuration. Secret and schema fields are read-only. Legacy aliases are rejected.
 
 ---
 
@@ -172,9 +173,9 @@ newest complete suffix through a temporary-file replacement. An invalid older re
 loading at that boundary without being repaired. Exit does not wait for persistence or injection
 already in progress.
 
-API and Local backends reuse the same recording/orchestration pipeline; no endpoint rewriting or
-persisted-document mutation occurs in the application layer. Both process entry files only
-delegate startup to explicit library entry points.
+The configurable API backend is shared by the recording/orchestration, offline conversion, setup,
+and prompt-lab workflows; no endpoint rewriting or persisted-document mutation occurs in the
+application layer. Both process entry files only delegate startup to explicit library entry points.
 
 Prompt-lab evaluation is a CLI-only workflow: it does not construct winit, a post-processor,
 history, or native typing. It resolves the configured backend, replaces only the consumed

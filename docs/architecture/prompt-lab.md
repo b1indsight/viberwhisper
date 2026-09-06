@@ -22,7 +22,7 @@ src/application/prompt_lab.rs — CLI/config/backend assembly
 
 The domain modules contain no winit or native platform types. The application layer reuses the
 existing listener only for capture controls and assembles offline regression from the resolved STT
-profile, `WavChunkReader`, `ApiTranscriber`, and the shared language-aware merge helper.
+configuration, `WavChunkReader`, `ApiTranscriber`, and the shared language-aware merge helper.
 
 ## Dataset and Capture
 

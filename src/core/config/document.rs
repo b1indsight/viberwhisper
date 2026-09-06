@@ -19,7 +19,7 @@ pub struct ConfigDocument {
 impl Default for ConfigDocument {
     fn default() -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             input: InputSection::default(),
             audio: AudioSection::default(),
             transcription: TranscriptionSection::default(),
@@ -44,11 +44,11 @@ where
     D: serde::Deserializer<'de>,
 {
     let version = u32::deserialize(deserializer)?;
-    if version == 2 {
+    if version == 3 {
         Ok(version)
     } else {
         Err(serde::de::Error::custom(format!(
-            "unsupported schema_version {version}; expected 2"
+            "unsupported schema_version {version}; expected 3"
         )))
     }
 }
@@ -141,29 +141,10 @@ impl Default for PostProcessSection {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum InferenceProfile {
-    Api,
-    Local,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InferenceSection {
-    pub(crate) active: InferenceProfile,
     pub(crate) api: ApiInferenceSection,
-    pub(crate) local: LocalSection,
-}
-
-impl Default for InferenceSection {
-    fn default() -> Self {
-        Self {
-            active: InferenceProfile::Api,
-            api: ApiInferenceSection::default(),
-            local: LocalSection::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -220,23 +201,5 @@ impl fmt::Debug for ApiPostProcessSection {
             .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .finish()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct LocalSection {
-    pub(crate) data_dir: Option<String>,
-    pub(crate) server_port: u16,
-    pub(crate) quantization: String,
-}
-
-impl Default for LocalSection {
-    fn default() -> Self {
-        Self {
-            data_dir: Some("~/.viberwhisper".to_string()),
-            server_port: 17_265,
-            quantization: "int8".to_string(),
-        }
     }
 }

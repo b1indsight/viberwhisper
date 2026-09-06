@@ -6,10 +6,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use document::ConfigDocument;
-pub(crate) use document::{
-    AudioSection, InferenceProfile, InputSection, LocalSection, PostProcessSection,
-    TranscriptionSection,
-};
+pub(crate) use document::{AudioSection, InputSection, PostProcessSection, TranscriptionSection};
 pub use fields::ConfigKey;
 #[cfg(test)]
 use fields::{FieldError, FieldValue, SecretStatus};
@@ -158,15 +155,17 @@ mod tests {
     }
 
     #[test]
-    fn canonical_example_round_trips_as_v2() {
+    fn canonical_example_round_trips_as_v3() {
         let document: ConfigDocument =
             serde_json::from_str(include_str!("../../config.example.json")).unwrap();
-        assert_eq!(document.schema_version, 2);
+        assert_eq!(document.schema_version, 3);
         let encoded = serde_json::to_string(&document).unwrap();
         let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         assert!(encoded_value.get("chunking").is_none());
         assert!(encoded_value.get("session").is_none());
         assert!(encoded_value["inference"]["api"].get("provider").is_none());
+        assert!(encoded_value["inference"].get("active").is_none());
+        assert!(encoded_value["inference"].get("local").is_none());
         assert_eq!(
             serde_json::from_str::<ConfigDocument>(&encoded).unwrap(),
             document
@@ -174,11 +173,10 @@ mod tests {
     }
 
     #[test]
-    fn existing_v2_documents_default_the_new_optional_input_device() {
-        let previous_v2 =
-            include_str!("../../config.example.json").replace("    \"input_device\": null,\n", "");
-        let document: ConfigDocument = serde_json::from_str(&previous_v2).unwrap();
-        assert_eq!(document.audio.input_device, None);
+    fn rejects_retired_v2_documents() {
+        let previous_v2 = include_str!("../../config.example.json")
+            .replace("\"schema_version\": 3", "\"schema_version\": 2");
+        assert!(serde_json::from_str::<ConfigDocument>(&previous_v2).is_err());
     }
 
     #[test]
@@ -215,9 +213,9 @@ mod tests {
     #[test]
     fn rejects_missing_wrong_and_flat_schema() {
         assert!(serde_json::from_str::<ConfigDocument>(r#"{"input": {}}"#).is_err());
-        assert!(serde_json::from_str::<ConfigDocument>(r#"{"schema_version": 1}"#).is_err());
+        assert!(serde_json::from_str::<ConfigDocument>(r#"{"schema_version": 2}"#).is_err());
         assert!(
-            serde_json::from_str::<ConfigDocument>(r#"{"schema_version": 2, "hold_hotkey": "F8"}"#)
+            serde_json::from_str::<ConfigDocument>(r#"{"schema_version": 3, "hold_hotkey": "F8"}"#)
                 .is_err()
         );
     }
@@ -279,7 +277,8 @@ mod tests {
         assert!(keys.contains(&"input.hold_hotkey"));
         assert!(keys.contains(&"audio.input_device"));
         assert!(keys.contains(&"inference.api.transcription.api_url"));
-        assert!(keys.contains(&"inference.local.server_port"));
+        assert!(!keys.contains(&"inference.active"));
+        assert!(!keys.contains(&"inference.local.server_port"));
         assert!(!keys.contains(&"hold_hotkey"));
         assert!(!keys.contains(&"local_mode"));
         for retired in [
@@ -291,7 +290,7 @@ mod tests {
         ] {
             assert!(!keys.contains(&retired));
         }
-        assert_eq!(keys.len(), 22);
+        assert_eq!(keys.len(), 18);
 
         let document = ConfigDocument::default();
         let secrets = MapSecrets(HashMap::new());
