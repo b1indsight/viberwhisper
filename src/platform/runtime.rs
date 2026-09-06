@@ -40,25 +40,11 @@ pub(crate) enum PlatformAction {
     ExitRequested,
 }
 
-/// The only native desktop capability surface consumed by the listener application.
+/// Main-thread platform owner parameterized by the backend selected in `platform.rs`.
 ///
 /// The runtime is created and retained on the winit main thread because it owns native tray
 /// state. `start` installs process-lifetime callbacks; only the cloned `TextTyper` handle
 /// returned by `text_typer` may cross to a finalization worker.
-pub(crate) trait PlatformInterface: Sized {
-    fn start(
-        hotkeys: &HotkeyConfig,
-        notify: impl Fn(PlatformEvent) + Send + Sync + 'static,
-    ) -> Result<Self>;
-
-    fn handle_event(&mut self, event: PlatformEvent) -> Option<PlatformAction>;
-    fn set_recording(&mut self, recording: bool);
-    fn set_history(&mut self, entries: Vec<String>);
-    fn push_history(&mut self, text: String);
-    fn text_typer(&self) -> Arc<dyn TextTyper>;
-}
-
-/// Main-thread platform owner parameterized by the backend selected in `platform.rs`.
 pub(crate) struct PlatformRuntime<B, D = NativeDrivers>
 where
     B: PlatformBackend,
@@ -124,12 +110,12 @@ impl<B: PlatformBackend> RuntimeDrivers<B> for NativeDrivers {
     }
 }
 
-impl<B, D> PlatformInterface for PlatformRuntime<B, D>
+impl<B, D> PlatformRuntime<B, D>
 where
     B: PlatformBackend,
     D: RuntimeDrivers<B>,
 {
-    fn start(
+    pub(crate) fn start(
         hotkeys: &HotkeyConfig,
         notify: impl Fn(PlatformEvent) + Send + Sync + 'static,
     ) -> Result<Self> {
@@ -155,7 +141,7 @@ where
         })
     }
 
-    fn handle_event(&mut self, event: PlatformEvent) -> Option<PlatformAction> {
+    pub(crate) fn handle_event(&mut self, event: PlatformEvent) -> Option<PlatformAction> {
         match event.0 {
             PlatformEventKind::Hotkey(event) => action_from_hotkey(event),
             PlatformEventKind::Tray(event) => match self.tray.handle_event(event) {
@@ -170,19 +156,19 @@ where
         }
     }
 
-    fn set_recording(&mut self, recording: bool) {
+    pub(crate) fn set_recording(&mut self, recording: bool) {
         self.tray.set_recording(recording);
     }
 
-    fn set_history(&mut self, entries: Vec<String>) {
+    pub(crate) fn set_history(&mut self, entries: Vec<String>) {
         self.tray.set_history(entries);
     }
 
-    fn push_history(&mut self, text: String) {
+    pub(crate) fn push_history(&mut self, text: String) {
         self.tray.push_history(text);
     }
 
-    fn text_typer(&self) -> Arc<dyn TextTyper> {
+    pub(crate) fn text_typer(&self) -> Arc<dyn TextTyper> {
         Arc::clone(&self.typer)
     }
 }

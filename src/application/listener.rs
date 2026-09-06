@@ -58,7 +58,7 @@ fn run_with_mode(config: ListenerConfig, mode: ListenerMode) -> Result<()> {
     use transcriber::ApiTranscriber;
     use winit::event_loop::{ControlFlow, EventLoop};
 
-    use crate::platform::{NativePlatform, PlatformInterface};
+    use crate::platform::NativePlatform;
 
     info!("ViberWhisper voice-to-text listener starting");
 

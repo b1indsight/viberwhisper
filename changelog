@@ -57,3 +57,4 @@
 2026-09-06: Route listener, local-install, offline-conversion, and prompt-lab capture diagnostics through structured tracing while preserving intentional CLI stdout
 2026-09-06: Replace boxed dynamic-error application and infrastructure results with contextual anyhow errors while preserving structured domain errors
 2026-09-06: Remove the bundled Local inference mode, Gemma/Python runtime, service-management CLI, and profile configuration while retaining configurable OpenAI-compatible endpoints
+2026-09-06: Expose desktop platform capabilities as inherent runtime methods and remove the redundant application-facing trait

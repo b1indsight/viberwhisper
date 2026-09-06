@@ -17,7 +17,7 @@ use crate::core::recording_session::{
     RecordingSessionMachine, RecordingState, SessionEffect, SessionEvent,
 };
 use crate::input::typer::TextTyper;
-use crate::platform::{NativePlatform, PlatformEvent, PlatformInterface};
+use crate::platform::{NativePlatform, PlatformEvent};
 use crate::postprocess::{PostProcessor, PostProcessorSession};
 use crate::prompt_lab::{CaptureTranscription, PromptLabCapture, SttSnapshot};
 use crate::session::SessionId;
