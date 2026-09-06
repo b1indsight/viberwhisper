@@ -3,11 +3,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::{info, warn};
 
+use crate::core::config::ListenerConfig;
 use crate::core::recording_session::{RecordingState, SessionEvent};
 use crate::history::{HistoryStore, HistoryTyper};
 use crate::platform::PlatformAction;
 use crate::prompt_lab::{DatasetStore, PromptLabCapture, SttSnapshot};
-use crate::runtime_config::ListenerConfig;
 use crate::{audio, core, postprocess, transcriber};
 
 mod event_loop;

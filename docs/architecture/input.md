@@ -84,7 +84,7 @@ state.
 **`start_hotkey_listener(config, filter, notify)`**
 
 - `HotkeyConfig::validate::<P>(&InputSection)` parses and validates both bindings before
-  construction; `platform::validate_hotkeys` supplies the selected `P` to `runtime_config`.
+  construction; `platform::validate_hotkeys` supplies the selected `P` to `core::config`.
 - Empty strings disable a binding, including both bindings for tray-only control; duplicate non-empty bindings are rejected.
 - Non-function bindings log that `rdev::listen` observes rather than suppresses their native input.
 - On Windows, a `LEFTCTRL` binding logs an additional warning because AltGr is reported as left Ctrl
@@ -114,7 +114,7 @@ aliases resolving to the same key use `hotkey.duplicate`. Windows additionally u
 `hotkey.altgr_conflict` when the two bindings are `LEFTCTRL` and `RIGHTALT` in either order.
 
 Configuration persistence intentionally does not invoke this runtime validation. `config set`
-stores the string; `config check` and listener startup call the existing `runtime_config` resolution
+stores the string; `config check` and listener startup call the existing `core::config` resolution
 path and report hotkey issues together with other active-listener configuration issues.
 
 Key names identify `rdev::Key` values rather than produced characters. The macOS backend maps

@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft plan; implementation awaits explicit user approval on this PR.
+Plan approved by the user; implementation and local validation are complete on PR #125.
 Base: `master` at `bef71a4e` (PR #123).
 
 ## Problem and outcome
@@ -55,7 +55,8 @@ prompt-lab/post-processing validation coupling is outside this refactor's scope.
 | `src/application/setup.rs` | Update listener configuration resolution and imports. |
 | `src/application/listener.rs` | Import `ListenerConfig` from `core::config`. |
 | `src/application/prompt_lab.rs` | Update configuration resolution and imports. |
-| `docs/architecture/core.md`, `AGENTS.md` | Describe the resulting ownership and module layout. |
+| `docs/architecture/core.md`, `docs/architecture/input.md`, `AGENTS.md` | Describe the resulting ownership and module layout. |
+| `changelog` | Record the configuration module consolidation. |
 
 Historical plans retain their original descriptions of earlier implementations.
 
@@ -76,3 +77,15 @@ Historical plans retain their original descriptions of earlier implementations.
 The existing tests cover parsing, persistence, field edits, listener resolution, API backend
 construction, secret handling, and invalid runtime configuration. Reuse this behavior
 coverage; add no tests that merely assert the new file location or repeat moved logic.
+
+## Implementation results
+
+- The baseline configuration suite passed all 17 tests across the two original modules.
+- The consolidated configuration suite passed the same 17 tests, including all four relocated
+  runtime configuration tests with one shared `MapSecrets` fixture.
+- `cargo fmt --check`, `cargo build --locked`, `cargo test --locked` (183 tests), and
+  `cargo clippy --locked -- -D warnings` passed on macOS.
+- A source comparison confirmed that the moved runtime definitions and four test bodies were
+  preserved verbatim, and current source and architecture docs have no old module references.
+- Hosted macOS and Windows validation is tracked by the checks on
+  [PR #125](https://github.com/b1indsight/viberwhisper/pull/125).

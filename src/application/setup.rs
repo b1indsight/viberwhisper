@@ -15,9 +15,10 @@ use rdev::EventType;
 use tinyfiledialogs::{MessageBoxIcon, YesNo};
 
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
-use crate::core::config::{ConfigDocument, ConfigStore, EnvironmentSecretSource, SecretSource};
+use crate::core::config::{
+    self, ConfigDocument, ConfigStore, EnvironmentSecretSource, ListenerConfig, SecretSource,
+};
 use crate::postprocess::PostProcessor;
-use crate::runtime_config::{self, ListenerConfig};
 use crate::session::SessionId;
 use crate::transcriber::{ApiTranscriber, Transcriber};
 use crate::{audio, text};
@@ -135,7 +136,7 @@ pub(super) fn run_explicit() -> AnyhowResult<()> {
 }
 
 fn resolve_document(document: &ConfigDocument) -> AnyhowResult<ListenerConfig> {
-    Ok(runtime_config::resolve_listener(
+    Ok(config::resolve_listener(
         document,
         &EnvironmentSecretSource,
     )?)
@@ -253,7 +254,7 @@ impl SetupVerifier for NativeVerifier {
         document: &ConfigDocument,
         _ui: &mut dyn SetupUi,
     ) -> Result<VerificationResult, String> {
-        let config = runtime_config::resolve_listener(document, &EnvironmentSecretSource)
+        let config = config::resolve_listener(document, &EnvironmentSecretSource)
             .map_err(|error| error.to_string())?;
         let transcriber =
             ApiTranscriber::new(config.backend.transcriber).map_err(|error| error.to_string())?;

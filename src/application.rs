@@ -10,8 +10,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::core::cli::{Cli, Commands, ConfigAction};
-use crate::core::config::{ConfigDocument, ConfigStore, EnvironmentSecretSource};
-use crate::runtime_config;
+use crate::core::config::{self, ConfigDocument, ConfigStore, EnvironmentSecretSource};
 use crate::{audio, postprocess, text, transcriber};
 
 /// Initializes process-wide services, parses the CLI, and runs the selected workflow.
@@ -103,7 +102,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::Path => unreachable!(),
         ConfigAction::Check => {
-            runtime_config::check(&document, &secrets)?;
+            config::check(&document, &secrets)?;
             println!("Configuration is valid.");
         }
         ConfigAction::List => {
@@ -137,7 +136,7 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
     info!(input, "Transcribing audio file");
 
     let (_, document) = load_config()?;
-    let config = runtime_config::resolve_convert(&document, &EnvironmentSecretSource)?;
+    let config = config::resolve_convert(&document, &EnvironmentSecretSource)?;
     let transcriber = ApiTranscriber::new(config.backend.transcriber)?;
     let post_processor = PostProcessor::new(config.backend.post_process);
 
