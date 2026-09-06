@@ -13,19 +13,20 @@
 - **LLM 文本后处理**：可选的 LLM 后处理层，自动补标点、去语气词、清理中断与重复
 - **自动文本输入**：识别结果自动输入到当前光标位置；macOS 原生控件优先使用辅助功能 API，Chromium 浏览器使用可恢复的剪贴板粘贴，支持中文等 Unicode 字符
 - **本地识别历史**：最终用于输入的文本以 JSONL 追加到应用数据目录，右键菜单直接显示最近 5 条，点击即可复制完整原文
-- **STT Prompt 回归调试**：采集并校正 WAV 测试集，全量重跑临时候选 prompt，以 WER、代理语义评分和专有名词准确率独立把关
 - **状态栏录音控制**：左键点击五柱 V 形声波图标即可开始或停止录音，右键打开识别历史和退出菜单
 - **灵活配置**：支持自定义热键、模型、语言、API 地址、麦克风增益等
 - **自动清理**：自动保留最新 10 条录音，旧文件自动删除
 
-## 系统要求
+## 使用指南
+
+### 系统要求
 
 - **操作系统**：macOS 或 Windows
   - macOS：原生控件优先通过辅助功能 API 写入当前选择；Chromium 浏览器和不支持该能力的控件使用原生剪贴板与 Cmd+V。需在「系统设置 → 隐私与安全性 → 辅助功能」中授权正在运行的终端或 ViberWhisper
   - Windows：使用 SendInput API，无需额外权限
-- **Rust**：仅源码构建需要支持 Rust 2024 edition 的 stable toolchain；安装发布包不需要 Rust
+- 安装发布包不需要 Rust；如需从源码构建，请参阅[贡献指南](CONTRIBUTING.md)
 
-## 下载安装包
+### 下载安装包
 
 版本发布后可从 [GitHub Releases](https://github.com/b1indsight/viberwhisper/releases) 下载：
 
@@ -43,13 +44,13 @@ Gatekeeper/SmartScreen 警告。请先核对校验和与 GitHub provenance，再
 > **当前发行范围**：DMG、MSI 和便携归档包含 Rust 应用，并通过可配置的
 > OpenAI-compatible API endpoint 提供转写和可选文本后处理。
 
-## 快速开始
+### 快速开始
 
-### 1. 获取 API 密钥
+#### 1. 获取 API 密钥
 
 默认使用 Groq：前往 [Groq Console](https://console.groq.com) 注册并获取 API 密钥。
 
-### 2. 配置
+#### 2. 配置
 
 程序只读取严格的 nested v3 配置，不探测当前目录中的旧版平铺 `config.json`，也不会自动迁移。实际路径可用下面的命令查看：
 
@@ -103,14 +104,7 @@ secret key 也不能通过 `config set` 修改。向导密码框输入的密钥�
 右键菜单直接显示最新 5 条；长文本在 40 个 Unicode 字符后缩略，但点击时复制的始终是完整原文。
 复制动作不会自动粘贴，也不需要 macOS 辅助功能权限。
 
-### 3. 构建并运行
-
-```bash
-cargo build --release
-cargo run --release
-```
-
-### 4. 使用
+#### 3. 启动并使用
 
 1. 启动程序，系统托盘/状态栏会出现五柱声波图标，不再显示悬浮窗；Windows 安装版从开始
    菜单启动，便携版双击 `viberwhisper-app.exe`，均不会打开命令行窗口
@@ -123,7 +117,7 @@ cargo run --release
 
 > macOS 需要辅助功能授权才能完成文字输入。未授权时输入会明确失败且不会改动剪贴板。原生应用没有焦点输入框或焦点位于可识别的密码框时也会拒绝输入。Chromium 浏览器不依赖网页辅助功能树，而是使用原生剪贴板与 Cmd+V；转写文本会保留在剪贴板中，自动粘贴未生效时可手动粘贴。浏览器隐藏网页辅助功能树时，系统无法区分普通网页输入框和密码框；此时行为等同用户手动执行 Cmd+V。
 
-## CLI 命令
+### CLI 命令
 
 ```bash
 # 启动录音监听（默认，无子命令）
@@ -145,70 +139,13 @@ viberwhisper config set <key> <value>
 # 离线转写 WAV 文件
 viberwhisper convert input.wav
 viberwhisper convert input.wav --output output.txt
-
-# 采集 STT prompt 测试样本（使用现有托盘与 Hold/Toggle 热键）
-viberwhisper prompt-lab record --dataset /path/to/my-stt-dataset
-
-# 查看、校正并验证样本
-viberwhisper prompt-lab sample list --dataset /path/to/my-stt-dataset --status pending
-viberwhisper prompt-lab sample show --dataset /path/to/my-stt-dataset <sample-id>
-viberwhisper prompt-lab sample correct --dataset /path/to/my-stt-dataset <sample-id> \
-  --reference-file expected.txt --proper-nouns-file proper-nouns.json
-viberwhisper prompt-lab dataset validate --dataset /path/to/my-stt-dataset
-
-# 用临时候选 prompt 全量重跑所有 ready 历史录音
-viberwhisper prompt-lab evaluate --dataset /path/to/my-stt-dataset \
-  --prompt-file candidate.txt \
-  --max-wer-percent 8 --min-llm-score 95 --min-proper-noun-percent 98
-
-# 将编码代理给出的逐样本语义复核应用到同一份报告
-viberwhisper prompt-lab report apply-review \
-  --report /path/to/my-stt-dataset/runs/<run-id>.json \
-  --review /path/to/<run-id>.agent-review.json
 ```
 
-`prompt-lab record` 只保存当前 STT API 返回的原始结果，不执行 LLM 后处理、不写普通
-`history.jsonl`，也不向当前输入框注入文字。每次完成的录音在数据集的 `audio/` 下保存一个完整
-WAV，并在 `samples/` 下保存同 ID 的 JSON；初始识别不是标准答案，必须通过 `sample correct`
-写入人工参考文本后才会成为 `ready`。专有名词文件是由 `canonical`、`accepted`、
-`case_sensitive` 和 `expected_occurrences` 组成的 JSON 数组；省略该文件表示该样本没有专有名词。
-
-数据集中的录音、初始识别和人工参考文本均为本机明文。录音会发送给当前配置的 STT 服务；在后续
-调试任务中，编码代理也会读取参考文本与候选结果。请只采集愿意通过这些路径处理的内容。首个版本
-要求同一数据集同一时间只由一个 `prompt-lab` 进程使用，不提供锁、原子写入或中断自动恢复；
-`dataset validate` 会报告损坏 JSON、截断 WAV、摘要不匹配和无侧车录音，需人工清理或重录。
-
-### STT Prompt 回归调试
-
-`prompt-lab evaluate` 每次都会按稳定 ID 顺序重新读取并转写全部 `ready` WAV，不复用旧 STT
-结果，也不把人工参考文本发给 STT。`--prompt-file` 的原文只覆盖本次进程内的
-`transcription.prompt`，不会修改 `config.json`；省略它会使用当前配置作为基线，`--no-prompt`
-则明确不发送 multipart prompt。`--compare-to` 可指向一份已完成且数据集、后端与评分版本兼容的
-旧报告；不兼容会在任何 STT 请求前失败。报告默认直接写入数据集的 `runs/`，只生成 JSON，
-不生成 Markdown 或网页报告。
-
-三项指标各自独立，不合成加权总分：
-
-- **词错误率（WER）**：NFKC 规范化后，中文使用固定 Jieba 词典且关闭 HMM，其他文本使用
-  Unicode 词边界；数据集值是替换、删除、插入总数除以参考词总数的微平均，可超过 100%。
-- **语义差异评分**：编码代理只依据每条人工参考文本和本次 STT 结果，按固定 rubric 给出
-  `0..=100` 整数、简短原因和结构化差异；程序不配置或调用 Judge API/model。
-- **专有名词准确率**：按 canonical/accepted 形式、大小写策略、词边界和期望出现次数计算匹配数
-  的微平均。整个 ready 集必须至少标注一次专有名词，否则回归会拒绝启动。
-
-首次评估成功后，规范报告状态为 `awaiting_agent_review`，此时只有 WER 和专有名词指标，不能判定
-通过。编码代理读取该 JSON，生成覆盖全部样本的 versioned review JSON，再执行 `apply-review`；
-程序验证 run ID、rubric、完整样本覆盖、`0..=100` 分数及差异结构后，直接改写同一份报告，计算
-语义均分和三个门禁。只有 `WER <= max`、`LLM >= min`、`专有名词 >= min` 同时成立时
-`meets_targets` 才为 `true`。若未通过，编码代理根据逐条差异修改候选 prompt 并再次全量回归，
-直到达到目标或判断 prompt 已无法继续改善。单条 STT 失败不会跳过后续样本，但报告会标记为
-`incomplete`、命令返回非零，且该报告不能接受复核或作为比较基线。
-
-## 配置说明
+### 配置说明
 
 CLI 只接受下表中的 canonical dotted key；`hotkey`、`model`、`local_mode` 等旧别名不再支持。
 
-### 输入与音频
+#### 输入与音频
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -267,7 +204,7 @@ macOS 的 Chromium/兜底粘贴会在极短的内部注入窗口暂停 ViberWhis
 内部可靠性策略不作为用户配置：实时与离线音频统一按 30 秒或 23 MiB 的较小限制分片；每个 STT 请求
 最多等待 12 秒，网络错误或 HTTP 5xx 最多重试一次；停止录音后的 session 收敛窗口固定为 30 秒。
 
-### 转写 API
+#### 转写 API
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -278,7 +215,7 @@ macOS 的 Chromium/兜底粘贴会在极短的内部注入窗口暂停 ViberWhis
 | `inference.api.transcription.model` | 字符串 | `whisper-large-v3-turbo` | 转写模型 |
 | `inference.api.transcription.api_key` | secret | 无 | 只读状态；环境变量为 `TRANSCRIPTION_API_KEY` |
 
-### LLM 后处理
+#### LLM 后处理
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -293,7 +230,7 @@ macOS 的 Chromium/兜底粘贴会在极短的内部注入窗口暂停 ViberWhis
 > **注意**：`config.json` 已在 `.gitignore` 中排除，避免误提交真实密钥。程序不会把环境变量中的密钥写入磁盘；手工写在 `config.json` 中的密钥会在更新其他配置项时原样保留。
 > 后处理当前固定使用 OpenAI-compatible chat completions 请求格式。
 
-### 切换转写服务
+#### 切换转写服务
 
 修改 API endpoint、model 和环境密钥即可切换兼容接口：
 
@@ -302,11 +239,11 @@ macOS 的 Chromium/兜底粘贴会在极短的内部注入窗口暂停 ViberWhis
 ./viberwhisper config set inference.api.transcription.model whisper-1
 ```
 
-## LLM 后处理
+### LLM 后处理
 
 启用后，转写结果会在输出前经过 LLM 整理，自动补标点、去除语气词、清理中断与重复。
 
-### 启用方法
+#### 启用方法
 
 ```bash
 # 启用后处理
@@ -320,36 +257,18 @@ viberwhisper config set inference.api.post_process.model gpt-4o-mini
 export POST_PROCESS_API_KEY=your_key_here
 ```
 
-### 两种模式
+#### 两种模式
 
 - **预热模式**（默认，`post_process.preheat_enabled = true`）：录音过程中每收到一段稳定文本就提前发送 LLM 请求，录音结束后几乎零等待
 - **保守模式**（`post_process.preheat_enabled = false`）：录音全部结束后一次性发送，零 token 浪费
 
 后处理失败时自动降级为输出原始转写文本，不会导致整次录音失败。
 
-## 依赖项
+## 开发与贡献
 
-- [rdev](https://crates.io/crates/rdev) - 全局热键监听
-- [cpal](https://crates.io/crates/cpal) - 跨平台音频录制
-- [hound](https://crates.io/crates/hound) - WAV 音频文件处理
-- [dirs](https://crates.io/crates/dirs) - 跨平台目录路径获取
-- [reqwest](https://crates.io/crates/reqwest) - HTTP 客户端
-- [serde_json](https://crates.io/crates/serde_json) - JSON 序列化/反序列化
-- [clap](https://crates.io/crates/clap) - CLI 参数解析
-- [tray-icon](https://crates.io/crates/tray-icon) - 系统托盘图标
-- [winit](https://crates.io/crates/winit) - 跨平台原生事件循环
-- [tracing](https://crates.io/crates/tracing) - 结构化日志
-
-## 开发
-
-```bash
-cargo test     # 运行测试
-cargo clippy   # 代码检查
-cargo fmt      # 代码格式化
-```
-
-维护者打包、版本校验、tag 发布、产物验证和失败恢复流程见
-[`docs/releasing.md`](docs/releasing.md)。
+README 面向安装、配置和日常使用。源码构建、技术栈、测试要求、跨平台注意事项及 PR 流程见
+[贡献指南](CONTRIBUTING.md)；架构、功能计划和维护者文档索引见
+[项目文档](docs/README.md)。
 
 ## 许可证
 
