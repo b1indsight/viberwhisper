@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed on a draft PR; implementation requires explicit approval.
+Approved and implemented on draft PR #118. Native formatting, tests, and Clippy pass; hosted PR
+checks remain the final validation gate.
 
 ## Context
 
@@ -48,7 +49,7 @@ part of the CLI contract.
 | --- | --- |
 | `src/application/listener.rs` | Replace banner, mode, hotkey, and exit instructions with concise `info!` events and fields. |
 | `src/application/listener/event_loop.rs` | Record completed prompt-lab captures as one structured `info!` event. |
-| `src/application.rs` | Log output-file write failures before returning them; retain command results on stdout. |
+| `src/application.rs` | Log local-install and transcription progress plus output-file write failures; retain command results on stdout. |
 | `docs/README.md` | Index this plan and its current status. |
 | `changelog` | Record the completed runtime logging cleanup during implementation. |
 

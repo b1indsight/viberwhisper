@@ -430,11 +430,11 @@ impl ListenerApplication {
                             capture_transcription(orchestrator.finish_session(session_id), stt);
                         match capture_session {
                             Ok(capture_session) => match capture_session.finish(transcription) {
-                                Ok(sample) => println!(
-                                    "Captured {}\naudio: {}\nsidecar: {}",
-                                    sample.id,
-                                    sample.audio_path.display(),
-                                    sample.sidecar_path.display()
+                                Ok(sample) => info!(
+                                    sample_id = %sample.id,
+                                    audio_path = %sample.audio_path.display(),
+                                    sidecar_path = %sample.sidecar_path.display(),
+                                    "Prompt-lab sample captured"
                                 ),
                                 Err(error) => error!(
                                     session_id = session_id.0,

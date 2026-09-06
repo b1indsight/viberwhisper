@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use tracing::warn;
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::core::cli::{Cli, Commands, ConfigAction, LocalCommand};
@@ -179,48 +179,74 @@ fn ensure_local_install(
         std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string());
     let runtime = detect_python_runtime()?;
 
-    print_python_runtime(&runtime);
+    log_python_runtime(&runtime);
 
-    println!("[local] step 1/4 – python venv");
+    info!(
+        step = 1,
+        total_steps = 4,
+        "Creating local Python virtual environment"
+    );
     setup_venv(&paths.venv_dir)?;
 
     if install_deps {
         let requirements = local_requirements_path();
-        println!("[local] step 2/4 – python dependencies");
+        info!(
+            step = 2,
+            total_steps = 4,
+            "Installing local Python dependencies"
+        );
         install_requirements(&paths.venv_dir, &requirements)?;
     } else if !dependencies_installed(&paths.venv_dir) {
         return Err(
             "Python dependencies are not installed. Run `viberwhisper local install` first.".into(),
         );
     } else {
-        println!("[local] step 2/4 – python dependencies (skipped)");
+        info!(
+            step = 2,
+            total_steps = 4,
+            "Local Python dependencies already installed"
+        );
     }
 
     if !model_weights_present(&paths.model_dir) {
-        println!("[local] step 3/4 – downloading google/gemma-4-E2B-it");
-        println!("[local]   set HF_ENDPOINT env var to use a mirror");
+        info!(
+            step = 3,
+            total_steps = 4,
+            model = "google/gemma-4-E2B-it",
+            "Downloading local model; set HF_ENDPOINT to use a mirror"
+        );
     } else {
-        println!("[local] step 3/4 – model already present, skipping download");
+        info!(
+            step = 3,
+            total_steps = 4,
+            model = "google/gemma-4-E2B-it",
+            "Local model already present"
+        );
     }
     download_model(&paths.model_dir, &hf_endpoint)?;
 
-    println!("[local] step 4/4 – verify");
+    info!(
+        step = 4,
+        total_steps = 4,
+        "Verifying local runtime installation"
+    );
     verify_install(&paths.venv_dir, &paths.model_dir)?;
 
     Ok(())
 }
 
-fn print_python_runtime(runtime: &PythonRuntime) {
+fn log_python_runtime(runtime: &PythonRuntime) {
     let (major, minor) = runtime.version;
-    println!(
-        "[local] python: {} ({}.{}; require >= 3.10)",
-        runtime.python.display(),
-        major,
-        minor
+    info!(
+        python = %runtime.python.display(),
+        version_major = major,
+        version_minor = minor,
+        minimum_version = "3.10",
+        "Detected local Python runtime"
     );
     match &runtime.uv {
-        Some(uv) => println!("[local] package runner: uv ({})", uv.display()),
-        None => println!("[local] package runner: system python fallback"),
+        Some(uv) => info!(runner = "uv", path = %uv.display(), "Selected local package runner"),
+        None => info!(runner = "system-python", "Selected local package runner"),
     }
 }
 
@@ -306,7 +332,7 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<(), Box<dyn std::
     use std::path::Path;
     use transcriber::{ApiTranscriber, Transcriber};
 
-    println!("Transcribing: {}", input);
+    info!(input, "Transcribing audio file");
 
     let (store, document) = load_config()?;
     let (config_dir, home_dir) = config_context(&store)?;
@@ -351,7 +377,7 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<(), Box<dyn std::
     match output {
         Some(path) => {
             if let Err(e) = std::fs::write(path, &text) {
-                eprintln!("Failed to write file: {}", e);
+                error!(path, error = %e, "Failed to write transcription output");
                 return Err(e.into());
             }
             println!("Saved to: {}", path);
