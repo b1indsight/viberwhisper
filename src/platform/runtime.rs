@@ -1,6 +1,8 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use anyhow::Result;
+
 use super::backend::PlatformBackend;
 use crate::input::hotkey::{HotkeyConfig, HotkeyEvent, HotkeySource, start_hotkey_listener};
 use crate::input::tray::{TrayAction, TrayEvent, TrayManager};
@@ -47,7 +49,7 @@ pub(crate) trait PlatformInterface: Sized {
     fn start(
         hotkeys: &HotkeyConfig,
         notify: impl Fn(PlatformEvent) + Send + Sync + 'static,
-    ) -> Result<Self, Box<dyn std::error::Error>>;
+    ) -> Result<Self>;
 
     fn handle_event(&mut self, event: PlatformEvent) -> Option<PlatformAction>;
     fn set_recording(&mut self, recording: bool);
@@ -101,7 +103,7 @@ pub(crate) trait RuntimeDrivers<B: PlatformBackend>: 'static {
         filter: super::backend::HotkeyFilter,
         notify: HotkeyNotify,
     );
-    fn start_tray(notify: TrayNotify) -> Result<Self::Tray, Box<dyn std::error::Error>>;
+    fn start_tray(notify: TrayNotify) -> Result<Self::Tray>;
 }
 
 pub(crate) struct NativeDrivers;
@@ -117,7 +119,7 @@ impl<B: PlatformBackend> RuntimeDrivers<B> for NativeDrivers {
         start_hotkey_listener::<B::Hotkeys, _>(config, filter, move |event| notify(event));
     }
 
-    fn start_tray(notify: TrayNotify) -> Result<Self::Tray, Box<dyn std::error::Error>> {
+    fn start_tray(notify: TrayNotify) -> Result<Self::Tray> {
         TrayManager::<B::Tray>::new(move |event| notify(event))
     }
 }
@@ -130,7 +132,7 @@ where
     fn start(
         hotkeys: &HotkeyConfig,
         notify: impl Fn(PlatformEvent) + Send + Sync + 'static,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self> {
         let notify = Arc::new(notify);
         let (typer, hotkey_filter) = B::text_typer_and_hotkey_filter();
 
@@ -238,7 +240,7 @@ mod tests {
     struct RecordingTyper;
 
     impl TextTyper for RecordingTyper {
-        fn type_text(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+        fn type_text(&self, text: &str) -> Result<()> {
             TYPED_TEXT
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -262,7 +264,7 @@ mod tests {
             (Arc::new(RecordingTyper), Box::new(Some))
         }
 
-        fn copy_to_clipboard(_text: &str) -> Result<(), Box<dyn std::error::Error>> {
+        fn copy_to_clipboard(_text: &str) -> Result<()> {
             Ok(())
         }
     }
@@ -301,7 +303,7 @@ mod tests {
             }
         }
 
-        fn start_tray(notify: TrayNotify) -> Result<Self::Tray, Box<dyn std::error::Error>> {
+        fn start_tray(notify: TrayNotify) -> Result<Self::Tray> {
             notify(TrayEvent::Menu(MenuEvent {
                 id: MenuId::new("exit"),
             }));

@@ -5,12 +5,12 @@
 
 mod hotkey;
 
-use std::error::Error;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use anyhow::{Result as AnyhowResult, anyhow};
 use rdev::EventType;
 use tinyfiledialogs::{MessageBoxIcon, YesNo};
 
@@ -31,7 +31,7 @@ const DEFAULT_POST_PROCESS_MODEL: &str = "gpt-4o-mini";
 const HOTKEY_CAPTURE_HELPER_ENV: &str = "VIBERWHISPER_CAPTURE_HOTKEY";
 const HOTKEY_CAPTURE_EXIT_TIMEOUT: Duration = Duration::from_secs(1);
 
-pub(super) fn run_hotkey_capture_helper_if_requested() -> Result<bool, Box<dyn Error>> {
+pub(super) fn run_hotkey_capture_helper_if_requested() -> AnyhowResult<bool> {
     if hotkey::run_helper_if_requested()? {
         return Ok(true);
     }
@@ -59,12 +59,12 @@ pub(super) fn run_hotkey_capture_helper_if_requested() -> Result<bool, Box<dyn E
     });
 
     match result {
-        Ok(()) => Err("hotkey listener stopped before capturing a key".into()),
-        Err(error) => Err(format!("could not start hotkey capture: {error:?}").into()),
+        Ok(()) => Err(anyhow!("hotkey listener stopped before capturing a key")),
+        Err(error) => Err(anyhow!("could not start hotkey capture: {error:?}")),
     }
 }
 
-pub(super) fn listener_config() -> Result<Option<ListenerConfig>, Box<dyn Error>> {
+pub(super) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
     let store = ConfigStore::discover()?;
     let (initial, reason) = match store.load() {
         Ok(None) => (
@@ -109,7 +109,7 @@ pub(super) fn listener_config() -> Result<Option<ListenerConfig>, Box<dyn Error>
     }
 }
 
-pub(super) fn run_explicit() -> Result<(), Box<dyn Error>> {
+pub(super) fn run_explicit() -> AnyhowResult<()> {
     let store = ConfigStore::discover()?;
     let initial = match store.load() {
         Ok(Some(document)) => document,
@@ -140,7 +140,7 @@ pub(super) fn run_explicit() -> Result<(), Box<dyn Error>> {
 fn resolve_document(
     store: &ConfigStore,
     document: &ConfigDocument,
-) -> Result<ListenerConfig, Box<dyn Error>> {
+) -> AnyhowResult<ListenerConfig> {
     let (config_dir, home_dir) = config_context(store)?;
     Ok(runtime_config::resolve_listener(
         document,
@@ -261,7 +261,7 @@ struct NativeVerifier {
 }
 
 impl NativeVerifier {
-    fn new(store: &ConfigStore) -> Result<Self, Box<dyn Error>> {
+    fn new(store: &ConfigStore) -> AnyhowResult<Self> {
         let (config_dir, home_dir) = config_context(store)?;
         Ok(Self {
             config_dir,
@@ -365,7 +365,7 @@ fn run_wizard(
     device_names: Result<Vec<String>, String>,
     ui: &mut dyn SetupUi,
     verifier: &mut dyn SetupVerifier,
-) -> Result<WizardOutcome, Box<dyn Error>> {
+) -> AnyhowResult<WizardOutcome> {
     document.inference.active = InferenceProfile::Api;
     let Some(url) = required_input(
         ui,

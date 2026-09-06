@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use anyhow::Result;
+
 use super::{config_context, load_config};
 use crate::core::cli::{
     PromptLabCommand, PromptLabDatasetCommand, PromptLabReportCommand, PromptLabSampleCommand,
@@ -13,7 +15,7 @@ use crate::prompt_lab::{
 };
 use crate::runtime_config::{self, ProfileSelection};
 
-pub(super) fn handle(action: PromptLabCommand) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn handle(action: PromptLabCommand) -> Result<()> {
     match action {
         PromptLabCommand::Record { dataset } => record(dataset),
         PromptLabCommand::Sample { action } => sample(action),
@@ -52,7 +54,7 @@ struct EvaluateCommand {
     output: Option<PathBuf>,
 }
 
-fn evaluate_command(command: EvaluateCommand) -> Result<(), Box<dyn std::error::Error>> {
+fn evaluate_command(command: EvaluateCommand) -> Result<()> {
     use crate::transcriber::ApiTranscriber;
 
     let candidate_from_file = command
@@ -123,7 +125,7 @@ fn evaluate_command(command: EvaluateCommand) -> Result<(), Box<dyn std::error::
     }
 }
 
-fn report(action: PromptLabReportCommand) -> Result<(), Box<dyn std::error::Error>> {
+fn report(action: PromptLabReportCommand) -> Result<()> {
     match action {
         PromptLabReportCommand::ApplyReview { report, review } => {
             let report = apply_review(&report, &review)?;
@@ -145,7 +147,7 @@ fn report(action: PromptLabReportCommand) -> Result<(), Box<dyn std::error::Erro
     }
 }
 
-fn record(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn record(root: PathBuf) -> Result<()> {
     let dataset = DatasetStore::open_or_create(root)?;
     let (store, document) = load_config()?;
     let (config_dir, home_dir) = config_context(&store)?;
@@ -159,7 +161,7 @@ fn record(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     super::listener::run_capture(config, dataset)
 }
 
-fn sample(action: PromptLabSampleCommand) -> Result<(), Box<dyn std::error::Error>> {
+fn sample(action: PromptLabSampleCommand) -> Result<()> {
     match action {
         PromptLabSampleCommand::List { dataset, status } => {
             let store = DatasetStore::open_or_create(dataset)?;
@@ -210,7 +212,7 @@ fn sample(action: PromptLabSampleCommand) -> Result<(), Box<dyn std::error::Erro
     }
 }
 
-fn dataset(action: PromptLabDatasetCommand) -> Result<(), Box<dyn std::error::Error>> {
+fn dataset(action: PromptLabDatasetCommand) -> Result<()> {
     match action {
         PromptLabDatasetCommand::Validate { dataset } => {
             let store = DatasetStore::open_or_create(dataset)?;

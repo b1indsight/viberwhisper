@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use anyhow::{Context, Result, anyhow, bail};
+
 const REQUIRED_RUNTIME_PACKAGES: &[&str] = &[
     "accelerate",
     "fastapi",
@@ -25,7 +27,7 @@ pub struct PythonRuntime {
 }
 
 /// Creates a Python virtual environment for the local service.
-pub fn setup_venv(venv_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub fn setup_venv(venv_dir: &Path) -> Result<()> {
     let python = venv_python_path(venv_dir);
     if python.exists() {
         return Ok(());
@@ -53,17 +55,14 @@ pub fn setup_venv(venv_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Installs Python requirements into the virtual environment.
-pub fn install_requirements(
-    venv_dir: &Path,
-    reqs: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn install_requirements(venv_dir: &Path, reqs: &Path) -> Result<()> {
     if !reqs.exists() {
-        return Err(format!("requirements file not found: {}", reqs.display()).into());
+        bail!("requirements file not found: {}", reqs.display());
     }
 
     let python = venv_python_path(venv_dir);
     if !python.exists() {
-        return Err(format!("virtualenv python not found: {}", python.display()).into());
+        bail!("virtualenv python not found: {}", python.display());
     }
 
     if let Some(uv) = find_uv() {
@@ -89,10 +88,7 @@ pub fn install_requirements(
 }
 
 /// Downloads the local Gemma model into the model directory.
-pub fn download_model(
-    model_dir: &Path,
-    hf_endpoint: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn download_model(model_dir: &Path, hf_endpoint: &str) -> Result<()> {
     if model_weights_present(model_dir) {
         return Ok(());
     }
@@ -101,15 +97,16 @@ pub fn download_model(
 
     let venv_dir = model_dir
         .parent()
-        .ok_or("model directory must have a parent directory for sibling venv lookup")?
+        .ok_or_else(|| {
+            anyhow!("model directory must have a parent directory for sibling venv lookup")
+        })?
         .join("venv");
     let python = venv_python_path(&venv_dir);
     if !python.exists() {
-        return Err(format!(
+        bail!(
             "virtualenv python not found for model download: {}",
             python.display()
-        )
-        .into());
+        );
     }
 
     let hf = venv_bin_path(&venv_dir, "hf");
@@ -139,14 +136,14 @@ pub fn download_model(
 }
 
 /// Verifies the presence of the virtual environment and model files.
-pub fn verify_install(venv_dir: &Path, model_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub fn verify_install(venv_dir: &Path, model_dir: &Path) -> Result<()> {
     let python = venv_python_path(venv_dir);
     if !python.exists() {
-        return Err(format!("virtualenv python not found: {}", python.display()).into());
+        bail!("virtualenv python not found: {}", python.display());
     }
 
     if !model_dir.is_dir() {
-        return Err(format!("model directory not found: {}", model_dir.display()).into());
+        bail!("model directory not found: {}", model_dir.display());
     }
 
     let has_model_files = std::fs::read_dir(model_dir)?
@@ -159,7 +156,7 @@ pub fn verify_install(venv_dir: &Path, model_dir: &Path) -> Result<(), Box<dyn s
         });
 
     if !has_model_files {
-        return Err(format!("model directory is empty: {}", model_dir.display()).into());
+        bail!("model directory is empty: {}", model_dir.display());
     }
 
     Ok(())
@@ -233,7 +230,7 @@ pub(crate) fn find_uv() -> Option<PathBuf> {
     command_succeeds(&uv, ["--version"]).then_some(uv)
 }
 
-pub fn detect_python_runtime() -> Result<PythonRuntime, Box<dyn std::error::Error>> {
+pub fn detect_python_runtime() -> Result<PythonRuntime> {
     let python = find_python()?;
     let version = python_version(&python)?;
     Ok(PythonRuntime {
@@ -243,7 +240,7 @@ pub fn detect_python_runtime() -> Result<PythonRuntime, Box<dyn std::error::Erro
     })
 }
 
-fn find_python() -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn find_python() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("PYTHON")
         && !path.is_empty()
     {
@@ -264,27 +261,29 @@ fn find_python() -> Result<PathBuf, Box<dyn std::error::Error>> {
         }
     }
 
-    Err(format!(
+    Err(anyhow!(
         "python executable not found, or no supported version >= {}.{} is available",
-        MIN_PYTHON_MAJOR, MIN_PYTHON_MINOR
-    )
-    .into())
+        MIN_PYTHON_MAJOR,
+        MIN_PYTHON_MINOR
+    ))
 }
 
-fn ensure_supported_python(python: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn ensure_supported_python(python: &Path) -> Result<()> {
     let (major, minor) = python_version(python)?;
     if is_supported_python_version(major, minor) {
         Ok(())
     } else {
-        Err(format!(
+        Err(anyhow!(
             "Python {}.{} is not supported; require >= {}.{}",
-            major, minor, MIN_PYTHON_MAJOR, MIN_PYTHON_MINOR
-        )
-        .into())
+            major,
+            minor,
+            MIN_PYTHON_MAJOR,
+            MIN_PYTHON_MINOR
+        ))
     }
 }
 
-fn python_version(python: &Path) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+fn python_version(python: &Path) -> Result<(u32, u32)> {
     let output = Command::new(python)
         .args([
             "-c",
@@ -293,23 +292,25 @@ fn python_version(python: &Path) -> Result<(u32, u32), Box<dyn std::error::Error
         .output()?;
 
     if !output.status.success() {
-        return Err(format!("failed to query python version from {}", python.display()).into());
+        bail!("failed to query python version from {}", python.display());
     }
 
     parse_python_version(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn parse_python_version(version: &str) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+fn parse_python_version(version: &str) -> Result<(u32, u32)> {
     let version = version.trim();
     let mut parts = version.split('.');
     let major = parts
         .next()
-        .ok_or("missing python major version")?
-        .parse::<u32>()?;
+        .ok_or_else(|| anyhow!("missing python major version"))?
+        .parse::<u32>()
+        .context("invalid Python major version")?;
     let minor = parts
         .next()
-        .ok_or("missing python minor version")?
-        .parse::<u32>()?;
+        .ok_or_else(|| anyhow!("missing python minor version"))?
+        .parse::<u32>()
+        .context("invalid Python minor version")?;
     Ok((major, minor))
 }
 
@@ -330,11 +331,7 @@ where
         .is_ok_and(|status| status.success())
 }
 
-fn run_command<I, S>(
-    program: PathBuf,
-    args: I,
-    env: Option<(&str, &str)>,
-) -> Result<(), Box<dyn std::error::Error>>
+fn run_command<I, S>(program: PathBuf, args: I, env: Option<(&str, &str)>) -> Result<()>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
@@ -348,7 +345,7 @@ where
     if status.success() {
         Ok(())
     } else {
-        Err(format!("command failed with status {status}").into())
+        Err(anyhow!("command failed with status {status}"))
     }
 }
 
@@ -390,6 +387,10 @@ mod tests {
     fn test_parse_python_version_rejects_invalid_input() {
         assert!(parse_python_version("3").is_err());
         assert!(parse_python_version("").is_err());
+
+        let error = parse_python_version("three.10").unwrap_err();
+        assert!(format!("{error:#}").contains("invalid Python major version"));
+        assert!(error.downcast_ref::<std::num::ParseIntError>().is_some());
     }
 
     #[test]

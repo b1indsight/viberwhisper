@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+use anyhow::Result as AnyhowResult;
 use tracing::{debug, error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -49,11 +50,7 @@ impl FinalizationGate {
         self.0.load(Ordering::Acquire)
     }
 
-    fn type_text_if_active(
-        &self,
-        typer: &dyn TextTyper,
-        text: &str,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
+    fn type_text_if_active(&self, typer: &dyn TextTyper, text: &str) -> AnyhowResult<bool> {
         if self.is_cancelled() {
             return Ok(false);
         }
@@ -643,7 +640,7 @@ mod tests {
     struct CountingTyper(AtomicUsize);
 
     impl TextTyper for CountingTyper {
-        fn type_text(&self, _text: &str) -> Result<(), Box<dyn std::error::Error>> {
+        fn type_text(&self, _text: &str) -> anyhow::Result<()> {
             self.0.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -680,7 +677,7 @@ mod tests {
     }
 
     impl TextTyper for BlockingTyper {
-        fn type_text(&self, _text: &str) -> Result<(), Box<dyn std::error::Error>> {
+        fn type_text(&self, _text: &str) -> anyhow::Result<()> {
             self.entered.wait();
             self.release.wait();
             Ok(())

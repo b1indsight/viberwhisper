@@ -5,6 +5,7 @@ mod setup;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::{Result, anyhow, bail};
 use clap::Parser;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -35,7 +36,7 @@ impl Drop for LocalServiceGuard {
 }
 
 /// Initializes process-wide services, parses the CLI, and runs the selected workflow.
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run() -> Result<()> {
     if setup::run_hotkey_capture_helper_if_requested()? {
         return Ok(());
     }
@@ -75,6 +76,7 @@ pub fn run_desktop() -> ExitCode {
         Err(_) => return ExitCode::FAILURE,
     }
     if let Err(error) = crate::platform::prepare_desktop_output() {
+        let error = anyhow::Error::new(error).context("failed to prepare desktop output");
         crate::platform::report_desktop_startup_error(&error);
         return ExitCode::FAILURE;
     }
@@ -84,13 +86,13 @@ pub fn run_desktop() -> ExitCode {
     match run_listener_with_setup() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            crate::platform::report_desktop_startup_error(error.as_ref());
+            crate::platform::report_desktop_startup_error(&error);
             ExitCode::FAILURE
         }
     }
 }
 
-fn run_listener_with_setup() -> Result<(), Box<dyn std::error::Error>> {
+fn run_listener_with_setup() -> Result<()> {
     if let Some(config) = setup::listener_config()? {
         listener::run_with_config(config)?;
     }
@@ -107,7 +109,7 @@ fn init_tracing() {
         .init();
 }
 
-fn handle_local(action: LocalCommand) -> Result<(), Box<dyn std::error::Error>> {
+fn handle_local(action: LocalCommand) -> Result<()> {
     let (store, document) = load_config()?;
     let (config_dir, home_dir) = config_context(&store)?;
     match action {
@@ -159,9 +161,7 @@ fn handle_local(action: LocalCommand) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
-fn start_local_backend(
-    backend: &mut BackendConfig,
-) -> Result<Option<LocalServiceManager>, Box<dyn std::error::Error>> {
+fn start_local_backend(backend: &mut BackendConfig) -> Result<Option<LocalServiceManager>> {
     let Some(config) = backend.local_service.take() else {
         return Ok(None);
     };
@@ -171,10 +171,7 @@ fn start_local_backend(
     Ok(Some(manager))
 }
 
-fn ensure_local_install(
-    paths: &LocalPaths,
-    install_deps: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn ensure_local_install(paths: &LocalPaths, install_deps: bool) -> Result<()> {
     let hf_endpoint =
         std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string());
     let runtime = detect_python_runtime()?;
@@ -197,9 +194,7 @@ fn ensure_local_install(
         );
         install_requirements(&paths.venv_dir, &requirements)?;
     } else if !dependencies_installed(&paths.venv_dir) {
-        return Err(
-            "Python dependencies are not installed. Run `viberwhisper local install` first.".into(),
-        );
+        bail!("Python dependencies are not installed. Run `viberwhisper local install` first.");
     } else {
         info!(
             step = 2,
@@ -250,19 +245,19 @@ fn log_python_runtime(runtime: &PythonRuntime) {
     }
 }
 
-fn load_config() -> Result<(ConfigStore, ConfigDocument), Box<dyn std::error::Error>> {
+fn load_config() -> Result<(ConfigStore, ConfigDocument)> {
     let store = ConfigStore::discover()?;
     let document = store.load()?.unwrap_or_default();
     Ok((store, document))
 }
 
-fn config_context(store: &ConfigStore) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+fn config_context(store: &ConfigStore) -> Result<(PathBuf, PathBuf)> {
     let config_dir = store
         .path()
         .parent()
-        .ok_or("configuration path has no parent directory")?
+        .ok_or_else(|| anyhow!("configuration path has no parent directory"))?
         .to_path_buf();
-    let home_dir = dirs::home_dir().ok_or("could not determine home directory")?;
+    let home_dir = dirs::home_dir().ok_or_else(|| anyhow!("could not determine home directory"))?;
     Ok((config_dir, home_dir))
 }
 
@@ -288,7 +283,7 @@ fn find_server_file(filename: &str) -> PathBuf {
         .join(filename)
 }
 
-fn handle_config(action: ConfigAction) -> Result<(), Box<dyn std::error::Error>> {
+fn handle_config(action: ConfigAction) -> Result<()> {
     let store = ConfigStore::discover()?;
     if matches!(action, ConfigAction::Path) {
         println!("{}", store.path().display());
@@ -327,7 +322,7 @@ fn handle_config(action: ConfigAction) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-fn handle_convert(input: &str, output: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
     use postprocess::PostProcessor;
     use std::path::Path;
     use transcriber::{ApiTranscriber, Transcriber};

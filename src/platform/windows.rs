@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fs::OpenOptions, io, os::windows::io::AsRawHandle};
 
+use anyhow::{Result, bail};
 use rdev::Key;
 
 use super::backend::{HotkeyFilter, PlatformBackend};
@@ -34,9 +35,9 @@ fn redirect_standard_handle(identifier: u32) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn show_startup_error(error: &dyn std::error::Error) {
+pub(super) fn show_startup_error(error: &anyhow::Error) {
     let title = nul_terminated_utf16("ViberWhisper startup failed");
-    let message = nul_terminated_utf16(&format!("ViberWhisper could not start:\n\n{error}"));
+    let message = nul_terminated_utf16(&format!("ViberWhisper could not start:\n\n{error:#}"));
     // SAFETY: Both buffers are live, NUL-terminated UTF-16 for the duration of the call, and a
     // null owner is valid for a process-level startup error dialog.
     unsafe {
@@ -68,7 +69,7 @@ impl PlatformBackend for WindowsBackend {
         (Arc::new(WindowsTyper), Box::new(Some))
     }
 
-    fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn copy_to_clipboard(text: &str) -> Result<()> {
         clipboard::set_text(text).map_err(Into::into)
     }
 }
@@ -111,7 +112,7 @@ impl TrayPolicy for WindowsTray {
     }
 
     #[cfg(not(test))]
-    fn prepare_application() -> Result<(), Box<dyn std::error::Error>> {
+    fn prepare_application() -> Result<()> {
         Ok(())
     }
 
@@ -139,7 +140,7 @@ fn unicode_events(text: &str) -> Vec<(u16, bool)> {
 }
 
 impl TextTyper for WindowsTyper {
-    fn type_text(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn type_text(&self, text: &str) -> Result<()> {
         // Give the target window time to regain focus
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -162,7 +163,7 @@ impl TextTyper for WindowsTyper {
         };
 
         if sent as usize != inputs.len() {
-            return Err(format!("SendInput only sent {}/{} events", sent, inputs.len()).into());
+            bail!("SendInput only sent {}/{} events", sent, inputs.len());
         }
 
         info!(text = %text, "Text typed");

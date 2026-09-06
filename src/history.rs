@@ -12,7 +12,7 @@ pub(crate) const MAX_HISTORY_BYTES: usize = 5 * 1024 * 1024;
 pub(crate) const RECENT_HISTORY_LIMIT: usize = 5;
 const REVERSE_SCAN_BYTES: usize = 4096;
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+type Result<T> = anyhow::Result<T>;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -246,7 +246,7 @@ impl HistoryTyper {
 }
 
 impl TextTyper for HistoryTyper {
-    fn type_text(&self, text: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn type_text(&self, text: &str) -> anyhow::Result<()> {
         match self.store.append(text) {
             Ok(()) => (self.saved)(text.to_string()),
             Err(error) => tracing::error!(%error, "Failed to persist transcription history"),
@@ -348,7 +348,7 @@ mod tests {
     struct RecordingTyper(Mutex<Vec<String>>);
 
     impl TextTyper for RecordingTyper {
-        fn type_text(&self, text: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        fn type_text(&self, text: &str) -> anyhow::Result<()> {
             self.0.lock().unwrap().push(text.to_string());
             Ok(())
         }

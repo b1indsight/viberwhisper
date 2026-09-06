@@ -1,4 +1,6 @@
 use std::sync::Arc;
+
+use anyhow::Result;
 use tracing::{info, warn};
 
 use super::{LocalServiceGuard, start_local_backend};
@@ -34,14 +36,11 @@ fn toggle_session_event(state: &RecordingState) -> Option<SessionEvent> {
 }
 
 /// Runs the listener using an already resolved workflow configuration.
-pub(super) fn run_with_config(config: ListenerConfig) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn run_with_config(config: ListenerConfig) -> Result<()> {
     run_with_mode(config, ListenerMode::Delivery)
 }
 
-pub(super) fn run_capture(
-    config: ListenerConfig,
-    store: DatasetStore,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn run_capture(config: ListenerConfig, store: DatasetStore) -> Result<()> {
     run_with_mode(config, ListenerMode::Capture(Arc::new(store)))
 }
 
@@ -50,10 +49,7 @@ enum ListenerMode {
     Capture(Arc<DatasetStore>),
 }
 
-fn run_with_mode(
-    mut config: ListenerConfig,
-    mode: ListenerMode,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run_with_mode(mut config: ListenerConfig, mode: ListenerMode) -> Result<()> {
     use std::sync::Arc;
 
     use audio::AudioRecorder;

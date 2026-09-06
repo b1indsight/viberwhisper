@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::{Result, bail};
 #[cfg(not(test))]
 use tracing::warn;
 #[cfg(not(test))]
@@ -40,7 +41,7 @@ pub(crate) trait TrayPolicy: 'static {
     fn idle_icon_is_template() -> bool;
 
     #[cfg(not(test))]
-    fn prepare_application() -> Result<(), Box<dyn std::error::Error>>;
+    fn prepare_application() -> Result<()>;
 
     #[cfg(not(test))]
     fn double_click_interval() -> Option<Duration>;
@@ -171,9 +172,7 @@ impl<P: TrayPolicy> TrayManager<P> {
     ///
     /// `tray-icon` stores handlers in one-shot global cells, so another manager in the same process
     /// cannot replace the callback.
-    pub fn new(
-        notify: impl Fn(TrayEvent) + Send + Sync + 'static,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(notify: impl Fn(TrayEvent) + Send + Sync + 'static) -> Result<Self> {
         P::prepare_application()?;
         let (idle_source, idle_is_template) = status_icon_source::<P>(false);
         let (recording_source, _) = status_icon_source::<P>(true);
@@ -310,9 +309,7 @@ fn install_native_handlers(notify: impl Fn(TrayEvent) + Send + Sync + 'static) {
 
 #[cfg(test)]
 impl<P: TrayPolicy> TrayManager<P> {
-    pub fn new(
-        _notify: impl Fn(TrayEvent) + Send + Sync + 'static,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(_notify: impl Fn(TrayEvent) + Send + Sync + 'static) -> Result<Self> {
         Ok(TrayManager(PhantomData))
     }
 
@@ -336,23 +333,23 @@ fn status_icon_source<P: TrayPolicy>(recording: bool) -> (&'static [u8], bool) {
 }
 
 #[cfg(not(test))]
-fn create_icon(bytes: &[u8]) -> Result<Icon, Box<dyn std::error::Error>> {
+fn create_icon(bytes: &[u8]) -> Result<Icon> {
     let (rgba, width, height) = decode_icon_png(bytes)?;
     Ok(Icon::from_rgba(rgba, width, height)?)
 }
 
-fn decode_icon_png(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error>> {
+fn decode_icon_png(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
     let decoder = png::Decoder::new(Cursor::new(bytes));
     let mut reader = decoder.read_info()?;
     let mut rgba = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut rgba)?;
 
     if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
-        return Err(format!(
+        bail!(
             "status icon must be an 8-bit RGBA PNG, got {:?} {:?}",
-            info.bit_depth, info.color_type
-        )
-        .into());
+            info.bit_depth,
+            info.color_type
+        );
     }
 
     rgba.truncate(info.buffer_size());
