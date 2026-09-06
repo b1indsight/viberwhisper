@@ -46,8 +46,8 @@ The gate is deliberately per chunk because live chunks are uploaded while record
 progress. Existing ordered merging ignores empty segments, so silent chunks can surround voiced
 chunks without changing voiced order. If every chunk is silent, realtime finalization skips
 post-processing, history persistence, and injection; offline conversion also short-circuits before
-post-processing. API mode, Local mode, prompt-lab capture/evaluation, and offline conversion all
-share this one transcriber boundary. The gate detects near-silent energy, not general non-speech
+post-processing. Listener delivery, prompt-lab capture/evaluation, and offline conversion all share
+this one transcriber boundary. The gate detects near-silent energy, not general non-speech
 noise, and does not inspect provider-specific response metadata or recognized text.
 
 ## Retry Budget

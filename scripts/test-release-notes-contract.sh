@@ -13,7 +13,7 @@ cat > "${valid_notes}" <<'EOF'
 
 - The macOS app is ad-hoc signed, not Developer ID signed, and not notarized.
 - Windows artifacts are not Authenticode signed.
-- Packages support the API inference profile only; Local mode requires a source checkout.
+- Packages use configurable OpenAI-compatible endpoints, including user-managed services on localhost.
 - Validate downloads with `SHA256SUMS` and GitHub artifact provenance.
 EOF
 
@@ -66,8 +66,8 @@ assert_marker_rejected macos_ad_hoc "macOS ad-hoc signing" "ad-hoc signed" "loca
 assert_marker_rejected macos_developer_id "missing Developer ID signing" "not Developer ID signed" "Developer ID status unspecified"
 assert_marker_rejected macos_notarization "missing notarization" "not notarized" "notarization status unspecified"
 assert_marker_rejected windows_authenticode "missing Windows Authenticode signing" "not Authenticode signed" "Windows signing status unspecified"
-assert_marker_rejected api_only "API-only packaged scope" "API inference profile only" "API inference profile"
-assert_marker_rejected local_checkout "Local-mode source checkout requirement" "requires a source checkout" "requires a separate installation"
+assert_marker_rejected compatible_api "OpenAI-compatible endpoint scope" "OpenAI-compatible endpoints" "HTTP endpoints"
+assert_marker_rejected localhost "localhost endpoint support" "on localhost" "on the same machine"
 assert_marker_rejected checksums "SHA256SUMS verification" 'SHA256SUMS' 'checksums'
 assert_marker_rejected provenance "GitHub artifact provenance" "GitHub artifact provenance" "build metadata"
 

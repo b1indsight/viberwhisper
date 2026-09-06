@@ -56,7 +56,9 @@ Calls an OpenAI-compatible chat completions API to clean up transcribed text. Th
 
 **Construction:** `LlmPostProcessor::new(config: LlmConfig) -> Result<Self>`
 
-`PostProcessConfig::validate` owns URL/model validation and produces either `Disabled` or a validated `LlmConfig`. Authentication is explicit: Local uses `ApiAuth::None`; API mode uses Bearer auth when enabled.
+`PostProcessConfig::validate` owns URL/model validation and produces either `Disabled` or a
+validated `LlmConfig`. Authentication uses Bearer auth when configured and explicit
+`ApiAuth::None` otherwise.
 
 **`process` method:** Sends a single blocking request to the LLM API. Empty text is returned immediately without a network call.
 

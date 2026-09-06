@@ -2,7 +2,9 @@
 
 ## Status
 
-**Implemented.** The Python FastAPI service, Rust process lifecycle management, local CLI commands, runtime endpoint overrides, health diagnostics, tests, and user documentation are present. Migration to llama.cpp remains a future option once upstream audio support is available.
+**Superseded by plan 44.** This document records the former implementation. The bundled Python
+service, Rust lifecycle management, Local CLI/configuration, and model runtime have since been
+removed.
 
 ## Background
 

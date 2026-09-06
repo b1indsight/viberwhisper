@@ -21,9 +21,8 @@ portable double-click flow use `viberwhisper-app.exe`; terminal commands continu
 credentials; an explicit per-machine invocation remains available for same-context upgrades of
 older machine-wide installations. WiX dual-purpose packages can still publish the Installed Apps
 entry under HKLM for a per-user installation; the MSI context, payload, and shortcut remain scoped
-to the installing user. Python/Gemma files under `server/` are deliberately excluded,
-so packaged artifacts support the API inference profile only. Run Local mode from a source
-checkout until a future release explicitly adds a packaged Python runtime.
+to the installing user. Inference uses configurable OpenAI-compatible endpoints; release artifacts
+do not bundle a model runtime or manage an external service process.
 
 The `.app` receives an ad-hoc signature, but releases are not yet Developer ID signed/notarized or
 Authenticode signed. Document and test the expected Gatekeeper and SmartScreen prompts; never

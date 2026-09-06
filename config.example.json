@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "input": {
     "hold_hotkey": "F8",
     "toggle_hotkey": "F9"
@@ -20,7 +20,6 @@
     "temperature": 0.0
   },
   "inference": {
-    "active": "api",
     "api": {
       "transcription": {
         "api_url": "https://api.groq.com/openai/v1/audio/transcriptions",
@@ -30,11 +29,6 @@
         "api_url": "https://api.openai.com/v1/chat/completions",
         "model": "gpt-4o-mini"
       }
-    },
-    "local": {
-      "data_dir": "~/.viberwhisper",
-      "server_port": 17265,
-      "quantization": "int8"
     }
   }
 }

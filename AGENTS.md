@@ -8,7 +8,7 @@ This is a Rust 2024 desktop utility named "viberwhisper". It runs as a backgroun
 
 ### Project Background
 
-ViberWhisper is a local-first voice-to-text typing tool. The app lets the user trigger recording from anywhere, transcribe speech through an OpenAI-compatible STT API, optionally clean up the result with an LLM, and inject the final text into the active application.
+ViberWhisper is a cross-platform voice-to-text typing tool. The app lets the user trigger recording from anywhere, transcribe speech through an OpenAI-compatible STT API, optionally clean up the result with an LLM, and inject the final text into the active application.
 
 ### Platform
 
@@ -87,11 +87,11 @@ src/
   bin/
     viberwhisper-app.rs      — Feature-gated Windows GUI-subsystem desktop entry point
   lib.rs                     — Crate module root and public CLI/desktop application entry exports
-  application.rs             — Logging, CLI dispatch, config/local/convert workflows
+  application.rs             — Logging, CLI dispatch, config/convert workflows
   application/
     listener.rs              — Platform-action loop, session effects, transcription delivery
     prompt_lab.rs            — Dataset capture, regression, and agent-review CLI assembly
-  runtime_config.rs          — Application-level profile and consumer config assembly
+  runtime_config.rs          — Application-level API consumer config assembly
   session.rs                 — Shared SessionId value type
   text.rs                    — Shared language-aware transcription text merge
   history.rs                 — Bounded JSONL transcription history persistence and tail repair
@@ -106,7 +106,7 @@ src/
   core/
     config.rs                — Config facade, errors, validation, and safe value types
     config/
-      document.rs            — Strict v2 configuration document
+      document.rs            — Strict v3 configuration document
       fields.rs              — Canonical field catalog
       store.rs               — Atomic configuration persistence
     cli.rs                   — Clap-based CLI (config, convert subcommands)
@@ -142,10 +142,6 @@ src/
   postprocess.rs             — PostProcessor facade, session traits, NoopPostProcessor
   postprocess/
     llm.rs                   — LlmPostProcessor with conservative and preheat sessions
-  local.rs                   — Local runtime facade and public exports
-  local/
-    installer.rs             — Python environment, dependencies, and model installation
-    service.rs               — Local inference service process lifecycle
 docs/
   architecture/              — Module-level design docs
   plan/                      — Feature implementation plans

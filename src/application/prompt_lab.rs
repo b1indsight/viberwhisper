@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use super::{config_context, load_config};
+use super::load_config;
 use crate::core::cli::{
     PromptLabCommand, PromptLabDatasetCommand, PromptLabReportCommand, PromptLabSampleCommand,
     PromptLabSampleStatus,
@@ -13,7 +13,7 @@ use crate::prompt_lab::{
     DatasetStore, EvaluationReport, EvaluationRequest, ProperNounAnnotation, ReferenceStatus,
     RunStatus, SttSnapshot, Thresholds, apply_review, evaluate,
 };
-use crate::runtime_config::{self, ProfileSelection};
+use crate::runtime_config;
 
 pub(super) fn handle(action: PromptLabCommand) -> Result<()> {
     match action {
@@ -74,14 +74,8 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
         .as_deref()
         .map(EvaluationReport::read)
         .transpose()?;
-    let (store, document) = load_config()?;
-    let (config_dir, home_dir) = config_context(&store)?;
-    let mut config = runtime_config::resolve_convert(
-        &document,
-        &EnvironmentSecretSource,
-        &config_dir,
-        &home_dir,
-    )?;
+    let (_, document) = load_config()?;
+    let mut config = runtime_config::resolve_convert(&document, &EnvironmentSecretSource)?;
     let prompt = if command.no_prompt {
         None
     } else if let Some(prompt) = candidate_from_file {
@@ -91,8 +85,6 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
     };
     config.backend.transcriber = config.backend.transcriber.with_prompt(prompt);
     let stt = SttSnapshot::from(config.backend.transcriber.metadata());
-    let local_manager = super::start_local_backend(&mut config.backend)?;
-    let _local_manager = super::LocalServiceGuard::new(local_manager);
     let transcriber = ApiTranscriber::new(config.backend.transcriber)?;
     let outcome = evaluate(
         &dataset,
@@ -149,15 +141,8 @@ fn report(action: PromptLabReportCommand) -> Result<()> {
 
 fn record(root: PathBuf) -> Result<()> {
     let dataset = DatasetStore::open_or_create(root)?;
-    let (store, document) = load_config()?;
-    let (config_dir, home_dir) = config_context(&store)?;
-    let config = runtime_config::resolve_listener(
-        &document,
-        &EnvironmentSecretSource,
-        ProfileSelection::Configured,
-        &config_dir,
-        &home_dir,
-    )?;
+    let (_, document) = load_config()?;
+    let config = runtime_config::resolve_listener(&document, &EnvironmentSecretSource)?;
     super::listener::run_capture(config, dataset)
 }
 

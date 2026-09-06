@@ -14,13 +14,10 @@ use anyhow::{Result as AnyhowResult, anyhow};
 use rdev::EventType;
 use tinyfiledialogs::{MessageBoxIcon, YesNo};
 
-use super::config_context;
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
-use crate::core::config::{
-    ConfigDocument, ConfigStore, EnvironmentSecretSource, InferenceProfile, SecretSource,
-};
+use crate::core::config::{ConfigDocument, ConfigStore, EnvironmentSecretSource, SecretSource};
 use crate::postprocess::PostProcessor;
-use crate::runtime_config::{self, ListenerConfig, ProfileSelection};
+use crate::runtime_config::{self, ListenerConfig};
 use crate::session::SessionId;
 use crate::transcriber::{ApiTranscriber, Transcriber};
 use crate::{audio, text};
@@ -72,7 +69,7 @@ pub(super) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
             "尚未找到配置文件。是否现在运行配置向导？\n选择“否”将在本次启动使用内置默认值。"
                 .to_string(),
         ),
-        Ok(Some(document)) => match resolve_document(&store, &document) {
+        Ok(Some(document)) => match resolve_document(&document) {
             Ok(config) => return Ok(Some(config)),
             Err(error) => (
                 document,
@@ -93,10 +90,10 @@ pub(super) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
 
     let mut ui = NativeSetupUi;
     if !ui.confirm(&reason, true) {
-        return Ok(Some(resolve_document(&store, &ConfigDocument::default())?));
+        return Ok(Some(resolve_document(&ConfigDocument::default())?));
     }
 
-    let mut verifier = NativeVerifier::new(&store)?;
+    let mut verifier = NativeVerifier;
     match run_wizard(
         &store,
         initial,
@@ -104,7 +101,7 @@ pub(super) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
         &mut ui,
         &mut verifier,
     )? {
-        WizardOutcome::Saved(document) => Ok(Some(resolve_document(&store, &document)?)),
+        WizardOutcome::Saved(document) => Ok(Some(resolve_document(&document)?)),
         WizardOutcome::Cancelled => Ok(None),
     }
 }
@@ -124,7 +121,7 @@ pub(super) fn run_explicit() -> AnyhowResult<()> {
         }
     };
     let mut ui = NativeSetupUi;
-    let mut verifier = NativeVerifier::new(&store)?;
+    let mut verifier = NativeVerifier;
     if let WizardOutcome::Saved(document) = run_wizard(
         &store,
         initial,
@@ -132,22 +129,15 @@ pub(super) fn run_explicit() -> AnyhowResult<()> {
         &mut ui,
         &mut verifier,
     )? {
-        resolve_document(&store, &document)?;
+        resolve_document(&document)?;
     }
     Ok(())
 }
 
-fn resolve_document(
-    store: &ConfigStore,
-    document: &ConfigDocument,
-) -> AnyhowResult<ListenerConfig> {
-    let (config_dir, home_dir) = config_context(store)?;
+fn resolve_document(document: &ConfigDocument) -> AnyhowResult<ListenerConfig> {
     Ok(runtime_config::resolve_listener(
         document,
         &EnvironmentSecretSource,
-        ProfileSelection::Configured,
-        &config_dir,
-        &home_dir,
     )?)
 }
 
@@ -255,20 +245,7 @@ struct VerificationResult {
     final_text: String,
 }
 
-struct NativeVerifier {
-    config_dir: std::path::PathBuf,
-    home_dir: std::path::PathBuf,
-}
-
-impl NativeVerifier {
-    fn new(store: &ConfigStore) -> AnyhowResult<Self> {
-        let (config_dir, home_dir) = config_context(store)?;
-        Ok(Self {
-            config_dir,
-            home_dir,
-        })
-    }
-}
+struct NativeVerifier;
 
 impl SetupVerifier for NativeVerifier {
     fn verify(
@@ -276,14 +253,8 @@ impl SetupVerifier for NativeVerifier {
         document: &ConfigDocument,
         _ui: &mut dyn SetupUi,
     ) -> Result<VerificationResult, String> {
-        let config = runtime_config::resolve_listener(
-            document,
-            &EnvironmentSecretSource,
-            ProfileSelection::Configured,
-            &self.config_dir,
-            &self.home_dir,
-        )
-        .map_err(|error| error.to_string())?;
+        let config = runtime_config::resolve_listener(document, &EnvironmentSecretSource)
+            .map_err(|error| error.to_string())?;
         let transcriber =
             ApiTranscriber::new(config.backend.transcriber).map_err(|error| error.to_string())?;
         let post_processor = PostProcessor::new(config.backend.post_process);
@@ -366,7 +337,6 @@ fn run_wizard(
     ui: &mut dyn SetupUi,
     verifier: &mut dyn SetupVerifier,
 ) -> AnyhowResult<WizardOutcome> {
-    document.inference.active = InferenceProfile::Api;
     let Some(url) = required_input(
         ui,
         "请输入 OpenAI 兼容的 STT API 地址",
@@ -452,7 +422,7 @@ fn run_wizard(
             Err(()) => return Ok(WizardOutcome::Cancelled),
         };
 
-    if let Err(error) = resolve_document(store, &document) {
+    if let Err(error) = resolve_document(&document) {
         ui.message(&format!(
             "配置仍有问题，未保存：\n{}",
             safe_dialog_text(&error.to_string())

@@ -23,11 +23,6 @@ pub enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Manage the local Gemma inference service
-    Local {
-        #[command(subcommand)]
-        action: LocalCommand,
-    },
     /// Transcribe an audio file
     Convert {
         /// Path to the input WAV file
@@ -173,18 +168,6 @@ pub enum ConfigAction {
     },
 }
 
-#[derive(Subcommand, Debug)]
-pub enum LocalCommand {
-    /// Install the local inference service dependencies and model
-    Install,
-    /// Start the local inference service and run the main listener loop
-    Start,
-    /// Stop the local inference service
-    Stop,
-    /// Show the local inference service status
-    Status,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,14 +220,8 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_local_start() {
-        let cli = Cli::try_parse_from(["viberwhisper", "local", "start"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Local {
-                action: LocalCommand::Start
-            })
-        ));
+    fn rejects_removed_local_command() {
+        assert!(Cli::try_parse_from(["viberwhisper", "local", "start"]).is_err());
     }
 
     #[test]

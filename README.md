@@ -2,7 +2,7 @@
 
 一个基于 Rust 实现的语音转文字输入工具，按住热键即可将语音实时转录并输入到任意文本框。
 
-灵感来源于 [Typeless](https://typeless.ai/)，默认使用 [Groq Whisper API](https://console.groq.com) 进行语音识别，也可通过配置切换到任何兼容 OpenAI multipart 格式的转写接口；也支持启动本地 Gemma 服务，在本机完成转写与文本整理。
+灵感来源于 [Typeless](https://typeless.ai/)，默认使用 [Groq Whisper API](https://console.groq.com) 进行语音识别，也可通过配置切换到任何兼容 OpenAI multipart 格式的转写接口。
 
 ## 功能特性
 
@@ -11,7 +11,6 @@
 - **静音幻听抑制**：在 STT 上传前本地过滤没有可听窗口的近静音分片，整段静音不会触发后处理、历史记录或文字输入
 - **长录音自动分片**：超过时长/大小限制的录音自动切分，后台并行转写，结果智能合并
 - **LLM 文本后处理**：可选的 LLM 后处理层，自动补标点、去语气词、清理中断与重复
-- **本地推理模式**：通过内置 `local` 子命令拉起 Python FastAPI 服务，使用 Gemma 4 本地模型提供 `/v1/audio/transcriptions` 与 `/v1/chat/completions`
 - **自动文本输入**：识别结果自动输入到当前光标位置；macOS 原生控件优先使用辅助功能 API，Chromium 浏览器使用可恢复的剪贴板粘贴，支持中文等 Unicode 字符
 - **本地识别历史**：最终用于输入的文本以 JSONL 追加到应用数据目录，右键菜单直接显示最近 5 条，点击即可复制完整原文
 - **STT Prompt 回归调试**：采集并校正 WAV 测试集，全量重跑临时候选 prompt，以 WER、代理语义评分和专有名词准确率独立把关
@@ -25,7 +24,6 @@
   - macOS：原生控件优先通过辅助功能 API 写入当前选择；Chromium 浏览器和不支持该能力的控件使用原生剪贴板与 Cmd+V。需在「系统设置 → 隐私与安全性 → 辅助功能」中授权正在运行的终端或 ViberWhisper
   - Windows：使用 SendInput API，无需额外权限
 - **Rust**：仅源码构建需要支持 Rust 2024 edition 的 stable toolchain；安装发布包不需要 Rust
-- **Python**：本地模式需要 Python 3.10+；安装时优先使用 `uv`，若未安装则回退到系统 Python（用于 FastAPI + Transformers 服务）
 
 ## 下载安装包
 
@@ -42,9 +40,8 @@
 当前发行包尚未使用 Apple Developer ID/notarization 或 Windows Authenticode 签名，因此系统可能显示
 Gatekeeper/SmartScreen 警告。请先核对校验和与 GitHub provenance，再通过系统提供的确认入口运行。
 
-> **当前发行范围**：DMG、MSI 和便携归档只包含 Rust 应用，支持 API inference profile；不携带
-> `server/` 下的 Python/Gemma runtime。发行包中的 `local install`、`local start` 和 Local profile
-> 暂不支持；本地模式目前仍需从源码目录运行。
+> **当前发行范围**：DMG、MSI 和便携归档包含 Rust 应用，并通过可配置的
+> OpenAI-compatible API endpoint 提供转写和可选文本后处理。
 
 ## 快速开始
 
@@ -54,7 +51,7 @@ Gatekeeper/SmartScreen 警告。请先核对校验和与 GitHub provenance，再
 
 ### 2. 配置
 
-程序只读取严格的 nested v2 配置，不探测当前目录中的旧版平铺 `config.json`，也不会自动迁移。实际路径可用下面的命令查看：
+程序只读取严格的 nested v3 配置，不探测当前目录中的旧版平铺 `config.json`，也不会自动迁移。实际路径可用下面的命令查看：
 
 ```bash
 viberwhisper config path
@@ -74,9 +71,10 @@ viberwhisper setup
 ```
 
 也可将 [`config.example.json`](config.example.json) 复制到上述路径，或使用 `config set` 修改普通字段。
-已有文件必须包含 `schema_version: 2` 和当前结构；新增的可选 `audio.input_device` 缺失时兼容为系统默认设备。
+已有文件必须包含 `schema_version: 3` 和当前结构；新增的可选 `audio.input_device` 缺失时兼容为系统默认设备。
 其他缺字段、未知字段、损坏 JSON 或 schema 版本错误都会明确进入恢复向导。已退役的 `chunking`、`session`
-和 `inference.api.provider` 均视为未知字段。
+和 `inference.api.provider` 均视为未知字段。由 v2 升级时，把 `schema_version` 改为 `3`，并删除
+`inference.active` 与整个 `inference.local` 对象；原 Local 用户还需要填写可用的 API endpoint 和模型。
 
 API 密钥优先从环境变量读取，其次才读取配置文件中的对应 secret 字段：
 
@@ -112,15 +110,6 @@ cargo build --release
 cargo run --release
 ```
 
-如果要使用本地 Gemma 模式，先执行：
-
-```bash
-cargo run -- local install
-cargo run -- local start
-```
-
-`local install` 会先校验本机 Python 版本是否为 3.10 或以上，然后优先使用 `uv` 创建虚拟环境和安装 `server/requirements.txt` 中的依赖；若未安装 `uv`，则回退到系统 Python。随后会下载 `google/gemma-4-E2B-it` 模型并校验安装结果。默认数据目录为 `~/.viberwhisper`，可通过 `inference.local.data_dir` 覆盖；如需 Hugging Face 镜像，可在安装前设置 `HF_ENDPOINT`。
-
 ### 4. 使用
 
 1. 启动程序，系统托盘/状态栏会出现五柱声波图标，不再显示悬浮窗；Windows 安装版从开始
@@ -140,16 +129,10 @@ cargo run -- local start
 # 启动录音监听（默认，无子命令）
 viberwhisper
 
-# 安装 / 启动 / 停止 / 查看本地 Gemma 服务
-viberwhisper local install
-viberwhisper local start
-viberwhisper local stop
-viberwhisper local status
-
 # 查看所有配置
 viberwhisper config list
 
-# 显示配置路径 / 检查当前 profile 的运行配置
+# 显示配置路径 / 检查当前 API 运行配置
 viberwhisper config path
 viberwhisper config check
 
@@ -184,7 +167,7 @@ viberwhisper prompt-lab report apply-review \
   --review /path/to/<run-id>.agent-review.json
 ```
 
-`prompt-lab record` 只保存当前 STT profile 返回的原始结果，不执行 LLM 后处理、不写普通
+`prompt-lab record` 只保存当前 STT API 返回的原始结果，不执行 LLM 后处理、不写普通
 `history.jsonl`，也不向当前输入框注入文字。每次完成的录音在数据集的 `audio/` 下保存一个完整
 WAV，并在 `samples/` 下保存同 ID 的 JSON；初始识别不是标准答案，必须通过 `sample correct`
 写入人工参考文本后才会成为 `ready`。专有名词文件是由 `canonical`、`accepted`、
@@ -284,14 +267,13 @@ macOS 的 Chromium/兜底粘贴会在极短的内部注入窗口暂停 ViberWhis
 内部可靠性策略不作为用户配置：实时与离线音频统一按 30 秒或 23 MiB 的较小限制分片；每个 STT 请求
 最多等待 12 秒，网络错误或 HTTP 5xx 最多重试一次；停止录音后的 session 收敛窗口固定为 30 秒。
 
-### 转写与 API profile
+### 转写 API
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `transcription.language` | 字符串/null | `zh` | 语言代码；`null` 为自动检测 |
 | `transcription.prompt` | 字符串/null | 中文提示词 | 转写提示词 |
 | `transcription.temperature` | 数字 | `0` | 转写温度 |
-| `inference.active` | `api`/`local` | `api` | 默认使用的推理 profile |
 | `inference.api.transcription.api_url` | URL | Groq Whisper URL | OpenAI-compatible multipart 地址 |
 | `inference.api.transcription.model` | 字符串 | `whisper-large-v3-turbo` | 转写模型 |
 | `inference.api.transcription.api_key` | secret | 无 | 只读状态；环境变量为 `TRANSCRIPTION_API_KEY` |
@@ -311,20 +293,9 @@ macOS 的 Chromium/兜底粘贴会在极短的内部注入窗口暂停 ViberWhis
 > **注意**：`config.json` 已在 `.gitignore` 中排除，避免误提交真实密钥。程序不会把环境变量中的密钥写入磁盘；手工写在 `config.json` 中的密钥会在更新其他配置项时原样保留。
 > 后处理当前固定使用 OpenAI-compatible chat completions 请求格式。
 
-### 本地模式
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `inference.local.data_dir` | 字符串/null | `~/.viberwhisper` | 模型、虚拟环境、PID 和日志目录 |
-| `inference.local.server_port` | 数字 | `17265` | 本地 FastAPI 服务端口 |
-| `inference.local.quantization` | 字符串 | `int8` | 可选 `int4` / `int8` / `bf16` |
-
-将 `inference.active` 设为 `local` 后，默认监听和 `convert` 使用 Local profile。`local start` 只对本次运行做
-Local override，不修改持久化配置。Local 请求使用显式无认证模式，不发送 `Authorization` 头。
-
 ### 切换转写服务
 
-修改 API profile 的 endpoint、model 和环境密钥即可切换兼容接口：
+修改 API endpoint、model 和环境密钥即可切换兼容接口：
 
 ```bash
 ./viberwhisper config set inference.api.transcription.api_url https://api.openai.com/v1/audio/transcriptions
@@ -356,17 +327,6 @@ export POST_PROCESS_API_KEY=your_key_here
 
 后处理失败时自动降级为输出原始转写文本，不会导致整次录音失败。
 
-## 本地 Gemma 服务
-
-本地服务位于 [`server/server.py`](server/server.py)，通过 FastAPI 暴露两个 OpenAI 兼容端点：
-
-- `POST /v1/audio/transcriptions`：接收 WAV 音频并调用 Gemma 音频理解能力返回转写结果
-- `POST /v1/chat/completions`：供后处理模块复用，返回整理后的文本
-
-Rust 侧的 `LocalServiceManager` 负责启动、健康检查、PID 记录、日志文件和关闭流程。`viberwhisper local start` 会先拉起服务，再进入正常监听循环；将 `inference.active` 设为 `local` 也会在启动主程序时自动做同样的准备。
-
-当前本地服务限制单次音频请求最长 30 秒，因此长录音仍由 Rust 端先分片，再逐片提交给本地端点。
-
 ## 依赖项
 
 - [rdev](https://crates.io/crates/rdev) - 全局热键监听
@@ -386,7 +346,6 @@ Rust 侧的 `LocalServiceManager` 负责启动、健康检查、PID 记录、日
 cargo test     # 运行测试
 cargo clippy   # 代码检查
 cargo fmt      # 代码格式化
-uv run pytest  # 运行 Python server 测试
 ```
 
 维护者打包、版本校验、tag 发布、产物验证和失败恢复流程见
