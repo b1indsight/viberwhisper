@@ -71,3 +71,4 @@ Implementation plans and technical specs for each feature.
 | [42-structured-runtime-logging.md](plan/42-structured-runtime-logging.md) | Implemented | Route runtime diagnostics through structured tracing while preserving intentional CLI stdout |
 | [43-anyhow-error-boundaries.md](plan/43-anyhow-error-boundaries.md) | Implemented | Replace boxed dynamic-error result boundaries with consistent contextual `anyhow` results while retaining typed domain errors |
 | [44-remove-local-inference-mode.md](plan/44-remove-local-inference-mode.md) | Implemented | Remove the bundled Local inference profile, model runtime, CLI, configuration, and supporting Python surface |
+| [45-prompt-lab-review-rules.md](plan/45-prompt-lab-review-rules.md) | Implemented | Share agent-review validation, LLM aggregation, and threshold calculations across review application and report loading |

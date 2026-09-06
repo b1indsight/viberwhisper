@@ -15,8 +15,8 @@ src/prompt_lab/
   capture.rs       — session-owned archive worker and sample publication
   dataset.rs       — strict manifests/sidecars, correction, validation, scoring digest
   metrics.rs       — versioned WER alignment and proper-noun matching
-  regression.rs    — fresh WAV execution, report contract, comparison
-  review.rs        — coding-agent input validation and final gates
+  regression.rs    — fresh WAV execution, report contract, shared review rules, comparison
+  review.rs        — coding-agent input identity/coverage validation and report completion
 src/application/prompt_lab.rs — CLI/config/backend assembly
 ```
 
@@ -85,11 +85,20 @@ A successful local run directly writes schema-v1 JSON with status `awaiting_agen
 LLM/gate fields. Agent review input must use the exact run ID and rubric, contain each sample ID once,
 use scores in `0..=100`, and provide non-empty reasons plus differences for every score below 100.
 The review module validates the entire input and unchanged report contract before any write. Metric
-counts, alignments, annotations, and matched forms must exactly equal fresh derivations; only the
-derived percentages use a bounded floating-point comparison so JSON round trips cannot invalidate
-an otherwise unchanged report. The module then embeds the review content, calculates the mean and
-inclusive gates, and directly rewrites that report as `complete`. Invalid input leaves the report
-byte-for-byte unchanged.
+counts, alignments, annotations, and matched forms must exactly equal fresh derivations; derived
+percentages and the LLM mean use a bounded floating-point comparison so JSON round trips cannot
+invalidate an otherwise unchanged report. The module then embeds the review content, calculates
+the mean and inclusive gates, and directly rewrites that report as `complete`. Invalid input
+leaves the report byte-for-byte unchanged.
+
+The report-domain types in `regression.rs` own the shared rules: `AgentSampleReview::validate`
+checks review payloads, `EvaluationReport::review_aggregate` summarizes the validated sample
+reviews, and `GateResults::evaluate` / `all_passed` calculate the inclusive gates and overall
+result. Review application and completed-report loading both use these methods. Input document
+identity, duplicate IDs, and exact sample coverage remain the responsibility of `review.rs`.
+Loading a completed report independently validates each review and recomputes the aggregate and
+gates to check the stored values. Gate evaluation uses the validated persisted LLM mean so an
+accepted JSON rounding difference does not change an exact-threshold decision during loading.
 
 `meets_targets` is true only when WER is at or below its maximum and both 100-point metrics are at
 or above their minima. There is no combined score. Optional comparison requires a complete report

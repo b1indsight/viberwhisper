@@ -192,6 +192,35 @@ pub(crate) struct AgentSampleReview {
     pub(crate) differences: Vec<AgentDifference>,
 }
 
+impl AgentSampleReview {
+    /// Validates the shared review payload rules at either JSON input boundary.
+    pub(super) fn validate(&self, sample_id: &str) -> Result<()> {
+        if self.score > 100 {
+            return Err(RegressionError::Invalid(format!(
+                "agent review score for {sample_id} exceeds 100"
+            )));
+        }
+        if self.reason.trim().is_empty() {
+            return Err(RegressionError::Invalid(format!(
+                "agent review reason for {sample_id} must not be empty"
+            )));
+        }
+        if self.score < 100 && self.differences.is_empty() {
+            return Err(RegressionError::Invalid(format!(
+                "agent review below 100 for {sample_id} must describe at least one difference"
+            )));
+        }
+        for difference in &self.differences {
+            if difference.category.trim().is_empty() || difference.explanation.trim().is_empty() {
+                return Err(RegressionError::Invalid(format!(
+                    "agent review difference for {sample_id} needs category and explanation"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReviewSummary {
@@ -200,12 +229,33 @@ pub(crate) struct ReviewSummary {
     pub(crate) reviewed_at_unix_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct GateResults {
     pub(crate) wer: bool,
     pub(crate) llm: bool,
     pub(crate) proper_nouns: bool,
+}
+
+impl GateResults {
+    /// Applies inclusive report thresholds to local metrics and a validated LLM mean.
+    pub(super) fn evaluate(
+        aggregates: &Aggregates,
+        mean_score: f64,
+        thresholds: &Thresholds,
+    ) -> Self {
+        Self {
+            wer: aggregates.wer.wer_percent <= thresholds.max_wer_percent,
+            llm: mean_score >= thresholds.min_llm_score,
+            proper_nouns: aggregates.proper_nouns.accuracy_percent
+                >= thresholds.min_proper_noun_percent,
+        }
+    }
+
+    /// Reports whether every metric meets its threshold.
+    pub(super) fn all_passed(&self) -> bool {
+        self.wer && self.llm && self.proper_nouns
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,6 +510,22 @@ impl EvaluationReport {
         self.validate_comparison_contract()
     }
 
+    /// Summarizes a nonempty sample set whose review payloads have all been validated.
+    pub(super) fn review_aggregate(&self) -> LlmAggregate {
+        let mut total = 0_u64;
+        for sample in &self.samples {
+            let review = sample
+                .agent_review
+                .as_ref()
+                .expect("sample reviews were checked before aggregation");
+            total += u64::from(review.score);
+        }
+        LlmAggregate {
+            mean_score: total as f64 / self.samples.len() as f64,
+            scored_samples: self.samples.len(),
+        }
+    }
+
     fn validate_complete_review(&self) -> Result<()> {
         let review = self.review.as_ref().expect("complete fields were checked");
         if review.source != "coding_agent"
@@ -470,58 +536,32 @@ impl EvaluationReport {
                 "complete report review metadata is invalid".to_string(),
             ));
         }
-        let mut total = 0_u64;
         for sample in &self.samples {
             let review = sample
                 .agent_review
                 .as_ref()
                 .expect("complete sample review was checked");
-            if review.score > 100 || review.reason.trim().is_empty() {
-                return Err(RegressionError::Invalid(format!(
-                    "sample {} has an invalid agent review",
-                    sample.sample_id
-                )));
-            }
-            if review.score < 100 && review.differences.is_empty() {
-                return Err(RegressionError::Invalid(format!(
-                    "sample {} review below 100 has no differences",
-                    sample.sample_id
-                )));
-            }
-            if review.differences.iter().any(|difference| {
-                difference.category.trim().is_empty() || difference.explanation.trim().is_empty()
-            }) {
-                return Err(RegressionError::Invalid(format!(
-                    "sample {} has an invalid structured difference",
-                    sample.sample_id
-                )));
-            }
-            total += u64::from(review.score);
+            review.validate(&sample.sample_id)?;
         }
         let llm = self
             .aggregates
             .llm
             .as_ref()
             .expect("complete LLM aggregate was checked");
-        let mean = total as f64 / self.samples.len() as f64;
-        if llm.scored_samples != self.samples.len() || !float_eq(llm.mean_score, mean) {
+        let expected_llm = self.review_aggregate();
+        if llm.scored_samples != expected_llm.scored_samples
+            || !float_eq(llm.mean_score, expected_llm.mean_score)
+        {
             return Err(RegressionError::Invalid(
                 "LLM aggregate does not match per-sample reviews".to_string(),
             ));
         }
-        let expected_gates = GateResults {
-            wer: self.aggregates.wer.wer_percent <= self.thresholds.max_wer_percent,
-            llm: llm.mean_score >= self.thresholds.min_llm_score,
-            proper_nouns: self.aggregates.proper_nouns.accuracy_percent
-                >= self.thresholds.min_proper_noun_percent,
-        };
+        // Preserve threshold decisions based on the stored mean after tolerating JSON
+        // round-trip differences in the aggregate comparison above.
+        let expected_gates =
+            GateResults::evaluate(&self.aggregates, llm.mean_score, &self.thresholds);
         let gates = self.gates.as_ref().expect("complete gates were checked");
-        let meets = gates.wer && gates.llm && gates.proper_nouns;
-        if gates.wer != expected_gates.wer
-            || gates.llm != expected_gates.llm
-            || gates.proper_nouns != expected_gates.proper_nouns
-            || self.meets_targets != Some(meets)
-        {
+        if gates != &expected_gates || self.meets_targets != Some(gates.all_passed()) {
             return Err(RegressionError::Invalid(
                 "complete report gates do not match metrics and thresholds".to_string(),
             ));
