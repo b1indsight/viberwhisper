@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The `core` module contains strict v3 configuration persistence, CLI parsing, recording lifecycle state, and transcription orchestration. Application-level configuration assembly lives in `src/runtime_config.rs` so business consumers never receive the full persisted document.
+The `core` module contains strict v3 configuration persistence and workflow assembly, CLI parsing, recording lifecycle state, and transcription orchestration. `core::config` provides the configuration entry point and assembles module-owned values so business consumers never receive the full persisted document.
 
 ## Config (`src/core/config/`)
 
@@ -13,7 +13,7 @@ The config package intentionally has four files:
 | `document.rs` | `ConfigDocument`, nested v3 serde schema, and defaults |
 | `fields.rs` | one canonical `ConfigKey` catalog used by list/get/set |
 | `store.rs` | platform path discovery plus fail-closed load and atomic save |
-| `src/core/config.rs` | facade, config errors, validation report, secret-safe value types |
+| `src/core/config.rs` | facade, config errors, validation report, secret-safe value types, and workflow configuration assembly |
 
 `ConfigDocument` accepts the canonical document with `schema_version: 3`. Missing or unknown fields,
 wrong versions, invalid JSON, and non-finite floats are errors, except that optional
@@ -30,12 +30,14 @@ file, `Some` carries a loaded document, and malformed or unreadable files remain
 
 `EnvironmentSecretSource` reads only `TRANSCRIPTION_API_KEY` and `POST_PROCESS_API_KEY` through the runtime assembly layer. Environment values override disk secrets but are never copied into `ConfigDocument`; CLI output reports only `unset`, `disk`, `environment`, or `environment overrides disk`.
 
-## Runtime assembly (`src/runtime_config.rs`)
+## Workflow configuration assembly (`src/core/config.rs`)
 
-`runtime_config` constructs module-owned API consumer configs and aggregates construction errors into
-`ListenerConfig` or `BackendConfig`. `BackendConfig` stores the transcriber and post-process values
-directly; there is no profile selector or service-lifecycle state. It contains no generic validator
-registry and no duplicated raw DTO layer.
+`core::config` constructs module-owned API consumer configs and aggregates construction errors.
+`resolve_listener` returns `ListenerConfig`; `resolve_convert` returns `ConvertConfig`; both contain
+the transcriber and post-process values in `BackendConfig`. `check` validates the listener
+configuration without starting services. Document loading and field edits remain independent of
+workflow validation. There is no profile selector, service-lifecycle state, generic validator
+registry, or duplicated raw DTO layer.
 
 Each consumer receives a type owned by its module: `HotkeyConfig`, `AudioConfig`,
 `OrchestratorConfig`, `TranscriberConfig`, or `PostProcessConfig`. Hotkey resolution enters through
@@ -153,7 +155,7 @@ listener directly. Before tracing starts, the Windows GUI entry redirects stdout
 the Windows platform boundary into a native error dialog because ordinary diagnostics are not
 visible. macOS packaging continues to expose only the established `.app` entry.
 
-`application` loads one `ConfigDocument`, asks `runtime_config` for a typed workflow configuration,
+`application` loads one `ConfigDocument`, asks `core::config` for a typed workflow configuration,
 and passes each narrow value to its consumer. Listener mode then creates one main-thread winit
 `EventLoop<AppEvent>` in `ControlFlow::Wait` mode. Opaque platform input, audio-readiness, and
 background completion producers use `EventLoopProxy` to wake that loop; winit owns AppKit/Win32
