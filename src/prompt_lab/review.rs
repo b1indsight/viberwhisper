@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use super::regression::{
     AGENT_REVIEW_RUBRIC_VERSION, AgentDifference, AgentSampleReview, EvaluationReport, GateResults,
-    LlmAggregate, RegressionError, ReviewSummary, RunStatus, unix_time_ms,
+    RegressionError, ReviewSummary, RunStatus, unix_time_ms,
 };
 
 type Result<T> = std::result::Result<T, RegressionError>;
@@ -50,19 +50,19 @@ pub(crate) fn apply_review(report_path: &Path, review_path: &Path) -> Result<Eva
 
     let mut reviews = HashMap::with_capacity(input.samples.len());
     for sample in input.samples {
-        validate_sample_review(&sample)?;
-        let id = sample.sample_id.clone();
-        if reviews
-            .insert(
-                id.clone(),
-                AgentSampleReview {
-                    score: sample.score,
-                    reason: sample.reason,
-                    differences: sample.differences,
-                },
-            )
-            .is_some()
-        {
+        let id = sample.sample_id;
+        if id.trim().is_empty() {
+            return Err(RegressionError::Invalid(
+                "agent review sample ID must not be empty".to_string(),
+            ));
+        }
+        let review = AgentSampleReview {
+            score: sample.score,
+            reason: sample.reason,
+            differences: sample.differences,
+        };
+        review.validate(&id)?;
+        if reviews.insert(id.clone(), review).is_some() {
             return Err(RegressionError::Invalid(format!(
                 "agent review contains duplicate sample ID {id}"
             )));
@@ -80,29 +80,20 @@ pub(crate) fn apply_review(report_path: &Path, review_path: &Path) -> Result<Eva
         ));
     }
 
-    let mut score_total = 0_u64;
     for sample in &mut report.samples {
         let review = reviews
             .remove(&sample.sample_id)
             .expect("coverage was checked before report mutation");
-        score_total += u64::from(review.score);
         sample.agent_review = Some(review);
     }
-    let mean_score = score_total as f64 / report.samples.len() as f64;
-    let gates = GateResults {
-        wer: report.aggregates.wer.wer_percent <= report.thresholds.max_wer_percent,
-        llm: mean_score >= report.thresholds.min_llm_score,
-        proper_nouns: report.aggregates.proper_nouns.accuracy_percent
-            >= report.thresholds.min_proper_noun_percent,
-    };
-    let meets_targets = gates.wer && gates.llm && gates.proper_nouns;
+    let llm = report.review_aggregate();
+    let mean_score = llm.mean_score;
+    let gates = GateResults::evaluate(&report.aggregates, mean_score, &report.thresholds);
+    let meets_targets = gates.all_passed();
     let reviewed_at_unix_ms = unix_time_ms()?;
     report.status = RunStatus::Complete;
     report.completed_at_unix_ms = Some(reviewed_at_unix_ms);
-    report.aggregates.llm = Some(LlmAggregate {
-        mean_score,
-        scored_samples: report.samples.len(),
-    });
+    report.aggregates.llm = Some(llm);
     report.review = Some(ReviewSummary {
         source: "coding_agent".to_string(),
         rubric_version: AGENT_REVIEW_RUBRIC_VERSION.to_string(),
@@ -157,46 +148,12 @@ fn validate_input_identity(input: &AgentReviewInput, report: &EvaluationReport) 
     Ok(())
 }
 
-fn validate_sample_review(sample: &AgentReviewSampleInput) -> Result<()> {
-    if sample.sample_id.trim().is_empty() {
-        return Err(RegressionError::Invalid(
-            "agent review sample ID must not be empty".to_string(),
-        ));
-    }
-    if sample.score > 100 {
-        return Err(RegressionError::Invalid(format!(
-            "agent review score for {} exceeds 100",
-            sample.sample_id
-        )));
-    }
-    if sample.reason.trim().is_empty() {
-        return Err(RegressionError::Invalid(format!(
-            "agent review reason for {} must not be empty",
-            sample.sample_id
-        )));
-    }
-    if sample.score < 100 && sample.differences.is_empty() {
-        return Err(RegressionError::Invalid(format!(
-            "agent review below 100 for {} must describe at least one difference",
-            sample.sample_id
-        )));
-    }
-    for difference in &sample.differences {
-        if difference.category.trim().is_empty() || difference.explanation.trim().is_empty() {
-            return Err(RegressionError::Invalid(format!(
-                "agent review difference for {} needs category and explanation",
-                sample.sample_id
-            )));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::Path;
 
+    use serde_json::{Value, json};
     use tempfile::tempdir;
 
     use super::*;
@@ -308,20 +265,106 @@ mod tests {
     }
 
     #[test]
-    fn complete_agent_review_finalizes_report_and_all_gates() {
+    fn complete_agent_review_aggregates_samples_and_round_trips() {
         let directory = tempdir().unwrap();
         let report_path = directory.path().join("run.json");
         let review_path = directory.path().join("review.json");
-        awaiting_report().write(&report_path).unwrap();
+        let mut report = awaiting_report();
+        let mut second_sample = report.samples[0].clone();
+        second_sample.sample_id = "sample-1-2".to_string();
+        second_sample.audio_path = "audio/sample-1-2.wav".to_string();
+        report
+            .dataset
+            .ready_sample_ids
+            .push(second_sample.sample_id.clone());
+        report.samples.push(second_sample);
+        report.aggregates.wer.reference_words = 4;
+        report.aggregates.proper_nouns.matched_occurrences = 2;
+        report.aggregates.proper_nouns.expected_occurrences = 2;
+        report.thresholds.min_llm_score = 99.5;
+        report.write(&report_path).unwrap();
         write_perfect_review(&review_path);
+        let mut input: Value = serde_json::from_slice(&fs::read(&review_path).unwrap()).unwrap();
+        input["samples"].as_array_mut().unwrap().push(json!({
+            "sample_id": "sample-1-2",
+            "score": 99,
+            "reason": "Minor punctuation difference",
+            "differences": [{"category": "punctuation", "explanation": "Missing comma"}]
+        }));
+        fs::write(&review_path, serde_json::to_vec(&input).unwrap()).unwrap();
 
-        let report = apply_review(&report_path, &review_path).unwrap();
+        // Unequal sample scores catch integer division and aggregating only one review.
+        let mut report = apply_review(&report_path, &review_path).unwrap();
 
         assert_eq!(report.status, RunStatus::Complete);
-        assert_eq!(report.aggregates.llm.as_ref().unwrap().mean_score, 100.0);
+        assert_eq!(report.aggregates.llm.as_ref().unwrap().mean_score, 99.5);
+        assert_eq!(report.aggregates.llm.as_ref().unwrap().scored_samples, 2);
         assert_eq!(report.meets_targets, Some(true));
-        assert!(report.gates.as_ref().unwrap().wer);
         assert!(EvaluationReport::read(&report_path).is_ok());
+
+        // A rounded mean within the report's tolerance can cross an exact threshold. Gates
+        // must still describe the validated persisted mean when a later process reads it.
+        report.aggregates.llm.as_mut().unwrap().mean_score = 99.49999999999997;
+        report.gates.as_mut().unwrap().llm = false;
+        report.meets_targets = Some(false);
+        report.write(&report_path).unwrap();
+        assert!(EvaluationReport::read(&report_path).is_ok());
+    }
+
+    #[test]
+    fn review_gates_include_thresholds_and_reject_each_failing_side() {
+        let directory = tempdir().unwrap();
+        let report_path = directory.path().join("run.json");
+        let review_path = directory.path().join("review.json");
+        let mut report = awaiting_report();
+        let sample = &mut report.samples[0];
+        let hypothesis = "使用 Other";
+        sample.hypothesis = Some(hypothesis.to_string());
+        sample.wer = Some(score_wer(&sample.reference, hypothesis));
+        sample.proper_nouns = Some(score_proper_nouns(
+            hypothesis,
+            &sample.proper_noun_annotations,
+        ));
+        report.aggregates.wer.substitutions = 1;
+        report.aggregates.wer.wer_percent = 50.0;
+        report.aggregates.proper_nouns.matched_occurrences = 0;
+        report.aggregates.proper_nouns.accuracy_percent = 0.0;
+        write_perfect_review(&review_path);
+        let mut input: Value = serde_json::from_slice(&fs::read(&review_path).unwrap()).unwrap();
+        input["samples"][0]["score"] = json!(85);
+        input["samples"][0]["reason"] = json!("Proper noun changed");
+        input["samples"][0]["differences"] = json!([{
+            "category": "proper_noun", "explanation": "Codex became Other"
+        }]);
+        fs::write(&review_path, serde_json::to_vec(&input).unwrap()).unwrap();
+
+        // Each metric sits on its passing boundary first; moving just one threshold must
+        // flip that gate and the overall result in both freshly written and loaded reports.
+        for (max_wer, min_llm, min_proper_nouns, expected) in [
+            (50.0, 85.0, 0.0, (true, true, true, true)),
+            (49.0, 85.0, 0.0, (false, true, true, false)),
+            (50.0, 86.0, 0.0, (true, false, true, false)),
+            (50.0, 85.0, 1.0, (true, true, false, false)),
+        ] {
+            report.thresholds = Thresholds {
+                max_wer_percent: max_wer,
+                min_llm_score: min_llm,
+                min_proper_noun_percent: min_proper_nouns,
+            };
+            report.write(&report_path).unwrap();
+            let completed = apply_review(&report_path, &review_path).unwrap();
+            let gates = completed.gates.as_ref().unwrap();
+            assert_eq!(
+                (
+                    gates.wer,
+                    gates.llm,
+                    gates.proper_nouns,
+                    completed.meets_targets.unwrap()
+                ),
+                expected
+            );
+            assert!(EvaluationReport::read(&report_path).is_ok());
+        }
     }
 
     #[test]
@@ -406,37 +449,72 @@ mod tests {
     }
 
     #[test]
-    fn out_of_range_score_is_rejected_without_rewriting_report() {
+    fn invalid_review_payloads_are_rejected_at_both_json_boundaries() {
         let directory = tempdir().unwrap();
         let report_path = directory.path().join("run.json");
         let review_path = directory.path().join("review.json");
         awaiting_report().write(&report_path).unwrap();
         let before = fs::read(&report_path).unwrap();
-        fs::write(
-            &review_path,
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "schema_version": 1,
-                "run_id": "run-test-1",
-                "rubric_version": AGENT_REVIEW_RUBRIC_VERSION,
-                "samples": [{
-                    "sample_id": "sample-1-1",
-                    "score": 101,
-                    "reason": "invalid",
-                    "differences": [{
-                        "category": "other",
-                        "reference": null,
-                        "hypothesis": null,
-                        "explanation": "invalid"
-                    }]
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        write_perfect_review(&review_path);
+        let input: Value = serde_json::from_slice(&fs::read(&review_path).unwrap()).unwrap();
+        let completed = apply_review(&report_path, &review_path).unwrap();
+        let completed = serde_json::to_value(completed).unwrap();
 
-        let error = apply_review(&report_path, &review_path).unwrap_err();
+        // Users can edit review files and completed reports independently. Both boundaries
+        // must reject the invalid payload itself, before aggregate checks or a report rewrite.
+        for (field, value) in [
+            ("score", json!(101)),
+            ("reason", json!(" \t")),
+            ("score", json!(99)),
+            (
+                "differences",
+                json!([{"category": " ", "explanation": "difference"}]),
+            ),
+            (
+                "differences",
+                json!([{"category": "other", "explanation": " \t"}]),
+            ),
+        ] {
+            let mut invalid_input = input.clone();
+            invalid_input["samples"][0][field] = value.clone();
+            fs::write(&report_path, &before).unwrap();
+            fs::write(&review_path, serde_json::to_vec(&invalid_input).unwrap()).unwrap();
+            let error = apply_review(&report_path, &review_path).unwrap_err();
+            assert!(error.to_string().contains("sample-1-1"), "{field}: {error}");
+            assert_eq!(fs::read(&report_path).unwrap(), before);
 
-        assert!(error.to_string().contains("exceeds 100"));
-        assert_eq!(fs::read(&report_path).unwrap(), before);
+            let mut invalid_report = completed.clone();
+            invalid_report["samples"][0]["agent_review"][field] = value;
+            fs::write(&report_path, serde_json::to_vec(&invalid_report).unwrap()).unwrap();
+            let error = EvaluationReport::read(&report_path).unwrap_err();
+            assert!(error.to_string().contains("sample-1-1"), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn completed_report_rejects_changed_review_aggregates_and_gates() {
+        let directory = tempdir().unwrap();
+        let report_path = directory.path().join("run.json");
+        let review_path = directory.path().join("review.json");
+        awaiting_report().write(&report_path).unwrap();
+        write_perfect_review(&review_path);
+        let completed = apply_review(&report_path, &review_path).unwrap();
+        let completed = serde_json::to_value(completed).unwrap();
+
+        // Stored derived values must be checked against the sample reviews and thresholds;
+        // sharing their calculation must not make edited summary fields authoritative.
+        for (pointer, value) in [
+            ("/aggregates/llm/mean_score", json!(99.0)),
+            ("/aggregates/llm/scored_samples", json!(2)),
+            ("/gates/wer", json!(false)),
+            ("/gates/llm", json!(false)),
+            ("/gates/proper_nouns", json!(false)),
+            ("/meets_targets", json!(false)),
+        ] {
+            let mut invalid = completed.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            fs::write(&report_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(EvaluationReport::read(&report_path).is_err(), "{pointer}");
+        }
     }
 }
