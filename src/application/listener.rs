@@ -65,9 +65,7 @@ fn run_with_mode(
 
     use crate::platform::{NativePlatform, PlatformInterface};
 
-    println!("ViberWhisper - Voice-to-Text Input");
-    println!("===================================");
-    println!();
+    info!("ViberWhisper voice-to-text listener starting");
 
     let local_manager = start_local_backend(&mut config.backend)?;
     let _local_manager = LocalServiceGuard::new(local_manager);
@@ -135,19 +133,18 @@ fn run_with_mode(
     info!("System tray icon started");
 
     if matches!(output, ListenerOutput::Capture { .. }) {
-        println!(
-            "Prompt-lab capture mode: audio and raw STT results are saved; text is not typed."
+        info!(
+            "Prompt-lab capture mode enabled; audio and raw STT results will be saved without typing text"
         );
     }
 
     if let Some(hotkey) = config.hotkeys.hold_label.as_deref() {
-        println!("Hold {hotkey} to record, release to transcribe.");
+        info!(mode = "hold", hotkey, "Recording hotkey enabled");
     }
     if let Some(hotkey) = config.hotkeys.toggle_label.as_deref() {
-        println!("Press {hotkey} to start recording, press again to stop.");
+        info!(mode = "toggle", hotkey, "Recording hotkey enabled");
     }
-    println!("Press Ctrl+C to exit.");
-    println!();
+    info!("Listener ready; press Ctrl+C to exit");
 
     let mut application = ListenerApplication::new(recorder, orchestrator, platform, output, proxy);
     event_loop.run_app(&mut application)?;
