@@ -69,3 +69,4 @@ Implementation plans and technical specs for each feature.
 | [39-release-notes-automation.md](plan/39-release-notes-automation.md) | Implemented | Prepend validated distribution guidance to automatically generated Release Notes |
 | [40-windows-gui-launcher.md](plan/40-windows-gui-launcher.md) | Implemented | Launch the Windows tray application without a console while preserving the existing CLI executable |
 | [42-structured-runtime-logging.md](plan/42-structured-runtime-logging.md) | Implemented | Route runtime diagnostics through structured tracing while preserving intentional CLI stdout |
+| [43-anyhow-error-boundaries.md](plan/43-anyhow-error-boundaries.md) | Implemented | Replace boxed dynamic-error result boundaries with consistent contextual `anyhow` results while retaining typed domain errors |

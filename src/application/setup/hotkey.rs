@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -6,6 +5,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
+use anyhow::{Result as AnyhowResult, anyhow, bail};
 use rdev::listen;
 
 use crate::core::config::InputSection;
@@ -45,7 +45,7 @@ impl VerificationState {
 }
 
 /// Runs the verification-only global hook inside the short-lived helper process.
-pub(super) fn run_helper_if_requested() -> Result<bool, Box<dyn Error>> {
+pub(super) fn run_helper_if_requested() -> AnyhowResult<bool> {
     if std::env::var_os(VERIFY_HELPER_ENV).is_none() {
         return Ok(false);
     }
@@ -53,7 +53,7 @@ pub(super) fn run_helper_if_requested() -> Result<bool, Box<dyn Error>> {
     let hold_key = environment_key(VERIFY_HOLD_ENV)?;
     let toggle_key = environment_key(VERIFY_TOGGLE_ENV)?;
     if hold_key.is_none() && toggle_key.is_none() {
-        return Err("verification requires at least one configured hotkey".into());
+        bail!("verification requires at least one configured hotkey");
     }
 
     let state = Mutex::new((
@@ -91,26 +91,26 @@ pub(super) fn run_helper_if_requested() -> Result<bool, Box<dyn Error>> {
     });
 
     match result {
-        Ok(()) => Err("verification hotkey listener stopped unexpectedly".into()),
-        Err(error) => {
-            Err(format!("could not start verification hotkey listener: {error:?}").into())
-        }
+        Ok(()) => Err(anyhow!("verification hotkey listener stopped unexpectedly")),
+        Err(error) => Err(anyhow!(
+            "could not start verification hotkey listener: {error:?}"
+        )),
     }
 }
 
-fn environment_key(name: &str) -> Result<Option<rdev::Key>, Box<dyn Error>> {
+fn environment_key(name: &str) -> AnyhowResult<Option<rdev::Key>> {
     let Some(value) = std::env::var_os(name) else {
         return Ok(None);
     };
     let value = value
         .into_string()
-        .map_err(|_| format!("{name} is not valid text"))?;
+        .map_err(|_| anyhow!("{name} is not valid text"))?;
     if value.is_empty() {
         return Ok(None);
     }
     parse_key(&value)
         .map(Some)
-        .ok_or_else(|| format!("{name} contains an unsupported key").into())
+        .ok_or_else(|| anyhow!("{name} contains an unsupported key"))
 }
 
 /// Owns the helper process and exposes its single Start/Stop protocol to the verifier.

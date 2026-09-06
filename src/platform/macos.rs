@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use anyhow::Result as AnyhowResult;
 use rdev::Key;
 
 use super::backend::{HotkeyFilter, PlatformBackend};
@@ -35,14 +36,14 @@ impl PlatformBackend for MacBackend {
         (Arc::new(typer), Box::new(filter))
     }
 
-    fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn copy_to_clipboard(text: &str) -> AnyhowResult<()> {
         let _write = DESKTOP_WRITE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         objc2::rc::autoreleasepool(|_| {
             pasteboard::replace_with_text(&objc2_app_kit::NSPasteboard::generalPasteboard(), text)
         })
-        .map_err(Into::into)
+        .map_err(anyhow::Error::msg)
     }
 }
 
@@ -91,11 +92,12 @@ impl TrayPolicy for MacTray {
     }
 
     #[cfg(not(test))]
-    fn prepare_application() -> Result<(), Box<dyn std::error::Error>> {
+    fn prepare_application() -> AnyhowResult<()> {
         use objc2::MainThreadMarker;
         use objc2_app_kit::{NSApp, NSApplicationActivationPolicy};
 
-        let mtm = MainThreadMarker::new().ok_or("tray must be created on the main thread")?;
+        let mtm = MainThreadMarker::new()
+            .ok_or_else(|| anyhow::anyhow!("tray must be created on the main thread"))?;
         let _ = NSApp(mtm).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         Ok(())
     }
@@ -281,7 +283,7 @@ impl MacTyper {
 }
 
 impl TextTyper for MacTyper {
-    fn type_text(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn type_text(&self, text: &str) -> AnyhowResult<()> {
         if text.is_empty() {
             return Ok(());
         }

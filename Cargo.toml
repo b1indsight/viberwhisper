@@ -22,6 +22,7 @@ test = false
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy", "integration", "windows-app"))'] }
 
 [dependencies]
+anyhow = "1"
 rdev = "0.5"
 cpal = "0.15"
 hound = "3.5"

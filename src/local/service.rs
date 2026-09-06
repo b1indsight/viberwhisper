@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use anyhow::{Context, Result, anyhow, bail};
+
 use super::{LocalPaths, LocalQuantization, LocalServiceConfig};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -78,7 +80,7 @@ impl LocalServiceManager {
     }
 
     /// Spawns the local server process and waits for health.
-    pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn start(&mut self) -> Result<()> {
         self.cleanup_stale_pid_file();
         if self.is_running()
             && health_check(
@@ -92,23 +94,22 @@ impl LocalServiceManager {
             return Ok(());
         }
 
-        fs::create_dir_all(self.state_dir()).map_err(|error| {
+        fs::create_dir_all(self.state_dir()).with_context(|| {
             format!(
-                "failed to create local service state dir {}: {error}",
+                "failed to create local service state dir {}",
                 self.state_dir().display()
             )
         })?;
 
         let python = venv_python_path(&self.venv_dir);
         if !python.exists() {
-            return Err(format!("local Python interpreter not found: {}", python.display()).into());
+            bail!("local Python interpreter not found: {}", python.display());
         }
         if !self.model_dir.exists() {
-            return Err(format!(
+            bail!(
                 "local model directory not found: {}",
                 self.model_dir.display()
-            )
-            .into());
+            );
         }
 
         let (stdout_stdio, stderr_stdio) = self.log_stdio()?;
@@ -145,9 +146,9 @@ impl LocalServiceManager {
                             .stdin(Stdio::null())
                             .stdout(stdout)
                             .stderr(stderr);
-                        python_command.spawn().map_err(|python_error| {
+                        python_command.spawn().with_context(|| {
                             format!(
-                                "failed to start local service with uv ({uv_error}) and direct python ({python_error})"
+                                "failed to start local service with uv ({uv_error}) and direct python"
                             )
                         })?
                     }
@@ -166,15 +167,15 @@ impl LocalServiceManager {
                     .stdin(Stdio::null())
                     .stdout(stdout_stdio)
                     .stderr(stderr_stdio);
-                python_command.spawn().map_err(|error| {
-                    format!("failed to start local service with direct python: {error}")
-                })?
+                python_command
+                    .spawn()
+                    .context("failed to start local service with direct python")?
             }
         };
 
-        fs::write(self.pid_file_path(), child.id().to_string()).map_err(|error| {
+        fs::write(self.pid_file_path(), child.id().to_string()).with_context(|| {
             format!(
-                "failed to write local service pid file {}: {error}",
+                "failed to write local service pid file {}",
                 self.pid_file_path().display()
             )
         })?;
@@ -187,12 +188,15 @@ impl LocalServiceManager {
             HEALTH_INITIAL_DELAY,
             HEALTH_POLL_INTERVAL,
         ) {
-            let msg = match &self.log_file {
-                Some(path) => format!("{error} (see server log for details: {})", path.display()),
-                None => error.to_string(),
+            let error = match &self.log_file {
+                Some(path) => error.context(format!(
+                    "local service failed to become healthy; see server log for details: {}",
+                    path.display()
+                )),
+                None => error,
             };
             self.stop();
-            return Err(msg.into());
+            return Err(error);
         }
 
         Ok(())
@@ -248,7 +252,7 @@ impl LocalServiceManager {
     }
 
     /// Returns the best-effort persisted service status.
-    pub fn status(&self) -> Result<LocalServiceStatus, Box<dyn std::error::Error>> {
+    pub fn status(&self) -> Result<LocalServiceStatus> {
         let pid = self
             .read_pid()
             .or_else(|| self.process.as_ref().map(Child::id));
@@ -303,33 +307,30 @@ impl LocalServiceManager {
         }
     }
 
-    fn log_stdio(&self) -> Result<(Stdio, Stdio), Box<dyn std::error::Error>> {
+    fn log_stdio(&self) -> Result<(Stdio, Stdio)> {
         let Some(path) = &self.log_file else {
             return Ok((Stdio::null(), Stdio::null()));
         };
 
-        File::create(path).map_err(|error| {
-            format!(
-                "failed to create local service log file {}: {error}",
-                path.display()
-            )
+        File::create(path).with_context(|| {
+            format!("failed to create local service log file {}", path.display())
         })?;
 
         let stdout = OpenOptions::new()
             .append(true)
             .open(path)
-            .map_err(|error| {
+            .with_context(|| {
                 format!(
-                    "failed to open local service log file for stdout {}: {error}",
+                    "failed to open local service log file for stdout {}",
                     path.display()
                 )
             })?;
         let stderr = OpenOptions::new()
             .append(true)
             .open(path)
-            .map_err(|error| {
+            .with_context(|| {
                 format!(
-                    "failed to open local service log file for stderr {}: {error}",
+                    "failed to open local service log file for stderr {}",
                     path.display()
                 )
             })?;
@@ -384,13 +385,13 @@ fn health_check(
     timeout: Duration,
     initial_delay: Duration,
     poll_interval: Duration,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()?;
     let deadline = Instant::now() + timeout;
     let url = format!("{base_url}/health");
-    let mut last_error = "health check did not start".to_string();
+    let mut last_error = anyhow!("health check did not start");
 
     std::thread::sleep(initial_delay);
 
@@ -398,18 +399,18 @@ fn health_check(
         match client.get(&url).send() {
             Ok(resp) if resp.status() == StatusCode::OK => return Ok(()),
             Ok(resp) => {
-                last_error = format!("service not ready: http {}", resp.status().as_u16());
+                last_error = anyhow!("service not ready: http {}", resp.status().as_u16());
             }
-            Err(error) => last_error = error.to_string(),
+            Err(error) => last_error = error.into(),
         }
 
         std::thread::sleep(poll_interval);
     }
 
-    Err(last_error.into())
+    Err(last_error)
 }
 
-fn health_once(base_url: &str) -> Result<StatusCode, Box<dyn std::error::Error>> {
+fn health_once(base_url: &str) -> Result<StatusCode> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()?;
@@ -429,7 +430,7 @@ fn wait_for_exit_or_kill(pid: u32) {
     let _ = force_kill_pid(pid);
 }
 
-fn force_kill_pid(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
+fn force_kill_pid(pid: u32) -> Result<()> {
     #[cfg(target_os = "windows")]
     let status = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/F"])
@@ -443,7 +444,7 @@ fn force_kill_pid(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
     if status.success() {
         Ok(())
     } else {
-        Err(format!("failed to force-kill process {pid}").into())
+        Err(anyhow!("failed to force-kill process {pid}"))
     }
 }
 
@@ -479,7 +480,7 @@ fn is_pid_running(pid: u32) -> bool {
     }
 }
 
-fn terminate_pid(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
+fn terminate_pid(pid: u32) -> Result<()> {
     #[cfg(target_os = "windows")]
     let status = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
@@ -493,7 +494,7 @@ fn terminate_pid(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
     if status.success() {
         Ok(())
     } else {
-        Err(format!("failed to terminate process {pid}").into())
+        Err(anyhow!("failed to terminate process {pid}"))
     }
 }
 

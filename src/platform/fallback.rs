@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Result;
 use rdev::Key;
 
 use super::backend::{HotkeyFilter, PlatformBackend};
@@ -24,7 +25,7 @@ impl PlatformBackend for FallbackBackend {
         (Arc::new(MockTyper), Box::new(Some))
     }
 
-    fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn copy_to_clipboard(text: &str) -> Result<()> {
         tracing::info!(
             text_bytes = text.len(),
             "mock clipboard received history text"
@@ -45,7 +46,7 @@ impl TrayPolicy for FallbackTray {
     }
 
     #[cfg(not(test))]
-    fn prepare_application() -> Result<(), Box<dyn std::error::Error>> {
+    fn prepare_application() -> Result<()> {
         Ok(())
     }
 

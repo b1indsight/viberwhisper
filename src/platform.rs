@@ -41,12 +41,12 @@ pub(crate) fn prepare_desktop_output() -> std::io::Result<()> {
 }
 
 /// Reports a fatal error at the desktop process boundary where stderr may not be visible.
-pub(crate) fn report_desktop_startup_error(error: &dyn std::error::Error) {
+pub(crate) fn report_desktop_startup_error(error: &anyhow::Error) {
     #[cfg(target_os = "windows")]
     windows::show_startup_error(error);
 
     #[cfg(not(target_os = "windows"))]
-    eprintln!("ViberWhisper failed to start: {error}");
+    eprintln!("ViberWhisper failed to start: {error:#}");
 }
 
 /// Resolves persisted hotkey names with the policy selected for this build target.
