@@ -1,7 +1,5 @@
 use crate::core::config::ApiAuth;
-use crate::postprocess::{
-    LlmConfig, PostProcessError, PostProcessorSession, TextPostProcessor, TextPostProcessorSession,
-};
+use crate::postprocess::{LlmConfig, PostProcessError, PostProcessorSession, TextPostProcessor};
 use reqwest::blocking::Client;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -65,8 +63,8 @@ impl TextPostProcessor for LlmPostProcessor {
         Ok(result)
     }
 
-    fn create_session(&self) -> PostProcessorSession {
-        PostProcessorSession(if self.streaming_enabled {
+    fn create_session(&self) -> Box<dyn PostProcessorSession> {
+        if self.streaming_enabled {
             Box::new(PreheatLlmSession::new(
                 self.auth.clone(),
                 self.api_url.clone(),
@@ -85,7 +83,7 @@ impl TextPostProcessor for LlmPostProcessor {
                 client: self.client.clone(),
                 chunks: Vec::new(),
             })
-        })
+        }
     }
 }
 
@@ -155,7 +153,7 @@ struct ConservativeLlmSession {
     chunks: Vec<String>,
 }
 
-impl TextPostProcessorSession for ConservativeLlmSession {
+impl PostProcessorSession for ConservativeLlmSession {
     fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());
@@ -282,7 +280,7 @@ impl PreheatLlmSession {
     }
 }
 
-impl TextPostProcessorSession for PreheatLlmSession {
+impl PostProcessorSession for PreheatLlmSession {
     fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());

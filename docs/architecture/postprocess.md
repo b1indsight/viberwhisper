@@ -8,7 +8,7 @@ Optional LLM-based text cleanup applied after STT transcription. Adds punctuatio
 
 ```
 src/
-  postprocess.rs      — processor/session traits and facades, typed config and errors
+  postprocess.rs      — processor facade, processor/session traits, typed config and errors
   postprocess/
     llm.rs            — LlmPostProcessor, ConservativeLlmSession, PreheatLlmSession
 ```
@@ -21,7 +21,7 @@ pub struct PostProcessor(Box<dyn TextPostProcessor>);
 impl PostProcessor {
     pub fn new(config: PostProcessConfig) -> Self;
     pub fn process_text(&self, text: &str) -> Result<String, PostProcessError>;
-    pub fn create_session(&self) -> PostProcessorSession;
+    pub fn create_session(&self) -> Box<dyn PostProcessorSession>;
 }
 ```
 
@@ -34,17 +34,15 @@ Two interfaces for different use cases:
 ## `PostProcessorSession`
 
 ```rust
-pub struct PostProcessorSession(Box<dyn TextPostProcessorSession>);
-
-impl PostProcessorSession {
-    pub fn push_stable_chunk(&mut self, text: &str);
-    pub fn finish(&mut self) -> Result<String, PostProcessError>;
+pub trait PostProcessorSession: Send {
+    fn push_stable_chunk(&mut self, text: &str);
+    fn finish(&mut self) -> Result<String, PostProcessError>;
 }
 ```
 
-`TextPostProcessorSession` provides the common incremental interface implemented by `NoopSession`, `ConservativeLlmSession`, and `PreheatLlmSession`. The session facade delegates to the boxed implementation. The interface accepts stable STT chunks incrementally, and `finish` returns the final processed text.
+`PostProcessorSession` provides the public incremental interface implemented by `NoopSession`, `ConservativeLlmSession`, and `PreheatLlmSession`. The interface accepts stable STT chunks incrementally, and `finish` returns the final processed text.
 
-Both `TextPostProcessor::create_session` and the public facade return `PostProcessorSession`, keeping session dynamic dispatch inside that wrapper. Creation only initializes state; text processing starts in subsequent session calls.
+Both `TextPostProcessor::create_session` and the public facade return `Box<dyn PostProcessorSession>` directly. Creation only initializes state; text processing starts in subsequent session calls. The listener owns the boxed session and borrows it as `&mut dyn PostProcessorSession` during finalization.
 
 ## Implementations
 

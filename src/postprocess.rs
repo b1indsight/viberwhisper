@@ -109,12 +109,17 @@ pub struct PostProcessor(Box<dyn TextPostProcessor>);
 /// Text-cleanup behavior selected once from the validated runtime config.
 trait TextPostProcessor: Send + Sync {
     fn process_text(&self, text: &str) -> Result<String, PostProcessError>;
-    fn create_session(&self) -> PostProcessorSession;
+    fn create_session(&self) -> Box<dyn PostProcessorSession>;
 }
 
-/// Mutable cleanup state owned by one recording session.
-trait TextPostProcessorSession: Send {
+/// Incremental text cleanup state for one recording session.
+///
+/// Created by [`PostProcessor::create_session`]. Feed stable text chunks with
+/// [`Self::push_stable_chunk`], then call [`Self::finish`] for the final text.
+pub trait PostProcessorSession: Send {
+    /// Adds a stable text fragment to the session's accumulated input.
     fn push_stable_chunk(&mut self, text: &str);
+    /// Completes cleanup and returns the processed text.
     fn finish(&mut self) -> Result<String, PostProcessError>;
 }
 
@@ -139,21 +144,8 @@ impl PostProcessor {
     }
 
     /// Creates independent state for incremental text cleanup.
-    pub fn create_session(&self) -> PostProcessorSession {
+    pub fn create_session(&self) -> Box<dyn PostProcessorSession> {
         self.0.create_session()
-    }
-}
-
-/// Incremental cleanup state for one recording session.
-pub struct PostProcessorSession(Box<dyn TextPostProcessorSession>);
-
-impl PostProcessorSession {
-    pub fn push_stable_chunk(&mut self, text: &str) {
-        self.0.push_stable_chunk(text);
-    }
-
-    pub fn finish(&mut self) -> Result<String, PostProcessError> {
-        self.0.finish()
     }
 }
 
@@ -164,8 +156,8 @@ impl TextPostProcessor for NoopPostProcessor {
         Ok(text.to_string())
     }
 
-    fn create_session(&self) -> PostProcessorSession {
-        PostProcessorSession(Box::new(NoopSession::default()))
+    fn create_session(&self) -> Box<dyn PostProcessorSession> {
+        Box::new(NoopSession::default())
     }
 }
 
@@ -174,7 +166,7 @@ struct NoopSession {
     chunks: Vec<String>,
 }
 
-impl TextPostProcessorSession for NoopSession {
+impl PostProcessorSession for NoopSession {
     fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());
