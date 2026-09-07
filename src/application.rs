@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::core::cli::{Cli, Commands, ConfigAction};
 use crate::core::config::{
-    ConfigDocument, ConfigStore, EnvironmentSecretSource, SecretSource, ValidationReport, fields,
+    ConfigDocument, ConfigStore, EnvironmentSecretSource, SecretSource, fields,
 };
 use crate::{audio, postprocess, text, transcriber};
 
@@ -24,31 +24,16 @@ struct ConvertConfig {
 }
 
 impl ConvertConfig {
-    fn from_config(
-        document: &ConfigDocument,
-        secrets: &dyn SecretSource,
-    ) -> Result<Self, ValidationReport> {
-        let mut issues = Vec::new();
-        let transcriber = ValidationReport::collect(
-            transcriber::TranscriberConfig::from_config(document, secrets),
-            &mut issues,
-        );
-        let post_process = ValidationReport::collect(
-            postprocess::PostProcessConfig::from_config(document, secrets),
-            &mut issues,
-        );
-        match (transcriber, post_process) {
-            (Some(transcriber), Some(post_process)) => Ok(Self {
-                transcriber,
-                post_process,
-                language: document.select(
-                    fields::TranscriptionLanguage,
-                    secrets,
-                    std::convert::identity,
-                ),
-            }),
-            _ => Err(ValidationReport::from(issues)),
-        }
+    fn from_config(document: &ConfigDocument, secrets: &dyn SecretSource) -> Result<Self> {
+        Ok(Self {
+            transcriber: transcriber::TranscriberConfig::from_config(document, secrets)?,
+            post_process: postprocess::PostProcessConfig::from_config(document, secrets)?,
+            language: document.select(
+                fields::TranscriptionLanguage,
+                secrets,
+                std::convert::identity,
+            ),
+        })
     }
 }
 
@@ -142,7 +127,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
         ConfigAction::Path => unreachable!(),
         ConfigAction::Check => {
             listener::ListenerConfig::from_config(&document, &secrets)?;
-            println!("Configuration is valid.");
+            println!("Configuration loaded successfully.");
         }
         ConfigAction::List => {
             println!("{:<48} Value", "Key");
@@ -230,6 +215,24 @@ mod tests {
         fn get(&self, _name: &str) -> Option<String> {
             None
         }
+    }
+
+    #[test]
+    fn api_configuration_defers_model_and_protocol_checks_to_requests() {
+        let mut document = ConfigDocument::default();
+        document.inference.api.transcription.api_url = "file:///transcriptions".to_string();
+        document.inference.api.transcription.model.clear();
+        document.post_process.enabled = true;
+        document.inference.api.post_process.api_url = Some("file:///completions".to_string());
+        document.inference.api.post_process.model = Some(String::new());
+        // Configuration constructs typed settings; HTTP transport and API model errors
+        // belong to the request that uses them, including when cleanup is enabled.
+        let config = ConvertConfig::from_config(&document, &EmptySecrets).unwrap();
+        assert!(config.transcriber.metadata().model.is_empty());
+        assert!(matches!(
+            config.post_process,
+            postprocess::PostProcessConfig::Llm(_)
+        ));
     }
 
     #[test]

@@ -13,7 +13,7 @@ The config package intentionally has four files:
 | `document.rs` | `ConfigDocument`, nested v3 serde schema, and defaults |
 | `fields.rs` | one canonical catalog for typed field requests and CLI list/get/set |
 | `store.rs` | platform path discovery plus fail-closed load and atomic save |
-| `src/core/config.rs` | facade, config errors, validation report, and secret-safe value types |
+| `src/core/config.rs` | facade, config errors, and secret-safe value types |
 
 `ConfigDocument` accepts the canonical document with `schema_version: 3`. Missing or unknown fields,
 wrong versions, invalid JSON, and non-finite floats are errors, except that optional
@@ -34,7 +34,7 @@ file, `Some` carries a loaded document, and malformed or unreadable files remain
 
 `ConfigDocument::select(fields, secrets, build)` reads a typed field selector or a tuple of
 selectors, then passes exactly those values to the caller's constructor. Its generic return
-value can be a caller-owned configuration or a validation result; the configuration package
+value can be a caller-owned configuration or a construction result; the configuration package
 imports neither type. One field catalog generates the selectors, dotted names, writability,
 and redacted CLI reads, so runtime requests and CLI field access share their mappings.
 
@@ -45,7 +45,9 @@ carry redacted authentication plus source status; CLI reads expose only the sour
 
 `AudioConfig`, `TranscriberConfig`, and `PostProcessConfig` declare their requirements in their
 own modules. Post-processing requests its enabled flag first and reads LLM settings only when
-enabled. Business validators continue to own endpoint, model, and hotkey rules.
+enabled. Constructors parse URL values and require the fields needed for enabled cleanup.
+HTTP protocol and empty-model errors are left to the request layer. Hotkey construction resolves
+named keys and rejects unsupported or conflicting bindings.
 
 Workflow composition lives at the application boundary. `RecordingConfig` combines hotkeys,
 audio, orchestrator, and STT settings for raw dataset capture. `ListenerConfig` adds cleanup
@@ -53,10 +55,11 @@ for normal delivery and setup verification. Offline `ConvertConfig` combines STT
 and merge language; WAV chunk limits remain audio-owned constants. Prompt-lab evaluation
 requests only `TranscriberConfig`, so invalid hotkey or cleanup settings do not block STT.
 
-Independent validation issues are collected with `ValidationReport::collect`; conversion from
-an issue vector sorts and deduplicates the report. The CLI's `config check` command builds a
-`ListenerConfig` without starting services. Loading and editing documents remain independent
-of business validation and support incremental configuration.
+Constructors propagate ordinary errors with `?`; there is no separate validation pass or
+configuration-wide issue collection. The CLI's `config check` command builds a `ListenerConfig`
+without starting services and reports the first construction error. It does not prove that an
+endpoint, model, or credential will be accepted by an API. Loading and editing documents remain
+independent of component construction and support incremental configuration.
 
 ## CLI (`src/core/cli.rs`)
 

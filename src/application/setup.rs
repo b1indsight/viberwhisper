@@ -75,7 +75,7 @@ pub(super) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
                 document,
                 format!(
                     "当前配置无法启动监听器：\n{}\n\n是否现在修复？\n选择“否”将在本次启动使用内置默认值。",
-                    safe_dialog_text(&error.to_string())
+                    safe_dialog_text(&format!("{error:#}"))
                 ),
             ),
         },
@@ -135,10 +135,7 @@ pub(super) fn run_explicit() -> AnyhowResult<()> {
 }
 
 fn resolve_document(document: &ConfigDocument) -> AnyhowResult<ListenerConfig> {
-    Ok(ListenerConfig::from_config(
-        document,
-        &EnvironmentSecretSource,
-    )?)
+    ListenerConfig::from_config(document, &EnvironmentSecretSource)
 }
 
 enum WizardOutcome {
@@ -254,7 +251,7 @@ impl SetupVerifier for NativeVerifier {
         _ui: &mut dyn SetupUi,
     ) -> Result<VerificationResult, String> {
         let config = ListenerConfig::from_config(document, &EnvironmentSecretSource)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         let transcriber =
             ApiTranscriber::new(config.recording.transcriber).map_err(|error| error.to_string())?;
         let post_processor = PostProcessor::new(config.post_process);
@@ -487,7 +484,7 @@ fn required_input(ui: &mut dyn SetupUi, message: &str, default: &str) -> Option<
 }
 
 fn configure_hotkeys(document: &mut ConfigDocument, ui: &mut dyn SetupUi) -> Result<(), ()> {
-    let current_valid = crate::platform::validate_hotkeys(&document.input).is_ok();
+    let current_valid = crate::platform::hotkey_config(&document.input).is_ok();
     let summary = format!(
         "当前录音热键：\n按住录音：{}\n切换录音：{}\n\n是否保留当前设置？",
         display_binding(&document.input.hold_hotkey),
@@ -507,7 +504,7 @@ fn configure_hotkeys(document: &mut ConfigDocument, ui: &mut dyn SetupUi) -> Res
             hold_hotkey,
             toggle_hotkey,
         };
-        match crate::platform::validate_hotkeys(&candidate) {
+        match crate::platform::hotkey_config(&candidate) {
             Ok(_) => {
                 let summary = format!(
                     "新的录音热键：\n按住录音：{}\n切换录音：{}\n\n是否确认使用？",
@@ -519,13 +516,11 @@ fn configure_hotkeys(document: &mut ConfigDocument, ui: &mut dyn SetupUi) -> Res
                     return Ok(());
                 }
             }
-            Err(issues) => {
-                let details = issues
-                    .iter()
-                    .map(|issue| format!("{}: {}", issue.key.as_str(), issue.message))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                ui.message(&format!("热键设置无效：\n{}", safe_dialog_text(&details)));
+            Err(error) => {
+                ui.message(&format!(
+                    "热键设置无效：\n{}",
+                    safe_dialog_text(&error.to_string())
+                ));
             }
         }
     }

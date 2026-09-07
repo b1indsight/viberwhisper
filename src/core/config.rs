@@ -11,7 +11,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use document::ConfigDocument;
-pub(crate) use document::{InputSection, PostProcessSection, TranscriptionSection};
+pub(crate) use document::InputSection;
 pub use fields::ConfigKey;
 #[cfg(test)]
 use fields::{FieldError, FieldValue, SecretStatus};
@@ -65,68 +65,6 @@ impl std::error::Error for ConfigError {
             Self::InvalidDocument { source, .. } | Self::Serialize(source) => Some(source),
             Self::ConfigDirectoryUnavailable => None,
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidationIssue {
-    pub key: ConfigKey,
-    pub code: &'static str,
-    pub message: String,
-}
-
-impl ValidationIssue {
-    pub(crate) fn new(key: ConfigKey, code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            key,
-            code,
-            message: message.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidationReport {
-    pub issues: Vec<ValidationIssue>,
-}
-
-impl fmt::Display for ValidationReport {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, issue) in self.issues.iter().enumerate() {
-            if index > 0 {
-                formatter.write_str("\n")?;
-            }
-            write!(formatter, "{}: {}", issue.key.as_str(), issue.message)?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for ValidationReport {}
-
-impl ValidationReport {
-    /// Collects independent construction failures so a workflow can report them together.
-    pub(crate) fn collect<T>(
-        result: Result<T, Vec<ValidationIssue>>,
-        issues: &mut Vec<ValidationIssue>,
-    ) -> Option<T> {
-        match result {
-            Ok(value) => Some(value),
-            Err(errors) => {
-                issues.extend(errors);
-                None
-            }
-        }
-    }
-}
-
-impl From<Vec<ValidationIssue>> for ValidationReport {
-    fn from(mut issues: Vec<ValidationIssue>) -> Self {
-        issues.sort_by(|left, right| {
-            (left.key.as_str(), left.code).cmp(&(right.key.as_str(), right.code))
-        });
-        issues.dedup_by(|left, right| left.key == right.key && left.code == right.code);
-        Self { issues }
     }
 }
 

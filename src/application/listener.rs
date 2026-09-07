@@ -4,9 +4,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use crate::audio::AudioConfig;
-use crate::core::config::{
-    ConfigDocument, InputSection, SecretSource, ValidationIssue, ValidationReport, fields,
-};
+use crate::core::config::{ConfigDocument, InputSection, SecretSource, fields};
 use crate::core::orchestrator::OrchestratorConfig;
 use crate::core::recording_session::{RecordingState, SessionEvent};
 use crate::history::{HistoryStore, HistoryTyper};
@@ -32,38 +30,27 @@ impl RecordingConfig {
     pub(super) fn from_config(
         document: &ConfigDocument,
         secrets: &dyn SecretSource,
-    ) -> Result<Self, Vec<ValidationIssue>> {
-        let mut issues = Vec::new();
-        let hotkeys = ValidationReport::collect(
-            document.select(
-                (fields::InputHoldHotkey, fields::InputToggleHotkey),
+    ) -> Result<Self> {
+        let hotkeys = document.select(
+            (fields::InputHoldHotkey, fields::InputToggleHotkey),
+            secrets,
+            |(hold_hotkey, toggle_hotkey)| {
+                crate::platform::hotkey_config(&InputSection {
+                    hold_hotkey,
+                    toggle_hotkey,
+                })
+            },
+        )?;
+        Ok(Self {
+            hotkeys,
+            audio: AudioConfig::from_config(document, secrets),
+            orchestrator: document.select(
+                fields::TranscriptionLanguage,
                 secrets,
-                |(hold_hotkey, toggle_hotkey)| {
-                    crate::platform::validate_hotkeys(&InputSection {
-                        hold_hotkey,
-                        toggle_hotkey,
-                    })
-                },
+                OrchestratorConfig::new,
             ),
-            &mut issues,
-        );
-        let transcriber = ValidationReport::collect(
-            TranscriberConfig::from_config(document, secrets),
-            &mut issues,
-        );
-        match (hotkeys, transcriber) {
-            (Some(hotkeys), Some(transcriber)) => Ok(Self {
-                hotkeys,
-                audio: AudioConfig::from_config(document, secrets),
-                orchestrator: document.select(
-                    fields::TranscriptionLanguage,
-                    secrets,
-                    OrchestratorConfig::new,
-                ),
-                transcriber,
-            }),
-            _ => Err(issues),
-        }
+            transcriber: TranscriberConfig::from_config(document, secrets)?,
+        })
     }
 }
 
@@ -78,21 +65,11 @@ impl ListenerConfig {
     pub(super) fn from_config(
         document: &ConfigDocument,
         secrets: &dyn SecretSource,
-    ) -> Result<Self, ValidationReport> {
-        let mut issues = Vec::new();
-        let recording =
-            ValidationReport::collect(RecordingConfig::from_config(document, secrets), &mut issues);
-        let post_process = ValidationReport::collect(
-            PostProcessConfig::from_config(document, secrets),
-            &mut issues,
-        );
-        match (recording, post_process) {
-            (Some(recording), Some(post_process)) => Ok(Self {
-                recording,
-                post_process,
-            }),
-            _ => Err(ValidationReport::from(issues)),
-        }
+    ) -> Result<Self> {
+        Ok(Self {
+            recording: RecordingConfig::from_config(document, secrets)?,
+            post_process: PostProcessConfig::from_config(document, secrets)?,
+        })
     }
 }
 
@@ -303,26 +280,15 @@ mod tests {
     }
 
     #[test]
-    fn listener_reports_errors_from_all_required_configurations() {
-        use crate::core::config::ConfigKey;
+    fn listener_reports_the_first_construction_error() {
         let mut document = ConfigDocument::default();
         document.input.hold_hotkey = "not a hotkey".to_string();
         document.inference.api.transcription.api_url = "not a URL".to_string();
         document.inference.api.transcription.model.clear();
         document.post_process.enabled = true;
-        // Setup and config-check should report all fixable settings in one pass.
-        let report = ListenerConfig::from_config(&document, &EmptySecrets).unwrap_err();
-        for key in [
-            ConfigKey::InputHoldHotkey,
-            ConfigKey::ApiTranscriptionUrl,
-            ConfigKey::ApiTranscriptionModel,
-            ConfigKey::ApiPostProcessUrl,
-            ConfigKey::ApiPostProcessModel,
-        ] {
-            assert!(
-                report.issues.iter().any(|issue| issue.key == key),
-                "missing {key:?}"
-            );
-        }
+        // Startup stops where settings cannot be constructed instead of running
+        // a separate pass over every unrelated configuration error.
+        let error = ListenerConfig::from_config(&document, &EmptySecrets).unwrap_err();
+        assert!(error.to_string().starts_with("input.hold_hotkey:"));
     }
 }

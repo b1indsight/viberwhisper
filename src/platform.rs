@@ -9,7 +9,7 @@ mod windows;
 
 use rdev::EventType;
 
-use crate::core::config::{InputSection, ValidationIssue};
+use crate::core::config::InputSection;
 use crate::input::hotkey::HotkeyConfig;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -43,10 +43,8 @@ pub(crate) fn report_desktop_startup_error(error: &anyhow::Error) {
 }
 
 /// Resolves persisted hotkey names with the policy selected for this build target.
-pub(crate) fn validate_hotkeys(
-    section: &InputSection,
-) -> Result<HotkeyConfig, Vec<ValidationIssue>> {
-    HotkeyConfig::validate::<<SelectedBackend as PlatformBackend>::Hotkeys>(section)
+pub(crate) fn hotkey_config(section: &InputSection) -> anyhow::Result<HotkeyConfig> {
+    HotkeyConfig::from_section::<<SelectedBackend as PlatformBackend>::Hotkeys>(section)
 }
 
 /// Applies the target's physical-key normalization without starting the desktop runtime.

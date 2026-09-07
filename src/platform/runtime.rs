@@ -300,7 +300,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
 
-        let hotkeys = HotkeyConfig::validate::<FakeHotkeys>(&InputSection::default()).unwrap();
+        let hotkeys = HotkeyConfig::from_section::<FakeHotkeys>(&InputSection::default()).unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let received = Arc::clone(&events);
         let mut runtime =

@@ -61,3 +61,4 @@
 2026-09-06: Share Prompt Lab review payload validation, LLM aggregation, and threshold evaluation across review application and completed-report loading
 2026-09-06: Consolidate workflow configuration types, resolution, and validation under core::config and reuse the configuration test fixture
 2026-09-07: Resolve caller-declared typed configuration fields without business-module dependencies, and isolate raw STT workflows from unused cleanup settings
+2026-09-07: Remove separate consumer validation passes; report construction errors directly and defer API model/protocol checks to requests

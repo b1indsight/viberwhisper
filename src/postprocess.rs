@@ -1,8 +1,7 @@
 mod llm;
 
-use crate::core::config::{
-    ApiAuth, ConfigDocument, ConfigKey, PostProcessSection, SecretSource, ValidationIssue, fields,
-};
+use crate::core::config::{ApiAuth, ConfigDocument, SecretSource, fields};
+use anyhow::Context;
 use llm::LlmPostProcessor;
 use std::fmt;
 use tracing::warn;
@@ -28,7 +27,7 @@ impl PostProcessConfig {
     pub(crate) fn from_config(
         document: &ConfigDocument,
         secrets: &dyn SecretSource,
-    ) -> Result<Self, Vec<ValidationIssue>> {
+    ) -> anyhow::Result<Self> {
         if !document.select(fields::PostProcessEnabled, secrets, std::convert::identity) {
             return Ok(Self::Disabled);
         }
@@ -43,83 +42,22 @@ impl PostProcessConfig {
             ),
             secrets,
             |(endpoint, key, model, prompt, temperature, preheat_enabled)| {
-                Self::validate(
-                    endpoint.as_deref(),
-                    key.auth,
-                    model.as_deref(),
-                    &PostProcessSection {
-                        enabled: true,
-                        preheat_enabled,
-                        prompt,
-                        temperature,
-                    },
-                )
+                let endpoint = endpoint.context(
+                    "inference.api.post_process.api_url is required when cleanup is enabled",
+                )?;
+                Ok(Self::Llm(LlmConfig {
+                    endpoint: reqwest::Url::parse(&endpoint)
+                        .context("invalid inference.api.post_process.api_url")?,
+                    auth: key.auth,
+                    model: model.context(
+                        "inference.api.post_process.model is required when cleanup is enabled",
+                    )?,
+                    prompt,
+                    temperature,
+                    preheat_enabled,
+                }))
             },
         )
-    }
-
-    pub(crate) fn validate(
-        endpoint: Option<&str>,
-        auth: ApiAuth,
-        model: Option<&str>,
-        section: &PostProcessSection,
-    ) -> Result<Self, Vec<ValidationIssue>> {
-        if !section.enabled {
-            return Ok(Self::Disabled);
-        }
-
-        let mut issues = Vec::new();
-        let endpoint = match endpoint {
-            Some(value) => match reqwest::Url::parse(value) {
-                Ok(url) if matches!(url.scheme(), "http" | "https") => Some(url),
-                Ok(_) => {
-                    issues.push(ValidationIssue::new(
-                        ConfigKey::ApiPostProcessUrl,
-                        "post_process.url_scheme",
-                        "post-process URL must use http or https",
-                    ));
-                    None
-                }
-                Err(error) => {
-                    issues.push(ValidationIssue::new(
-                        ConfigKey::ApiPostProcessUrl,
-                        "post_process.url_invalid",
-                        format!("invalid post-process URL: {error}"),
-                    ));
-                    None
-                }
-            },
-            None => {
-                issues.push(ValidationIssue::new(
-                    ConfigKey::ApiPostProcessUrl,
-                    "post_process.url_missing",
-                    "post-process URL is required when enabled",
-                ));
-                None
-            }
-        };
-        let model = match model.filter(|value| !value.trim().is_empty()) {
-            Some(model) => Some(model.to_string()),
-            None => {
-                issues.push(ValidationIssue::new(
-                    ConfigKey::ApiPostProcessModel,
-                    "post_process.model_missing",
-                    "post-process model is required when enabled",
-                ));
-                None
-            }
-        };
-        match (endpoint, model) {
-            (Some(endpoint), Some(model)) if issues.is_empty() => Ok(Self::Llm(LlmConfig {
-                endpoint,
-                auth,
-                model,
-                prompt: section.prompt.clone(),
-                temperature: section.temperature,
-                preheat_enabled: section.preheat_enabled,
-            })),
-            _ => Err(issues),
-        }
     }
 }
 

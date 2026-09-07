@@ -1,8 +1,7 @@
 use crate::audio::{WavChunk, contains_audible_window};
-use crate::core::config::{
-    ApiAuth, ConfigDocument, ConfigKey, SecretSource, TranscriptionSection, ValidationIssue, fields,
-};
+use crate::core::config::{ApiAuth, ConfigDocument, SecretSource, fields};
 use crate::transcriber::TranscribeError;
+use anyhow::Context;
 use std::io::Cursor;
 use std::time::Duration;
 use tracing::{info, instrument, warn};
@@ -49,11 +48,11 @@ pub(crate) struct TranscriberMetadata {
 }
 
 impl TranscriberConfig {
-    /// Requests only the fields used by the STT client and validates those values.
+    /// Builds STT settings from the requested fields, parsing the endpoint into a URL.
     pub(crate) fn from_config(
         document: &ConfigDocument,
         secrets: &dyn SecretSource,
-    ) -> Result<Self, Vec<ValidationIssue>> {
+    ) -> anyhow::Result<Self> {
         document.select(
             (
                 fields::ApiTranscriptionUrl,
@@ -65,64 +64,17 @@ impl TranscriberConfig {
             ),
             secrets,
             |(endpoint, key, model, language, prompt, temperature)| {
-                Self::validate(
-                    &endpoint,
-                    key.auth,
-                    &model,
-                    &TranscriptionSection {
-                        language,
-                        prompt,
-                        temperature,
-                    },
-                )
+                Ok(Self {
+                    endpoint: reqwest::Url::parse(&endpoint)
+                        .context("invalid inference.api.transcription.api_url")?,
+                    auth: key.auth,
+                    model,
+                    language,
+                    prompt,
+                    temperature,
+                })
             },
         )
-    }
-
-    pub(crate) fn validate(
-        endpoint: &str,
-        auth: ApiAuth,
-        model: &str,
-        transcription: &TranscriptionSection,
-    ) -> Result<Self, Vec<ValidationIssue>> {
-        let mut issues = Vec::new();
-        let endpoint = match reqwest::Url::parse(endpoint) {
-            Ok(url) if matches!(url.scheme(), "http" | "https") => Some(url),
-            Ok(_) => {
-                issues.push(ValidationIssue::new(
-                    ConfigKey::ApiTranscriptionUrl,
-                    "transcriber.url_scheme",
-                    "transcription URL must use http or https",
-                ));
-                None
-            }
-            Err(error) => {
-                issues.push(ValidationIssue::new(
-                    ConfigKey::ApiTranscriptionUrl,
-                    "transcriber.url_invalid",
-                    format!("invalid transcription URL: {error}"),
-                ));
-                None
-            }
-        };
-        if model.trim().is_empty() {
-            issues.push(ValidationIssue::new(
-                ConfigKey::ApiTranscriptionModel,
-                "transcriber.model_empty",
-                "transcription model cannot be empty",
-            ));
-        }
-        match endpoint {
-            Some(endpoint) if issues.is_empty() => Ok(Self {
-                endpoint,
-                auth,
-                model: model.to_string(),
-                language: transcription.language.clone(),
-                prompt: transcription.prompt.clone(),
-                temperature: transcription.temperature,
-            }),
-            _ => Err(issues),
-        }
     }
 
     pub(crate) fn metadata(&self) -> TranscriberMetadata {
@@ -332,25 +284,27 @@ impl Transcriber for ApiTranscriber {
 mod tests {
     use super::*;
     use crate::audio::chunk::encode_i16_wav;
-    use crate::core::config::{ApiAuth, SecretValue, TranscriptionSection};
+    use crate::core::config::{ApiAuth, SecretValue};
 
-    fn validated_config(endpoint: &str) -> TranscriberConfig {
-        validated_config_with_auth(endpoint, ApiAuth::Bearer(SecretValue::new("test_key")))
+    fn test_config(endpoint: &str) -> TranscriberConfig {
+        test_config_with_auth(endpoint, ApiAuth::Bearer(SecretValue::new("test_key")))
     }
 
-    fn validated_config_with_auth(endpoint: &str, auth: ApiAuth) -> TranscriberConfig {
-        TranscriberConfig::validate(
-            endpoint,
+    fn test_config_with_auth(endpoint: &str, auth: ApiAuth) -> TranscriberConfig {
+        let transcription = ConfigDocument::default().transcription;
+        TranscriberConfig {
+            endpoint: reqwest::Url::parse(endpoint).unwrap(),
             auth,
-            "whisper-large-v3-turbo",
-            &TranscriptionSection::default(),
-        )
-        .unwrap()
+            model: "whisper-large-v3-turbo".to_string(),
+            language: transcription.language,
+            prompt: transcription.prompt,
+            temperature: transcription.temperature,
+        }
     }
 
     #[test]
     fn metadata_omits_endpoint_credentials_and_query_parameters() {
-        let config = validated_config(
+        let config = test_config(
             "https://user:password@api.example.test/v1/audio/transcriptions?token=secret#fragment",
         );
 
@@ -368,7 +322,7 @@ mod tests {
 
     #[test]
     fn prompt_override_changes_only_the_in_memory_transcriber_prompt() {
-        let config = validated_config("https://api.example.test/v1/audio/transcriptions");
+        let config = test_config("https://api.example.test/v1/audio/transcriptions");
         let before = config.metadata();
 
         let after = config
@@ -450,7 +404,7 @@ mod tests {
     }
 
     fn transcriber_for_port(port: u16) -> ApiTranscriber {
-        let config = validated_config(&format!("http://127.0.0.1:{port}/v1/audio/transcriptions"));
+        let config = test_config(&format!("http://127.0.0.1:{port}/v1/audio/transcriptions"));
         ApiTranscriber::new(config).unwrap()
     }
 
@@ -520,7 +474,7 @@ mod tests {
             ),
         ] {
             let (port, request) = spawn_request_stub();
-            let config = validated_config_with_auth(
+            let config = test_config_with_auth(
                 &format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
                 auth,
             );

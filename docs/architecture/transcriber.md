@@ -24,6 +24,10 @@ path but deliberately bypasses post-processing.
 consumes endpoint, authentication, model, language, prompt, and temperature. Retry policy is owned
 by the module; chunk duration and size limits are owned by the audio producer.
 
+`TranscriberConfig::from_config` selects these fields and parses the endpoint into a URL.
+There is no separate validation pass: HTTP protocol and empty-model errors are reported by
+the request layer, while URL parse failures are returned immediately from construction.
+
 `TranscriberConfig::with_prompt` consumes one already resolved config and replaces only its prompt
 in memory. Prompt-lab uses this for configured baselines, prompt files, and explicit no-prompt runs;
 the persisted config document is never mutated. `metadata()` returns endpoint/model/language/prompt/

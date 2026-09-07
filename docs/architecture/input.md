@@ -83,12 +83,12 @@ state.
 
 **`start_hotkey_listener(config, filter, notify)`**
 
-- `HotkeyConfig::validate::<P>(&InputSection)` parses and validates both bindings before
-  construction; `platform::validate_hotkeys` supplies the selected backend policy for those settings.
+- `HotkeyConfig::from_section::<P>(&InputSection)` parses the bindings during construction;
+  `platform::hotkey_config` supplies the selected backend policy for those settings.
 - Empty strings disable a binding, including both bindings for tray-only control; duplicate non-empty bindings are rejected.
 - Non-function bindings log that `rdev::listen` observes rather than suppresses their native input.
 - On Windows, a `LEFTCTRL` binding logs an additional warning because AltGr is reported as left Ctrl
-  plus right Alt by layouts that use AltGr. Validation rejects a `LEFTCTRL`/`RIGHTALT` pair so one
+  plus right Alt by layouts that use AltGr. Construction rejects a `LEFTCTRL`/`RIGHTALT` pair so one
   physical AltGr press cannot enqueue both configured recording actions.
 - Spawns the listener thread without blocking application startup.
 - Delivers mapped press/release events directly to the supplied non-blocking callback; the listener
@@ -105,17 +105,17 @@ locks/system keys, punctuation, and numeric-keypad keys. Explicit aliases normal
 `LEFTALT`/`Key::Alt`.
 
 `parse_key` recognizes the shared vocabulary independently of platform. The selected
-`HotkeyPolicy` then returns `hotkey.unsupported` when the current `rdev 0.5.3` backend cannot emit the named
+`HotkeyPolicy` supplies an error reason when the current `rdev 0.5.3` backend cannot emit the named
 variant. On macOS this includes Caps Lock (a status change rather than a press/release pair), right
 Ctrl, forward Delete/Insert/navigation-cluster keys, several lock/system keys, international
 backslash, and numeric-keypad names. On Windows it includes right Meta, Function, and the numeric
-keypad Enter key that `rdev` cannot distinguish from Enter. Unknown names use `hotkey.invalid`, and
-aliases resolving to the same key use `hotkey.duplicate`. Windows additionally uses
-`hotkey.altgr_conflict` when the two bindings are `LEFTCTRL` and `RIGHTALT` in either order.
+keypad Enter key that `rdev` cannot distinguish from Enter. Unknown names, aliases resolving to
+the same key, and a Windows `LEFTCTRL`/`RIGHTALT` pair produce construction errors identifying
+the affected configuration field.
 
-Configuration persistence intentionally does not invoke this runtime validation. `config set`
+Configuration persistence intentionally does not construct runtime hotkeys. `config set`
 stores the string; `config check` and listener startup construct the application-owned
-`ListenerConfig` and report hotkey issues together with other required configuration issues.
+`ListenerConfig` and return the first construction error.
 
 Key names identify `rdev::Key` values rather than produced characters. The macOS backend maps
 hardware key codes, while the Windows backend maps virtual-key values; letter and punctuation

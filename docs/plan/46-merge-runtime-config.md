@@ -3,9 +3,9 @@
 ## Status
 
 The user approved field-driven configuration after the initial module consolidation in PR #125.
-The revised implementation and local validation are complete. The user requested one combined
-review and publication on the same bookmark and PR. Review and hosted CI results are tracked
-on PR #125.
+The field-driven implementation was reviewed and published on PR #125. The user requested
+publication of the follow-up that removes separate consumer validation passes. Implementation
+and local validation are complete; review and hosted CI results are tracked on the same PR.
 Base: `master` at `bef71a4e` (PR #123).
 
 ## Problem and outcome
@@ -33,7 +33,7 @@ pub fn select<R: FieldRequest, T>(
 
 `FieldRequest` is implemented by typed selectors and tuples of selectors. For example, a
 recorder requests `(fields::AudioInputDevice, fields::AudioMicGain)` and supplies a constructor
-accepting `(Option<String>, f32)`. Its result may be a configuration value or a validation
+accepting `(Option<String>, f32)`. Its result may be a configuration value or a construction
 result. No string-key conversion, JSON round trip, workflow registry, or upstream type is
 needed to construct the result.
 
@@ -47,21 +47,25 @@ Only requested fields and their associated secret sources are consulted.
 | Location | Responsibility |
 | --- | --- |
 | `src/core/config/fields.rs` | Canonical catalog, typed requests, selected-value construction, CLI field access, and effective secrets. |
-| `src/core/config.rs` | Public configuration entry point, errors, secret types, and generic validation issue collection. |
+| `src/core/config.rs` | Public configuration entry point, persistence errors, and secret types. |
 | `src/core/config/store.rs` | Configuration persistence and canonical platform-specific directory discovery. |
 | `src/audio.rs` | Requests microphone settings and supplies fixed audio chunk limits. |
-| `src/transcriber/api.rs` | Requests STT fields and applies transcriber validation. |
+| `src/transcriber/api.rs` | Requests STT fields and constructs settings with a parsed URL. |
 | `src/postprocess.rs` | Requests the enabled flag first, then LLM fields only when enabled. |
 | `src/application/listener.rs` | Composes `RecordingConfig` for capture and `ListenerConfig` for normal delivery. |
 | `src/application.rs` | Composes `ConvertConfig` for offline STT, cleanup, and merge language. |
 | `src/application/setup.rs` | Uses the application's listener settings for setup verification. |
 | `src/application/prompt_lab.rs` | Uses recording settings for capture and only STT settings for evaluation. |
+| `src/input/hotkey.rs`, `src/platform.rs` | Construct named-key bindings with the selected target policy. |
 | `src/history.rs`, `src/platform*` | History uses configuration's directory helper; desktop backends no longer own directory discovery. |
 
 `BackendConfig`, workflow resolvers in `core::config`, and the redundant `check` wrapper are
 removed. The CLI `config check` command builds the application-owned `ListenerConfig` directly.
-Business modules retain their validation rules; errors from required components are aggregated
-and normalized through `ValidationReport`.
+Consumers construct settings directly and propagate the first error with `?`. The standalone
+`validate` methods, `ValidationIssue`, `ValidationReport`, and validation-composition helper are
+removed. URL parsing remains necessary for URL-typed fields; enabled cleanup still requires URL
+and model values. Hotkey construction resolves key names and rejects unsupported or conflicting
+bindings, including the Windows AltGr pair. There is no separate validation pass.
 
 ## Behavioral boundaries
 
@@ -70,21 +74,26 @@ values, environment-over-disk precedence, and redaction retain their existing be
 Directory identifiers remain `com.b1indsight.viberwhisper` on macOS, `ViberWhisper` on Windows,
 and `viberwhisper` on fallback targets. History continues to use the same directory.
 
-Loading and editing configuration remain independent of business validation. STT evaluation
-and raw capture intentionally stop validating unused cleanup settings. Offline conversion still
-requires its configured cleanup, and normal delivery/setup still validate hotkeys and cleanup.
-Disabled cleanup does not resolve LLM fields or credentials.
+Loading and editing configuration remain independent of component construction. STT evaluation
+and raw capture do not construct unused cleanup settings. Offline conversion still requires its
+configured cleanup, and normal delivery/setup still construct usable hotkeys and cleanup settings.
+Disabled cleanup does not resolve LLM fields or credentials. Empty-model and HTTP protocol
+prechecks are removed; requests report those errors. `config check` verifies local construction
+without starting services and does not guarantee that API requests will succeed.
 
 ## Validation
 
 - Added field-projection tests first and observed them fail because selectors and `select`
   were not implemented, then made them pass with typed requests.
+- Updated behavior tests first: direct API configuration and first-error propagation initially
+  failed under the old validation pass, then passed after switching to direct construction.
 - Covered caller-owned output types, selective secret reads, environment precedence and
   redaction, STT independence, raw-capture independence, disabled cleanup, offline conversion,
-  and combined listener validation. Existing persistence and field-access coverage is retained.
-- `cargo test --locked`: 186 tests passed on macOS.
+  and first-error propagation. Existing persistence, field-access, hotkey parsing, duplicate-key,
+  and platform-policy coverage is retained.
+- `cargo test --locked`: 187 tests passed on macOS.
 - `cargo fmt --check`, `cargo build --locked`, and
   `cargo clippy --locked --all-targets -- -D warnings`: passed on macOS.
 - Source inspection found no project-module imports in `core::config` or its submodules.
 - Independent review runs before publication; hosted Windows/macOS CI results are tracked on
-  PR #125 for the published commit. Earlier PR checks apply to the initial implementation only.
+  PR #125 for each published commit.

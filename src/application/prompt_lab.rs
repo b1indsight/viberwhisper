@@ -10,7 +10,7 @@ use crate::core::cli::{
     PromptLabCommand, PromptLabDatasetCommand, PromptLabReportCommand, PromptLabSampleCommand,
     PromptLabSampleStatus,
 };
-use crate::core::config::{EnvironmentSecretSource, ValidationReport};
+use crate::core::config::EnvironmentSecretSource;
 use crate::prompt_lab::{
     DatasetStore, EvaluationReport, EvaluationRequest, ProperNounAnnotation, ReferenceStatus,
     RunStatus, SttSnapshot, Thresholds, apply_review, evaluate,
@@ -77,8 +77,7 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
         .map(EvaluationReport::read)
         .transpose()?;
     let (_, document) = load_config()?;
-    let mut config = TranscriberConfig::from_config(&document, &EnvironmentSecretSource)
-        .map_err(ValidationReport::from)?;
+    let mut config = TranscriberConfig::from_config(&document, &EnvironmentSecretSource)?;
     let prompt = if command.no_prompt {
         None
     } else if let Some(prompt) = candidate_from_file {
@@ -146,8 +145,7 @@ fn report(action: PromptLabReportCommand) -> Result<()> {
 fn record(root: PathBuf) -> Result<()> {
     let dataset = DatasetStore::open_or_create(root)?;
     let (_, document) = load_config()?;
-    let config = RecordingConfig::from_config(&document, &EnvironmentSecretSource)
-        .map_err(ValidationReport::from)?;
+    let config = RecordingConfig::from_config(&document, &EnvironmentSecretSource)?;
     super::listener::run_capture(config, dataset)
 }
 
