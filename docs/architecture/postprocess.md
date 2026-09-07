@@ -8,7 +8,7 @@ Optional LLM-based text cleanup applied after STT transcription. Adds punctuatio
 
 ```
 src/
-  postprocess.rs      — processor facade, processor/session traits, typed config and errors
+  postprocess.rs      — processor facade and trait, session enum, typed config and errors
   postprocess/
     llm.rs            — LlmPostProcessor, ConservativeLlmSession, PreheatLlmSession
 ```
@@ -21,7 +21,7 @@ pub struct PostProcessor(Box<dyn TextPostProcessor>);
 impl PostProcessor {
     pub fn new(config: PostProcessConfig) -> Self;
     pub fn process_text(&self, text: &str) -> Result<String, PostProcessError>;
-    pub fn create_session(&self) -> Box<dyn PostProcessorSession>;
+    pub fn create_session(&self) -> PostProcessorSession;
 }
 ```
 
@@ -34,15 +34,21 @@ Two interfaces for different use cases:
 ## `PostProcessorSession`
 
 ```rust
-pub trait PostProcessorSession: Send {
-    fn push_stable_chunk(&mut self, text: &str);
-    fn finish(&mut self) -> Result<String, PostProcessError>;
+pub enum PostProcessorSession {
+    Noop(NoopSession),
+    Conservative(ConservativeLlmSession),
+    Preheat(PreheatLlmSession),
+}
+
+impl PostProcessorSession {
+    pub fn push_stable_chunk(&mut self, text: &str);
+    pub fn finish(&mut self) -> Result<String, PostProcessError>;
 }
 ```
 
-`PostProcessorSession` provides the public incremental interface implemented by `NoopSession`, `ConservativeLlmSession`, and `PreheatLlmSession`. The interface accepts stable STT chunks incrementally, and `finish` returns the final processed text.
+`PostProcessorSession` owns one of the three concrete session states inline. Its methods use exhaustive matches to dispatch to the selected implementation. The interface accepts stable STT chunks incrementally, and `finish` returns the final processed text. Variant payload types are public with private state fields; sessions are created through `PostProcessor::create_session`.
 
-Both `TextPostProcessor::create_session` and the public facade return `Box<dyn PostProcessorSession>` directly. Creation only initializes state; text processing starts in subsequent session calls. The listener owns the boxed session and borrows it as `&mut dyn PostProcessorSession` during finalization.
+Both `TextPostProcessor::create_session` and the public facade return the concrete `PostProcessorSession` enum. Creation only initializes state; text processing starts in subsequent session calls. The listener owns the session and borrows it as `&mut PostProcessorSession` during finalization. Session dispatch uses neither a trait object nor a boxed wrapper.
 
 ## Implementations
 

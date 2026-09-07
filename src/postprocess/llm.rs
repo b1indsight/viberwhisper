@@ -63,9 +63,9 @@ impl TextPostProcessor for LlmPostProcessor {
         Ok(result)
     }
 
-    fn create_session(&self) -> Box<dyn PostProcessorSession> {
+    fn create_session(&self) -> PostProcessorSession {
         if self.streaming_enabled {
-            Box::new(PreheatLlmSession::new(
+            PostProcessorSession::Preheat(PreheatLlmSession::new(
                 self.auth.clone(),
                 self.api_url.clone(),
                 self.model.clone(),
@@ -74,7 +74,7 @@ impl TextPostProcessor for LlmPostProcessor {
                 self.client.clone(),
             ))
         } else {
-            Box::new(ConservativeLlmSession {
+            PostProcessorSession::Conservative(ConservativeLlmSession {
                 auth: self.auth.clone(),
                 api_url: self.api_url.clone(),
                 model: self.model.clone(),
@@ -143,7 +143,8 @@ fn call_llm_impl(
 // Conservative session (streaming_enabled = false): accumulate, call once.
 // ---------------------------------------------------------------------------
 
-struct ConservativeLlmSession {
+/// Accumulated text and request configuration for conservative cleanup.
+pub struct ConservativeLlmSession {
     auth: ApiAuth,
     api_url: reqwest::Url,
     model: String,
@@ -153,14 +154,14 @@ struct ConservativeLlmSession {
     chunks: Vec<String>,
 }
 
-impl PostProcessorSession for ConservativeLlmSession {
-    fn push_stable_chunk(&mut self, text: &str) {
+impl ConservativeLlmSession {
+    pub(super) fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());
         }
     }
 
-    fn finish(&mut self) -> Result<String, PostProcessError> {
+    pub(super) fn finish(&mut self) -> Result<String, PostProcessError> {
         // Post-processing receives already ordered stable text fragments; joining
         // without separators preserves the STT layer's chosen spacing/punctuation.
         let combined = self.chunks.join("");
@@ -191,7 +192,8 @@ struct PreheatState {
     latest_result: Option<Result<String, String>>,
 }
 
-struct PreheatLlmSession {
+/// Accumulated text and background request state for preheated cleanup.
+pub struct PreheatLlmSession {
     auth: ApiAuth,
     api_url: reqwest::Url,
     model: String,
@@ -278,10 +280,8 @@ impl PreheatLlmSession {
             // Otherwise this result is stale — silently drop it.
         });
     }
-}
 
-impl PostProcessorSession for PreheatLlmSession {
-    fn push_stable_chunk(&mut self, text: &str) {
+    pub(super) fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());
             info!(
@@ -293,7 +293,7 @@ impl PostProcessorSession for PreheatLlmSession {
         }
     }
 
-    fn finish(&mut self) -> Result<String, PostProcessError> {
+    pub(super) fn finish(&mut self) -> Result<String, PostProcessError> {
         // Keep post-processing concatenation separator-free; the STT result is
         // already a display-ready text stream before LLM cleanup.
         let combined = self.chunks.join("");
@@ -353,6 +353,7 @@ impl PostProcessorSession for PreheatLlmSession {
 mod tests {
     use super::*;
     use crate::core::config::{ApiAuth, SecretValue};
+    use crate::postprocess::{PostProcessConfig, PostProcessor};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
@@ -451,6 +452,27 @@ mod tests {
         let result = p.process_text("");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn session_processes_text_in_both_modes() {
+        // Desktop finalization must reach the LLM through either enum variant;
+        // empty-input tests bypass the request and cannot verify this path.
+        for preheat_enabled in [false, true] {
+            let (endpoint, _headers) = spawn_header_stub();
+            let mut config = config_with_postprocess(preheat_enabled, None);
+            config.endpoint = endpoint;
+            let processor = PostProcessor::new(PostProcessConfig::Llm(config));
+            let mut session = processor.create_session();
+
+            session.push_stable_chunk("raw");
+
+            assert_eq!(
+                session.finish().unwrap(),
+                "clean",
+                "preheat_enabled={preheat_enabled}"
+            );
+        }
     }
 
     #[test]

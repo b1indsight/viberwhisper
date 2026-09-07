@@ -396,7 +396,7 @@ impl ListenerApplication {
                     move || {
                         finish_transcription(
                             orchestrator.finish_session(session_id),
-                            post_processor.as_mut(),
+                            &mut post_processor,
                             typer.as_ref(),
                             gate.as_ref(),
                         );
@@ -474,7 +474,7 @@ impl ApplicationHandler<AppEvent> for ListenerApplication {
 
 fn finish_transcription(
     result: Result<String, SessionError>,
-    post_processor: &mut dyn PostProcessorSession,
+    post_processor: &mut PostProcessorSession,
     typer: &dyn TextTyper,
     gate: &FinalizationGate,
 ) {

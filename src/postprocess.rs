@@ -3,6 +3,7 @@ mod llm;
 use crate::core::config::{ApiAuth, ConfigDocument, fields};
 use anyhow::Context;
 use llm::LlmPostProcessor;
+pub use llm::{ConservativeLlmSession, PreheatLlmSession};
 use std::fmt;
 use tracing::warn;
 
@@ -109,18 +110,37 @@ pub struct PostProcessor(Box<dyn TextPostProcessor>);
 /// Text-cleanup behavior selected once from the validated runtime config.
 trait TextPostProcessor: Send + Sync {
     fn process_text(&self, text: &str) -> Result<String, PostProcessError>;
-    fn create_session(&self) -> Box<dyn PostProcessorSession>;
+    fn create_session(&self) -> PostProcessorSession;
 }
 
 /// Incremental text cleanup state for one recording session.
 ///
 /// Created by [`PostProcessor::create_session`]. Feed stable text chunks with
 /// [`Self::push_stable_chunk`], then call [`Self::finish`] for the final text.
-pub trait PostProcessorSession: Send {
+pub enum PostProcessorSession {
+    Noop(NoopSession),
+    Conservative(ConservativeLlmSession),
+    Preheat(PreheatLlmSession),
+}
+
+impl PostProcessorSession {
     /// Adds a stable text fragment to the session's accumulated input.
-    fn push_stable_chunk(&mut self, text: &str);
+    pub fn push_stable_chunk(&mut self, text: &str) {
+        match self {
+            Self::Noop(session) => session.push_stable_chunk(text),
+            Self::Conservative(session) => session.push_stable_chunk(text),
+            Self::Preheat(session) => session.push_stable_chunk(text),
+        }
+    }
+
     /// Completes cleanup and returns the processed text.
-    fn finish(&mut self) -> Result<String, PostProcessError>;
+    pub fn finish(&mut self) -> Result<String, PostProcessError> {
+        match self {
+            Self::Noop(session) => session.finish(),
+            Self::Conservative(session) => session.finish(),
+            Self::Preheat(session) => session.finish(),
+        }
+    }
 }
 
 impl PostProcessor {
@@ -144,7 +164,7 @@ impl PostProcessor {
     }
 
     /// Creates independent state for incremental text cleanup.
-    pub fn create_session(&self) -> Box<dyn PostProcessorSession> {
+    pub fn create_session(&self) -> PostProcessorSession {
         self.0.create_session()
     }
 }
@@ -156,17 +176,18 @@ impl TextPostProcessor for NoopPostProcessor {
         Ok(text.to_string())
     }
 
-    fn create_session(&self) -> Box<dyn PostProcessorSession> {
-        Box::new(NoopSession::default())
+    fn create_session(&self) -> PostProcessorSession {
+        PostProcessorSession::Noop(NoopSession::default())
     }
 }
 
+/// Pass-through state owned by [`PostProcessorSession::Noop`].
 #[derive(Default)]
-struct NoopSession {
+pub struct NoopSession {
     chunks: Vec<String>,
 }
 
-impl PostProcessorSession for NoopSession {
+impl NoopSession {
     fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());
