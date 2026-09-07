@@ -118,7 +118,7 @@ impl RecordingSessionMachine {
         let transition = if session_mismatch {
             None
         } else {
-            transition(self.state, event, &mut self.next_session_id)
+            transition(self.state, event, SessionId(self.next_session_id))
         };
         let Some(transition) = transition else {
             debug!(
@@ -130,6 +130,12 @@ impl RecordingSessionMachine {
             return Vec::new();
         };
 
+        if matches!(
+            (self.state, transition.next),
+            (RecordingState::Idle, RecordingState::Starting { .. })
+        ) {
+            self.next_session_id += 1;
+        }
         self.state = transition.next;
         transition.effects
     }
@@ -138,22 +144,20 @@ impl RecordingSessionMachine {
 /// Enumerate every event that may change or act on the recording lifecycle.
 /// The caller validates session routing first; events not represented by a
 /// state/event match arm are then rejected without mutating the current state.
+/// The supplied ID is used only when starting a new session; allocation belongs
+/// to the machine that accepts the transition.
 fn transition(
     state: RecordingState,
     event: SessionEvent,
-    next_session_id: &mut u64,
+    session_id: SessionId,
 ) -> Option<Transition> {
     match (state, event) {
         (RecordingState::ShuttingDown { .. }, _) => None,
         (state, SessionEvent::ShutdownRequested) => Some(shutdown_transition(state)),
-        (RecordingState::Idle, SessionEvent::StartRequested) => {
-            let session_id = SessionId(*next_session_id);
-            *next_session_id += 1;
-            Some(Transition {
-                next: RecordingState::Starting { session_id },
-                effects: vec![SessionEffect::StartSession { session_id }],
-            })
-        }
+        (RecordingState::Idle, SessionEvent::StartRequested) => Some(Transition {
+            next: RecordingState::Starting { session_id },
+            effects: vec![SessionEffect::StartSession { session_id }],
+        }),
         (RecordingState::Starting { session_id }, SessionEvent::SessionStarted { .. }) => {
             Some(Transition {
                 next: RecordingState::Recording { session_id },
@@ -234,26 +238,21 @@ mod tests {
 
     #[test]
     fn explicit_transition_table_rejects_unlisted_paths() {
-        let mut next_session_id = 2;
-
         let result = transition(
             RecordingState::Starting {
                 session_id: SessionId(1),
             },
             SessionEvent::StopRequested,
-            &mut next_session_id,
+            SessionId(2),
         );
 
         assert!(result.is_none());
-        assert_eq!(next_session_id, 2);
     }
 
     #[test]
     fn explicit_transition_table_accepts_applied_zero_effect_path() {
         // Finishing convergence changes lifecycle state even though the runtime has
         // no follow-up command to execute, so it must not hit the rejection fallback.
-        let mut next_session_id = 2;
-
         let result = transition(
             RecordingState::Stopping {
                 session_id: SessionId(1),
@@ -261,13 +260,12 @@ mod tests {
             SessionEvent::SessionStopped {
                 session_id: SessionId(1),
             },
-            &mut next_session_id,
+            SessionId(2),
         )
         .expect("listed transition should be accepted");
 
         assert_eq!(result.next, RecordingState::Idle);
         assert!(result.effects.is_empty());
-        assert_eq!(next_session_id, 2);
     }
 
     #[test]
@@ -394,8 +392,12 @@ mod tests {
     }
 
     #[test]
-    fn session_start_failure_returns_to_idle_and_next_start_gets_a_new_id() {
+    fn rejected_events_and_failed_starts_do_not_reuse_or_skip_session_ids() {
         let mut machine = RecordingSessionMachine::new();
+        // A release while idle or a repeated start during startup must not consume
+        // IDs; a failed device startup still reserves its ID against late events.
+        machine.handle(SessionEvent::StopRequested);
+        machine.handle(SessionEvent::StartRequested);
         machine.handle(SessionEvent::StartRequested);
         assert_eq!(
             machine.handle(SessionEvent::SessionStartFailed {

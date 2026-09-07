@@ -63,3 +63,4 @@
 2026-09-07: Resolve caller-declared typed configuration fields without business-module dependencies, and isolate raw STT workflows from unused cleanup settings
 2026-09-07: Remove separate consumer validation passes; report construction errors directly and defer API model/protocol checks to requests
 2026-09-07: Bind lazy secret sources to configuration documents so field reads and consumer constructors no longer pass credential providers through application layers
+2026-09-07: Simplify core session ID allocation, chunk notifications and state updates, and pass owned language configuration through transcription result merging

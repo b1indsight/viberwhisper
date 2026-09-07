@@ -2,7 +2,7 @@
 ///
 /// Chinese languages are joined without a separator. All other languages use
 /// a single space. Empty segments are ignored.
-pub(crate) fn merge_texts(texts: &[String], language: Option<&str>) -> String {
+pub(crate) fn merge_texts(texts: &[String], language: Option<String>) -> String {
     let separator = match language {
         Some(lang) if lang.starts_with("zh") => "",
         _ => " ",
@@ -21,9 +21,16 @@ mod tests {
     use super::merge_texts;
 
     #[test]
-    fn merges_non_chinese_segments_with_spaces() {
-        let segments = vec!["hello".to_string(), "world".to_string()];
+    fn merges_segments_with_the_language_separator() {
+        let segments = vec!["hello".to_string(), String::new(), "world".to_string()];
 
-        assert_eq!(merge_texts(&segments, Some("en")), "hello world");
+        for (language, expected) in [
+            (None, "hello world"),
+            (Some("en"), "hello world"),
+            (Some("zh"), "helloworld"),
+            (Some("zh-CN"), "helloworld"),
+        ] {
+            assert_eq!(merge_texts(&segments, language.map(String::from)), expected);
+        }
     }
 }

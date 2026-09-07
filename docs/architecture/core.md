@@ -105,26 +105,36 @@ No subcommand runs the recording listener. Other commands are:
 ### Key Concepts
 
 - **Chunk State Machine**: `Flushed → Uploading → Transcribed / Failed`
-- **Session-owned Results**: Each active session exclusively owns its `Vec<ChunkEntry>`. The worker never reads or mutates chunk state; it reports `UploadStarted` and `Completed` events through a session-specific result channel.
+- **Session-owned Results**: Each active session exclusively owns its `chunk_entries: Vec<ChunkEntry>`. These are tracking records, not WAV data. The worker never reads or mutates chunk state; it reports `UploadStarted` and `Completed` events through a session-specific result channel.
 - **Convergence Timeout**: A module-owned 30-second deadline marks chunks still pending as `Failed(Timeout)`
 - **Partial Failure**: If some chunks succeed and others fail, returns partial text with an error
 - **Bounded Queue**: The capacity-two in-memory `WavChunk` queue is non-blocking. A full queue marks the chunk failed rather than stalling session shutdown.
 - **Memory Ownership**: Queued chunks are immutable shared WAV bytes. Rejected, stale, cancelled, or completed chunks are released by normal ownership drops; the orchestrator performs no chunk-file cleanup.
 - **Strict Session Routing**: start, chunk, finish, and abort operations carry `SessionId`; duplicate starts and mismatched IDs are rejected without replacing active work.
 
-`on_chunk_ready` opportunistically drains completed worker events while recording. During shutdown,
+`on_chunk_ready` is a notification returning `()`: invalid session IDs are logged and rejected
+internally, and callers do not repeat that logging. It first attempts non-blocking submission,
+then registers either a pending or failed entry before consuming available worker events.
+Submission failures remain in the session for `finish_session` to report alongside partial text.
+`apply_worker_event` owns the shared upload/completion transitions, including terminal-state
+protection. During shutdown,
 `finish_session` closes the bounded input sender and waits on the result receiver with the fixed
 convergence deadline. Timeout or abort drops session-owned chunk state immediately; a detached
 worker can finish synchronous transcription, but late events cannot retain or mutate the ended
 session or reach a newer session.
 
+`SessionStartError` is a struct containing the requested and active IDs. Result collection and
+shared text merging accept language configuration as `Option<String>`; callers clone configuration
+that must remain available for later sessions.
+
 ### `SessionError` Enum
 
 | Variant | Description |
 |---|---|
+| `Routing(SessionRoutingError)` | No active session or a mismatched session ID |
 | `NoChunks` | Recording too short to produce any audio |
-| `PartialFailure { partial_text, failures }` | Some chunks succeeded, includes partial text |
-| `ConvergenceTimeout { partial_text, pending }` | Timeout hit, includes what was completed |
+| `PartialFailure { partial_text, errors }` | One or more chunks failed; includes any successful text |
+| `ConvergenceTimeout { partial_text, pending_count }` | Timeout hit, includes what was completed |
 
 ---
 
@@ -148,6 +158,10 @@ The active states carry only a monotonically increasing `SessionId`; input sourc
 ### Explicit Transition Table
 
 `RecordingSessionMachine::handle` is the only state-writing entry point. It first compares a result event's routing `SessionId` with the active state once, then delegates matching events to one private `(RecordingState, SessionEvent)` match. The allowed paths are `Idle -> Starting -> Recording -> Stopping -> Idle`, plus chunk submission, failure recovery, and shutdown. Events rejected by either layer leave the state unchanged, emit no effects, and produce one compact debug record containing only the current state, event name, and optional routing ID.
+
+The transition function receives a session ID value and never modifies the allocation counter.
+The machine advances that counter only when accepting an `Idle -> Starting` transition, so rejected
+events do not consume IDs and a failed startup cannot reuse its ID.
 
 ### Event/Effect Boundary
 

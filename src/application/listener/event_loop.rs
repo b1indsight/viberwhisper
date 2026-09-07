@@ -220,9 +220,7 @@ impl ListenerApplication {
                     }
                     SessionEffect::SubmitChunk { session_id, chunk } => {
                         self.output.archive_chunk(session_id, &chunk);
-                        if let Err(error) = self.orchestrator.on_chunk_ready(session_id, chunk) {
-                            warn!(session_id = session_id.0, error = %error, "Chunk was rejected");
-                        }
+                        self.orchestrator.on_chunk_ready(session_id, chunk);
                     }
                     SessionEffect::CancelRecorder { session_id } => {
                         self.output.cancel_session(session_id);
@@ -275,12 +273,7 @@ impl ListenerApplication {
                         }
                     },
                     Err(error) => {
-                        let active_session_id = match &error {
-                            crate::core::orchestrator::SessionStartError::ActiveSession {
-                                active,
-                                ..
-                            } => *active,
-                        };
+                        let active_session_id = error.active;
                         let cancel_outcome = self.recorder.cancel_recording(session_id);
                         self.output.cancel_session(active_session_id);
                         debug!(
@@ -364,9 +357,7 @@ impl ListenerApplication {
                 }
                 for chunk in chunks {
                     self.output.archive_chunk(session_id, &chunk);
-                    if let Err(error) = self.orchestrator.on_chunk_ready(session_id, chunk) {
-                        warn!(session_id = session_id.0, error = %error, "Stop-time chunk was rejected");
-                    }
+                    self.orchestrator.on_chunk_ready(session_id, chunk);
                 }
                 self.spawn_finalization(session_id);
                 None

@@ -318,7 +318,7 @@ impl SetupVerifier for NativeVerifier {
                     .map_err(|error| error.to_string())?,
             );
         }
-        let raw = text::merge_texts(&texts, document.transcription.language.as_deref());
+        let raw = text::merge_texts(&texts, document.transcription.language.clone());
         if raw.trim().is_empty() {
             return Err("转写服务返回了空文本".to_string());
         }

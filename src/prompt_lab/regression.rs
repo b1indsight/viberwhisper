@@ -719,7 +719,7 @@ pub(crate) fn evaluate(
             transcriber,
             request.max_chunk_duration_secs,
             request.max_chunk_size_bytes,
-            request.language.as_deref(),
+            request.language.clone(),
         );
         match result {
             Ok(hypothesis) => samples.push(SampleResult {
@@ -889,7 +889,7 @@ fn transcribe_sample(
     transcriber: &dyn Transcriber,
     max_chunk_duration_secs: u32,
     max_chunk_size_bytes: u64,
-    language: Option<&str>,
+    language: Option<String>,
 ) -> std::result::Result<String, String> {
     let mut reader = WavChunkReader::open(path, max_chunk_duration_secs, max_chunk_size_bytes)
         .map_err(|error| error.to_string())?;
