@@ -56,9 +56,10 @@ Calls an OpenAI-compatible chat completions API to clean up transcribed text. Th
 
 **Construction:** `LlmPostProcessor::new(config: LlmConfig) -> Result<Self>`
 
-`PostProcessConfig::validate` owns URL/model validation and produces either `Disabled` or a
-validated `LlmConfig`. Authentication uses Bearer auth when configured and explicit
-`ApiAuth::None` otherwise.
+`PostProcessConfig::from_config` directly produces `Disabled` or an `LlmConfig`. Enabled cleanup
+requires URL and model values, and parses the URL during construction. Empty-model and HTTP
+protocol errors are handled by the request layer. Authentication uses Bearer auth when configured
+and explicit `ApiAuth::None` otherwise. Disabled cleanup reads no LLM fields or credentials.
 
 **`process` method:** Sends a single blocking request to the LLM API. Empty text is returned immediately without a network call.
 

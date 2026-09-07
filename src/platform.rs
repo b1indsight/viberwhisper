@@ -7,11 +7,9 @@ mod runtime;
 #[cfg(target_os = "windows")]
 mod windows;
 
-use std::path::PathBuf;
-
 use rdev::EventType;
 
-use crate::core::config::{InputSection, ValidationIssue};
+use crate::core::config::InputSection;
 use crate::input::hotkey::HotkeyConfig;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -25,11 +23,6 @@ use backend::PlatformBackend;
 pub(crate) use runtime::{PlatformAction, PlatformEvent};
 
 pub(crate) type NativePlatform = runtime::PlatformRuntime<SelectedBackend>;
-
-/// Returns the current target's application configuration directory.
-pub(crate) fn config_dir() -> Option<PathBuf> {
-    SelectedBackend::config_dir()
-}
 
 /// Gives the desktop process valid output handles without requiring a visible console.
 pub(crate) fn prepare_desktop_output() -> std::io::Result<()> {
@@ -50,10 +43,8 @@ pub(crate) fn report_desktop_startup_error(error: &anyhow::Error) {
 }
 
 /// Resolves persisted hotkey names with the policy selected for this build target.
-pub(crate) fn validate_hotkeys(
-    section: &InputSection,
-) -> Result<HotkeyConfig, Vec<ValidationIssue>> {
-    HotkeyConfig::validate::<<SelectedBackend as PlatformBackend>::Hotkeys>(section)
+pub(crate) fn hotkey_config(section: &InputSection) -> anyhow::Result<HotkeyConfig> {
+    HotkeyConfig::from_section::<<SelectedBackend as PlatformBackend>::Hotkeys>(section)
 }
 
 /// Applies the target's physical-key normalization without starting the desktop runtime.

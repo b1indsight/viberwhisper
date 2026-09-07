@@ -1,18 +1,63 @@
+//! Canonical field names, typed selections, and redacted CLI field access.
+
 use std::fmt;
 
-use super::{ConfigDocument, SecretSource};
+use super::{ApiAuth, ConfigDocument, SecretValue};
+
+/// A typed field selection. Tuples combine selections without reading other fields.
+pub trait FieldRequest {
+    type Values;
+
+    fn read(self, document: &ConfigDocument) -> Self::Values;
+}
+
+macro_rules! field_tuple {
+    ($($kind:ident: $value:ident),+) => {
+        impl<$($kind: FieldRequest),+> FieldRequest for ($($kind,)+) {
+            type Values = ($($kind::Values,)+);
+
+            fn read(self, document: &ConfigDocument) -> Self::Values {
+                let ($($value,)+) = self;
+                ($($value.read(document),)+)
+            }
+        }
+    };
+}
+
+field_tuple!(A: a, B: b);
+field_tuple!(A: a, B: b, C: c);
+field_tuple!(A: a, B: b, C: c, D: d);
+field_tuple!(A: a, B: b, C: c, D: d, E: e);
+field_tuple!(A: a, B: b, C: c, D: d, E: e, F: f);
 
 macro_rules! define_config_fields {
     ($(
         $variant:ident => {
             name: $name:literal,
-            writable: $writable:literal
+            writable: $writable:literal,
+            value: $value:ty,
+            read: $read:expr
         }
     ),+ $(,)?) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum ConfigKey {
             $($variant),+
         }
+
+        $(
+            #[doc = concat!("Selects `", $name, "` with its native value type.")]
+            #[derive(Debug, Clone, Copy)]
+            pub struct $variant;
+
+            impl FieldRequest for $variant {
+                type Values = $value;
+
+                fn read(self, document: &ConfigDocument) -> Self::Values {
+                    let read: fn(&ConfigDocument) -> $value = $read;
+                    read(document)
+                }
+            }
+        )+
 
         impl ConfigKey {
             pub fn as_str(self) -> &'static str {
@@ -33,34 +78,145 @@ macro_rules! define_config_fields {
                     $(Self::$variant => $writable),+
                 }
             }
+
+            fn value(self, document: &ConfigDocument) -> FieldValue {
+                match self {
+                    $(Self::$variant => $variant.read(document).into()),+
+                }
+            }
         }
 
-        const CONFIG_KEYS: &[ConfigKey] = &[
-            $(ConfigKey::$variant),+
-        ];
+        const CONFIG_KEYS: &[ConfigKey] = &[$(ConfigKey::$variant),+];
     };
 }
 
 define_config_fields! {
-    SchemaVersion => { name: "schema_version", writable: false },
-    InputHoldHotkey => { name: "input.hold_hotkey", writable: true },
-    InputToggleHotkey => { name: "input.toggle_hotkey", writable: true },
-    AudioInputDevice => { name: "audio.input_device", writable: true },
-    AudioMicGain => { name: "audio.mic_gain", writable: true },
-    TranscriptionLanguage => { name: "transcription.language", writable: true },
-    TranscriptionPrompt => { name: "transcription.prompt", writable: true },
-    TranscriptionTemperature => { name: "transcription.temperature", writable: true },
-    PostProcessEnabled => { name: "post_process.enabled", writable: true },
-    PostProcessPreheatEnabled => { name: "post_process.preheat_enabled", writable: true },
-    PostProcessPrompt => { name: "post_process.prompt", writable: true },
-    PostProcessTemperature => { name: "post_process.temperature", writable: true },
-    ApiTranscriptionUrl => { name: "inference.api.transcription.api_url", writable: true },
-    ApiTranscriptionModel => { name: "inference.api.transcription.model", writable: true },
-    ApiTranscriptionKey => { name: "inference.api.transcription.api_key", writable: false },
-    ApiPostProcessUrl => { name: "inference.api.post_process.api_url", writable: true },
-    ApiPostProcessModel => { name: "inference.api.post_process.model", writable: true },
-    ApiPostProcessKey => { name: "inference.api.post_process.api_key", writable: false },
+    SchemaVersion => {
+        name: "schema_version", writable: false, value: u32,
+        read: |document| document.schema_version
+    },
+    InputHoldHotkey => {
+        name: "input.hold_hotkey", writable: true, value: String,
+        read: |document| document.input.hold_hotkey.clone()
+    },
+    InputToggleHotkey => {
+        name: "input.toggle_hotkey", writable: true, value: String,
+        read: |document| document.input.toggle_hotkey.clone()
+    },
+    AudioInputDevice => {
+        name: "audio.input_device", writable: true, value: Option<String>,
+        read: |document| document.audio.input_device.clone()
+    },
+    AudioMicGain => {
+        name: "audio.mic_gain", writable: true, value: f32,
+        read: |document| document.audio.mic_gain
+    },
+    TranscriptionLanguage => {
+        name: "transcription.language", writable: true, value: Option<String>,
+        read: |document| document.transcription.language.clone()
+    },
+    TranscriptionPrompt => {
+        name: "transcription.prompt", writable: true, value: Option<String>,
+        read: |document| document.transcription.prompt.clone()
+    },
+    TranscriptionTemperature => {
+        name: "transcription.temperature", writable: true, value: f32,
+        read: |document| document.transcription.temperature
+    },
+    PostProcessEnabled => {
+        name: "post_process.enabled", writable: true, value: bool,
+        read: |document| document.post_process.enabled
+    },
+    PostProcessPreheatEnabled => {
+        name: "post_process.preheat_enabled", writable: true, value: bool,
+        read: |document| document.post_process.preheat_enabled
+    },
+    PostProcessPrompt => {
+        name: "post_process.prompt", writable: true, value: Option<String>,
+        read: |document| document.post_process.prompt.clone()
+    },
+    PostProcessTemperature => {
+        name: "post_process.temperature", writable: true, value: f32,
+        read: |document| document.post_process.temperature
+    },
+    ApiTranscriptionUrl => {
+        name: "inference.api.transcription.api_url", writable: true, value: String,
+        read: |document| document.inference.api.transcription.api_url.clone()
+    },
+    ApiTranscriptionModel => {
+        name: "inference.api.transcription.model", writable: true, value: String,
+        read: |document| document.inference.api.transcription.model.clone()
+    },
+    ApiTranscriptionKey => {
+        name: "inference.api.transcription.api_key", writable: false, value: ResolvedSecret,
+        read: |document| document.resolve_secret("TRANSCRIPTION_API_KEY", document.inference.api.transcription.api_key.as_deref())
+    },
+    ApiPostProcessUrl => {
+        name: "inference.api.post_process.api_url", writable: true, value: Option<String>,
+        read: |document| document.inference.api.post_process.api_url.clone()
+    },
+    ApiPostProcessModel => {
+        name: "inference.api.post_process.model", writable: true, value: Option<String>,
+        read: |document| document.inference.api.post_process.model.clone()
+    },
+    ApiPostProcessKey => {
+        name: "inference.api.post_process.api_key", writable: false, value: ResolvedSecret,
+        read: |document| document.resolve_secret("POST_PROCESS_API_KEY", document.inference.api.post_process.api_key.as_deref())
+    },
 }
+
+/// A resolved credential with a redacted CLI view of its source.
+#[derive(Debug)]
+pub struct ResolvedSecret {
+    pub(crate) auth: ApiAuth,
+    pub(crate) status: SecretStatus,
+}
+
+impl ConfigDocument {
+    fn resolve_secret(&self, name: &str, disk: Option<&str>) -> ResolvedSecret {
+        let environment = self.secrets.get(name);
+        let status = secret_status(disk, environment.as_deref());
+        let value = environment
+            .filter(|value| !value.is_empty())
+            .or_else(|| disk.filter(|value| !value.is_empty()).map(str::to_string));
+        ResolvedSecret {
+            auth: value.map_or(ApiAuth::None, |value| {
+                ApiAuth::Bearer(SecretValue::new(value))
+            }),
+            status,
+        }
+    }
+}
+
+impl From<ResolvedSecret> for FieldValue {
+    fn from(value: ResolvedSecret) -> Self {
+        Self::Secret(value.status)
+    }
+}
+
+impl From<String> for FieldValue {
+    fn from(value: String) -> Self {
+        Self::Value(value)
+    }
+}
+
+impl From<Option<String>> for FieldValue {
+    fn from(value: Option<String>) -> Self {
+        value.map_or(Self::Unset, Self::Value)
+    }
+}
+
+macro_rules! display_field_values {
+    ($($kind:ty),+) => {
+        $(impl From<$kind> for FieldValue {
+            fn from(value: $kind) -> Self {
+                Self::Value(value.to_string())
+            }
+        })+
+    };
+}
+
+display_field_values!(u32, f32, bool);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldValue {
@@ -120,64 +276,21 @@ impl fmt::Display for FieldError {
 impl std::error::Error for FieldError {}
 
 impl ConfigDocument {
+    /// Builds a caller-owned value from one typed field or a tuple of typed fields.
+    ///
+    /// Only requested fields and their bound secret source are read. The caller's
+    /// constructor owns the output type and any construction errors.
+    pub fn select<R: FieldRequest, T>(&self, fields: R, build: impl FnOnce(R::Values) -> T) -> T {
+        build(fields.read(self))
+    }
+
     pub fn field_keys() -> &'static [ConfigKey] {
         CONFIG_KEYS
     }
 
-    pub fn get_field(
-        &self,
-        name: &str,
-        secrets: &dyn SecretSource,
-    ) -> Result<FieldValue, FieldError> {
+    pub fn get_field(&self, name: &str) -> Result<FieldValue, FieldError> {
         let key = ConfigKey::parse(name).ok_or_else(|| FieldError::UnknownKey(name.to_string()))?;
-        if key == ConfigKey::ApiTranscriptionKey {
-            return Ok(FieldValue::Secret(secret_status(
-                self.inference.api.transcription.api_key.as_deref(),
-                secrets.get("TRANSCRIPTION_API_KEY").as_deref(),
-            )));
-        }
-        if key == ConfigKey::ApiPostProcessKey {
-            return Ok(FieldValue::Secret(secret_status(
-                self.inference.api.post_process.api_key.as_deref(),
-                secrets.get("POST_PROCESS_API_KEY").as_deref(),
-            )));
-        }
-
-        Ok(match key {
-            ConfigKey::SchemaVersion => FieldValue::Value(self.schema_version.to_string()),
-            ConfigKey::InputHoldHotkey => FieldValue::Value(self.input.hold_hotkey.clone()),
-            ConfigKey::InputToggleHotkey => FieldValue::Value(self.input.toggle_hotkey.clone()),
-            ConfigKey::AudioInputDevice => optional_field(&self.audio.input_device),
-            ConfigKey::AudioMicGain => FieldValue::Value(self.audio.mic_gain.to_string()),
-            ConfigKey::TranscriptionLanguage => optional_field(&self.transcription.language),
-            ConfigKey::TranscriptionPrompt => optional_field(&self.transcription.prompt),
-            ConfigKey::TranscriptionTemperature => {
-                FieldValue::Value(self.transcription.temperature.to_string())
-            }
-            ConfigKey::PostProcessEnabled => {
-                FieldValue::Value(self.post_process.enabled.to_string())
-            }
-            ConfigKey::PostProcessPreheatEnabled => {
-                FieldValue::Value(self.post_process.preheat_enabled.to_string())
-            }
-            ConfigKey::PostProcessPrompt => optional_field(&self.post_process.prompt),
-            ConfigKey::PostProcessTemperature => {
-                FieldValue::Value(self.post_process.temperature.to_string())
-            }
-            ConfigKey::ApiTranscriptionUrl => {
-                FieldValue::Value(self.inference.api.transcription.api_url.clone())
-            }
-            ConfigKey::ApiTranscriptionModel => {
-                FieldValue::Value(self.inference.api.transcription.model.clone())
-            }
-            ConfigKey::ApiPostProcessUrl => {
-                optional_field(&self.inference.api.post_process.api_url)
-            }
-            ConfigKey::ApiPostProcessModel => {
-                optional_field(&self.inference.api.post_process.model)
-            }
-            ConfigKey::ApiTranscriptionKey | ConfigKey::ApiPostProcessKey => unreachable!(),
-        })
+        Ok(key.value(self))
     }
 
     pub fn set_field(&mut self, name: &str, value: &str) -> Result<(), FieldError> {
@@ -227,12 +340,6 @@ impl ConfigDocument {
         }
         Ok(())
     }
-}
-
-fn optional_field(value: &Option<String>) -> FieldValue {
-    value
-        .as_ref()
-        .map_or(FieldValue::Unset, |value| FieldValue::Value(value.clone()))
 }
 
 fn parse_optional(value: &str) -> Option<String> {

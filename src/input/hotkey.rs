@@ -4,7 +4,7 @@ use std::thread;
 use rdev::{Event, EventType, Key, listen};
 use tracing::{debug, error, info, warn};
 
-use crate::core::config::{ConfigKey, InputSection, ValidationIssue};
+use crate::core::config::{ConfigKey, InputSection};
 
 #[derive(Debug)]
 pub struct HotkeyConfig {
@@ -14,14 +14,11 @@ pub struct HotkeyConfig {
     pub(crate) toggle_label: Option<String>,
 }
 
-/// Target policy used by the shared parser, validator, and listener diagnostics.
+/// Target policy used when constructing hotkeys and reporting listener diagnostics.
 pub(crate) trait HotkeyPolicy: Send + 'static {
     fn unsupported_reason(key: Key) -> Option<&'static str>;
 
-    fn pair_conflict(
-        _first: Option<Key>,
-        _second: Option<Key>,
-    ) -> Option<(&'static str, &'static str)> {
+    fn pair_conflict(_first: Option<Key>, _second: Option<Key>) -> Option<&'static str> {
         None
     }
 
@@ -37,44 +34,24 @@ struct NamedKey {
 }
 
 impl HotkeyConfig {
-    pub(crate) fn validate<P: HotkeyPolicy>(
-        section: &InputSection,
-    ) -> Result<Self, Vec<ValidationIssue>> {
-        let mut issues = Vec::new();
-        let hold_binding = validate_binding::<P>(
-            ConfigKey::InputHoldHotkey,
-            &section.hold_hotkey,
-            &mut issues,
-        );
-        let toggle_binding = validate_binding::<P>(
-            ConfigKey::InputToggleHotkey,
-            &section.toggle_hotkey,
-            &mut issues,
-        );
+    /// Parses configured names into distinct, supported bindings for the target.
+    pub(crate) fn from_section<P: HotkeyPolicy>(section: &InputSection) -> anyhow::Result<Self> {
+        let hold_binding = parse_binding::<P>(ConfigKey::InputHoldHotkey, &section.hold_hotkey)?;
+        let toggle_binding =
+            parse_binding::<P>(ConfigKey::InputToggleHotkey, &section.toggle_hotkey)?;
 
         if hold_binding.is_some()
             && hold_binding.map(|binding| binding.key) == toggle_binding.map(|binding| binding.key)
         {
-            issues.push(ValidationIssue::new(
-                ConfigKey::InputToggleHotkey,
-                "hotkey.duplicate",
-                "hold and toggle hotkeys must use different keys",
-            ));
+            anyhow::bail!("input.toggle_hotkey: hold and toggle hotkeys must use different keys");
         }
-        if let Some((code, message)) = P::pair_conflict(
+        if let Some(message) = P::pair_conflict(
             hold_binding.map(|binding| binding.key),
             toggle_binding.map(|binding| binding.key),
         ) {
-            issues.push(ValidationIssue::new(
-                ConfigKey::InputToggleHotkey,
-                code,
-                message,
-            ));
+            anyhow::bail!("input.toggle_hotkey: {message}");
         }
 
-        if !issues.is_empty() {
-            return Err(issues);
-        }
         Ok(Self {
             hold_key: hold_binding.map(|binding| binding.key),
             toggle_key: toggle_binding.map(|binding| binding.key),
@@ -84,35 +61,25 @@ impl HotkeyConfig {
     }
 }
 
-fn validate_binding<P: HotkeyPolicy>(
-    key: ConfigKey,
-    value: &str,
-    issues: &mut Vec<ValidationIssue>,
-) -> Option<NamedKey> {
+fn parse_binding<P: HotkeyPolicy>(key: ConfigKey, value: &str) -> anyhow::Result<Option<NamedKey>> {
     if value.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    let Some(parsed_key) = parse_key(value) else {
-        issues.push(ValidationIssue::new(
-            key,
-            "hotkey.invalid",
-            format!("invalid hotkey `{value}`; expected a named single key such as F8 or RIGHTALT"),
-        ));
-        return None;
-    };
-    let parsed = parse_named_key(value).expect("parse_key delegates to parse_named_key");
-    debug_assert_eq!(parsed.key, parsed_key);
+    let field = key.as_str();
+    let parsed = parse_named_key(value).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{field}: invalid hotkey `{value}`; expected a named single key such as F8 or RIGHTALT"
+        )
+    })?;
     if let Some(reason) = P::unsupported_reason(parsed.key) {
-        issues.push(ValidationIssue::new(
-            key,
-            "hotkey.unsupported",
-            format!("hotkey `{}` is unsupported: {reason}", parsed.canonical),
-        ));
-        return None;
+        anyhow::bail!(
+            "{field}: hotkey `{}` is unsupported: {reason}",
+            parsed.canonical
+        );
     }
 
-    Some(parsed)
+    Ok(Some(parsed))
 }
 
 /// Parse a configured, named physical key. Empty strings disable a binding.
@@ -435,8 +402,9 @@ mod tests {
     }
 
     #[test]
-    fn validates_default_disabled_and_invalid_hotkey_sections() {
-        let config = HotkeyConfig::validate::<TestHotkeyPolicy>(&InputSection::default()).unwrap();
+    fn constructs_default_disabled_and_invalid_hotkey_sections() {
+        let config =
+            HotkeyConfig::from_section::<TestHotkeyPolicy>(&InputSection::default()).unwrap();
         assert_eq!(config.hold_key, Some(Key::F8));
         assert_eq!(config.toggle_key, Some(Key::F9));
 
@@ -444,7 +412,7 @@ mod tests {
             hold_hotkey: String::new(),
             toggle_hotkey: String::new(),
         };
-        let config = HotkeyConfig::validate::<TestHotkeyPolicy>(&tray_only).unwrap();
+        let config = HotkeyConfig::from_section::<TestHotkeyPolicy>(&tray_only).unwrap();
         assert_eq!(config.hold_key, None);
         assert_eq!(config.toggle_key, None);
 
@@ -452,16 +420,23 @@ mod tests {
             hold_hotkey: "F13".to_string(),
             toggle_hotkey: "F13".to_string(),
         };
-        let issues = HotkeyConfig::validate::<TestHotkeyPolicy>(&invalid).unwrap_err();
-        assert_eq!(issues[0].key, ConfigKey::InputHoldHotkey);
+        let error = HotkeyConfig::from_section::<TestHotkeyPolicy>(&invalid).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with(ConfigKey::InputHoldHotkey.as_str())
+        );
 
         let duplicate = InputSection {
             hold_hotkey: "RIGHTALT".to_string(),
             toggle_hotkey: "altgr".to_string(),
         };
-        let issues = HotkeyConfig::validate::<TestHotkeyPolicy>(&duplicate).unwrap_err();
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].code, "hotkey.duplicate");
+        let error = HotkeyConfig::from_section::<TestHotkeyPolicy>(&duplicate).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("hold and toggle hotkeys must use different keys")
+        );
     }
 
     #[test]
@@ -615,7 +590,7 @@ mod tests {
         assert_eq!(parse_key(" rightoption "), Some(Key::AltGr));
         assert_eq!(parse_key("invalid"), None);
 
-        let config = HotkeyConfig::validate::<TestHotkeyPolicy>(&InputSection {
+        let config = HotkeyConfig::from_section::<TestHotkeyPolicy>(&InputSection {
             hold_hotkey: " rightoption ".to_string(),
             toggle_hotkey: "f9".to_string(),
         })

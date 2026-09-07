@@ -8,9 +8,8 @@ one application-facing runtime for:
 - global hotkey and tray input;
 - status icon creation and recording-state updates;
 - final text delivery to the focused control;
-- history-menu refresh and explicit clipboard replacement;
-- platform-aware hotkey validation; and
-- configuration-directory discovery.
+- history-menu refresh and explicit clipboard replacement; and
+- platform-aware hotkey construction.
 
 Application and shared input code do not select an operating system, construct native writers, or
 handle `rdev`/`tray-icon` payload types.
@@ -36,8 +35,7 @@ native dependencies remain selected by Cargo target dependency tables.
 `platform/backend.rs` defines the private `PlatformBackend` contract. Each backend supplies:
 
 - a `HotkeyPolicy` implementation;
-- a `TrayPolicy` implementation;
-- its configuration directory; and
+- a `TrayPolicy` implementation; and
 - one text writer, one native clipboard function, and the native hotkey filter.
 
 The compiler checks the selected backend's associated policies. There is no runtime OS enum,
@@ -112,14 +110,14 @@ events and never copy text or run recording transitions.
 
 ## Hotkey Policy
 
-`platform::validate_hotkeys` resolves persisted names through the selected backend policy before a
-listener starts. Shared parsing, aliases, duplicates, repeat suppression, and stable validation
-codes remain in `input::hotkey`. Backends own the native differences:
+`platform::hotkey_config` resolves persisted names through the selected backend policy before a
+listener starts. Shared parsing, aliases, duplicates, repeat suppression, and construction errors
+remain in `input::hotkey`. Backends own the native differences:
 
 - macOS rejects key variants the current `rdev` backend cannot emit and normalizes modifier
   direction with Core Graphics physical key state;
 - Windows rejects `RIGHTMETA`, `FUNCTION`, and keypad Enter, rejects a
-  `LEFTCTRL`/`RIGHTALT` pair as `hotkey.altgr_conflict`, and warns that AltGr can emit left Ctrl;
+  `LEFTCTRL`/`RIGHTALT` pair, and warns that AltGr can emit left Ctrl;
 - macOS supplies the synthetic-paste suppression filter paired with `MacTyper`;
 - Windows and the fallback backend supply an identity event filter.
 
@@ -144,10 +142,10 @@ Both platforms retain the 300 ms minimum debounce window and embedded 32×32 RGB
 
 ## Configuration Directory
 
-`platform::config_dir()` delegates through the selected backend. macOS appends
-`com.b1indsight.viberwhisper`; Windows appends `ViberWhisper`; the fallback appends
-`viberwhisper`. `ConfigStore` appends `config.json` and `HistoryStore` appends `history.jsonl`, so
-platform code knows neither document schema nor persistence error policy.
+The configuration storage module owns `core::config::config_dir()` and obtains the base
+from `dirs::config_dir()`. macOS appends `com.b1indsight.viberwhisper`; Windows appends
+`ViberWhisper`; the fallback appends `viberwhisper`. `ConfigStore` appends `config.json` and
+`HistoryStore` appends `history.jsonl`. Directory lookup does not depend on the desktop backend.
 
 ## macOS Text Delivery
 

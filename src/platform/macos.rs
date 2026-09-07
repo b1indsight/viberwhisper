@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -26,10 +25,6 @@ pub(crate) struct MacTray;
 impl PlatformBackend for MacBackend {
     type Hotkeys = MacHotkeys;
     type Tray = MacTray;
-
-    fn config_dir() -> Option<PathBuf> {
-        dirs::config_dir().map(|base| base.join("com.b1indsight.viberwhisper"))
-    }
 
     fn text_typer_and_hotkey_filter() -> (Arc<dyn TextTyper>, HotkeyFilter) {
         let (typer, filter) = MacTyper::new();

@@ -97,7 +97,6 @@ src/
     setup.rs                 — First-run and on-demand setup orchestration
     setup/
       hotkey.rs              — Isolated hotkey capture and binding verification helper
-  runtime_config.rs          — Application-level API consumer config assembly
   session.rs                 — Shared SessionId value type
   text.rs                    — Shared language-aware transcription text merge
   history.rs                 — Bounded JSONL transcription history persistence and tail repair
@@ -110,10 +109,10 @@ src/
     review.rs                — Coding-agent review validation and final threshold gates
   core.rs                    — Core module entry and submodule declarations
   core/
-    config.rs                — Config facade, errors, validation, and safe value types
+    config.rs                — Config facade, typed field selection, errors, and safe value types
     config/
       document.rs            — Strict v3 configuration document
-      fields.rs              — Canonical field catalog
+      fields.rs              — Canonical field catalog and typed field requests
       store.rs               — Atomic configuration persistence
     cli.rs                   — Clap-based CLI (config, convert subcommands)
     orchestrator.rs          — SessionOrchestrator for session lifecycle

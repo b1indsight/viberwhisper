@@ -1,16 +1,22 @@
+//! Configuration persistence and typed field selection.
+//!
+//! Callers declare fields with `fields` selectors and construct their own values through
+//! `ConfigDocument::select`. Configuration knows no business or application types.
+
 mod document;
-mod fields;
+pub mod fields;
 mod store;
 
 use std::fmt;
 use std::path::PathBuf;
 
 pub use document::ConfigDocument;
-pub(crate) use document::{AudioSection, InputSection, PostProcessSection, TranscriptionSection};
+pub(crate) use document::InputSection;
 pub use fields::ConfigKey;
 #[cfg(test)]
 use fields::{FieldError, FieldValue, SecretStatus};
 pub use store::ConfigStore;
+pub(crate) use store::config_dir;
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -62,42 +68,6 @@ impl std::error::Error for ConfigError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidationIssue {
-    pub key: ConfigKey,
-    pub code: &'static str,
-    pub message: String,
-}
-
-impl ValidationIssue {
-    pub(crate) fn new(key: ConfigKey, code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            key,
-            code,
-            message: message.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidationReport {
-    pub issues: Vec<ValidationIssue>,
-}
-
-impl fmt::Display for ValidationReport {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, issue) in self.issues.iter().enumerate() {
-            if index > 0 {
-                formatter.write_str("\n")?;
-            }
-            write!(formatter, "{}: {}", issue.key.as_str(), issue.message)?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for ValidationReport {}
-
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretValue(String);
 
@@ -129,7 +99,8 @@ pub enum ApiAuth {
     Bearer(SecretValue),
 }
 
-pub trait SecretSource {
+/// Lazy credential lookup bound to a document and shared when that document is cloned.
+pub trait SecretSource: Send + Sync {
     fn get(&self, name: &str) -> Option<String>;
 }
 
@@ -211,13 +182,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_wrong_and_flat_schema() {
+    fn rejects_invalid_document_shapes() {
         assert!(serde_json::from_str::<ConfigDocument>(r#"{"input": {}}"#).is_err());
         assert!(serde_json::from_str::<ConfigDocument>(r#"{"schema_version": 2}"#).is_err());
         assert!(
             serde_json::from_str::<ConfigDocument>(r#"{"schema_version": 3, "hold_hotkey": "F8"}"#)
                 .is_err()
         );
+
+        // Adding a skipped runtime field must not expand the strict on-disk schema.
+        let mut value = serde_json::to_value(ConfigDocument::default()).unwrap();
+        value["secrets"] = serde_json::json!({"TRANSCRIPTION_API_KEY": "unexpected"});
+        assert!(serde_json::from_value::<ConfigDocument>(value).is_err());
     }
 
     #[test]
@@ -292,25 +268,23 @@ mod tests {
         }
         assert_eq!(keys.len(), 18);
 
-        let document = ConfigDocument::default();
-        let secrets = MapSecrets(HashMap::new());
+        let document = ConfigDocument::new(MapSecrets(HashMap::new()));
         for key in ConfigDocument::field_keys() {
-            document.get_field(key.as_str(), &secrets).unwrap();
+            document.get_field(key.as_str()).unwrap();
         }
     }
 
     #[test]
     fn field_get_set_distinguishes_unknown_unset_and_read_only() {
-        let mut document = ConfigDocument::default();
-        let secrets = MapSecrets(HashMap::new());
+        let mut document = ConfigDocument::new(MapSecrets(HashMap::new()));
         assert_eq!(
             document
-                .get_field("inference.api.post_process.model", &secrets)
+                .get_field("inference.api.post_process.model")
                 .unwrap(),
             FieldValue::Unset
         );
         assert!(matches!(
-            document.get_field("model", &secrets),
+            document.get_field("model"),
             Err(FieldError::UnknownKey(_))
         ));
         assert!(matches!(
@@ -327,7 +301,7 @@ mod tests {
         ));
         document.set_field("audio.mic_gain", "2.5").unwrap();
         assert_eq!(
-            document.get_field("audio.mic_gain", &secrets).unwrap(),
+            document.get_field("audio.mic_gain").unwrap(),
             FieldValue::Value("2.5".to_string())
         );
         assert!(document.set_field("audio.mic_gain", "NaN").is_err());
@@ -335,30 +309,29 @@ mod tests {
             .set_field("audio.input_device", "External USB Mic")
             .unwrap();
         assert_eq!(
-            document.get_field("audio.input_device", &secrets).unwrap(),
+            document.get_field("audio.input_device").unwrap(),
             FieldValue::Value("External USB Mic".to_string())
         );
         document.set_field("audio.input_device", "null").unwrap();
         assert_eq!(
-            document.get_field("audio.input_device", &secrets).unwrap(),
+            document.get_field("audio.input_device").unwrap(),
             FieldValue::Unset
         );
     }
 
     #[test]
     fn secret_status_reports_disk_environment_and_override_without_values() {
-        let mut document = ConfigDocument::default();
-        let none = MapSecrets(HashMap::new());
+        let mut document = ConfigDocument::new(MapSecrets(HashMap::new()));
         assert_eq!(
             document
-                .get_field("inference.api.transcription.api_key", &none)
+                .get_field("inference.api.transcription.api_key")
                 .unwrap(),
             FieldValue::Secret(SecretStatus::Unset)
         );
         document.inference.api.transcription.api_key = Some("disk-token".to_string());
         assert_eq!(
             document
-                .get_field("inference.api.transcription.api_key", &none)
+                .get_field("inference.api.transcription.api_key")
                 .unwrap(),
             FieldValue::Secret(SecretStatus::Disk)
         );
@@ -366,16 +339,18 @@ mod tests {
             "TRANSCRIPTION_API_KEY",
             "environment-token",
         )]));
+        let mut document = ConfigDocument::new(environment);
+        document.set_transcription_api_key(Some("disk-token".to_string()));
         assert_eq!(
             document
-                .get_field("inference.api.transcription.api_key", &environment)
+                .get_field("inference.api.transcription.api_key")
                 .unwrap(),
             FieldValue::Secret(SecretStatus::EnvironmentOverridesDisk)
         );
         document.inference.api.transcription.api_key = None;
         assert_eq!(
             document
-                .get_field("inference.api.transcription.api_key", &environment)
+                .get_field("inference.api.transcription.api_key")
                 .unwrap(),
             FieldValue::Secret(SecretStatus::Environment)
         );
@@ -391,10 +366,10 @@ mod tests {
             "environment-token",
         )]));
 
-        let mut document = ConfigDocument::default();
+        let mut document = ConfigDocument::new(environment);
         assert_eq!(
             document
-                .get_field("inference.api.transcription.api_key", &environment)
+                .get_field("inference.api.transcription.api_key")
                 .unwrap(),
             FieldValue::Secret(SecretStatus::Environment)
         );
@@ -422,5 +397,69 @@ mod tests {
         assert!(!debug.contains("transcription-token"));
         assert!(!debug.contains("post-process-token"));
         assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn cloned_documents_keep_their_secret_source() {
+        // Config edits clone the document before saving; reads must retain its bound source.
+        let document = ConfigDocument::new(MapSecrets(HashMap::from([(
+            "TRANSCRIPTION_API_KEY",
+            "environment-token",
+        )])));
+        let candidate = document.clone();
+        let auth = candidate.select(fields::ApiTranscriptionKey, |key| key.auth);
+        assert_eq!(auth, ApiAuth::Bearer(SecretValue::new("environment-token")));
+    }
+
+    #[test]
+    fn field_selection_builds_caller_owned_settings_without_reading_unrelated_secrets() {
+        struct NoSecrets;
+        impl SecretSource for NoSecrets {
+            fn get(&self, _name: &str) -> Option<String> {
+                panic!("audio settings must not request API credentials");
+            }
+        }
+        #[derive(Debug, PartialEq)]
+        struct RecorderSettings {
+            device: Option<String>,
+            gain: f32,
+        }
+        let mut document = ConfigDocument::new(NoSecrets);
+        document.audio.input_device = Some("Desk microphone".to_string());
+        document.audio.mic_gain = 1.5;
+        // A caller requesting audio settings must not resolve unrelated API credentials.
+        let selected = document.select(
+            (fields::AudioInputDevice, fields::AudioMicGain),
+            |(device, gain)| RecorderSettings { device, gain },
+        );
+        assert_eq!(
+            selected,
+            RecorderSettings {
+                device: Some("Desk microphone".to_string()),
+                gain: 1.5
+            },
+        );
+    }
+
+    #[test]
+    fn field_selection_resolves_only_the_requested_api_key() {
+        struct TranscriptionSecret;
+        impl SecretSource for TranscriptionSecret {
+            fn get(&self, name: &str) -> Option<String> {
+                assert_eq!(name, "TRANSCRIPTION_API_KEY");
+                Some("environment-token".to_string())
+            }
+        }
+        let mut document = ConfigDocument::new(TranscriptionSecret);
+        document.set_transcription_api_key(Some("disk-token".to_string()));
+        // STT-only workflows must not consult post-processing secrets while resolving auth.
+        let auth = document.select(fields::ApiTranscriptionKey, |key| key.auth);
+        let ApiAuth::Bearer(secret) = &auth else {
+            panic!("the configured API key must resolve to bearer auth");
+        };
+        assert_eq!(secret.expose(), "environment-token");
+        let debug = format!("{auth:?}");
+        assert!(!debug.contains("environment-token"));
+        assert!(!debug.contains("disk-token"));
     }
 }

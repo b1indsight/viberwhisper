@@ -10,8 +10,7 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn discover() -> Result<Self, ConfigError> {
-        let directory =
-            crate::platform::config_dir().ok_or(ConfigError::ConfigDirectoryUnavailable)?;
+        let directory = config_dir().ok_or(ConfigError::ConfigDirectoryUnavailable)?;
         Ok(Self {
             path: directory.join("config.json"),
         })
@@ -26,7 +25,7 @@ impl ConfigStore {
         &self.path
     }
 
-    /// Loads the persisted document, returning `None` when the file does not exist.
+    /// Loads the document with environment-backed secrets, or `None` for a missing file.
     pub fn load(&self) -> Result<Option<ConfigDocument>, ConfigError> {
         let contents = match fs::read_to_string(&self.path) {
             Ok(contents) => contents,
@@ -89,4 +88,16 @@ impl ConfigStore {
             })?;
         Ok(())
     }
+}
+
+/// Canonical shared directory for configuration and local transcription history.
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    const DIRECTORY: &str = "com.b1indsight.viberwhisper";
+    #[cfg(target_os = "windows")]
+    const DIRECTORY: &str = "ViberWhisper";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    const DIRECTORY: &str = "viberwhisper";
+
+    dirs::config_dir().map(|base| base.join(DIRECTORY))
 }

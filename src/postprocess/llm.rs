@@ -354,28 +354,19 @@ impl TextPostProcessorSession for PreheatLlmSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::{ApiAuth, PostProcessSection, SecretValue};
+    use crate::core::config::{ApiAuth, SecretValue};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
 
     fn config_with_postprocess(preheat_enabled: bool, prompt: Option<&str>) -> LlmConfig {
-        let section = PostProcessSection {
-            enabled: true,
+        LlmConfig {
+            endpoint: reqwest::Url::parse("https://api.example.com/v1/chat/completions").unwrap(),
+            auth: ApiAuth::Bearer(SecretValue::new("test_key")),
+            model: "gpt-4o-mini".to_string(),
             preheat_enabled,
             prompt: prompt.map(str::to_string),
             temperature: 0.0,
-        };
-        match crate::postprocess::PostProcessConfig::validate(
-            Some("https://api.example.com/v1/chat/completions"),
-            ApiAuth::Bearer(SecretValue::new("test_key")),
-            Some("gpt-4o-mini"),
-            &section,
-        )
-        .unwrap()
-        {
-            crate::postprocess::PostProcessConfig::Llm(config) => config,
-            crate::postprocess::PostProcessConfig::Disabled => unreachable!(),
         }
     }
 

@@ -150,7 +150,7 @@ pub enum PromptLabDatasetCommand {
 pub enum ConfigAction {
     /// Show the configuration file path for the current platform
     Path,
-    /// Validate the current profile's runtime configuration
+    /// Check that the current settings can be loaded without starting services
     Check,
     /// List all configuration keys and their current values
     List,

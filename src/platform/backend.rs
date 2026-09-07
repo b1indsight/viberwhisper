@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -15,7 +14,6 @@ pub(crate) trait PlatformBackend: 'static {
     type Hotkeys: HotkeyPolicy;
     type Tray: TrayPolicy;
 
-    fn config_dir() -> Option<PathBuf>;
     fn text_typer_and_hotkey_filter() -> (Arc<dyn TextTyper>, HotkeyFilter);
     fn copy_to_clipboard(text: &str) -> Result<()>;
 }

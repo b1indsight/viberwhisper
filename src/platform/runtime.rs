@@ -193,7 +193,6 @@ fn action_from_tray(action: TrayAction) -> PlatformAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -240,10 +239,6 @@ mod tests {
     impl PlatformBackend for FakeBackend {
         type Hotkeys = FakeHotkeys;
         type Tray = FakeTrayPolicy;
-
-        fn config_dir() -> Option<PathBuf> {
-            None
-        }
 
         fn text_typer_and_hotkey_filter()
         -> (Arc<dyn TextTyper>, super::super::backend::HotkeyFilter) {
@@ -305,7 +300,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
 
-        let hotkeys = HotkeyConfig::validate::<FakeHotkeys>(&InputSection::default()).unwrap();
+        let hotkeys = HotkeyConfig::from_section::<FakeHotkeys>(&InputSection::default()).unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let received = Arc::clone(&events);
         let mut runtime =

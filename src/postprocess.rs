@@ -1,6 +1,7 @@
 mod llm;
 
-use crate::core::config::{ApiAuth, ConfigKey, PostProcessSection, ValidationIssue};
+use crate::core::config::{ApiAuth, ConfigDocument, fields};
+use anyhow::Context;
 use llm::LlmPostProcessor;
 use std::fmt;
 use tracing::warn;
@@ -22,68 +23,37 @@ pub enum PostProcessConfig {
 }
 
 impl PostProcessConfig {
-    pub(crate) fn validate(
-        endpoint: Option<&str>,
-        auth: ApiAuth,
-        model: Option<&str>,
-        section: &PostProcessSection,
-    ) -> Result<Self, Vec<ValidationIssue>> {
-        if !section.enabled {
+    /// Resolves enabled post-processing without consulting unused LLM fields when disabled.
+    pub(crate) fn from_config(document: &ConfigDocument) -> anyhow::Result<Self> {
+        if !document.select(fields::PostProcessEnabled, std::convert::identity) {
             return Ok(Self::Disabled);
         }
-
-        let mut issues = Vec::new();
-        let endpoint = match endpoint {
-            Some(value) => match reqwest::Url::parse(value) {
-                Ok(url) if matches!(url.scheme(), "http" | "https") => Some(url),
-                Ok(_) => {
-                    issues.push(ValidationIssue::new(
-                        ConfigKey::ApiPostProcessUrl,
-                        "post_process.url_scheme",
-                        "post-process URL must use http or https",
-                    ));
-                    None
-                }
-                Err(error) => {
-                    issues.push(ValidationIssue::new(
-                        ConfigKey::ApiPostProcessUrl,
-                        "post_process.url_invalid",
-                        format!("invalid post-process URL: {error}"),
-                    ));
-                    None
-                }
+        document.select(
+            (
+                fields::ApiPostProcessUrl,
+                fields::ApiPostProcessKey,
+                fields::ApiPostProcessModel,
+                fields::PostProcessPrompt,
+                fields::PostProcessTemperature,
+                fields::PostProcessPreheatEnabled,
+            ),
+            |(endpoint, key, model, prompt, temperature, preheat_enabled)| {
+                let endpoint = endpoint.context(
+                    "inference.api.post_process.api_url is required when cleanup is enabled",
+                )?;
+                Ok(Self::Llm(LlmConfig {
+                    endpoint: reqwest::Url::parse(&endpoint)
+                        .context("invalid inference.api.post_process.api_url")?,
+                    auth: key.auth,
+                    model: model.context(
+                        "inference.api.post_process.model is required when cleanup is enabled",
+                    )?,
+                    prompt,
+                    temperature,
+                    preheat_enabled,
+                }))
             },
-            None => {
-                issues.push(ValidationIssue::new(
-                    ConfigKey::ApiPostProcessUrl,
-                    "post_process.url_missing",
-                    "post-process URL is required when enabled",
-                ));
-                None
-            }
-        };
-        let model = match model.filter(|value| !value.trim().is_empty()) {
-            Some(model) => Some(model.to_string()),
-            None => {
-                issues.push(ValidationIssue::new(
-                    ConfigKey::ApiPostProcessModel,
-                    "post_process.model_missing",
-                    "post-process model is required when enabled",
-                ));
-                None
-            }
-        };
-        match (endpoint, model) {
-            (Some(endpoint), Some(model)) if issues.is_empty() => Ok(Self::Llm(LlmConfig {
-                endpoint,
-                auth,
-                model,
-                prompt: section.prompt.clone(),
-                temperature: section.temperature,
-                preheat_enabled: section.preheat_enabled,
-            })),
-            _ => Err(issues),
-        }
+        )
     }
 }
 
@@ -217,6 +187,7 @@ impl TextPostProcessorSession for NoopSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::SecretSource;
 
     #[test]
     fn test_noop_process() {
@@ -232,5 +203,23 @@ mod tests {
         session.push_stable_chunk("hello");
         session.push_stable_chunk("world");
         assert_eq!(session.finish().unwrap(), "helloworld");
+    }
+
+    #[test]
+    fn disabled_config_request_skips_llm_fields_and_secrets() {
+        struct NoSecrets;
+        impl SecretSource for NoSecrets {
+            fn get(&self, _name: &str) -> Option<String> {
+                panic!("disabled cleanup must not resolve API credentials");
+            }
+        }
+        let mut document = ConfigDocument::new(NoSecrets);
+        document.post_process.enabled = false;
+        document.inference.api.post_process.api_url = Some("not a URL".to_string());
+        // Turning cleanup off must bypass stale endpoint settings and secret providers.
+        assert!(matches!(
+            PostProcessConfig::from_config(&document),
+            Ok(PostProcessConfig::Disabled)
+        ));
     }
 }

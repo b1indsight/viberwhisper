@@ -1,6 +1,7 @@
 use crate::audio::{WavChunk, contains_audible_window};
-use crate::core::config::{ApiAuth, ConfigKey, TranscriptionSection, ValidationIssue};
+use crate::core::config::{ApiAuth, ConfigDocument, fields};
 use crate::transcriber::TranscribeError;
+use anyhow::Context;
 use std::io::Cursor;
 use std::time::Duration;
 use tracing::{info, instrument, warn};
@@ -47,50 +48,29 @@ pub(crate) struct TranscriberMetadata {
 }
 
 impl TranscriberConfig {
-    pub(crate) fn validate(
-        endpoint: &str,
-        auth: ApiAuth,
-        model: &str,
-        transcription: &TranscriptionSection,
-    ) -> Result<Self, Vec<ValidationIssue>> {
-        let mut issues = Vec::new();
-        let endpoint = match reqwest::Url::parse(endpoint) {
-            Ok(url) if matches!(url.scheme(), "http" | "https") => Some(url),
-            Ok(_) => {
-                issues.push(ValidationIssue::new(
-                    ConfigKey::ApiTranscriptionUrl,
-                    "transcriber.url_scheme",
-                    "transcription URL must use http or https",
-                ));
-                None
-            }
-            Err(error) => {
-                issues.push(ValidationIssue::new(
-                    ConfigKey::ApiTranscriptionUrl,
-                    "transcriber.url_invalid",
-                    format!("invalid transcription URL: {error}"),
-                ));
-                None
-            }
-        };
-        if model.trim().is_empty() {
-            issues.push(ValidationIssue::new(
-                ConfigKey::ApiTranscriptionModel,
-                "transcriber.model_empty",
-                "transcription model cannot be empty",
-            ));
-        }
-        match endpoint {
-            Some(endpoint) if issues.is_empty() => Ok(Self {
-                endpoint,
-                auth,
-                model: model.to_string(),
-                language: transcription.language.clone(),
-                prompt: transcription.prompt.clone(),
-                temperature: transcription.temperature,
-            }),
-            _ => Err(issues),
-        }
+    /// Builds STT settings from the requested fields, parsing the endpoint into a URL.
+    pub(crate) fn from_config(document: &ConfigDocument) -> anyhow::Result<Self> {
+        document.select(
+            (
+                fields::ApiTranscriptionUrl,
+                fields::ApiTranscriptionKey,
+                fields::ApiTranscriptionModel,
+                fields::TranscriptionLanguage,
+                fields::TranscriptionPrompt,
+                fields::TranscriptionTemperature,
+            ),
+            |(endpoint, key, model, language, prompt, temperature)| {
+                Ok(Self {
+                    endpoint: reqwest::Url::parse(&endpoint)
+                        .context("invalid inference.api.transcription.api_url")?,
+                    auth: key.auth,
+                    model,
+                    language,
+                    prompt,
+                    temperature,
+                })
+            },
+        )
     }
 
     pub(crate) fn metadata(&self) -> TranscriberMetadata {
@@ -300,25 +280,27 @@ impl Transcriber for ApiTranscriber {
 mod tests {
     use super::*;
     use crate::audio::chunk::encode_i16_wav;
-    use crate::core::config::{ApiAuth, SecretValue, TranscriptionSection};
+    use crate::core::config::{ApiAuth, SecretValue};
 
-    fn validated_config(endpoint: &str) -> TranscriberConfig {
-        validated_config_with_auth(endpoint, ApiAuth::Bearer(SecretValue::new("test_key")))
+    fn test_config(endpoint: &str) -> TranscriberConfig {
+        test_config_with_auth(endpoint, ApiAuth::Bearer(SecretValue::new("test_key")))
     }
 
-    fn validated_config_with_auth(endpoint: &str, auth: ApiAuth) -> TranscriberConfig {
-        TranscriberConfig::validate(
-            endpoint,
+    fn test_config_with_auth(endpoint: &str, auth: ApiAuth) -> TranscriberConfig {
+        let transcription = ConfigDocument::default().transcription;
+        TranscriberConfig {
+            endpoint: reqwest::Url::parse(endpoint).unwrap(),
             auth,
-            "whisper-large-v3-turbo",
-            &TranscriptionSection::default(),
-        )
-        .unwrap()
+            model: "whisper-large-v3-turbo".to_string(),
+            language: transcription.language,
+            prompt: transcription.prompt,
+            temperature: transcription.temperature,
+        }
     }
 
     #[test]
     fn metadata_omits_endpoint_credentials_and_query_parameters() {
-        let config = validated_config(
+        let config = test_config(
             "https://user:password@api.example.test/v1/audio/transcriptions?token=secret#fragment",
         );
 
@@ -336,7 +318,7 @@ mod tests {
 
     #[test]
     fn prompt_override_changes_only_the_in_memory_transcriber_prompt() {
-        let config = validated_config("https://api.example.test/v1/audio/transcriptions");
+        let config = test_config("https://api.example.test/v1/audio/transcriptions");
         let before = config.metadata();
 
         let after = config
@@ -418,7 +400,7 @@ mod tests {
     }
 
     fn transcriber_for_port(port: u16) -> ApiTranscriber {
-        let config = validated_config(&format!("http://127.0.0.1:{port}/v1/audio/transcriptions"));
+        let config = test_config(&format!("http://127.0.0.1:{port}/v1/audio/transcriptions"));
         ApiTranscriber::new(config).unwrap()
     }
 
@@ -488,7 +470,7 @@ mod tests {
             ),
         ] {
             let (port, request) = spawn_request_stub();
-            let config = validated_config_with_auth(
+            let config = test_config_with_auth(
                 &format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
                 auth,
             );
@@ -564,5 +546,24 @@ mod tests {
         // Initial attempt + one retry.
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         assert_eq!(waits, vec![std::time::Duration::from_secs(1)]);
+    }
+
+    #[test]
+    fn config_request_ignores_unrelated_hotkey_and_post_process_settings() {
+        struct SttSecrets;
+        impl crate::core::config::SecretSource for SttSecrets {
+            fn get(&self, name: &str) -> Option<String> {
+                assert_eq!(name, "TRANSCRIPTION_API_KEY");
+                None
+            }
+        }
+        let mut document = crate::core::config::ConfigDocument::new(SttSecrets);
+        document.input.hold_hotkey = "not a hotkey".to_string();
+        document.post_process.enabled = true;
+        document.inference.api.post_process.api_url = Some("not a URL".to_string());
+        document.transcription.language = Some("zh".to_string());
+        // A prompt-lab STT run must work even when unrelated desktop/cleanup settings are invalid.
+        let config = TranscriberConfig::from_config(&document).unwrap();
+        assert_eq!(config.metadata().language.as_deref(), Some("zh"));
     }
 }

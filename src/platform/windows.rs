@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fs::OpenOptions, io, os::windows::io::AsRawHandle};
 
@@ -61,10 +60,6 @@ impl PlatformBackend for WindowsBackend {
     type Hotkeys = WindowsHotkeys;
     type Tray = WindowsTray;
 
-    fn config_dir() -> Option<PathBuf> {
-        dirs::config_dir().map(|base| base.join("ViberWhisper"))
-    }
-
     fn text_typer_and_hotkey_filter() -> (Arc<dyn TextTyper>, HotkeyFilter) {
         (Arc::new(WindowsTyper), Box::new(Some))
     }
@@ -86,18 +81,14 @@ impl HotkeyPolicy for WindowsHotkeys {
         }
     }
 
-    fn pair_conflict(
-        first: Option<Key>,
-        second: Option<Key>,
-    ) -> Option<(&'static str, &'static str)> {
+    fn pair_conflict(first: Option<Key>, second: Option<Key>) -> Option<&'static str> {
         matches!(
             (first, second),
             (Some(Key::ControlLeft), Some(Key::AltGr)) | (Some(Key::AltGr), Some(Key::ControlLeft))
         )
-        .then_some((
-            "hotkey.altgr_conflict",
+        .then_some(
             "LEFTCTRL and RIGHTALT cannot be used together because Windows AltGr emits both keys",
-        ))
+        )
     }
 
     fn additional_warning(key: Key) -> Option<&'static str> {
@@ -255,14 +246,13 @@ mod tests {
 
     #[test]
     fn windows_policy_owns_altgr_key_and_icon_rules() {
-        let issues = HotkeyConfig::validate::<WindowsHotkeys>(&InputSection {
+        let error = HotkeyConfig::from_section::<WindowsHotkeys>(&InputSection {
             hold_hotkey: "LEFTCTRL".to_string(),
             toggle_hotkey: "RIGHTALT".to_string(),
         })
         .unwrap_err();
 
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].code, "hotkey.altgr_conflict");
+        assert!(error.to_string().contains("Windows AltGr emits both keys"));
         for key in [Key::MetaRight, Key::Function, Key::KpReturn] {
             assert!(WindowsHotkeys::unsupported_reason(key).is_some(), "{key:?}");
         }
