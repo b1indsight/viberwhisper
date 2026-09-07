@@ -2,8 +2,8 @@
 
 ## Scope and approval
 
-Implement the eight items collected in `TODO.md` during the core review, excluding configuration.
-The user approved the individual decisions and explicitly requested execution of the TODO list
+Implement the eight items agreed during the core review, excluding configuration.
+The user approved the individual decisions and explicitly requested their implementation
 on 2026-09-07. This document records that approved scope for the implementation PR.
 
 Keep the current lifecycle states, session routing, bounded worker queue, transcription strategy,
@@ -42,7 +42,7 @@ The length of `finish_session` alone is not a reason to split it.
 2. Update `src/core/recording_session.rs` and `src/core/orchestrator.rs`.
 3. Update `src/application/listener/event_loop.rs`, `src/text.rs`, `src/application.rs`,
    `src/application/setup.rs`, and `src/prompt_lab/regression.rs` for changed interfaces.
-4. Update `docs/architecture/core.md`, `changelog`, and the TODO completion status.
+4. Update `docs/architecture/core.md`, `changelog`, and this plan's implementation status.
 5. Run local validation, the independent code-review gate, and the same PR's platform CI.
 
 ## Validation
@@ -60,7 +60,7 @@ Verify language-aware merging still preserves Chinese concatenation and non-Chin
 
 ## Progress
 
-All eight TODOs are implemented. The updated tests first exposed the old error, transition,
+All eight review items are implemented. The updated tests first exposed the old error, transition,
 and language signatures, then passed after implementation.
 
 - Targeted core tests: 52 passed.
