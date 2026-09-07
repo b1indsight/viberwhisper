@@ -60,3 +60,4 @@
 2026-09-06: Expose desktop platform capabilities as inherent runtime methods and remove the redundant application-facing trait
 2026-09-06: Share Prompt Lab review payload validation, LLM aggregation, and threshold evaluation across review application and completed-report loading
 2026-09-06: Consolidate workflow configuration types, resolution, and validation under core::config and reuse the configuration test fixture
+2026-09-07: Resolve caller-declared typed configuration fields without business-module dependencies, and isolate raw STT workflows from unused cleanup settings

@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -16,10 +15,6 @@ pub(crate) struct FallbackTray;
 impl PlatformBackend for FallbackBackend {
     type Hotkeys = FallbackHotkeys;
     type Tray = FallbackTray;
-
-    fn config_dir() -> Option<PathBuf> {
-        dirs::config_dir().map(|base| base.join("viberwhisper"))
-    }
 
     fn text_typer_and_hotkey_filter() -> (Arc<dyn TextTyper>, HotkeyFilter) {
         (Arc::new(MockTyper), Box::new(Some))

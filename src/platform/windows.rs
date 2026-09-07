@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fs::OpenOptions, io, os::windows::io::AsRawHandle};
 
@@ -60,10 +59,6 @@ fn nul_terminated_utf16(text: &str) -> Vec<u16> {
 impl PlatformBackend for WindowsBackend {
     type Hotkeys = WindowsHotkeys;
     type Tray = WindowsTray;
-
-    fn config_dir() -> Option<PathBuf> {
-        dirs::config_dir().map(|base| base.join("ViberWhisper"))
-    }
 
     fn text_typer_and_hotkey_filter() -> (Arc<dyn TextTyper>, HotkeyFilter) {
         (Arc::new(WindowsTyper), Box::new(Some))

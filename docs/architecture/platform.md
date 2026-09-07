@@ -144,10 +144,10 @@ Both platforms retain the 300 ms minimum debounce window and embedded 32×32 RGB
 
 ## Configuration Directory
 
-`platform::config_dir()` delegates through the selected backend. macOS appends
-`com.b1indsight.viberwhisper`; Windows appends `ViberWhisper`; the fallback appends
-`viberwhisper`. `ConfigStore` appends `config.json` and `HistoryStore` appends `history.jsonl`, so
-platform code knows neither document schema nor persistence error policy.
+The configuration storage module owns `core::config::config_dir()` and obtains the base
+from `dirs::config_dir()`. macOS appends `com.b1indsight.viberwhisper`; Windows appends
+`ViberWhisper`; the fallback appends `viberwhisper`. `ConfigStore` appends `config.json` and
+`HistoryStore` appends `history.jsonl`. Directory lookup does not depend on the desktop backend.
 
 ## macOS Text Delivery
 

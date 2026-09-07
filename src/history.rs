@@ -48,7 +48,7 @@ pub(crate) struct HistoryStore {
 
 impl HistoryStore {
     pub(crate) fn discover() -> Result<Self> {
-        let directory = crate::platform::config_dir()
+        let directory = crate::core::config::config_dir()
             .ok_or_else(|| std::io::Error::other("application history directory is unavailable"))?;
         Ok(Self {
             path: directory.join("history.jsonl"),

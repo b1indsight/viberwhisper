@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The `core` module contains strict v3 configuration persistence and workflow assembly, CLI parsing, recording lifecycle state, and transcription orchestration. `core::config` provides the configuration entry point and assembles module-owned values so business consumers never receive the full persisted document.
+The `core` module contains strict v3 configuration persistence and typed field selection, CLI parsing, recording lifecycle state, and transcription orchestration. Configuration callers declare the fields they need and supply their own constructors; `core::config` has no dependency on business or application modules.
 
 ## Config (`src/core/config/`)
 
@@ -11,9 +11,9 @@ The config package intentionally has four files:
 | File | Responsibility |
 |---|---|
 | `document.rs` | `ConfigDocument`, nested v3 serde schema, and defaults |
-| `fields.rs` | one canonical `ConfigKey` catalog used by list/get/set |
+| `fields.rs` | one canonical catalog for typed field requests and CLI list/get/set |
 | `store.rs` | platform path discovery plus fail-closed load and atomic save |
-| `src/core/config.rs` | facade, config errors, validation report, secret-safe value types, and workflow configuration assembly |
+| `src/core/config.rs` | facade, config errors, validation report, and secret-safe value types |
 
 `ConfigDocument` accepts the canonical document with `schema_version: 3`. Missing or unknown fields,
 wrong versions, invalid JSON, and non-finite floats are errors, except that optional
@@ -22,29 +22,41 @@ Retired fields such as `chunking`, `session`, and `inference.api.provider` are n
 missing file is represented as `None` by `ConfigStore::load`; ordinary callers explicitly select
 the in-memory defaults while setup uses the absence to trigger the first-run flow.
 
-`ConfigStore::discover()` gets the application directory from `platform::config_dir()` and appends
+`ConfigStore::discover()` gets the application directory from its own `config_dir()` helper and appends
 `config.json`. Reads and writes therefore use the same canonical path independent of the launch
 working directory. Writes use a temporary file in the destination directory followed by atomic
 publication. `ConfigStore::load` is the single read and parse path: `None` distinguishes a missing
 file, `Some` carries a loaded document, and malformed or unreadable files remain errors.
 
-`EnvironmentSecretSource` reads only `TRANSCRIPTION_API_KEY` and `POST_PROCESS_API_KEY` through the runtime assembly layer. Environment values override disk secrets but are never copied into `ConfigDocument`; CLI output reports only `unset`, `disk`, `environment`, or `environment overrides disk`.
+`EnvironmentSecretSource` is consulted only for a requested API-key field (`TRANSCRIPTION_API_KEY` or `POST_PROCESS_API_KEY`). Environment values override disk secrets but are never copied into `ConfigDocument`; CLI output reports only `unset`, `disk`, `environment`, or `environment overrides disk`.
 
-## Workflow configuration assembly (`src/core/config.rs`)
+## Caller-declared field selection
 
-`core::config` constructs module-owned API consumer configs and aggregates construction errors.
-`resolve_listener` returns `ListenerConfig`; `resolve_convert` returns `ConvertConfig`; both contain
-the transcriber and post-process values in `BackendConfig`. `check` validates the listener
-configuration without starting services. Document loading and field edits remain independent of
-workflow validation. There is no profile selector, service-lifecycle state, generic validator
-registry, or duplicated raw DTO layer.
+`ConfigDocument::select(fields, secrets, build)` reads a typed field selector or a tuple of
+selectors, then passes exactly those values to the caller's constructor. Its generic return
+value can be a caller-owned configuration or a validation result; the configuration package
+imports neither type. One field catalog generates the selectors, dotted names, writability,
+and redacted CLI reads, so runtime requests and CLI field access share their mappings.
 
-Each consumer receives a type owned by its module: `HotkeyConfig`, `AudioConfig`,
-`OrchestratorConfig`, `TranscriberConfig`, or `PostProcessConfig`. Hotkey resolution enters through
-`platform::validate_hotkeys`, so the
-compile-time-selected backend supplies native key availability without adding target branches to
-runtime assembly. API authentication uses a redacted `SecretValue` when configured and
-`ApiAuth::None` otherwise, which also permits user-managed compatible localhost endpoints.
+For example, a caller can request `(fields::AudioInputDevice, fields::AudioMicGain)` and use
+`|(input_device, mic_gain)| ...` to build its own recording settings. Primitive field types
+remain native Rust types. API-key selections resolve environment-over-disk precedence and
+carry redacted authentication plus source status; CLI reads expose only the source status.
+
+`AudioConfig`, `TranscriberConfig`, and `PostProcessConfig` declare their requirements in their
+own modules. Post-processing requests its enabled flag first and reads LLM settings only when
+enabled. Business validators continue to own endpoint, model, and hotkey rules.
+
+Workflow composition lives at the application boundary. `RecordingConfig` combines hotkeys,
+audio, orchestrator, and STT settings for raw dataset capture. `ListenerConfig` adds cleanup
+for normal delivery and setup verification. Offline `ConvertConfig` combines STT, cleanup,
+and merge language; WAV chunk limits remain audio-owned constants. Prompt-lab evaluation
+requests only `TranscriberConfig`, so invalid hotkey or cleanup settings do not block STT.
+
+Independent validation issues are collected with `ValidationReport::collect`; conversion from
+an issue vector sorts and deduplicates the report. The CLI's `config check` command builds a
+`ListenerConfig` without starting services. Loading and editing documents remain independent
+of business validation and support incremental configuration.
 
 ## CLI (`src/core/cli.rs`)
 
@@ -155,8 +167,8 @@ listener directly. Before tracing starts, the Windows GUI entry redirects stdout
 the Windows platform boundary into a native error dialog because ordinary diagnostics are not
 visible. macOS packaging continues to expose only the established `.app` entry.
 
-`application` loads one `ConfigDocument`, asks `core::config` for a typed workflow configuration,
-and passes each narrow value to its consumer. Listener mode then creates one main-thread winit
+`application` loads one `ConfigDocument`; configuration constructors request their typed fields
+through `ConfigDocument::select`, and the workflow passes each narrow value to its runtime consumer. Listener mode then creates one main-thread winit
 `EventLoop<AppEvent>` in `ControlFlow::Wait` mode. Opaque platform input, audio-readiness, and
 background completion producers use `EventLoopProxy` to wake that loop; winit owns AppKit/Win32
 dispatch and no window is created. CLI-only workflows do not construct the event loop.

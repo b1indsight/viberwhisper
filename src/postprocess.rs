@@ -1,6 +1,8 @@
 mod llm;
 
-use crate::core::config::{ApiAuth, ConfigKey, PostProcessSection, ValidationIssue};
+use crate::core::config::{
+    ApiAuth, ConfigDocument, ConfigKey, PostProcessSection, SecretSource, ValidationIssue, fields,
+};
 use llm::LlmPostProcessor;
 use std::fmt;
 use tracing::warn;
@@ -22,6 +24,40 @@ pub enum PostProcessConfig {
 }
 
 impl PostProcessConfig {
+    /// Resolves enabled post-processing without consulting unused LLM fields when disabled.
+    pub(crate) fn from_config(
+        document: &ConfigDocument,
+        secrets: &dyn SecretSource,
+    ) -> Result<Self, Vec<ValidationIssue>> {
+        if !document.select(fields::PostProcessEnabled, secrets, std::convert::identity) {
+            return Ok(Self::Disabled);
+        }
+        document.select(
+            (
+                fields::ApiPostProcessUrl,
+                fields::ApiPostProcessKey,
+                fields::ApiPostProcessModel,
+                fields::PostProcessPrompt,
+                fields::PostProcessTemperature,
+                fields::PostProcessPreheatEnabled,
+            ),
+            secrets,
+            |(endpoint, key, model, prompt, temperature, preheat_enabled)| {
+                Self::validate(
+                    endpoint.as_deref(),
+                    key.auth,
+                    model.as_deref(),
+                    &PostProcessSection {
+                        enabled: true,
+                        preheat_enabled,
+                        prompt,
+                        temperature,
+                    },
+                )
+            },
+        )
+    }
+
     pub(crate) fn validate(
         endpoint: Option<&str>,
         auth: ApiAuth,
@@ -232,5 +268,23 @@ mod tests {
         session.push_stable_chunk("hello");
         session.push_stable_chunk("world");
         assert_eq!(session.finish().unwrap(), "helloworld");
+    }
+
+    #[test]
+    fn disabled_config_request_skips_llm_fields_and_secrets() {
+        struct NoSecrets;
+        impl SecretSource for NoSecrets {
+            fn get(&self, _name: &str) -> Option<String> {
+                panic!("disabled cleanup must not resolve API credentials");
+            }
+        }
+        let mut document = ConfigDocument::default();
+        document.post_process.enabled = false;
+        document.inference.api.post_process.api_url = Some("not a URL".to_string());
+        // Turning cleanup off must bypass stale endpoint settings and secret providers.
+        assert!(matches!(
+            PostProcessConfig::from_config(&document, &NoSecrets),
+            Ok(PostProcessConfig::Disabled)
+        ));
     }
 }

@@ -3,16 +3,19 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use super::listener::RecordingConfig;
 use super::load_config;
+use crate::audio::{MAX_CHUNK_DURATION_SECS, MAX_CHUNK_SIZE_BYTES};
 use crate::core::cli::{
     PromptLabCommand, PromptLabDatasetCommand, PromptLabReportCommand, PromptLabSampleCommand,
     PromptLabSampleStatus,
 };
-use crate::core::config::{self, EnvironmentSecretSource};
+use crate::core::config::{EnvironmentSecretSource, ValidationReport};
 use crate::prompt_lab::{
     DatasetStore, EvaluationReport, EvaluationRequest, ProperNounAnnotation, ReferenceStatus,
     RunStatus, SttSnapshot, Thresholds, apply_review, evaluate,
 };
+use crate::transcriber::TranscriberConfig;
 
 pub(super) fn handle(action: PromptLabCommand) -> Result<()> {
     match action {
@@ -74,25 +77,27 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
         .map(EvaluationReport::read)
         .transpose()?;
     let (_, document) = load_config()?;
-    let mut config = config::resolve_convert(&document, &EnvironmentSecretSource)?;
+    let mut config = TranscriberConfig::from_config(&document, &EnvironmentSecretSource)
+        .map_err(ValidationReport::from)?;
     let prompt = if command.no_prompt {
         None
     } else if let Some(prompt) = candidate_from_file {
         Some(prompt)
     } else {
-        config.backend.transcriber.metadata().prompt
+        config.metadata().prompt
     };
-    config.backend.transcriber = config.backend.transcriber.with_prompt(prompt);
-    let stt = SttSnapshot::from(config.backend.transcriber.metadata());
-    let transcriber = ApiTranscriber::new(config.backend.transcriber)?;
+    config = config.with_prompt(prompt);
+    let stt = SttSnapshot::from(config.metadata());
+    let language = stt.language.clone();
+    let transcriber = ApiTranscriber::new(config)?;
     let outcome = evaluate(
         &dataset,
         &transcriber,
         EvaluationRequest {
             stt,
-            language: config.language,
-            max_chunk_duration_secs: config.max_chunk_duration_secs,
-            max_chunk_size_bytes: config.max_chunk_size_bytes,
+            language,
+            max_chunk_duration_secs: MAX_CHUNK_DURATION_SECS,
+            max_chunk_size_bytes: MAX_CHUNK_SIZE_BYTES,
             thresholds: command.thresholds,
             output: command.output,
             compare_to: prior,
@@ -141,7 +146,8 @@ fn report(action: PromptLabReportCommand) -> Result<()> {
 fn record(root: PathBuf) -> Result<()> {
     let dataset = DatasetStore::open_or_create(root)?;
     let (_, document) = load_config()?;
-    let config = config::resolve_listener(&document, &EnvironmentSecretSource)?;
+    let config = RecordingConfig::from_config(&document, &EnvironmentSecretSource)
+        .map_err(ValidationReport::from)?;
     super::listener::run_capture(config, dataset)
 }
 

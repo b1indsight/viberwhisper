@@ -109,10 +109,10 @@ src/
     review.rs                — Coding-agent review validation and final threshold gates
   core.rs                    — Core module entry and submodule declarations
   core/
-    config.rs                — Config facade, workflow assembly, errors, validation, and safe value types
+    config.rs                — Config facade, typed field selection, errors, and safe value types
     config/
       document.rs            — Strict v3 configuration document
-      fields.rs              — Canonical field catalog
+      fields.rs              — Canonical field catalog and typed field requests
       store.rs               — Atomic configuration persistence
     cli.rs                   — Clap-based CLI (config, convert subcommands)
     orchestrator.rs          — SessionOrchestrator for session lifecycle

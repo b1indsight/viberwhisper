@@ -1,5 +1,7 @@
 use crate::audio::{WavChunk, contains_audible_window};
-use crate::core::config::{ApiAuth, ConfigKey, TranscriptionSection, ValidationIssue};
+use crate::core::config::{
+    ApiAuth, ConfigDocument, ConfigKey, SecretSource, TranscriptionSection, ValidationIssue, fields,
+};
 use crate::transcriber::TranscribeError;
 use std::io::Cursor;
 use std::time::Duration;
@@ -47,6 +49,36 @@ pub(crate) struct TranscriberMetadata {
 }
 
 impl TranscriberConfig {
+    /// Requests only the fields used by the STT client and validates those values.
+    pub(crate) fn from_config(
+        document: &ConfigDocument,
+        secrets: &dyn SecretSource,
+    ) -> Result<Self, Vec<ValidationIssue>> {
+        document.select(
+            (
+                fields::ApiTranscriptionUrl,
+                fields::ApiTranscriptionKey,
+                fields::ApiTranscriptionModel,
+                fields::TranscriptionLanguage,
+                fields::TranscriptionPrompt,
+                fields::TranscriptionTemperature,
+            ),
+            secrets,
+            |(endpoint, key, model, language, prompt, temperature)| {
+                Self::validate(
+                    &endpoint,
+                    key.auth,
+                    &model,
+                    &TranscriptionSection {
+                        language,
+                        prompt,
+                        temperature,
+                    },
+                )
+            },
+        )
+    }
+
     pub(crate) fn validate(
         endpoint: &str,
         auth: ApiAuth,
@@ -564,5 +596,24 @@ mod tests {
         // Initial attempt + one retry.
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         assert_eq!(waits, vec![std::time::Duration::from_secs(1)]);
+    }
+
+    #[test]
+    fn config_request_ignores_unrelated_hotkey_and_post_process_settings() {
+        struct SttSecrets;
+        impl crate::core::config::SecretSource for SttSecrets {
+            fn get(&self, name: &str) -> Option<String> {
+                assert_eq!(name, "TRANSCRIPTION_API_KEY");
+                None
+            }
+        }
+        let mut document = crate::core::config::ConfigDocument::default();
+        document.input.hold_hotkey = "not a hotkey".to_string();
+        document.post_process.enabled = true;
+        document.inference.api.post_process.api_url = Some("not a URL".to_string());
+        document.transcription.language = Some("zh".to_string());
+        // A prompt-lab STT run must work even when unrelated desktop/cleanup settings are invalid.
+        let config = TranscriberConfig::from_config(&document, &SttSecrets).unwrap();
+        assert_eq!(config.metadata().language.as_deref(), Some("zh"));
     }
 }

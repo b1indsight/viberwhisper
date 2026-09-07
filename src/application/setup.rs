@@ -14,10 +14,9 @@ use anyhow::{Result as AnyhowResult, anyhow};
 use rdev::EventType;
 use tinyfiledialogs::{MessageBoxIcon, YesNo};
 
+use super::listener::ListenerConfig;
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
-use crate::core::config::{
-    self, ConfigDocument, ConfigStore, EnvironmentSecretSource, ListenerConfig, SecretSource,
-};
+use crate::core::config::{ConfigDocument, ConfigStore, EnvironmentSecretSource, SecretSource};
 use crate::postprocess::PostProcessor;
 use crate::session::SessionId;
 use crate::transcriber::{ApiTranscriber, Transcriber};
@@ -136,7 +135,7 @@ pub(super) fn run_explicit() -> AnyhowResult<()> {
 }
 
 fn resolve_document(document: &ConfigDocument) -> AnyhowResult<ListenerConfig> {
-    Ok(config::resolve_listener(
+    Ok(ListenerConfig::from_config(
         document,
         &EnvironmentSecretSource,
     )?)
@@ -254,12 +253,12 @@ impl SetupVerifier for NativeVerifier {
         document: &ConfigDocument,
         _ui: &mut dyn SetupUi,
     ) -> Result<VerificationResult, String> {
-        let config = config::resolve_listener(document, &EnvironmentSecretSource)
+        let config = ListenerConfig::from_config(document, &EnvironmentSecretSource)
             .map_err(|error| error.to_string())?;
         let transcriber =
-            ApiTranscriber::new(config.backend.transcriber).map_err(|error| error.to_string())?;
-        let post_processor = PostProcessor::new(config.backend.post_process);
-        let mut recorder = AudioRecorder::with_config(&config.audio, |_| {});
+            ApiTranscriber::new(config.recording.transcriber).map_err(|error| error.to_string())?;
+        let post_processor = PostProcessor::new(config.post_process);
+        let mut recorder = AudioRecorder::with_config(&config.recording.audio, |_| {});
         let session_id = SessionId(1);
         let mut hotkeys = hotkey::VerificationListener::spawn(&document.input)?;
 

@@ -10,8 +10,47 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::core::cli::{Cli, Commands, ConfigAction};
-use crate::core::config::{self, ConfigDocument, ConfigStore, EnvironmentSecretSource};
+use crate::core::config::{
+    ConfigDocument, ConfigStore, EnvironmentSecretSource, SecretSource, ValidationReport, fields,
+};
 use crate::{audio, postprocess, text, transcriber};
+
+/// Settings consumed by offline transcription and final text cleanup.
+#[derive(Debug)]
+struct ConvertConfig {
+    transcriber: transcriber::TranscriberConfig,
+    post_process: postprocess::PostProcessConfig,
+    language: Option<String>,
+}
+
+impl ConvertConfig {
+    fn from_config(
+        document: &ConfigDocument,
+        secrets: &dyn SecretSource,
+    ) -> Result<Self, ValidationReport> {
+        let mut issues = Vec::new();
+        let transcriber = ValidationReport::collect(
+            transcriber::TranscriberConfig::from_config(document, secrets),
+            &mut issues,
+        );
+        let post_process = ValidationReport::collect(
+            postprocess::PostProcessConfig::from_config(document, secrets),
+            &mut issues,
+        );
+        match (transcriber, post_process) {
+            (Some(transcriber), Some(post_process)) => Ok(Self {
+                transcriber,
+                post_process,
+                language: document.select(
+                    fields::TranscriptionLanguage,
+                    secrets,
+                    std::convert::identity,
+                ),
+            }),
+            _ => Err(ValidationReport::from(issues)),
+        }
+    }
+}
 
 /// Initializes process-wide services, parses the CLI, and runs the selected workflow.
 pub fn run() -> Result<()> {
@@ -102,7 +141,7 @@ fn handle_config(action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::Path => unreachable!(),
         ConfigAction::Check => {
-            config::check(&document, &secrets)?;
+            listener::ListenerConfig::from_config(&document, &secrets)?;
             println!("Configuration is valid.");
         }
         ConfigAction::List => {
@@ -136,14 +175,14 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
     info!(input, "Transcribing audio file");
 
     let (_, document) = load_config()?;
-    let config = config::resolve_convert(&document, &EnvironmentSecretSource)?;
-    let transcriber = ApiTranscriber::new(config.backend.transcriber)?;
-    let post_processor = PostProcessor::new(config.backend.post_process);
+    let config = ConvertConfig::from_config(&document, &EnvironmentSecretSource)?;
+    let transcriber = ApiTranscriber::new(config.transcriber)?;
+    let post_processor = PostProcessor::new(config.post_process);
 
     let mut chunk_reader = audio::WavChunkReader::open(
         Path::new(input),
-        config.max_chunk_duration_secs,
-        config.max_chunk_size_bytes,
+        audio::MAX_CHUNK_DURATION_SECS,
+        audio::MAX_CHUNK_SIZE_BYTES,
     )?;
     let mut chunk_texts = Vec::new();
     for chunk in chunk_reader.chunks() {
@@ -178,4 +217,38 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
         None => println!("{}", text),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Keep this fixture local; application/listener.rs uses the same no-secret test setup.
+    struct EmptySecrets;
+
+    impl SecretSource for EmptySecrets {
+        fn get(&self, _name: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn conversion_settings_ignore_hotkeys_and_allow_unauthenticated_endpoints() {
+        let mut document = ConfigDocument::default();
+        document.input.hold_hotkey = "not a hotkey".to_string();
+        document.inference.api.transcription.api_url =
+            "http://127.0.0.1:8080/v1/audio/transcriptions".to_string();
+        document.transcription.language = Some("zh".to_string());
+        document.post_process.enabled = true;
+        document.inference.api.post_process.api_url =
+            Some("http://127.0.0.1:8080/v1/chat/completions".to_string());
+        document.inference.api.post_process.model = Some("local-model".to_string());
+        // WAV conversion uses STT and cleanup, without requiring a valid desktop hotkey binding.
+        let config = ConvertConfig::from_config(&document, &EmptySecrets).unwrap();
+        assert_eq!(config.language.as_deref(), Some("zh"));
+        assert_eq!(
+            config.transcriber.metadata().language.as_deref(),
+            Some("zh")
+        );
+    }
 }

@@ -1,91 +1,90 @@
-# Consolidate runtime configuration into core::config
+# Caller-declared configuration fields
 
 ## Status
 
-Plan approved by the user; implementation and local validation are complete on PR #125.
+The user approved field-driven configuration after the initial module consolidation in PR #125.
+The revised implementation and local validation are complete. The user requested one combined
+review and publication on the same bookmark and PR. Review and hosted CI results are tracked
+on PR #125.
 Base: `master` at `bef71a4e` (PR #123).
 
 ## Problem and outcome
 
-Configuration handling currently spans `core::config` and the top-level `runtime_config`
-module. Callers import document and storage types from one module and workflow configuration
-types and resolvers from the other. The user wants these interfaces consolidated directly in
-`src/core/config.rs`.
+Moving runtime assembly into `core::config` made configuration depend on audio, hotkeys,
+transcription, cleanup, orchestration, and the desktop platform. Consumers also depended on
+configuration types, producing bidirectional module dependencies. Workflow-wide resolution
+made STT-only prompt-lab operations validate unused post-processing settings.
 
-After this change, `core::config` will expose document access, persistence, and workflow
-configuration assembly through one module. `src/runtime_config.rs` will be removed.
+Callers now declare their required fields, and configuration resolves those fields before
+invoking a caller-provided constructor. The return type belongs to the caller. Configuration
+imports no application or business modules, and the separate `runtime_config` module remains
+removed.
 
-## Technical approach
+## Interface
 
-- Move `ListenerConfig`, `BackendConfig`, and `ConvertConfig` into `src/core/config.rs`.
-- Move the existing `resolve_listener`, `resolve_convert`, and `check` functions there,
-  preserving their signatures. Keep `resolve_api_backend`, `effective_secret`,
-  `collect_issues`, and `report` private in the same file.
-- Update application, setup, listener, and prompt-lab imports to `crate::core::config`.
-  Resolver calls become `config::resolve_listener`, `config::resolve_convert`, and
-  `config::check`; configuration types are imported from that module.
-- Remove the crate-root module declaration and the old source file. The implementation
-  lives directly in `config.rs`, without a compatibility facade or new resolver submodule.
-- Move the four existing runtime configuration tests into the existing configuration test
-  module and reuse its identical `MapSecrets` fixture.
-- Update the current architecture description and the repository module outline.
+```rust
+pub fn select<R: FieldRequest, T>(
+    &self,
+    fields: R,
+    secrets: &dyn SecretSource,
+    build: impl FnOnce(R::Values) -> T,
+) -> T;
+```
 
-`core::config` will consequently import the module-owned audio, hotkey, orchestrator,
-transcriber, and post-process configuration types. Their validation rules remain owned by
-those modules; the consolidated module assembles their results.
+`FieldRequest` is implemented by typed selectors and tuples of selectors. For example, a
+recorder requests `(fields::AudioInputDevice, fields::AudioMicGain)` and supplies a constructor
+accepting `(Option<String>, f32)`. Its result may be a configuration value or a validation
+result. No string-key conversion, JSON round trip, workflow registry, or upstream type is
+needed to construct the result.
+
+The existing field catalog generates dotted names, writability metadata, typed selectors,
+and CLI reads from one set of value readers. Secret selections combine environment overrides
+with disk values; authentication remains redacted, and CLI reads expose only source status.
+Only requested fields and their associated secret sources are consulted.
+
+## Ownership
+
+| Location | Responsibility |
+| --- | --- |
+| `src/core/config/fields.rs` | Canonical catalog, typed requests, selected-value construction, CLI field access, and effective secrets. |
+| `src/core/config.rs` | Public configuration entry point, errors, secret types, and generic validation issue collection. |
+| `src/core/config/store.rs` | Configuration persistence and canonical platform-specific directory discovery. |
+| `src/audio.rs` | Requests microphone settings and supplies fixed audio chunk limits. |
+| `src/transcriber/api.rs` | Requests STT fields and applies transcriber validation. |
+| `src/postprocess.rs` | Requests the enabled flag first, then LLM fields only when enabled. |
+| `src/application/listener.rs` | Composes `RecordingConfig` for capture and `ListenerConfig` for normal delivery. |
+| `src/application.rs` | Composes `ConvertConfig` for offline STT, cleanup, and merge language. |
+| `src/application/setup.rs` | Uses the application's listener settings for setup verification. |
+| `src/application/prompt_lab.rs` | Uses recording settings for capture and only STT settings for evaluation. |
+| `src/history.rs`, `src/platform*` | History uses configuration's directory helper; desktop backends no longer own directory discovery. |
+
+`BackendConfig`, workflow resolvers in `core::config`, and the redundant `check` wrapper are
+removed. The CLI `config check` command builds the application-owned `ListenerConfig` directly.
+Business modules retain their validation rules; errors from required components are aggregated
+and normalized through `ValidationReport`.
 
 ## Behavioral boundaries
 
-This is a module consolidation. Preserve schema v3, configuration paths, field permissions,
-atomic persistence, environment-secret precedence and redaction, validation error ordering
-and deduplication, and the existing listener and conversion configuration shapes.
+Schema v3, the configuration file location, atomic persistence, field permissions, optional
+values, environment-over-disk precedence, and redaction retain their existing behavior.
+Directory identifiers remain `com.b1indsight.viberwhisper` on macOS, `ViberWhisper` on Windows,
+and `viberwhisper` on fallback targets. History continues to use the same directory.
 
-File loading and field edits continue to work independently of runtime validation.
-`config set` continues to support incremental configuration. The previously discussed
-prompt-lab/post-processing validation coupling is outside this refactor's scope.
+Loading and editing configuration remain independent of business validation. STT evaluation
+and raw capture intentionally stop validating unused cleanup settings. Offline conversion still
+requires its configured cleanup, and normal delivery/setup still validate hotkeys and cleanup.
+Disabled cleanup does not resolve LLM fields or credentials.
 
-## Files
+## Validation
 
-| File | Change |
-| --- | --- |
-| `src/core/config.rs` | Own the workflow types, resolvers, private helpers, and relocated tests. |
-| `src/runtime_config.rs` | Remove after moving its implementation and tests. |
-| `src/lib.rs` | Remove `mod runtime_config`. |
-| `src/application.rs` | Use the consolidated configuration entry point. |
-| `src/application/setup.rs` | Update listener configuration resolution and imports. |
-| `src/application/listener.rs` | Import `ListenerConfig` from `core::config`. |
-| `src/application/prompt_lab.rs` | Update configuration resolution and imports. |
-| `docs/architecture/core.md`, `docs/architecture/input.md`, `AGENTS.md` | Describe the resulting ownership and module layout. |
-| `changelog` | Record the configuration module consolidation. |
-
-Historical plans retain their original descriptions of earlier implementations.
-
-## Implementation order and validation
-
-1. Run the existing configuration and runtime configuration tests as a baseline:
-   `cargo test --locked core::config::tests` and `cargo test --locked runtime_config::tests`.
-2. Move the definitions and tests, reuse the test fixture, and update all caller imports.
-3. Remove the old module and update the current architecture documentation and module outline.
-4. Run `cargo fmt --check`, `cargo build --locked`, `cargo test --locked`, and
-   `cargo clippy --locked -- -D warnings` on macOS. Confirm all four relocated tests execute.
-5. Use the existing Windows CI build and test jobs with `--locked --features windows-app`,
-   plus `cargo clippy --locked --all-targets --features windows-app -- -D warnings`.
-6. Check that source code and current architecture documentation contain no stale
-   `runtime_config` module references, review the final diff, and push implementation to
-   this same bookmark and PR through the repository's code review gate.
-
-The existing tests cover parsing, persistence, field edits, listener resolution, API backend
-construction, secret handling, and invalid runtime configuration. Reuse this behavior
-coverage; add no tests that merely assert the new file location or repeat moved logic.
-
-## Implementation results
-
-- The baseline configuration suite passed all 17 tests across the two original modules.
-- The consolidated configuration suite passed the same 17 tests, including all four relocated
-  runtime configuration tests with one shared `MapSecrets` fixture.
-- `cargo fmt --check`, `cargo build --locked`, `cargo test --locked` (183 tests), and
-  `cargo clippy --locked -- -D warnings` passed on macOS.
-- A source comparison confirmed that the moved runtime definitions and four test bodies were
-  preserved verbatim, and current source and architecture docs have no old module references.
-- Hosted macOS and Windows validation is tracked by the checks on
-  [PR #125](https://github.com/b1indsight/viberwhisper/pull/125).
+- Added field-projection tests first and observed them fail because selectors and `select`
+  were not implemented, then made them pass with typed requests.
+- Covered caller-owned output types, selective secret reads, environment precedence and
+  redaction, STT independence, raw-capture independence, disabled cleanup, offline conversion,
+  and combined listener validation. Existing persistence and field-access coverage is retained.
+- `cargo test --locked`: 186 tests passed on macOS.
+- `cargo fmt --check`, `cargo build --locked`, and
+  `cargo clippy --locked --all-targets -- -D warnings`: passed on macOS.
+- Source inspection found no project-module imports in `core::config` or its submodules.
+- Independent review runs before publication; hosted Windows/macOS CI results are tracked on
+  PR #125 for the published commit. Earlier PR checks apply to the initial implementation only.

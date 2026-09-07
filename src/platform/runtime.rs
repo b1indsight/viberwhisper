@@ -193,7 +193,6 @@ fn action_from_tray(action: TrayAction) -> PlatformAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -240,10 +239,6 @@ mod tests {
     impl PlatformBackend for FakeBackend {
         type Hotkeys = FakeHotkeys;
         type Tray = FakeTrayPolicy;
-
-        fn config_dir() -> Option<PathBuf> {
-            None
-        }
 
         fn text_typer_and_hotkey_filter()
         -> (Arc<dyn TextTyper>, super::super::backend::HotkeyFilter) {

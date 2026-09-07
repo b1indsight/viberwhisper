@@ -10,8 +10,7 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn discover() -> Result<Self, ConfigError> {
-        let directory =
-            crate::platform::config_dir().ok_or(ConfigError::ConfigDirectoryUnavailable)?;
+        let directory = config_dir().ok_or(ConfigError::ConfigDirectoryUnavailable)?;
         Ok(Self {
             path: directory.join("config.json"),
         })
@@ -89,4 +88,16 @@ impl ConfigStore {
             })?;
         Ok(())
     }
+}
+
+/// Canonical shared directory for configuration and local transcription history.
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    const DIRECTORY: &str = "com.b1indsight.viberwhisper";
+    #[cfg(target_os = "windows")]
+    const DIRECTORY: &str = "ViberWhisper";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    const DIRECTORY: &str = "viberwhisper";
+
+    dirs::config_dir().map(|base| base.join(DIRECTORY))
 }

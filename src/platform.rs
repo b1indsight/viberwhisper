@@ -7,8 +7,6 @@ mod runtime;
 #[cfg(target_os = "windows")]
 mod windows;
 
-use std::path::PathBuf;
-
 use rdev::EventType;
 
 use crate::core::config::{InputSection, ValidationIssue};
@@ -25,11 +23,6 @@ use backend::PlatformBackend;
 pub(crate) use runtime::{PlatformAction, PlatformEvent};
 
 pub(crate) type NativePlatform = runtime::PlatformRuntime<SelectedBackend>;
-
-/// Returns the current target's application configuration directory.
-pub(crate) fn config_dir() -> Option<PathBuf> {
-    SelectedBackend::config_dir()
-}
 
 /// Gives the desktop process valid output handles without requiring a visible console.
 pub(crate) fn prepare_desktop_output() -> std::io::Result<()> {
