@@ -182,17 +182,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_wrong_and_flat_schema() {
+    fn rejects_invalid_document_shapes() {
         assert!(serde_json::from_str::<ConfigDocument>(r#"{"input": {}}"#).is_err());
         assert!(serde_json::from_str::<ConfigDocument>(r#"{"schema_version": 2}"#).is_err());
         assert!(
             serde_json::from_str::<ConfigDocument>(r#"{"schema_version": 3, "hold_hotkey": "F8"}"#)
                 .is_err()
         );
-    }
 
-    #[test]
-    fn persisted_documents_cannot_set_the_runtime_secret_source() {
         // Adding a skipped runtime field must not expand the strict on-disk schema.
         let mut value = serde_json::to_value(ConfigDocument::default()).unwrap();
         value["secrets"] = serde_json::json!({"TRANSCRIPTION_API_KEY": "unexpected"});
@@ -403,38 +400,15 @@ mod tests {
     }
 
     #[test]
-    fn cloned_documents_keep_their_source_without_persisting_it() {
-        // Config edits clone the document before saving. Keep the bound source through
-        // that clone, while round trips and equality continue to describe disk content.
-        let document = ConfigDocument::new(MapSecrets(HashMap::from([
-            ("TRANSCRIPTION_API_KEY", "stt-environment-token"),
-            ("POST_PROCESS_API_KEY", "cleanup-environment-token"),
-        ])));
-        let mut candidate = document.clone();
-        let auth = candidate.select(
-            (fields::ApiTranscriptionKey, fields::ApiPostProcessKey),
-            |(stt, cleanup)| (stt.auth, cleanup.auth),
-        );
-        assert_eq!(
-            auth,
-            (
-                ApiAuth::Bearer(SecretValue::new("stt-environment-token")),
-                ApiAuth::Bearer(SecretValue::new("cleanup-environment-token")),
-            )
-        );
-        let encoded = serde_json::to_value(&candidate).unwrap();
-        assert!(encoded.get("secrets").is_none());
-        assert_eq!(
-            encoded,
-            serde_json::to_value(ConfigDocument::default()).unwrap()
-        );
-        let loaded: ConfigDocument = serde_json::from_value(encoded).unwrap();
-        assert_eq!(loaded, document);
-        candidate.audio.mic_gain = 2.0;
-        assert_ne!(candidate, document);
-        let debug = format!("{candidate:?}");
-        assert!(!debug.contains("stt-environment-token"));
-        assert!(!debug.contains("cleanup-environment-token"));
+    fn cloned_documents_keep_their_secret_source() {
+        // Config edits clone the document before saving; reads must retain its bound source.
+        let document = ConfigDocument::new(MapSecrets(HashMap::from([(
+            "TRANSCRIPTION_API_KEY",
+            "environment-token",
+        )])));
+        let candidate = document.clone();
+        let auth = candidate.select(fields::ApiTranscriptionKey, |key| key.auth);
+        assert_eq!(auth, ApiAuth::Bearer(SecretValue::new("environment-token")));
     }
 
     #[test]

@@ -92,16 +92,19 @@ without starting services and does not guarantee that API requests will succeed.
 
 - Added field-projection tests first and observed them fail because selectors and `select`
   were not implemented, then made them pass with typed requests.
-- Updated behavior tests first: direct API configuration and first-error propagation initially
-  failed under the old validation pass, then passed after switching to direct construction.
+- Updated behavior tests first: direct API configuration initially failed under the old
+  validation pass, then passed after switching to direct construction.
 - Added source-binding tests before implementation, then covered source retention across clones,
   unchanged JSON and equality, rejection of runtime source fields in JSON, and setup prompts
   using the document's injected source for both API keys.
 - Covered caller-owned output types, selective secret reads, environment precedence and
   redaction, STT independence, raw-capture independence, disabled cleanup, offline conversion,
-  and first-error propagation. Existing persistence, field-access, hotkey parsing, duplicate-key,
+  and direct consumer construction. Existing persistence, field-access, hotkey parsing, duplicate-key,
   and platform-policy coverage is retained.
-- `cargo test --locked`: 189 tests passed on macOS.
+- The clone test focuses on retaining the bound source; existing persistence and redaction
+  tests cover serialization and debug output. Runtime-source rejection is part of the shared
+  schema test, and tests do not require a fixed construction-error order.
+- `cargo test --locked`: 187 tests passed on macOS.
 - `cargo fmt --check`, `cargo build --locked`, and
   `cargo clippy --locked --all-targets -- -D warnings`: passed on macOS.
 - Source inspection found no project-module imports in `core::config` or its submodules.

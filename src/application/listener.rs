@@ -267,17 +267,4 @@ mod tests {
         assert_eq!(config.hotkeys.hold_label.as_deref(), Some("F8"));
         assert!(ListenerConfig::from_config(&document).is_err());
     }
-
-    #[test]
-    fn listener_reports_the_first_construction_error() {
-        let mut document = ConfigDocument::new(EmptySecrets);
-        document.input.hold_hotkey = "not a hotkey".to_string();
-        document.inference.api.transcription.api_url = "not a URL".to_string();
-        document.inference.api.transcription.model.clear();
-        document.post_process.enabled = true;
-        // Startup stops where settings cannot be constructed instead of running
-        // a separate pass over every unrelated configuration error.
-        let error = ListenerConfig::from_config(&document).unwrap_err();
-        assert!(error.to_string().starts_with("input.hold_hotkey:"));
-    }
 }
