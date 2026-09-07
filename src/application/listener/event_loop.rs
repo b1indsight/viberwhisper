@@ -388,7 +388,7 @@ impl ListenerApplication {
                 post_processor,
             } => {
                 let orchestrator = Arc::clone(&self.orchestrator);
-                let mut post_processor = post_processor.start_session();
+                let mut post_processor = post_processor.create_session();
                 let typer = Arc::clone(typer);
                 let proxy = self.proxy.clone();
                 spawn_finalization_worker(

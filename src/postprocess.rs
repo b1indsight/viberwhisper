@@ -108,8 +108,8 @@ pub struct PostProcessor(Box<dyn TextPostProcessor>);
 
 /// Text-cleanup behavior selected once from the validated runtime config.
 trait TextPostProcessor: Send + Sync {
-    fn process(&self, text: &str) -> Result<String, PostProcessError>;
-    fn start_session(&self) -> Box<dyn TextPostProcessorSession>;
+    fn process_text(&self, text: &str) -> Result<String, PostProcessError>;
+    fn create_session(&self) -> PostProcessorSession;
 }
 
 /// Mutable cleanup state owned by one recording session.
@@ -133,12 +133,14 @@ impl PostProcessor {
         Self(processor)
     }
 
-    pub fn process(&self, text: &str) -> Result<String, PostProcessError> {
-        self.0.process(text)
+    /// Processes a complete text input in one call.
+    pub fn process_text(&self, text: &str) -> Result<String, PostProcessError> {
+        self.0.process_text(text)
     }
 
-    pub fn start_session(&self) -> PostProcessorSession {
-        PostProcessorSession(self.0.start_session())
+    /// Creates independent state for incremental text cleanup.
+    pub fn create_session(&self) -> PostProcessorSession {
+        self.0.create_session()
     }
 }
 
@@ -158,12 +160,12 @@ impl PostProcessorSession {
 struct NoopPostProcessor;
 
 impl TextPostProcessor for NoopPostProcessor {
-    fn process(&self, text: &str) -> Result<String, PostProcessError> {
+    fn process_text(&self, text: &str) -> Result<String, PostProcessError> {
         Ok(text.to_string())
     }
 
-    fn start_session(&self) -> Box<dyn TextPostProcessorSession> {
-        Box::new(NoopSession::default())
+    fn create_session(&self) -> PostProcessorSession {
+        PostProcessorSession(Box::new(NoopSession::default()))
     }
 }
 
@@ -190,16 +192,16 @@ mod tests {
     use crate::core::config::SecretSource;
 
     #[test]
-    fn test_noop_process() {
+    fn test_noop_process_text() {
         let p = PostProcessor::new(PostProcessConfig::Disabled);
-        assert_eq!(p.process("hello").unwrap(), "hello");
-        assert_eq!(p.process("").unwrap(), "");
+        assert_eq!(p.process_text("hello").unwrap(), "hello");
+        assert_eq!(p.process_text("").unwrap(), "");
     }
 
     #[test]
     fn test_noop_session() {
         let p = PostProcessor::new(PostProcessConfig::Disabled);
-        let mut session = p.start_session();
+        let mut session = p.create_session();
         session.push_stable_chunk("hello");
         session.push_stable_chunk("world");
         assert_eq!(session.finish().unwrap(), "helloworld");

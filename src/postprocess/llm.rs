@@ -1,6 +1,6 @@
 use crate::core::config::ApiAuth;
 use crate::postprocess::{
-    LlmConfig, PostProcessError, TextPostProcessor, TextPostProcessorSession,
+    LlmConfig, PostProcessError, PostProcessorSession, TextPostProcessor, TextPostProcessorSession,
 };
 use reqwest::blocking::Client;
 use std::sync::{Arc, Condvar, Mutex};
@@ -55,7 +55,7 @@ impl LlmPostProcessor {
 }
 
 impl TextPostProcessor for LlmPostProcessor {
-    fn process(&self, text: &str) -> Result<String, PostProcessError> {
+    fn process_text(&self, text: &str) -> Result<String, PostProcessError> {
         if text.is_empty() {
             return Ok(text.to_string());
         }
@@ -65,8 +65,8 @@ impl TextPostProcessor for LlmPostProcessor {
         Ok(result)
     }
 
-    fn start_session(&self) -> Box<dyn TextPostProcessorSession> {
-        if self.streaming_enabled {
+    fn create_session(&self) -> PostProcessorSession {
+        PostProcessorSession(if self.streaming_enabled {
             Box::new(PreheatLlmSession::new(
                 self.auth.clone(),
                 self.api_url.clone(),
@@ -85,7 +85,7 @@ impl TextPostProcessor for LlmPostProcessor {
                 client: self.client.clone(),
                 chunks: Vec::new(),
             })
-        }
+        })
     }
 }
 
@@ -447,10 +447,10 @@ mod tests {
     }
 
     #[test]
-    fn test_process_empty_text_bypasses_llm() {
+    fn test_process_text_empty_input_bypasses_llm() {
         let config = config_with_postprocess(true, None);
         let p = LlmPostProcessor::new(config).unwrap();
-        let result = p.process("");
+        let result = p.process_text("");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
     }
@@ -460,7 +460,7 @@ mod tests {
         for preheat_enabled in [false, true] {
             let config = config_with_postprocess(preheat_enabled, None);
             let p = LlmPostProcessor::new(config).unwrap();
-            let mut session = p.start_session();
+            let mut session = p.create_session();
 
             assert_eq!(
                 session.finish().unwrap(),

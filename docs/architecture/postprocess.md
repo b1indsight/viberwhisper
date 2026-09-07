@@ -20,14 +20,14 @@ pub struct PostProcessor(Box<dyn TextPostProcessor>);
 
 impl PostProcessor {
     pub fn new(config: PostProcessConfig) -> Self;
-    pub fn process(&self, text: &str) -> Result<String, PostProcessError>;
-    pub fn start_session(&self) -> PostProcessorSession;
+    pub fn process_text(&self, text: &str) -> Result<String, PostProcessError>;
+    pub fn create_session(&self) -> PostProcessorSession;
 }
 ```
 
 Two interfaces for different use cases:
-- `process`: one-shot processing for the `convert` CLI path
-- `start_session`: incremental session for the `run_listener` path
+- `process_text`: one-shot processing for the `convert` CLI path
+- `create_session`: creates independent incremental cleanup state for the `run_listener` path
 
 `TextPostProcessor` defines the shared behavior implemented by `NoopPostProcessor` and `LlmPostProcessor`. The facade selects and boxes one implementation during construction, then delegates directly through the trait without repeating implementation-specific matches. The trait remains private so callers depend only on the stable `PostProcessor` API. If HTTP-client initialization fails, construction logs the error and selects the pass-through implementation because cleanup is optional.
 
@@ -43,6 +43,8 @@ impl PostProcessorSession {
 ```
 
 `TextPostProcessorSession` provides the common incremental interface implemented by `NoopSession`, `ConservativeLlmSession`, and `PreheatLlmSession`. The session facade delegates to the boxed implementation. The interface accepts stable STT chunks incrementally, and `finish` returns the final processed text.
+
+Both `TextPostProcessor::create_session` and the public facade return `PostProcessorSession`, keeping session dynamic dispatch inside that wrapper. Creation only initializes state; text processing starts in subsequent session calls.
 
 ## Implementations
 
