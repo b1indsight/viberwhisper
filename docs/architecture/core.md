@@ -10,7 +10,7 @@ The config package intentionally has four files:
 
 | File | Responsibility |
 |---|---|
-| `document.rs` | `ConfigDocument`, nested v3 serde schema, and defaults |
+| `document.rs` | `ConfigDocument`, nested v3 serde schema, defaults, and bound secret source |
 | `fields.rs` | one canonical catalog for typed field requests and CLI list/get/set |
 | `store.rs` | platform path discovery plus fail-closed load and atomic save |
 | `src/core/config.rs` | facade, config errors, and secret-safe value types |
@@ -28,11 +28,17 @@ working directory. Writes use a temporary file in the destination directory foll
 publication. `ConfigStore::load` is the single read and parse path: `None` distinguishes a missing
 file, `Some` carries a loaded document, and malformed or unreadable files remain errors.
 
-`EnvironmentSecretSource` is consulted only for a requested API-key field (`TRANSCRIPTION_API_KEY` or `POST_PROCESS_API_KEY`). Environment values override disk secrets but are never copied into `ConfigDocument`; CLI output reports only `unset`, `disk`, `environment`, or `environment overrides disk`.
+`ConfigDocument::new(source)` creates default settings with an owned secret source.
+Default construction and loading bind `EnvironmentSecretSource`.
+Clones share that source, which is omitted from serialization, debug output, and document
+equality. Reads stay lazy: only requested API-key fields consult `TRANSCRIPTION_API_KEY` or
+`POST_PROCESS_API_KEY`. Environment values override disk secrets without entering the persisted
+fields; CLI output reports only `unset`, `disk`, `environment`, or `environment overrides disk`.
+The setup wizard uses the same bound source to report credential overrides.
 
 ## Caller-declared field selection
 
-`ConfigDocument::select(fields, secrets, build)` reads a typed field selector or a tuple of
+`ConfigDocument::select(fields, build)` reads a typed field selector or a tuple of
 selectors, then passes exactly those values to the caller's constructor. Its generic return
 value can be a caller-owned configuration or a construction result; the configuration package
 imports neither type. One field catalog generates the selectors, dotted names, writability,

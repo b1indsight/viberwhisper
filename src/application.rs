@@ -10,9 +10,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::core::cli::{Cli, Commands, ConfigAction};
-use crate::core::config::{
-    ConfigDocument, ConfigStore, EnvironmentSecretSource, SecretSource, fields,
-};
+use crate::core::config::{ConfigDocument, ConfigStore, fields};
 use crate::{audio, postprocess, text, transcriber};
 
 /// Settings consumed by offline transcription and final text cleanup.
@@ -24,15 +22,11 @@ struct ConvertConfig {
 }
 
 impl ConvertConfig {
-    fn from_config(document: &ConfigDocument, secrets: &dyn SecretSource) -> Result<Self> {
+    fn from_config(document: &ConfigDocument) -> Result<Self> {
         Ok(Self {
-            transcriber: transcriber::TranscriberConfig::from_config(document, secrets)?,
-            post_process: postprocess::PostProcessConfig::from_config(document, secrets)?,
-            language: document.select(
-                fields::TranscriptionLanguage,
-                secrets,
-                std::convert::identity,
-            ),
+            transcriber: transcriber::TranscriberConfig::from_config(document)?,
+            post_process: postprocess::PostProcessConfig::from_config(document)?,
+            language: document.select(fields::TranscriptionLanguage, std::convert::identity),
         })
     }
 }
@@ -122,30 +116,29 @@ fn handle_config(action: ConfigAction) -> Result<()> {
     }
 
     let mut document = store.load()?.unwrap_or_default();
-    let secrets = EnvironmentSecretSource;
     match action {
         ConfigAction::Path => unreachable!(),
         ConfigAction::Check => {
-            listener::ListenerConfig::from_config(&document, &secrets)?;
+            listener::ListenerConfig::from_config(&document)?;
             println!("Configuration loaded successfully.");
         }
         ConfigAction::List => {
             println!("{:<48} Value", "Key");
             println!("{}", "-".repeat(80));
             for key in ConfigDocument::field_keys() {
-                let value = document.get_field(key.as_str(), &secrets)?;
+                let value = document.get_field(key.as_str())?;
                 println!("{:<48} {}", key.as_str(), value);
             }
         }
         ConfigAction::Get { key } => {
-            println!("{}", document.get_field(&key, &secrets)?);
+            println!("{}", document.get_field(&key)?);
         }
         ConfigAction::Set { key, value } => {
             let mut candidate = document.clone();
             candidate.set_field(&key, &value)?;
             store.save(&candidate)?;
             document = candidate;
-            let displayed = document.get_field(&key, &secrets)?;
+            let displayed = document.get_field(&key)?;
             println!("Set {key} = {displayed}");
         }
     }
@@ -160,7 +153,7 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
     info!(input, "Transcribing audio file");
 
     let (_, document) = load_config()?;
-    let config = ConvertConfig::from_config(&document, &EnvironmentSecretSource)?;
+    let config = ConvertConfig::from_config(&document)?;
     let transcriber = ApiTranscriber::new(config.transcriber)?;
     let post_processor = PostProcessor::new(config.post_process);
 
@@ -207,6 +200,7 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::SecretSource;
 
     // Keep this fixture local; application/listener.rs uses the same no-secret test setup.
     struct EmptySecrets;
@@ -219,7 +213,7 @@ mod tests {
 
     #[test]
     fn api_configuration_defers_model_and_protocol_checks_to_requests() {
-        let mut document = ConfigDocument::default();
+        let mut document = ConfigDocument::new(EmptySecrets);
         document.inference.api.transcription.api_url = "file:///transcriptions".to_string();
         document.inference.api.transcription.model.clear();
         document.post_process.enabled = true;
@@ -227,7 +221,7 @@ mod tests {
         document.inference.api.post_process.model = Some(String::new());
         // Configuration constructs typed settings; HTTP transport and API model errors
         // belong to the request that uses them, including when cleanup is enabled.
-        let config = ConvertConfig::from_config(&document, &EmptySecrets).unwrap();
+        let config = ConvertConfig::from_config(&document).unwrap();
         assert!(config.transcriber.metadata().model.is_empty());
         assert!(matches!(
             config.post_process,
@@ -237,7 +231,7 @@ mod tests {
 
     #[test]
     fn conversion_settings_ignore_hotkeys_and_allow_unauthenticated_endpoints() {
-        let mut document = ConfigDocument::default();
+        let mut document = ConfigDocument::new(EmptySecrets);
         document.input.hold_hotkey = "not a hotkey".to_string();
         document.inference.api.transcription.api_url =
             "http://127.0.0.1:8080/v1/audio/transcriptions".to_string();
@@ -247,7 +241,7 @@ mod tests {
             Some("http://127.0.0.1:8080/v1/chat/completions".to_string());
         document.inference.api.post_process.model = Some("local-model".to_string());
         // WAV conversion uses STT and cleanup, without requiring a valid desktop hotkey binding.
-        let config = ConvertConfig::from_config(&document, &EmptySecrets).unwrap();
+        let config = ConvertConfig::from_config(&document).unwrap();
         assert_eq!(config.language.as_deref(), Some("zh"));
         assert_eq!(
             config.transcriber.metadata().language.as_deref(),

@@ -1,10 +1,14 @@
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use super::{EnvironmentSecretSource, SecretSource};
+
 const DEFAULT_TRANSCRIPTION_API_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Persisted configuration with a lazily consulted secret source, shared by clones.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigDocument {
     #[serde(deserialize_with = "deserialize_schema_version")]
@@ -14,10 +18,24 @@ pub struct ConfigDocument {
     pub(crate) transcription: TranscriptionSection,
     pub(crate) post_process: PostProcessSection,
     pub(crate) inference: InferenceSection,
+    #[serde(skip, default = "default_secrets")]
+    pub(super) secrets: Arc<dyn SecretSource>,
+}
+
+fn default_secrets() -> Arc<dyn SecretSource> {
+    Arc::new(EnvironmentSecretSource)
 }
 
 impl Default for ConfigDocument {
     fn default() -> Self {
+        Self::new(EnvironmentSecretSource)
+    }
+}
+
+impl ConfigDocument {
+    /// Creates default configuration bound to an owned source without reading credentials.
+    /// Default construction and deserialization otherwise use environment variables.
+    pub fn new(secrets: impl SecretSource + 'static) -> Self {
         Self {
             schema_version: 3,
             input: InputSection::default(),
@@ -25,17 +43,42 @@ impl Default for ConfigDocument {
             transcription: TranscriptionSection::default(),
             post_process: PostProcessSection::default(),
             inference: InferenceSection::default(),
+            secrets: Arc::new(secrets),
         }
     }
-}
 
-impl ConfigDocument {
     pub(crate) fn set_transcription_api_key(&mut self, value: Option<String>) {
         self.inference.api.transcription.api_key = value;
     }
 
     pub(crate) fn set_post_process_api_key(&mut self, value: Option<String>) {
         self.inference.api.post_process.api_key = value;
+    }
+}
+
+impl fmt::Debug for ConfigDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConfigDocument")
+            .field("schema_version", &self.schema_version)
+            .field("input", &self.input)
+            .field("audio", &self.audio)
+            .field("transcription", &self.transcription)
+            .field("post_process", &self.post_process)
+            .field("inference", &self.inference)
+            .finish_non_exhaustive()
+    }
+}
+
+// Equality describes the persisted document, independently of its runtime source.
+impl PartialEq for ConfigDocument {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.input == other.input
+            && self.audio == other.audio
+            && self.transcription == other.transcription
+            && self.post_process == other.post_process
+            && self.inference == other.inference
     }
 }
 

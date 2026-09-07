@@ -25,7 +25,7 @@ impl ConfigStore {
         &self.path
     }
 
-    /// Loads the persisted document, returning `None` when the file does not exist.
+    /// Loads the document with environment-backed secrets, or `None` for a missing file.
     pub fn load(&self) -> Result<Option<ConfigDocument>, ConfigError> {
         let contents = match fs::read_to_string(&self.path) {
             Ok(contents) => contents,

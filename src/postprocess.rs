@@ -1,6 +1,6 @@
 mod llm;
 
-use crate::core::config::{ApiAuth, ConfigDocument, SecretSource, fields};
+use crate::core::config::{ApiAuth, ConfigDocument, fields};
 use anyhow::Context;
 use llm::LlmPostProcessor;
 use std::fmt;
@@ -24,11 +24,8 @@ pub enum PostProcessConfig {
 
 impl PostProcessConfig {
     /// Resolves enabled post-processing without consulting unused LLM fields when disabled.
-    pub(crate) fn from_config(
-        document: &ConfigDocument,
-        secrets: &dyn SecretSource,
-    ) -> anyhow::Result<Self> {
-        if !document.select(fields::PostProcessEnabled, secrets, std::convert::identity) {
+    pub(crate) fn from_config(document: &ConfigDocument) -> anyhow::Result<Self> {
+        if !document.select(fields::PostProcessEnabled, std::convert::identity) {
             return Ok(Self::Disabled);
         }
         document.select(
@@ -40,7 +37,6 @@ impl PostProcessConfig {
                 fields::PostProcessTemperature,
                 fields::PostProcessPreheatEnabled,
             ),
-            secrets,
             |(endpoint, key, model, prompt, temperature, preheat_enabled)| {
                 let endpoint = endpoint.context(
                     "inference.api.post_process.api_url is required when cleanup is enabled",
@@ -191,6 +187,7 @@ impl TextPostProcessorSession for NoopSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::SecretSource;
 
     #[test]
     fn test_noop_process() {
@@ -216,12 +213,12 @@ mod tests {
                 panic!("disabled cleanup must not resolve API credentials");
             }
         }
-        let mut document = ConfigDocument::default();
+        let mut document = ConfigDocument::new(NoSecrets);
         document.post_process.enabled = false;
         document.inference.api.post_process.api_url = Some("not a URL".to_string());
         // Turning cleanup off must bypass stale endpoint settings and secret providers.
         assert!(matches!(
-            PostProcessConfig::from_config(&document, &NoSecrets),
+            PostProcessConfig::from_config(&document),
             Ok(PostProcessConfig::Disabled)
         ));
     }

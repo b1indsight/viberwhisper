@@ -16,7 +16,10 @@ use tinyfiledialogs::{MessageBoxIcon, YesNo};
 
 use super::listener::ListenerConfig;
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
-use crate::core::config::{ConfigDocument, ConfigStore, EnvironmentSecretSource, SecretSource};
+use crate::core::config::{
+    ConfigDocument, ConfigStore,
+    fields::{self, SecretStatus},
+};
 use crate::postprocess::PostProcessor;
 use crate::session::SessionId;
 use crate::transcriber::{ApiTranscriber, Transcriber};
@@ -135,7 +138,7 @@ pub(super) fn run_explicit() -> AnyhowResult<()> {
 }
 
 fn resolve_document(document: &ConfigDocument) -> AnyhowResult<ListenerConfig> {
-    ListenerConfig::from_config(document, &EnvironmentSecretSource)
+    ListenerConfig::from_config(document)
 }
 
 enum WizardOutcome {
@@ -250,8 +253,7 @@ impl SetupVerifier for NativeVerifier {
         document: &ConfigDocument,
         _ui: &mut dyn SetupUi,
     ) -> Result<VerificationResult, String> {
-        let config = ListenerConfig::from_config(document, &EnvironmentSecretSource)
-            .map_err(|error| format!("{error:#}"))?;
+        let config = ListenerConfig::from_config(document).map_err(|error| format!("{error:#}"))?;
         let transcriber =
             ApiTranscriber::new(config.recording.transcriber).map_err(|error| error.to_string())?;
         let post_processor = PostProcessor::new(config.post_process);
@@ -352,10 +354,12 @@ fn run_wizard(
     };
     document.inference.api.transcription.model = model;
 
-    let stt_key_message = if EnvironmentSecretSource
-        .get("TRANSCRIPTION_API_KEY")
-        .is_some()
-    {
+    let stt_key_message = if document.select(fields::ApiTranscriptionKey, |key| {
+        matches!(
+            key.status,
+            SecretStatus::Environment | SecretStatus::EnvironmentOverridesDisk
+        )
+    }) {
         "已检测到 TRANSCRIPTION_API_KEY 环境变量。留空即可使用它，输入新值只会保存为备用磁盘密钥。"
     } else {
         "请输入 STT API Key。留空会保留已有磁盘密钥，也可使用 TRANSCRIPTION_API_KEY 环境变量。"
@@ -393,10 +397,12 @@ fn run_wizard(
             return Ok(WizardOutcome::Cancelled);
         };
         document.inference.api.post_process.model = Some(model);
-        let post_key_message = if EnvironmentSecretSource
-            .get("POST_PROCESS_API_KEY")
-            .is_some()
-        {
+        let post_key_message = if document.select(fields::ApiPostProcessKey, |key| {
+            matches!(
+                key.status,
+                SecretStatus::Environment | SecretStatus::EnvironmentOverridesDisk
+            )
+        }) {
             "已检测到 POST_PROCESS_API_KEY 环境变量。留空即可使用它，输入新值只会保存为备用磁盘密钥。"
         } else {
             "请输入 LLM API Key。留空会保留已有磁盘密钥，也可使用 POST_PROCESS_API_KEY 环境变量。"
@@ -721,7 +727,8 @@ mod tests {
             self.inputs.pop_front().unwrap()
         }
 
-        fn password(&mut self, _message: &str) -> Option<String> {
+        fn password(&mut self, message: &str) -> Option<String> {
+            self.messages.push(message.to_string());
             self.passwords.pop_front().unwrap()
         }
 
@@ -794,17 +801,32 @@ mod tests {
 
     #[test]
     fn confirmed_wizard_saves_the_selected_configuration() {
+        struct WizardSecrets;
+        impl crate::core::config::SecretSource for WizardSecrets {
+            fn get(&self, name: &str) -> Option<String> {
+                match name {
+                    "TRANSCRIPTION_API_KEY" => Some("stt-environment-token".to_string()),
+                    "POST_PROCESS_API_KEY" => Some("cleanup-environment-token".to_string()),
+                    _ => panic!("unexpected secret lookup: {name}"),
+                }
+            }
+        }
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("config.json");
         let store = ConfigStore::at(path.clone());
         let mut ui = ScriptedUi {
-            confirms: VecDeque::from([false, true, false, true]),
+            confirms: VecDeque::from([true, true, false, true]),
             inputs: VecDeque::from([
                 Some("https://example.com/v1/audio/transcriptions".to_string()),
                 Some("whisper-test".to_string()),
+                Some("https://example.com/v1/chat/completions".to_string()),
+                Some("cleanup-test".to_string()),
                 Some("2".to_string()),
             ]),
-            passwords: VecDeque::from([Some("disk-secret".to_string())]),
+            passwords: VecDeque::from([
+                Some("disk-secret".to_string()),
+                Some("cleanup-disk-secret".to_string()),
+            ]),
             captures: VecDeque::new(),
             messages: Vec::new(),
             confirm_messages: Vec::new(),
@@ -812,7 +834,7 @@ mod tests {
 
         let outcome = run_wizard(
             &store,
-            ConfigDocument::default(),
+            ConfigDocument::new(WizardSecrets),
             Ok(vec!["Built-in Mic".to_string(), "USB Mic".to_string()]),
             &mut ui,
             &mut UnexpectedVerifier,
@@ -825,6 +847,14 @@ mod tests {
         assert_eq!(document.audio.input_device.as_deref(), Some("USB Mic"));
         assert_eq!(document.input.hold_hotkey, "F8");
         assert_eq!(document.input.toggle_hotkey, "F9");
+        // The wizard must use the document's source for both credential prompts,
+        // independent of the process environment, and keep entered disk backups.
+        assert!(ui.messages.iter().any(|message| {
+            message.starts_with("已检测到 TRANSCRIPTION_API_KEY 环境变量")
+        }));
+        assert!(ui.messages.iter().any(|message| {
+            message.starts_with("已检测到 POST_PROCESS_API_KEY 环境变量")
+        }));
         assert_eq!(store.load().unwrap(), Some(*document));
         assert!(path.exists());
     }

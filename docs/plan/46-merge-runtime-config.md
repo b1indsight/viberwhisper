@@ -3,9 +3,10 @@
 ## Status
 
 The user approved field-driven configuration after the initial module consolidation in PR #125.
-The field-driven implementation was reviewed and published on PR #125. The user requested
-publication of the follow-up that removes separate consumer validation passes. Implementation
-and local validation are complete; review and hosted CI results are tracked on the same PR.
+Typed field selection and direct consumer construction are published on PR #125. The user
+approved binding secret sources to `ConfigDocument` and requested publication; this follow-up
+is implemented and validated locally. Independent review and hosted CI results
+are tracked on the same PR for each published change.
 Base: `master` at `bef71a4e` (PR #123).
 
 ## Problem and outcome
@@ -26,7 +27,6 @@ removed.
 pub fn select<R: FieldRequest, T>(
     &self,
     fields: R,
-    secrets: &dyn SecretSource,
     build: impl FnOnce(R::Values) -> T,
 ) -> T;
 ```
@@ -41,6 +41,13 @@ The existing field catalog generates dotted names, writability metadata, typed s
 and CLI reads from one set of value readers. Secret selections combine environment overrides
 with disk values; authentication remains redacted, and CLI reads expose only source status.
 Only requested fields and their associated secret sources are consulted.
+
+`ConfigDocument::new(source)` creates default settings bound to an owned, injectable secret
+source. Default construction and deserialization use `EnvironmentSecretSource`. Clones
+retain that source. Serialization and document
+equality cover only persisted fields, and debug output omits the source. Field readers keep
+the existing typed catalog and resolve API keys through the document, so consumers no longer
+pass a source through their constructors. No additional routing table is needed.
 
 ## Ownership
 
@@ -87,11 +94,14 @@ without starting services and does not guarantee that API requests will succeed.
   were not implemented, then made them pass with typed requests.
 - Updated behavior tests first: direct API configuration and first-error propagation initially
   failed under the old validation pass, then passed after switching to direct construction.
+- Added source-binding tests before implementation, then covered source retention across clones,
+  unchanged JSON and equality, rejection of runtime source fields in JSON, and setup prompts
+  using the document's injected source for both API keys.
 - Covered caller-owned output types, selective secret reads, environment precedence and
   redaction, STT independence, raw-capture independence, disabled cleanup, offline conversion,
   and first-error propagation. Existing persistence, field-access, hotkey parsing, duplicate-key,
   and platform-policy coverage is retained.
-- `cargo test --locked`: 187 tests passed on macOS.
+- `cargo test --locked`: 189 tests passed on macOS.
 - `cargo fmt --check`, `cargo build --locked`, and
   `cargo clippy --locked --all-targets -- -D warnings`: passed on macOS.
 - Source inspection found no project-module imports in `core::config` or its submodules.

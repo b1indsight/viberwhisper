@@ -1,5 +1,5 @@
 use crate::audio::{WavChunk, contains_audible_window};
-use crate::core::config::{ApiAuth, ConfigDocument, SecretSource, fields};
+use crate::core::config::{ApiAuth, ConfigDocument, fields};
 use crate::transcriber::TranscribeError;
 use anyhow::Context;
 use std::io::Cursor;
@@ -49,10 +49,7 @@ pub(crate) struct TranscriberMetadata {
 
 impl TranscriberConfig {
     /// Builds STT settings from the requested fields, parsing the endpoint into a URL.
-    pub(crate) fn from_config(
-        document: &ConfigDocument,
-        secrets: &dyn SecretSource,
-    ) -> anyhow::Result<Self> {
+    pub(crate) fn from_config(document: &ConfigDocument) -> anyhow::Result<Self> {
         document.select(
             (
                 fields::ApiTranscriptionUrl,
@@ -62,7 +59,6 @@ impl TranscriberConfig {
                 fields::TranscriptionPrompt,
                 fields::TranscriptionTemperature,
             ),
-            secrets,
             |(endpoint, key, model, language, prompt, temperature)| {
                 Ok(Self {
                     endpoint: reqwest::Url::parse(&endpoint)
@@ -561,13 +557,13 @@ mod tests {
                 None
             }
         }
-        let mut document = crate::core::config::ConfigDocument::default();
+        let mut document = crate::core::config::ConfigDocument::new(SttSecrets);
         document.input.hold_hotkey = "not a hotkey".to_string();
         document.post_process.enabled = true;
         document.inference.api.post_process.api_url = Some("not a URL".to_string());
         document.transcription.language = Some("zh".to_string());
         // A prompt-lab STT run must work even when unrelated desktop/cleanup settings are invalid.
-        let config = TranscriberConfig::from_config(&document, &SttSecrets).unwrap();
+        let config = TranscriberConfig::from_config(&document).unwrap();
         assert_eq!(config.metadata().language.as_deref(), Some("zh"));
     }
 }

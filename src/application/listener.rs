@@ -4,7 +4,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use crate::audio::AudioConfig;
-use crate::core::config::{ConfigDocument, InputSection, SecretSource, fields};
+use crate::core::config::{ConfigDocument, InputSection, fields};
 use crate::core::orchestrator::OrchestratorConfig;
 use crate::core::recording_session::{RecordingState, SessionEvent};
 use crate::history::{HistoryStore, HistoryTyper};
@@ -27,13 +27,9 @@ pub(super) struct RecordingConfig {
 }
 
 impl RecordingConfig {
-    pub(super) fn from_config(
-        document: &ConfigDocument,
-        secrets: &dyn SecretSource,
-    ) -> Result<Self> {
+    pub(super) fn from_config(document: &ConfigDocument) -> Result<Self> {
         let hotkeys = document.select(
             (fields::InputHoldHotkey, fields::InputToggleHotkey),
-            secrets,
             |(hold_hotkey, toggle_hotkey)| {
                 crate::platform::hotkey_config(&InputSection {
                     hold_hotkey,
@@ -43,13 +39,9 @@ impl RecordingConfig {
         )?;
         Ok(Self {
             hotkeys,
-            audio: AudioConfig::from_config(document, secrets),
-            orchestrator: document.select(
-                fields::TranscriptionLanguage,
-                secrets,
-                OrchestratorConfig::new,
-            ),
-            transcriber: TranscriberConfig::from_config(document, secrets)?,
+            audio: AudioConfig::from_config(document),
+            orchestrator: document.select(fields::TranscriptionLanguage, OrchestratorConfig::new),
+            transcriber: TranscriberConfig::from_config(document)?,
         })
     }
 }
@@ -62,13 +54,10 @@ pub(super) struct ListenerConfig {
 }
 
 impl ListenerConfig {
-    pub(super) fn from_config(
-        document: &ConfigDocument,
-        secrets: &dyn SecretSource,
-    ) -> Result<Self> {
+    pub(super) fn from_config(document: &ConfigDocument) -> Result<Self> {
         Ok(Self {
-            recording: RecordingConfig::from_config(document, secrets)?,
-            post_process: PostProcessConfig::from_config(document, secrets)?,
+            recording: RecordingConfig::from_config(document)?,
+            post_process: PostProcessConfig::from_config(document)?,
         })
     }
 }
@@ -270,25 +259,25 @@ mod tests {
 
     #[test]
     fn raw_capture_settings_ignore_invalid_cleanup_configuration() {
-        let mut document = ConfigDocument::default();
+        let mut document = ConfigDocument::new(EmptySecrets);
         document.post_process.enabled = true;
         document.inference.api.post_process.api_url = Some("not a URL".to_string());
         // Dataset capture archives raw STT, so an incomplete cleanup setup must not block it.
-        let config = RecordingConfig::from_config(&document, &EmptySecrets).unwrap();
+        let config = RecordingConfig::from_config(&document).unwrap();
         assert_eq!(config.hotkeys.hold_label.as_deref(), Some("F8"));
-        assert!(ListenerConfig::from_config(&document, &EmptySecrets).is_err());
+        assert!(ListenerConfig::from_config(&document).is_err());
     }
 
     #[test]
     fn listener_reports_the_first_construction_error() {
-        let mut document = ConfigDocument::default();
+        let mut document = ConfigDocument::new(EmptySecrets);
         document.input.hold_hotkey = "not a hotkey".to_string();
         document.inference.api.transcription.api_url = "not a URL".to_string();
         document.inference.api.transcription.model.clear();
         document.post_process.enabled = true;
         // Startup stops where settings cannot be constructed instead of running
         // a separate pass over every unrelated configuration error.
-        let error = ListenerConfig::from_config(&document, &EmptySecrets).unwrap_err();
+        let error = ListenerConfig::from_config(&document).unwrap_err();
         assert!(error.to_string().starts_with("input.hold_hotkey:"));
     }
 }
