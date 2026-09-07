@@ -166,7 +166,7 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
     for chunk in chunk_reader.chunks() {
         chunk_texts.push(transcriber.transcribe(&chunk?)?);
     }
-    let stt_text = text::merge_texts(&chunk_texts, config.language.as_deref());
+    let stt_text = text::merge_texts(&chunk_texts, config.language.clone());
     let text = if stt_text.is_empty() {
         stt_text
     } else {

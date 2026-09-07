@@ -39,23 +39,20 @@ impl OrchestratorConfig {
     }
 }
 
+/// A start request rejected because another session is still active.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionStartError {
-    ActiveSession {
-        requested: SessionId,
-        active: SessionId,
-    },
+pub struct SessionStartError {
+    pub requested: SessionId,
+    pub active: SessionId,
 }
 
 impl fmt::Display for SessionStartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ActiveSession { requested, active } => write!(
-                f,
-                "cannot start session {} while session {} is active",
-                requested.0, active.0
-            ),
-        }
+        write!(
+            f,
+            "cannot start session {} while session {} is active",
+            self.requested.0, self.active.0
+        )
     }
 }
 
@@ -176,7 +173,7 @@ enum WorkerEvent {
 
 struct ActiveSessionInner {
     session_id: SessionId,
-    chunks: Vec<ChunkEntry>,
+    chunk_entries: Vec<ChunkEntry>,
     chunk_tx: mpsc::SyncSender<WorkerMsg>,
     result_rx: mpsc::Receiver<WorkerEvent>,
     worker: thread::JoinHandle<()>,
@@ -220,7 +217,7 @@ impl SessionOrchestrator {
     pub fn start_session(&self, session_id: SessionId) -> Result<(), SessionStartError> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(active) = inner.as_ref() {
-            return Err(SessionStartError::ActiveSession {
+            return Err(SessionStartError {
                 requested: session_id,
                 active: active.session_id,
             });
@@ -239,7 +236,7 @@ impl SessionOrchestrator {
 
         *inner = Some(ActiveSessionInner {
             session_id,
-            chunks: Vec::new(),
+            chunk_entries: Vec::new(),
             chunk_tx,
             result_rx,
             worker,
@@ -251,18 +248,18 @@ impl SessionOrchestrator {
         Ok(())
     }
 
-    /// Submit one in-memory WAV chunk for background transcription.
-    pub fn on_chunk_ready(
-        &self,
-        session_id: SessionId,
-        chunk: WavChunk,
-    ) -> Result<usize, SessionRoutingError> {
+    /// Register a ready chunk and attempt non-blocking submission to the worker.
+    ///
+    /// Invalid session notifications are logged and ignored. Submission failures
+    /// are retained as failed entries and reported by `finish_session`.
+    pub fn on_chunk_ready(&self, session_id: SessionId, chunk: WavChunk) {
         let mut inner = self.inner.lock().unwrap();
         let Some(session) = inner.as_mut() else {
-            warn!("Chunk arrived without an active session");
-            return Err(SessionRoutingError::NoActiveSession {
-                requested: session_id,
-            });
+            warn!(
+                session_id = session_id.0,
+                "Chunk arrived without an active session"
+            );
+            return;
         };
         if session.session_id != session_id {
             let active = session.session_id;
@@ -271,38 +268,33 @@ impl SessionOrchestrator {
                 active = active.0,
                 "Rejecting stale chunk"
             );
-            return Err(SessionRoutingError::SessionMismatch {
-                requested: session_id,
-                active,
-            });
+            return;
         }
 
         let index = session.next_index;
         session.next_index += 1;
 
-        session.chunks.push(ChunkEntry {
-            index,
-            state: ChunkState::Flushed,
-        });
-
-        if let Err(e) = session.chunk_tx.try_send(WorkerMsg::Chunk { index, chunk }) {
+        let state = if let Err(e) = session.chunk_tx.try_send(WorkerMsg::Chunk { index, chunk }) {
             let message = match e {
                 mpsc::TrySendError::Full(_) => "worker queue full",
                 mpsc::TrySendError::Disconnected(_) => "worker channel closed",
             };
             error!(
+                session_id = session_id.0,
+                index,
                 error = message,
                 "Failed to enqueue chunk; marking as failed"
             );
-            if let Some(entry) = session.chunks.iter_mut().find(|e| e.index == index) {
-                entry.state = ChunkState::Failed(TranscribeError::Network(message.to_string()));
-            }
+            ChunkState::Failed(TranscribeError::Network(message.to_string()))
         } else {
             info!(index = index, "Chunk enqueued for background transcription");
-        }
+            ChunkState::Flushed
+        };
+        session.chunk_entries.push(ChunkEntry { index, state });
 
-        drain_worker_events(session);
-        Ok(index)
+        while let Ok(event) = session.result_rx.try_recv() {
+            apply_worker_event(&mut session.chunk_entries, event);
+        }
     }
 
     /// Stop the current session and block until all chunks reach a terminal state
@@ -348,23 +340,23 @@ impl SessionOrchestrator {
         // covers the entire shutdown rather than starting after a blocking send.
         drop(session.chunk_tx);
 
-        let mut chunks = session.chunks;
+        let mut chunk_entries = session.chunk_entries;
         let result_rx = session.result_rx;
         let worker = session.worker;
         let deadline = Instant::now() + self.convergence_timeout;
         let mut timed_out = false;
 
         loop {
-            if chunks.iter().all(|entry| entry.state.is_terminal()) {
+            if chunk_entries.iter().all(|entry| entry.state.is_terminal()) {
                 break;
             }
 
             let remaining = deadline.saturating_duration_since(Instant::now());
             match result_rx.recv_timeout(remaining) {
-                Ok(event) => apply_worker_event(&mut chunks, event),
+                Ok(event) => apply_worker_event(&mut chunk_entries, event),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     timed_out = true;
-                    let pending_count = chunks
+                    let pending_count = chunk_entries
                         .iter()
                         .filter(|entry| !entry.state.is_terminal())
                         .count();
@@ -372,7 +364,7 @@ impl SessionOrchestrator {
                         pending_count = pending_count,
                         "Convergence timeout; marking pending chunks as Failed(Timeout)"
                     );
-                    for entry in &mut chunks {
+                    for entry in &mut chunk_entries {
                         if !entry.state.is_terminal() {
                             entry.state = ChunkState::Failed(TranscribeError::Timeout);
                         }
@@ -382,7 +374,7 @@ impl SessionOrchestrator {
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     let error =
                         TranscribeError::Network("worker result channel closed".to_string());
-                    for entry in &mut chunks {
+                    for entry in &mut chunk_entries {
                         if !entry.state.is_terminal() {
                             entry.state = ChunkState::Failed(error.clone());
                         }
@@ -397,23 +389,23 @@ impl SessionOrchestrator {
             let _ = worker.join();
         } else {
             // Drop the handle without joining — the worker may still be mid-request.
-            // It only owns the result sender, so it cannot retain or mutate `chunks`.
+            // It only owns the result sender, so it cannot retain or mutate `chunk_entries`.
             drop(worker);
         }
 
         if timed_out {
-            let texts = collect_transcribed_texts(&chunks);
-            let pending_count = chunks
+            let texts = collect_transcribed_texts(&chunk_entries);
+            let pending_count = chunk_entries
                 .iter()
                 .filter(|entry| matches!(entry.state, ChunkState::Failed(TranscribeError::Timeout)))
                 .count();
             return Err(SessionError::ConvergenceTimeout {
                 pending_count,
-                partial_text: merge_texts(&texts, self.language.as_deref()),
+                partial_text: merge_texts(&texts, self.language.clone()),
             });
         }
 
-        collect_results(&chunks, self.language.as_deref())
+        collect_results(&chunk_entries, self.language.clone())
     }
 
     pub fn abort_session(&self, session_id: SessionId) -> Result<(), SessionRoutingError> {
@@ -480,64 +472,45 @@ fn worker_loop(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-fn drain_worker_events(session: &mut ActiveSessionInner) {
-    while let Ok(event) = session.result_rx.try_recv() {
-        apply_worker_event(&mut session.chunks, event);
-    }
-}
-
-fn apply_worker_event(chunks: &mut [ChunkEntry], event: WorkerEvent) {
+fn apply_worker_event(chunk_entries: &mut [ChunkEntry], event: WorkerEvent) {
     match event {
         WorkerEvent::UploadStarted { index } => {
-            if let Some(entry) = chunks.iter_mut().find(|entry| entry.index == index) {
-                begin_upload(entry);
+            if let Some(entry) = chunk_entries.iter_mut().find(|entry| entry.index == index) {
+                if matches!(entry.state, ChunkState::Flushed) {
+                    entry.state = ChunkState::Uploading;
+                } else {
+                    debug!(
+                        index,
+                        "Ignoring upload event for chunk that is no longer flushed"
+                    );
+                }
             }
         }
         WorkerEvent::Completed { index, result } => {
-            if let Some(entry) = chunks.iter_mut().find(|entry| entry.index == index) {
-                record_worker_result(entry, result);
+            if let Some(entry) = chunk_entries.iter_mut().find(|entry| entry.index == index) {
+                // A timeout is terminal: late completion must not rewrite the
+                // snapshot that finalization reports to the caller.
+                if entry.state.is_terminal() {
+                    debug!(index, "Ignoring late result for terminal chunk");
+                    return;
+                }
+                entry.state = match result {
+                    Ok(text) => {
+                        info!(index, "Chunk transcribed successfully");
+                        ChunkState::Transcribed(text)
+                    }
+                    Err(e) => {
+                        error!(index, error = %e, "Chunk transcription failed");
+                        ChunkState::Failed(e)
+                    }
+                };
             }
         }
     }
 }
 
-fn record_worker_result(entry: &mut ChunkEntry, result: Result<String, TranscribeError>) {
-    // A convergence timeout is terminal from the caller's perspective. A late
-    // worker event must not rewrite the snapshot used for the timeout result.
-    if entry.state.is_terminal() {
-        debug!(
-            index = entry.index,
-            "Ignoring late result for terminal chunk"
-        );
-        return;
-    }
-
-    entry.state = match result {
-        Ok(text) => {
-            info!(index = entry.index, "Chunk transcribed successfully");
-            ChunkState::Transcribed(text)
-        }
-        Err(e) => {
-            error!(index = entry.index, error = %e, "Chunk transcription failed");
-            ChunkState::Failed(e)
-        }
-    };
-}
-
-fn begin_upload(entry: &mut ChunkEntry) -> bool {
-    if !matches!(entry.state, ChunkState::Flushed) {
-        debug!(
-            index = entry.index,
-            "Ignoring upload event for chunk that is no longer flushed"
-        );
-        return false;
-    }
-    entry.state = ChunkState::Uploading;
-    true
-}
-
-fn collect_transcribed_texts(chunks: &[ChunkEntry]) -> Vec<String> {
-    let mut ordered: Vec<&ChunkEntry> = chunks.iter().collect();
+fn collect_transcribed_texts(chunk_entries: &[ChunkEntry]) -> Vec<String> {
+    let mut ordered: Vec<&ChunkEntry> = chunk_entries.iter().collect();
     ordered.sort_by_key(|e| e.index);
     ordered
         .iter()
@@ -551,8 +524,11 @@ fn collect_transcribed_texts(chunks: &[ChunkEntry]) -> Vec<String> {
         .collect()
 }
 
-fn collect_results(chunks: &[ChunkEntry], language: Option<&str>) -> Result<String, SessionError> {
-    let mut ordered: Vec<&ChunkEntry> = chunks.iter().collect();
+fn collect_results(
+    chunk_entries: &[ChunkEntry],
+    language: Option<String>,
+) -> Result<String, SessionError> {
+    let mut ordered: Vec<&ChunkEntry> = chunk_entries.iter().collect();
     ordered.sort_by_key(|e| e.index);
 
     let mut texts: Vec<String> = Vec::new();
@@ -730,30 +706,30 @@ mod tests {
 
     #[test]
     fn session_applies_worker_state_transitions() {
-        let mut chunks = vec![ChunkEntry {
+        let mut chunk_entries = vec![ChunkEntry {
             index: 3,
             state: ChunkState::Flushed,
         }];
 
-        apply_worker_event(&mut chunks, WorkerEvent::UploadStarted { index: 3 });
-        assert!(matches!(chunks[0].state, ChunkState::Uploading));
+        apply_worker_event(&mut chunk_entries, WorkerEvent::UploadStarted { index: 3 });
+        assert!(matches!(chunk_entries[0].state, ChunkState::Uploading));
 
         apply_worker_event(
-            &mut chunks,
+            &mut chunk_entries,
             WorkerEvent::Completed {
                 index: 3,
                 result: Ok("done".to_string()),
             },
         );
         assert!(matches!(
-            chunks[0].state,
+            chunk_entries[0].state,
             ChunkState::Transcribed(ref text) if text == "done"
         ));
     }
 
     #[test]
     fn multi_chunk_results_remain_index_ordered() {
-        let mut chunks = vec![
+        let mut chunk_entries = vec![
             ChunkEntry {
                 index: 0,
                 state: ChunkState::Flushed,
@@ -765,14 +741,14 @@ mod tests {
         ];
 
         apply_worker_event(
-            &mut chunks,
+            &mut chunk_entries,
             WorkerEvent::Completed {
                 index: 1,
                 result: Ok("second".to_string()),
             },
         );
         apply_worker_event(
-            &mut chunks,
+            &mut chunk_entries,
             WorkerEvent::Completed {
                 index: 0,
                 result: Ok("first".to_string()),
@@ -780,7 +756,7 @@ mod tests {
         );
 
         assert_eq!(
-            collect_results(&chunks, Some("en")).unwrap(),
+            collect_results(&chunk_entries, Some("en".into())).unwrap(),
             "first second"
         );
     }
@@ -843,7 +819,7 @@ mod tests {
         let orch = default_orchestrator(t);
 
         orch.start_session(SessionId(1)).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
+        orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
@@ -875,11 +851,11 @@ mod tests {
     fn test_chunk_without_active_session_is_rejected() {
         let orch = default_orchestrator(Arc::new(MockTranscriber));
 
-        let result = orch.on_chunk_ready(SessionId(1), test_chunk());
-
+        orch.on_chunk_ready(SessionId(1), test_chunk());
+        orch.start_session(SessionId(2)).unwrap();
         assert!(matches!(
-            result,
-            Err(SessionRoutingError::NoActiveSession { .. })
+            orch.finish_session(SessionId(2)),
+            Err(SessionError::NoChunks)
         ));
     }
 
@@ -897,10 +873,7 @@ mod tests {
 
         orch.start_session(SessionId(1)).unwrap();
         for expected_call in 0..3 {
-            assert_eq!(
-                orch.on_chunk_ready(SessionId(1), test_chunk()).unwrap(),
-                expected_call
-            );
+            orch.on_chunk_ready(SessionId(1), test_chunk());
             assert_eq!(
                 calls.recv_timeout(Duration::from_secs(1)).unwrap(),
                 expected_call
@@ -936,7 +909,7 @@ mod tests {
         let orch = make_orchestrator_with_timeout(t, Duration::from_millis(100));
 
         orch.start_session(SessionId(1)).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
+        orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
         let (lock, condvar) = &*release;
@@ -953,14 +926,14 @@ mod tests {
 
     #[test]
     fn test_timed_out_chunk_cannot_be_overwritten_by_late_worker_result() {
-        let mut chunks = vec![ChunkEntry {
+        let mut chunk_entries = vec![ChunkEntry {
             index: 0,
             state: ChunkState::Failed(TranscribeError::Timeout),
         }];
 
-        apply_worker_event(&mut chunks, WorkerEvent::UploadStarted { index: 0 });
+        apply_worker_event(&mut chunk_entries, WorkerEvent::UploadStarted { index: 0 });
         apply_worker_event(
-            &mut chunks,
+            &mut chunk_entries,
             WorkerEvent::Completed {
                 index: 0,
                 result: Ok("late result".to_string()),
@@ -968,7 +941,7 @@ mod tests {
         );
 
         assert!(matches!(
-            chunks[0].state,
+            chunk_entries[0].state,
             ChunkState::Failed(TranscribeError::Timeout)
         ));
     }
@@ -984,7 +957,7 @@ mod tests {
 
         let started = Instant::now();
         for _ in 0..100 {
-            let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
+            orch.on_chunk_ready(SessionId(1), test_chunk());
         }
 
         assert!(
@@ -992,18 +965,43 @@ mod tests {
             "enqueueing blocked on a full worker queue"
         );
         let inner = orch.inner.lock().unwrap();
-        let chunks = &inner.as_ref().unwrap().chunks;
-        assert!(chunks.iter().any(|entry| matches!(
-            entry.state,
-            ChunkState::Failed(TranscribeError::Network(ref message))
-                if message == "worker queue full"
-        )));
+        let chunk_entries = &inner.as_ref().unwrap().chunk_entries;
+        // When STT falls behind recording, rejected submissions must remain in
+        // the session so finalization cannot silently report complete success.
+        assert_eq!(chunk_entries.len(), 100);
+        let failed_indices: Vec<_> = chunk_entries
+            .iter()
+            .filter_map(|entry| match &entry.state {
+                ChunkState::Failed(TranscribeError::Network(message))
+                    if message == "worker queue full" =>
+                {
+                    Some(entry.index)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!failed_indices.is_empty());
         drop(inner);
 
         let (lock, condvar) = &*release;
         *lock.lock().unwrap() = true;
         condvar.notify_all();
-        let _ = orch.finish_session(SessionId(1));
+        match orch.finish_session(SessionId(1)) {
+            Err(SessionError::PartialFailure {
+                errors,
+                partial_text,
+            }) => {
+                assert_eq!(
+                    errors
+                        .into_iter()
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>(),
+                    failed_indices
+                );
+                assert!(!partial_text.is_empty());
+            }
+            other => panic!("Expected queue failures with partial text, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1012,12 +1010,12 @@ mod tests {
         let orch = default_orchestrator(t);
 
         orch.start_session(SessionId(1)).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
+        orch.on_chunk_ready(SessionId(1), test_chunk());
 
         let error = orch.start_session(SessionId(2)).unwrap_err();
         assert_eq!(
             error,
-            SessionStartError::ActiveSession {
+            SessionStartError {
                 requested: SessionId(2),
                 active: SessionId(1),
             }
@@ -1033,10 +1031,7 @@ mod tests {
         let orch = default_orchestrator(Arc::new(FixedTranscriber("active".into())));
         orch.start_session(SessionId(1)).unwrap();
 
-        assert!(matches!(
-            orch.on_chunk_ready(SessionId(2), test_chunk()),
-            Err(SessionRoutingError::SessionMismatch { .. })
-        ));
+        orch.on_chunk_ready(SessionId(2), test_chunk());
         assert!(matches!(
             orch.finish_session(SessionId(2)),
             Err(SessionError::Routing(
@@ -1067,7 +1062,7 @@ mod tests {
         let orch = default_orchestrator(t);
 
         orch.start_session(SessionId(1)).unwrap();
-        let _ = orch.on_chunk_ready(SessionId(1), test_chunk());
+        orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
         assert!(matches!(result, Err(SessionError::PartialFailure { .. })));
