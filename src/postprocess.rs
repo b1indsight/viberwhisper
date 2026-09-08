@@ -2,8 +2,7 @@ mod llm;
 
 use crate::core::config::{ApiAuth, ConfigDocument, fields};
 use anyhow::Context;
-use llm::LlmPostProcessor;
-pub use llm::{ConservativeLlmSession, PreheatLlmSession};
+pub use llm::{ConservativeLlmSession, LlmPostProcessor, PreheatLlmSession};
 use std::fmt;
 use tracing::warn;
 
@@ -105,12 +104,41 @@ impl From<serde_json::Error> for PostProcessError {
 ///
 /// LLM client construction falls back to pass-through behavior because cleanup
 /// is optional and must not make speech-to-text unavailable.
-pub struct PostProcessor(Box<dyn TextPostProcessor>);
+pub enum PostProcessor {
+    Disabled,
+    Llm(LlmPostProcessor),
+}
 
-/// Text-cleanup behavior selected once from the validated runtime config.
-trait TextPostProcessor: Send + Sync {
-    fn process_text(&self, text: &str) -> Result<String, PostProcessError>;
-    fn create_session(&self) -> PostProcessorSession;
+impl PostProcessor {
+    /// Creates a processor from resolved runtime settings.
+    pub fn new(config: PostProcessConfig) -> Self {
+        match config {
+            PostProcessConfig::Disabled => Self::Disabled,
+            PostProcessConfig::Llm(config) => match LlmPostProcessor::new(config) {
+                Ok(processor) => Self::Llm(processor),
+                Err(error) => {
+                    warn!(error = %error, "Failed to create LLM post-processor, falling back to noop");
+                    Self::Disabled
+                }
+            },
+        }
+    }
+
+    /// Processes a complete text input in one call.
+    pub fn process_text(&self, text: &str) -> Result<String, PostProcessError> {
+        match self {
+            Self::Disabled => Ok(text.to_string()),
+            Self::Llm(processor) => processor.process_text(text),
+        }
+    }
+
+    /// Creates independent state for incremental text cleanup.
+    pub fn create_session(&self) -> PostProcessorSession {
+        match self {
+            Self::Disabled => PostProcessorSession::Noop(NoopSession::default()),
+            Self::Llm(processor) => processor.create_session(),
+        }
+    }
 }
 
 /// Incremental text cleanup state for one recording session.
@@ -140,44 +168,6 @@ impl PostProcessorSession {
             Self::Conservative(session) => session.finish(),
             Self::Preheat(session) => session.finish(),
         }
-    }
-}
-
-impl PostProcessor {
-    pub fn new(config: PostProcessConfig) -> Self {
-        let processor: Box<dyn TextPostProcessor> = match config {
-            PostProcessConfig::Disabled => Box::new(NoopPostProcessor),
-            PostProcessConfig::Llm(config) => match LlmPostProcessor::new(config) {
-                Ok(processor) => Box::new(processor),
-                Err(error) => {
-                    warn!(error = %error, "Failed to create LLM post-processor, falling back to noop");
-                    Box::new(NoopPostProcessor)
-                }
-            },
-        };
-        Self(processor)
-    }
-
-    /// Processes a complete text input in one call.
-    pub fn process_text(&self, text: &str) -> Result<String, PostProcessError> {
-        self.0.process_text(text)
-    }
-
-    /// Creates independent state for incremental text cleanup.
-    pub fn create_session(&self) -> PostProcessorSession {
-        self.0.create_session()
-    }
-}
-
-struct NoopPostProcessor;
-
-impl TextPostProcessor for NoopPostProcessor {
-    fn process_text(&self, text: &str) -> Result<String, PostProcessError> {
-        Ok(text.to_string())
-    }
-
-    fn create_session(&self) -> PostProcessorSession {
-        PostProcessorSession::Noop(NoopSession::default())
     }
 }
 

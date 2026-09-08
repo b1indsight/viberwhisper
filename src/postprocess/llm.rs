@@ -1,5 +1,5 @@
 use crate::core::config::ApiAuth;
-use crate::postprocess::{LlmConfig, PostProcessError, PostProcessorSession, TextPostProcessor};
+use crate::postprocess::{LlmConfig, PostProcessError, PostProcessorSession};
 use reqwest::blocking::Client;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -15,6 +15,7 @@ const DEFAULT_PROMPT: &str = "请将下面的语音转写结果整理为适合�
     - 若句子本身不完整，可做最小必要整理\n\
     - 只输出整理后的最终文本，不要解释";
 
+/// Configured LLM cleanup state owned by [`crate::postprocess::PostProcessor::Llm`].
 pub struct LlmPostProcessor {
     auth: ApiAuth,
     api_url: reqwest::Url,
@@ -50,10 +51,8 @@ impl LlmPostProcessor {
             text,
         )
     }
-}
 
-impl TextPostProcessor for LlmPostProcessor {
-    fn process_text(&self, text: &str) -> Result<String, PostProcessError> {
+    pub(super) fn process_text(&self, text: &str) -> Result<String, PostProcessError> {
         if text.is_empty() {
             return Ok(text.to_string());
         }
@@ -63,7 +62,7 @@ impl TextPostProcessor for LlmPostProcessor {
         Ok(result)
     }
 
-    fn create_session(&self) -> PostProcessorSession {
+    pub(super) fn create_session(&self) -> PostProcessorSession {
         if self.streaming_enabled {
             PostProcessorSession::Preheat(PreheatLlmSession::new(
                 self.auth.clone(),
@@ -443,6 +442,18 @@ mod tests {
             LlmPostProcessor::new(config_with_postprocess(false, Some("custom prompt"))).unwrap();
         assert_eq!(custom.prompt, "custom prompt");
         assert!(!custom.streaming_enabled);
+    }
+
+    #[test]
+    fn configured_processor_cleans_complete_text() {
+        // Convert and setup verification use the configured processor directly;
+        // an accidental pass-through here would silently skip enabled cleanup.
+        let (endpoint, _headers) = spawn_header_stub();
+        let mut config = config_with_postprocess(true, None);
+        config.endpoint = endpoint;
+        let processor = PostProcessor::new(PostProcessConfig::Llm(config));
+
+        assert_eq!(processor.process_text("raw").unwrap(), "clean");
     }
 
     #[test]
