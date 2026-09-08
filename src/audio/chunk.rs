@@ -110,7 +110,10 @@ pub(crate) fn encode_i16_wav(samples: &[i16], sample_rate: u32) -> Result<WavChu
     };
     validate_spec(spec)?;
 
-    let mut cursor = Cursor::new(Vec::new());
+    let mut cursor = Cursor::new(Vec::with_capacity(encoded_capacity(
+        spec,
+        samples.len() as u64,
+    )?));
     {
         let mut writer = WavWriter::new(&mut cursor, spec)?;
         for &sample in samples {
@@ -132,6 +135,15 @@ fn validate_spec(spec: WavSpec) -> Result<(), ChunkError> {
         return Err(ChunkError::InvalidSpec("bits_per_sample"));
     }
     Ok(())
+}
+
+pub(super) fn encoded_capacity(spec: WavSpec, sample_count: u64) -> Result<usize, ChunkError> {
+    let bytes_per_sample = u64::from(spec.bits_per_sample).div_ceil(8);
+    let bytes = sample_count
+        .checked_mul(bytes_per_sample)
+        .and_then(|payload| payload.checked_add(encoded_header_bytes(spec)))
+        .ok_or(ChunkError::ArithmeticOverflow)?;
+    usize::try_from(bytes).map_err(|_| ChunkError::ArithmeticOverflow)
 }
 
 fn encoded_header_bytes(spec: WavSpec) -> u64 {

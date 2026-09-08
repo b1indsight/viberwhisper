@@ -54,3 +54,17 @@ sample conversion rules, and live-encoding failure recovery behavior.
 - Use GitHub CI for the macOS and Windows build/test/lint matrix. Unit tests do
   not establish real-device callback shutdown behavior; the excluded stop delay
   and backend shutdown policy stay unchanged.
+
+## Implementation and local validation
+
+All approved items are implemented. New and strengthened regression tests cover
+format-specific clipping, repeated callbacks, chunk boundaries, ordered live and
+stop-time PCM, empty sessions, mismatched and repeated lifecycle requests, and
+stop-time recovery after failed live encoding. Existing offline tests now exercise
+the reader directly as an iterator, including its terminal decode error.
+
+- Audio tests: 27 passed.
+- Full suite: 188 passed, with no failures or ignored tests.
+- Build, formatting, Clippy with warnings denied, and diff whitespace checks passed.
+- No real microphone or performance benchmark was run; the 200 ms stop wait and
+  existing live PCM recovery policy are preserved.

@@ -23,7 +23,6 @@ enum RecorderError {
     NoInputDevice,
     InputDeviceNotFound(String),
     UnsupportedSampleFormat,
-    NotRecording,
     NoAudioData,
 }
 
@@ -42,7 +41,6 @@ impl fmt::Display for RecorderError {
                 write!(f, "configured input device `{name}` is not available")
             }
             Self::UnsupportedSampleFormat => write!(f, "unsupported sample format"),
-            Self::NotRecording => write!(f, "not currently recording"),
             Self::NoAudioData => write!(f, "no audio data recorded"),
         }
     }
@@ -59,7 +57,6 @@ impl error::Error for RecorderError {
             Self::NoInputDevice
             | Self::InputDeviceNotFound(_)
             | Self::UnsupportedSampleFormat
-            | Self::NotRecording
             | Self::NoAudioData => None,
         }
     }
@@ -89,40 +86,45 @@ impl From<cpal::PlayStreamError> for RecorderError {
     }
 }
 
+/// Records one session at a time and produces independently decodable WAV chunks.
 pub struct AudioRecorder {
-    recording: Arc<AtomicBool>,
-    active_session_id: Option<SessionId>,
-    buffer: Arc<Mutex<Vec<i16>>>,
-    stream: Option<cpal::Stream>,
-    sample_count: Arc<AtomicUsize>,
+    active: Option<ActiveRecording>,
     input_device: Option<String>,
     gain: f32,
-    sample_rate: u32,
-    /// Number of samples already emitted as chunks during the current recording.
-    flushed_samples: usize,
-    /// Number of complete chunks observed by the audio callback.
-    ready_chunk_count: Arc<AtomicUsize>,
     chunk_notifier: Arc<dyn Fn(SessionId) + Send + Sync>,
-    /// Maximum mono frames per chunk. `None` means unlimited and `Some(0)` suppresses output.
-    chunk_max_samples: Option<usize>,
-    /// Production policy: max chunk duration in seconds.
     max_chunk_duration_secs: u32,
-    /// Production policy: max chunk size in bytes, including the encoded WAV header.
     max_chunk_size_bytes: u64,
 }
 
-fn selected_device_index<T: AsRef<str>>(
-    names: &[T],
-    requested: Option<&str>,
-) -> Result<Option<usize>, String> {
-    let Some(requested) = requested else {
-        return Ok(None);
-    };
-    names
-        .iter()
-        .position(|name| name.as_ref() == requested)
-        .map(Some)
-        .ok_or_else(|| format!("configured input device `{requested}` is not available"))
+struct ActiveRecording {
+    session_id: SessionId,
+    shared: Arc<RecordingBuffer>,
+    stream: Option<cpal::Stream>,
+    sample_rate: u32,
+    /// Number of samples already emitted as chunks during the current recording.
+    flushed_samples: usize,
+    /// Maximum mono frames per chunk. `None` means unlimited and `Some(0)` suppresses output.
+    chunk_max_samples: Option<usize>,
+}
+
+#[derive(Default)]
+struct RecordingBuffer {
+    recording: AtomicBool,
+    samples: Mutex<Vec<i16>>,
+    sample_count: AtomicUsize,
+    /// Number of complete chunks observed by the audio callback.
+    ready_chunk_count: AtomicUsize,
+}
+
+fn select_named_device<D>(
+    devices: impl IntoIterator<Item = (D, String)>,
+    requested: &str,
+) -> Result<D, RecorderError> {
+    devices
+        .into_iter()
+        .find(|(_, name)| name == requested)
+        .map(|(device, _)| device)
+        .ok_or_else(|| RecorderError::InputDeviceNotFound(requested.to_string()))
 }
 
 fn readable_named_devices<D, E>(
@@ -166,42 +168,31 @@ fn resolve_input_device(
     let devices = host
         .input_devices()
         .map_err(RecorderError::EnumerateInputDevices)?;
-    let mut named_devices = readable_named_devices(devices, |device| device.name());
-    let names: Vec<_> = named_devices
-        .iter()
-        .map(|(_, name)| name.as_str())
-        .collect();
-    let index = selected_device_index(&names, Some(requested))
-        .map_err(|_| RecorderError::InputDeviceNotFound(requested.to_string()))?
-        .expect("a requested device always resolves to an index");
-    Ok(named_devices.remove(index).0)
+    select_named_device(
+        readable_named_devices(devices, |device| device.name()),
+        requested,
+    )
 }
 
-/// Shared logic for both I16 and F32 audio callbacks: append mono samples and
-/// report whether the callback crossed a new chunk boundary.
-fn push_mono_chunk(
-    mono: Vec<i16>,
-    buffer: &Mutex<Vec<i16>>,
-    sample_count: &AtomicUsize,
-    ready_chunk_count: &AtomicUsize,
-    sample_rate: u32,
-    chunk_max_samples: usize,
-) -> bool {
-    let len = mono.len();
-    buffer.lock().unwrap().extend_from_slice(&mono);
-    let total = sample_count.fetch_add(len, Ordering::Relaxed) + len;
-    if total % (sample_rate as usize / 2) < len {
-        debug!(
-            frames = total,
-            seconds = total / sample_rate as usize,
-            "Recording progress"
-        );
+impl RecordingBuffer {
+    /// Publishes PCM before advertising newly complete chunks to the consumer.
+    fn push_mono(&self, mono: &[i16], sample_rate: u32, chunk_max_samples: usize) -> bool {
+        let len = mono.len();
+        self.samples.lock().unwrap().extend_from_slice(mono);
+        let total = self.sample_count.fetch_add(len, Ordering::Relaxed) + len;
+        if total % (sample_rate as usize / 2) < len {
+            debug!(
+                frames = total,
+                seconds = total / sample_rate as usize,
+                "Recording progress"
+            );
+        }
+        if let Some(ready_chunks) = total.checked_div(chunk_max_samples) {
+            let previous = self.ready_chunk_count.swap(ready_chunks, Ordering::AcqRel);
+            return ready_chunks > previous;
+        }
+        false
     }
-    if let Some(ready_chunks) = total.checked_div(chunk_max_samples) {
-        let previous = ready_chunk_count.swap(ready_chunks, Ordering::AcqRel);
-        return ready_chunks > previous;
-    }
-    false
 }
 
 impl AudioRecorder {
@@ -237,33 +228,29 @@ impl AudioRecorder {
         );
 
         AudioRecorder {
-            recording: Arc::new(AtomicBool::new(false)),
-            active_session_id: None,
-            buffer: Arc::new(Mutex::new(Vec::new())),
-            stream: None,
-            sample_count: Arc::new(AtomicUsize::new(0)),
+            active: None,
             input_device: config.input_device.clone(),
             gain,
-            sample_rate: 44100,
-            flushed_samples: 0,
-            ready_chunk_count: Arc::new(AtomicUsize::new(0)),
             chunk_notifier: Arc::new(chunk_notifier),
-            chunk_max_samples: None,
             max_chunk_duration_secs,
             max_chunk_size_bytes,
         }
     }
 
+    /// Starts a session, preserving any recording that is already active.
     pub fn start_recording(&mut self, session_id: SessionId) -> RecorderStartOutcome {
-        if self.recording.load(Ordering::Relaxed) {
+        if let Some(active) = &self.active {
             return RecorderStartOutcome::AlreadyRecording {
                 requested_session_id: session_id,
-                active_session_id: self.active_session_id.unwrap_or(session_id),
+                active_session_id: active.session_id,
             };
         }
 
         match self.try_start_recording(session_id) {
-            Ok(()) => RecorderStartOutcome::Started { session_id },
+            Ok(active) => {
+                self.active = Some(active);
+                RecorderStartOutcome::Started { session_id }
+            }
             Err(error) => RecorderStartOutcome::Failed {
                 session_id,
                 error: error.to_string(),
@@ -272,22 +259,17 @@ impl AudioRecorder {
     }
 
     #[instrument(skip(self))]
-    fn try_start_recording(&mut self, session_id: SessionId) -> Result<(), RecorderError> {
+    fn try_start_recording(&self, session_id: SessionId) -> Result<ActiveRecording, RecorderError> {
         let host = cpal::default_host();
         let device = resolve_input_device(&host, self.input_device.as_deref())?;
         let config = device.default_input_config()?;
-
         let sample_rate = config.sample_rate().0;
         let channels = config.channels() as usize;
         let sample_format = config.sample_format();
 
-        info!(sample_rate = sample_rate, channels = channels, format = ?sample_format, "Starting recording");
+        info!(sample_rate, channels, format = ?sample_format, "Starting recording");
 
-        self.sample_rate = sample_rate;
-        self.flushed_samples = 0;
-        self.ready_chunk_count.store(0, Ordering::Release);
-
-        self.chunk_max_samples = max_frames_per_chunk(
+        let chunk_max_samples = max_frames_per_chunk(
             self.max_chunk_duration_secs,
             self.max_chunk_size_bytes,
             WavSpec {
@@ -299,114 +281,168 @@ impl AudioRecorder {
         )?
         .map(|frames| usize::try_from(frames).map_err(|_| ChunkError::ArithmeticOverflow))
         .transpose()?;
-
-        let recording = Arc::clone(&self.recording);
-        let buffer = Arc::clone(&self.buffer);
-        let sample_count = Arc::clone(&self.sample_count);
-        let ready_chunk_count = Arc::clone(&self.ready_chunk_count);
-        let chunk_notifier = Arc::clone(&self.chunk_notifier);
-        let chunk_max_samples = self.chunk_max_samples.unwrap_or(0);
-        let gain = self.gain;
-
-        buffer.lock().unwrap().clear();
-        sample_count.store(0, Ordering::Relaxed);
+        let mut active = ActiveRecording {
+            session_id,
+            shared: Arc::new(RecordingBuffer::default()),
+            stream: None,
+            sample_rate,
+            flushed_samples: 0,
+            chunk_max_samples,
+        };
 
         let stream = match sample_format {
-            cpal::SampleFormat::I16 => device.build_input_stream(
-                &config.into(),
-                move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    if recording.load(Ordering::Relaxed) {
-                        let mono: Vec<i16> = data
-                            .chunks(channels)
-                            .map(|ch| {
-                                let avg =
-                                    ch.iter().map(|&s| s as f32).sum::<f32>() / channels as f32;
-                                (avg * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16
-                            })
-                            .collect();
-                        if push_mono_chunk(
-                            mono,
-                            &buffer,
-                            &sample_count,
-                            &ready_chunk_count,
-                            sample_rate,
-                            chunk_max_samples,
-                        ) {
-                            chunk_notifier(session_id);
-                        }
-                    }
-                },
-                move |err| error!(error = %err, "Stream error"),
-                None,
-            ),
-            cpal::SampleFormat::F32 => device.build_input_stream(
-                &config.into(),
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    if recording.load(Ordering::Relaxed) {
-                        let mono: Vec<i16> = data
-                            .chunks(channels)
-                            .map(|ch| {
-                                let avg = ch.iter().sum::<f32>() / channels as f32;
-                                (avg * gain).clamp(-1.0, 1.0) * i16::MAX as f32
-                            })
-                            .map(|s| s as i16)
-                            .collect();
-                        if push_mono_chunk(
-                            mono,
-                            &buffer,
-                            &sample_count,
-                            &ready_chunk_count,
-                            sample_rate,
-                            chunk_max_samples,
-                        ) {
-                            chunk_notifier(session_id);
-                        }
-                    }
-                },
-                move |err| error!(error = %err, "Stream error"),
-                None,
-            ),
-            _ => {
-                self.recording.store(false, Ordering::Relaxed);
-                return Err(RecorderError::UnsupportedSampleFormat);
+            cpal::SampleFormat::I16 => {
+                let mut callback = active.input_callback::<i16>(
+                    channels,
+                    self.gain,
+                    Arc::clone(&self.chunk_notifier),
+                    scale_i16,
+                );
+                device.build_input_stream(
+                    &config.into(),
+                    move |data: &[i16], _: &cpal::InputCallbackInfo| callback(data),
+                    move |err| error!(error = %err, "Stream error"),
+                    None,
+                )
             }
+            cpal::SampleFormat::F32 => {
+                let mut callback = active.input_callback::<f32>(
+                    channels,
+                    self.gain,
+                    Arc::clone(&self.chunk_notifier),
+                    scale_f32,
+                );
+                device.build_input_stream(
+                    &config.into(),
+                    move |data: &[f32], _: &cpal::InputCallbackInfo| callback(data),
+                    move |err| error!(error = %err, "Stream error"),
+                    None,
+                )
+            }
+            _ => return Err(RecorderError::UnsupportedSampleFormat),
         }?;
 
-        // Enable callbacks immediately before playback. Roll back the state if
-        // the backend rejects playback so the next start request can retry.
-        self.recording.store(true, Ordering::Relaxed);
+        // Enable callbacks immediately before playback. A rejected start owns only
+        // this session's state, so a later start cannot receive its stale samples.
+        active.shared.recording.store(true, Ordering::Relaxed);
         if let Err(error) = stream.play() {
-            self.recording.store(false, Ordering::Relaxed);
+            active.shared.recording.store(false, Ordering::Relaxed);
             return Err(error.into());
         }
-        self.stream = Some(stream);
-        self.active_session_id = Some(session_id);
-
+        active.stream = Some(stream);
         info!("Recording started");
-        Ok(())
+        Ok(active)
     }
 
-    /// Encode and return the next complete in-memory chunk, if one is ready.
+    /// Returns the next complete live chunk, retaining PCM if encoding fails.
     pub fn take_ready_chunk(&mut self) -> Option<ReadyChunk> {
-        if !self.recording.load(Ordering::Relaxed) {
-            return None;
+        self.active.as_mut()?.take_ready_chunk()
+    }
+
+    /// Stops the matching session and encodes its remaining complete chunks and tail.
+    #[instrument(skip(self))]
+    pub fn stop_recording(&mut self, session_id: SessionId) -> RecorderStopOutcome {
+        let Some(active) = self.active.take() else {
+            return RecorderStopOutcome::NotRecording {
+                requested_session_id: session_id,
+            };
+        };
+        if active.session_id != session_id {
+            let active_session_id = active.session_id;
+            self.active = Some(active);
+            return RecorderStopOutcome::StillRecording {
+                session_id: active_session_id,
+                error: format!(
+                    "stop requested for session {}, active session is {}",
+                    session_id.0, active_session_id.0
+                ),
+            };
         }
-        let session_id = self.active_session_id?;
+
+        let (chunks, warning) = match active.stop() {
+            Ok(chunks) => (chunks, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+        RecorderStopOutcome::Stopped {
+            session_id,
+            chunks,
+            warning,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn is_recording(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// Cancels the matching session without encoding any remaining audio.
+    pub fn cancel_recording(&mut self, session_id: SessionId) -> RecorderCancelOutcome {
+        let Some(mut active) = self.active.take() else {
+            return RecorderCancelOutcome::NotRecording;
+        };
+        if active.session_id != session_id {
+            let active_session_id = active.session_id;
+            self.active = Some(active);
+            return RecorderCancelOutcome::SessionMismatch { active_session_id };
+        }
+        active.shared.recording.store(false, Ordering::Relaxed);
+        drop(active.stream.take());
+        RecorderCancelOutcome::Cancelled
+    }
+}
+
+fn scale_i16(average: f32, gain: f32) -> i16 {
+    (average * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+fn scale_f32(average: f32, gain: f32) -> i16 {
+    ((average * gain).clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+}
+
+impl ActiveRecording {
+    /// Shares callback bookkeeping while keeping each input format's numeric conversion explicit.
+    /// The scratch allocation is reused, and downmixing happens outside the shared PCM lock.
+    fn input_callback<T: Copy + Into<f32>>(
+        &self,
+        channels: usize,
+        gain: f32,
+        chunk_notifier: Arc<dyn Fn(SessionId) + Send + Sync>,
+        scale: impl Fn(f32, f32) -> i16 + Send + 'static,
+    ) -> impl FnMut(&[T]) + Send + 'static {
+        let shared = Arc::clone(&self.shared);
+        let session_id = self.session_id;
+        let sample_rate = self.sample_rate;
+        let chunk_max_samples = self.chunk_max_samples.unwrap_or(0);
+        let mut mono = Vec::new();
+        move |data| {
+            if !shared.recording.load(Ordering::Relaxed) {
+                return;
+            }
+            mono.clear();
+            mono.extend(data.chunks(channels).map(|frame| {
+                let average =
+                    frame.iter().map(|&sample| sample.into()).sum::<f32>() / channels as f32;
+                scale(average, gain)
+            }));
+            if shared.push_mono(&mono, sample_rate, chunk_max_samples) {
+                chunk_notifier(session_id);
+            }
+        }
+    }
+
+    fn take_ready_chunk(&mut self) -> Option<ReadyChunk> {
         let chunk_max_samples = self.chunk_max_samples.filter(|&samples| samples > 0)?;
-
         let flushed_chunk_count = self.flushed_samples / chunk_max_samples;
-        let ready_chunk_count = self.ready_chunk_count.load(Ordering::Acquire);
-        if ready_chunk_count <= flushed_chunk_count {
+        if self.shared.ready_chunk_count.load(Ordering::Acquire) <= flushed_chunk_count {
             return None;
         }
 
-        let chunk_end = self.flushed_samples + chunk_max_samples;
         let chunk_samples = {
-            let buffer = self.buffer.lock().unwrap();
+            let buffer = self.shared.samples.lock().unwrap();
             let total_samples = buffer.len();
             if total_samples < chunk_max_samples {
                 debug!(
-                    total_samples = total_samples,
+                    total_samples,
                     chunk_size = chunk_max_samples,
                     "Chunk count is ahead of buffered samples; leaving readiness pending"
                 );
@@ -418,96 +454,41 @@ impl AudioRecorder {
         let chunk = match encode_i16_wav(&chunk_samples, self.sample_rate) {
             Ok(chunk) => chunk,
             Err(error) => {
-                warn!(
-                    error = %error,
-                    "Failed to encode in-recording chunk; retaining PCM until stop"
-                );
+                warn!(error = %error, "Failed to encode in-recording chunk; retaining PCM until stop");
                 return None;
             }
         };
-        self.buffer.lock().unwrap().drain(..chunk_max_samples);
-        self.flushed_samples = chunk_end;
-        Some(ReadyChunk { session_id, chunk })
+        self.shared
+            .samples
+            .lock()
+            .unwrap()
+            .drain(..chunk_max_samples);
+        self.flushed_samples += chunk_max_samples;
+        Some(ReadyChunk {
+            session_id: self.session_id,
+            chunk,
+        })
     }
 
-    #[instrument(skip(self))]
-    pub fn stop_recording(&mut self, session_id: SessionId) -> RecorderStopOutcome {
-        if !self.recording.load(Ordering::Relaxed) {
-            return RecorderStopOutcome::NotRecording {
-                requested_session_id: session_id,
-            };
-        }
-        let active_session_id = self.active_session_id.unwrap_or(session_id);
-        if active_session_id != session_id {
-            return RecorderStopOutcome::StillRecording {
-                session_id: active_session_id,
-                error: format!(
-                    "stop requested for session {}, active session is {}",
-                    session_id.0, active_session_id.0
-                ),
-            };
-        }
-
-        match self.try_stop_recording() {
-            Ok(chunks) => {
-                self.reset_chunk_bookkeeping();
-                self.active_session_id = None;
-                RecorderStopOutcome::Stopped {
-                    session_id,
-                    chunks,
-                    warning: None,
-                }
-            }
-            Err(error) if self.recording.load(Ordering::Relaxed) => {
-                RecorderStopOutcome::StillRecording {
-                    session_id,
-                    error: error.to_string(),
-                }
-            }
-            Err(error) => {
-                self.reset_chunk_bookkeeping();
-                self.active_session_id = None;
-                RecorderStopOutcome::Stopped {
-                    session_id,
-                    chunks: Vec::new(),
-                    warning: Some(error.to_string()),
-                }
-            }
-        }
-    }
-
-    #[instrument(skip(self))]
-    fn try_stop_recording(&mut self) -> Result<Vec<WavChunk>, RecorderError> {
-        if !self.recording.load(Ordering::Relaxed) {
-            debug!("Not recording, ignoring stop request");
-            return Err(RecorderError::NotRecording);
-        }
-
+    fn stop(mut self) -> Result<Vec<WavChunk>, RecorderError> {
         debug!("Stopping recording");
-        self.recording.store(false, Ordering::Relaxed);
-
+        self.shared.recording.store(false, Ordering::Relaxed);
         if self.stream.is_some() {
             // A live stream can still have callbacks in flight after recording is disabled.
             thread::sleep(Duration::from_millis(200));
         }
-
         drop(self.stream.take());
         debug!("Stream stopped");
 
-        let samples = {
-            let buffer = self.buffer.lock().unwrap();
-            debug!(samples = buffer.len(), "Buffer size");
-
-            if buffer.is_empty() {
-                return if self.flushed_samples > 0 {
-                    Ok(Vec::new())
-                } else {
-                    Err(RecorderError::NoAudioData)
-                };
-            }
-            buffer.to_vec()
-        };
-
+        let samples = std::mem::take(&mut *self.shared.samples.lock().unwrap());
+        debug!(samples = samples.len(), "Buffer size");
+        if samples.is_empty() {
+            return if self.flushed_samples > 0 {
+                Ok(Vec::new())
+            } else {
+                Err(RecorderError::NoAudioData)
+            };
+        }
         match self.chunk_max_samples {
             Some(0) => Ok(Vec::new()),
             Some(max_samples) => samples
@@ -516,35 +497,6 @@ impl AudioRecorder {
                 .collect(),
             None => Ok(vec![encode_i16_wav(&samples, self.sample_rate)?]),
         }
-    }
-
-    #[cfg(test)]
-    pub fn is_recording(&self) -> bool {
-        self.recording.load(Ordering::Relaxed)
-    }
-
-    pub fn cancel_recording(&mut self, session_id: SessionId) -> RecorderCancelOutcome {
-        if !self.recording.load(Ordering::Relaxed) {
-            return RecorderCancelOutcome::NotRecording;
-        }
-        let active_session_id = self.active_session_id.unwrap_or(session_id);
-        if active_session_id != session_id {
-            return RecorderCancelOutcome::SessionMismatch { active_session_id };
-        }
-
-        self.recording.store(false, Ordering::Relaxed);
-        drop(self.stream.take());
-        self.reset_chunk_bookkeeping();
-        self.active_session_id = None;
-        RecorderCancelOutcome::Cancelled
-    }
-
-    fn reset_chunk_bookkeeping(&mut self) {
-        self.buffer.lock().unwrap().clear();
-        self.sample_count.store(0, Ordering::Relaxed);
-        self.ready_chunk_count.store(0, Ordering::Release);
-        self.flushed_samples = 0;
-        self.chunk_max_samples = None;
     }
 }
 
@@ -598,13 +550,15 @@ mod tests {
 
     #[test]
     fn named_device_selection_is_exact_and_deterministic() {
-        let names = ["Built-in Mic", "USB Mic", "USB Mic"];
-        assert_eq!(selected_device_index(&names, None).unwrap(), None);
-        assert_eq!(
-            selected_device_index(&names, Some("USB Mic")).unwrap(),
-            Some(1)
-        );
-        assert!(selected_device_index(&names, Some("usb mic")).is_err());
+        let devices = || {
+            [
+                (0, "Built-in Mic".into()),
+                (1, "USB Mic".into()),
+                (2, "USB Mic".into()),
+            ]
+        };
+        assert_eq!(select_named_device(devices(), "USB Mic").unwrap(), 1);
+        assert!(select_named_device(devices(), "usb mic").is_err());
     }
 
     #[test]
@@ -625,37 +579,76 @@ mod tests {
             readable,
             vec![(1, "USB Mic".to_string()), (3, "USB Mic".to_string())]
         );
-        let readable_names: Vec<_> = readable.iter().map(|(_, name)| name.as_str()).collect();
-        assert_eq!(
-            selected_device_index(&readable_names, Some("USB Mic")).unwrap(),
-            Some(0)
-        );
+        assert_eq!(select_named_device(readable, "USB Mic").unwrap(), 1);
     }
 
     fn recorder_for_buffer(samples: Vec<i16>, chunk_max_samples: usize) -> AudioRecorder {
+        let sample_count = samples.len();
         AudioRecorder {
-            recording: Arc::new(AtomicBool::new(true)),
-            active_session_id: Some(SessionId(1)),
-            buffer: Arc::new(Mutex::new(samples)),
-            stream: None,
-            sample_count: Arc::new(AtomicUsize::new(0)),
+            active: Some(ActiveRecording {
+                session_id: SessionId(1),
+                shared: Arc::new(RecordingBuffer {
+                    recording: AtomicBool::new(true),
+                    samples: Mutex::new(samples),
+                    sample_count: AtomicUsize::new(sample_count),
+                    ready_chunk_count: AtomicUsize::new(
+                        sample_count.checked_div(chunk_max_samples).unwrap_or(0),
+                    ),
+                }),
+                stream: None,
+                sample_rate: 16000,
+                flushed_samples: 0,
+                chunk_max_samples: Some(chunk_max_samples),
+            }),
             input_device: None,
             gain: 1.0,
-            sample_rate: 16000,
-            flushed_samples: 0,
-            ready_chunk_count: Arc::new(AtomicUsize::new(0)),
             chunk_notifier: Arc::new(|_| {}),
-            chunk_max_samples: Some(chunk_max_samples),
             max_chunk_duration_secs: 0,
             max_chunk_size_bytes: 0,
         }
+    }
+
+    fn decode_chunks(chunks: impl IntoIterator<Item = WavChunk>) -> Vec<i16> {
+        chunks
+            .into_iter()
+            .flat_map(|chunk| {
+                hound::WavReader::new(std::io::Cursor::new(chunk.bytes()))
+                    .unwrap()
+                    .samples::<i16>()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn callbacks_preserve_downmix_gain_clipping_and_stop_gating() {
+        // Stereo input and gain clipping must survive sharing the I16/F32 callback pipeline.
+        let recorder = recorder_for_buffer(Vec::new(), 4);
+        let active = recorder.active.as_ref().unwrap();
+        let notifications = Arc::new(Mutex::new(Vec::new()));
+        let notified = Arc::clone(&notifications);
+        let notifier: Arc<dyn Fn(SessionId) + Send + Sync> =
+            Arc::new(move |id| notified.lock().unwrap().push(id));
+        let mut i16_callback = active.input_callback(2, 2.0, Arc::clone(&notifier), scale_i16);
+        let mut f32_callback = active.input_callback(2, 2.0, notifier, scale_f32);
+        i16_callback(&[100i16, 300, i16::MAX, i16::MAX]);
+        i16_callback(&[i16::MIN, i16::MIN, 100, -100]);
+        f32_callback(&[0.25f32, 0.75, -1.0, -1.0, 0.25, -0.25, 0.0, 0.5]);
+        active.shared.recording.store(false, Ordering::Relaxed);
+        i16_callback(&[1, 1]);
+        f32_callback(&[1.0, 1.0]);
+        assert_eq!(
+            *active.shared.samples.lock().unwrap(),
+            [400, i16::MAX, i16::MIN, 0, i16::MAX, -32767, 0, 16383]
+        );
+        assert_eq!(*notifications.lock().unwrap(), [SessionId(1), SessionId(1)]);
     }
 
     #[test]
     fn test_take_ready_chunk_flushes_each_ready_chunk() {
         let samples: Vec<i16> = (0..30).collect();
         let mut recorder = recorder_for_buffer(samples, 10);
-        recorder.ready_chunk_count.store(3, Ordering::Release);
 
         let first = recorder.take_ready_chunk();
         let second = recorder.take_ready_chunk();
@@ -666,56 +659,52 @@ mod tests {
         assert!(second.is_some());
         assert!(third.is_some());
         assert!(fourth.is_none());
-        assert_eq!(recorder.flushed_samples, 30);
+        assert_eq!(recorder.active.as_ref().unwrap().flushed_samples, 30);
         assert!(
-            recorder.buffer.lock().unwrap().is_empty(),
+            recorder
+                .active
+                .as_ref()
+                .unwrap()
+                .shared
+                .samples
+                .lock()
+                .unwrap()
+                .is_empty(),
             "flushed samples should be released from memory"
         );
 
-        for ready in [first, second, third].into_iter().flatten() {
-            assert!(hound::WavReader::new(std::io::Cursor::new(ready.chunk.bytes())).is_ok());
-        }
+        assert_eq!(
+            decode_chunks(
+                [first, second, third]
+                    .into_iter()
+                    .flatten()
+                    .map(|ready| ready.chunk)
+            ),
+            (0..30).collect::<Vec<_>>()
+        );
+        let RecorderStopOutcome::Stopped {
+            chunks, warning, ..
+        } = recorder.stop_recording(SessionId(1))
+        else {
+            panic!("expected fully flushed stop");
+        };
+        assert!(chunks.is_empty());
+        assert!(warning.is_none());
     }
 
     #[test]
     fn each_new_chunk_boundary_is_reported_to_the_callback() {
-        let buffer = Mutex::new(Vec::new());
-        let sample_count = AtomicUsize::new(0);
-        let ready_chunk_count = AtomicUsize::new(0);
-
-        assert!(!push_mono_chunk(
-            vec![1; 5],
-            &buffer,
-            &sample_count,
-            &ready_chunk_count,
-            10,
-            10,
-        ));
-        assert!(push_mono_chunk(
-            vec![1; 5],
-            &buffer,
-            &sample_count,
-            &ready_chunk_count,
-            10,
-            10,
-        ));
-        assert!(push_mono_chunk(
-            vec![2; 10],
-            &buffer,
-            &sample_count,
-            &ready_chunk_count,
-            10,
-            10,
-        ));
-
-        assert_eq!(ready_chunk_count.load(Ordering::Acquire), 2);
+        let buffer = RecordingBuffer::default();
+        assert!(!buffer.push_mono(&[1; 5], 10, 10));
+        assert!(buffer.push_mono(&[1; 5], 10, 10));
+        assert!(buffer.push_mono(&[2; 10], 10, 10));
+        assert_eq!(buffer.ready_chunk_count.load(Ordering::Acquire), 2);
     }
 
     #[test]
     fn stop_time_chunk_catch_up_clears_readiness_and_stops_polling() {
         let samples: Vec<i16> = (0..25).collect();
         let mut recorder = recorder_for_buffer(samples, 10);
-        recorder.ready_chunk_count.store(2, Ordering::Release);
 
         let result = recorder.stop_recording(SessionId(1));
 
@@ -723,10 +712,8 @@ mod tests {
             panic!("expected stop-time chunk catch-up");
         };
         assert_eq!(chunks.len(), 3);
-        assert!(recorder.buffer.lock().unwrap().is_empty());
-        assert_eq!(recorder.ready_chunk_count.load(Ordering::Acquire), 0);
-        assert_eq!(recorder.flushed_samples, 0);
-        assert_eq!(recorder.chunk_max_samples, None);
+        assert_eq!(decode_chunks(chunks), (0..25).collect::<Vec<_>>());
+        assert!(!recorder.is_recording());
         assert!(recorder.take_ready_chunk().is_none());
     }
 
@@ -734,16 +721,19 @@ mod tests {
     fn test_stop_recording_catches_up_after_live_chunk() {
         let samples: Vec<i16> = (0..35).collect();
         let mut recorder = recorder_for_buffer(samples, 10);
-        recorder.ready_chunk_count.store(1, Ordering::Release);
 
         let first = recorder.take_ready_chunk();
-        assert!(first.is_some());
+        let first = first.unwrap();
 
         let result = recorder.stop_recording(SessionId(1));
 
         match result {
             RecorderStopOutcome::Stopped { chunks, .. } => {
                 assert_eq!(chunks.len(), 3);
+                assert_eq!(
+                    decode_chunks(std::iter::once(first.chunk).chain(chunks)),
+                    (0..35).collect::<Vec<_>>()
+                );
             }
             _ => panic!("expected remaining audio to be chunked"),
         }
@@ -752,8 +742,14 @@ mod tests {
     #[test]
     fn stop_result_reports_not_recording_without_guessing() {
         let mut recorder = recorder_for_buffer(Vec::new(), 10);
-        recorder.recording.store(false, Ordering::Relaxed);
-        recorder.active_session_id = None;
+        // A session stopped before receiving input still becomes idle after reporting no audio.
+        assert!(matches!(
+            recorder.stop_recording(SessionId(1)),
+            RecorderStopOutcome::Stopped {
+                warning: Some(_),
+                ..
+            }
+        ));
 
         assert_eq!(
             recorder.stop_recording(SessionId(7)),
@@ -775,6 +771,31 @@ mod tests {
             }
         ));
         assert!(recorder.is_recording());
+        assert_eq!(
+            recorder.cancel_recording(SessionId(2)),
+            RecorderCancelOutcome::SessionMismatch {
+                active_session_id: SessionId(1)
+            }
+        );
+        assert!(matches!(
+            recorder.start_recording(SessionId(2)),
+            RecorderStartOutcome::AlreadyRecording {
+                active_session_id: SessionId(1),
+                ..
+            }
+        ));
+        let RecorderStopOutcome::Stopped {
+            chunks, warning, ..
+        } = recorder.stop_recording(SessionId(1))
+        else {
+            panic!("active session must remain stoppable");
+        };
+        assert!(warning.is_none());
+        assert_eq!(decode_chunks(chunks), [1, 2, 3]);
+        assert!(matches!(
+            recorder.stop_recording(SessionId(1)),
+            RecorderStopOutcome::NotRecording { .. }
+        ));
     }
 
     #[test]
@@ -786,13 +807,17 @@ mod tests {
             RecorderCancelOutcome::Cancelled
         );
         assert!(!recorder.is_recording());
-        assert!(recorder.buffer.lock().unwrap().is_empty());
+        assert_eq!(
+            recorder.cancel_recording(SessionId(1)),
+            RecorderCancelOutcome::NotRecording
+        );
+        assert!(recorder.take_ready_chunk().is_none());
     }
 
     #[test]
     fn too_small_chunk_capacity_produces_no_stop_chunk() {
         let mut recorder = recorder_for_buffer(vec![1, 2, 3], 10);
-        recorder.chunk_max_samples = Some(0);
+        recorder.active.as_mut().unwrap().chunk_max_samples = Some(0);
 
         let RecorderStopOutcome::Stopped { chunks, .. } = recorder.stop_recording(SessionId(1))
         else {
@@ -800,5 +825,22 @@ mod tests {
         };
 
         assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn failed_live_encoding_retains_pcm_for_stop_recovery() {
+        // A failed live encoder must not consume audio that stop-time encoding can recover.
+        let mut recorder = recorder_for_buffer(vec![1, 2, 3], 2);
+        recorder.active.as_mut().unwrap().sample_rate = 0;
+        assert!(recorder.take_ready_chunk().is_none());
+        recorder.active.as_mut().unwrap().sample_rate = 16_000;
+        let RecorderStopOutcome::Stopped {
+            chunks, warning, ..
+        } = recorder.stop_recording(SessionId(1))
+        else {
+            panic!("expected recovered stop output");
+        };
+        assert!(warning.is_none());
+        assert_eq!(decode_chunks(chunks), [1, 2, 3]);
     }
 }

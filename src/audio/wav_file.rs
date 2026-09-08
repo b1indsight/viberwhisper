@@ -4,9 +4,10 @@ use std::path::Path;
 
 use hound::{Sample, WavReader, WavSpec, WavWriter};
 
-use super::chunk::{ChunkError, WavChunk};
+use super::chunk::{ChunkError, WavChunk, encoded_capacity};
 use super::max_frames_per_chunk;
 
+/// Streams independently decodable WAV chunks; a decode error terminates iteration.
 pub struct WavChunkReader {
     reader: WavReader<BufReader<File>>,
     spec: WavSpec,
@@ -16,6 +17,7 @@ pub struct WavChunkReader {
 }
 
 impl WavChunkReader {
+    /// Opens a WAV with duration and byte limits; zero disables the corresponding limit.
     pub fn open(
         path: &Path,
         max_chunk_duration_secs: u32,
@@ -35,12 +37,12 @@ impl WavChunkReader {
             finished: false,
         })
     }
+}
 
-    pub fn chunks(&mut self) -> WavChunks<'_> {
-        WavChunks { reader: self }
-    }
+impl Iterator for WavChunkReader {
+    type Item = Result<WavChunk, ChunkError>;
 
-    fn next_chunk(&mut self) -> Option<Result<WavChunk, ChunkError>> {
+    fn next(&mut self) -> Option<Self::Item> {
         if self.finished || self.remaining_samples == 0 || self.frames_per_chunk == Some(0) {
             self.finished = true;
             return None;
@@ -73,18 +75,6 @@ impl WavChunkReader {
     }
 }
 
-pub struct WavChunks<'a> {
-    reader: &'a mut WavChunkReader,
-}
-
-impl Iterator for WavChunks<'_> {
-    type Item = Result<WavChunk, ChunkError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.reader.next_chunk()
-    }
-}
-
 fn encode_next_samples<R, S>(
     reader: &mut WavReader<R>,
     spec: WavSpec,
@@ -94,7 +84,7 @@ where
     R: std::io::Read,
     S: Sample,
 {
-    let mut cursor = Cursor::new(Vec::new());
+    let mut cursor = Cursor::new(Vec::with_capacity(encoded_capacity(spec, sample_count)?));
     {
         let mut writer = WavWriter::new(&mut cursor, spec)?;
         let mut samples = reader.samples::<S>();
@@ -162,8 +152,8 @@ mod tests {
         };
         write_int_wav(&path, spec, 10);
 
-        let mut reader = WavChunkReader::open(&path, 1, 0).unwrap();
-        let chunks = reader.chunks().collect::<Result<Vec<_>, _>>().unwrap();
+        let reader = WavChunkReader::open(&path, 1, 0).unwrap();
+        let chunks = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
         assert_eq!(chunks.len(), 3);
         assert_eq!(
@@ -184,8 +174,8 @@ mod tests {
         };
         write_int_wav(&path, spec, 100);
 
-        let mut reader = WavChunkReader::open(&path, 0, 0).unwrap();
-        let chunks = reader.chunks().collect::<Result<Vec<_>, _>>().unwrap();
+        let reader = WavChunkReader::open(&path, 0, 0).unwrap();
+        let chunks = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(read_i16_samples(&chunks[0]).len(), 100);
@@ -203,9 +193,9 @@ mod tests {
         };
         write_int_wav(&path, spec, 16_000);
 
-        let mut reader = WavChunkReader::open(&path, 0, 44 + 8_000 * 2).unwrap();
+        let reader = WavChunkReader::open(&path, 0, 44 + 8_000 * 2).unwrap();
 
-        assert_eq!(reader.chunks().count(), 0);
+        assert_eq!(reader.count(), 0);
         let _ = std::fs::remove_file(path);
     }
 
@@ -220,16 +210,9 @@ mod tests {
         };
         write_int_wav(&path, spec, 202);
 
-        let mut reader = WavChunkReader::open(&path, 1, 0).unwrap();
+        let reader = WavChunkReader::open(&path, 1, 0).unwrap();
 
-        assert_eq!(
-            reader
-                .chunks()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap()
-                .len(),
-            101
-        );
+        assert_eq!(reader.collect::<Result<Vec<_>, _>>().unwrap().len(), 101);
         let _ = std::fs::remove_file(path);
     }
 
@@ -238,8 +221,8 @@ mod tests {
         let path = test_path("float");
         write_float_wav(&path, 8);
 
-        let mut reader = WavChunkReader::open(&path, 1, 0).unwrap();
-        let chunks = reader.chunks().collect::<Result<Vec<_>, _>>().unwrap();
+        let reader = WavChunkReader::open(&path, 1, 0).unwrap();
+        let chunks = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
         assert_eq!(chunks.len(), 2);
         for chunk in chunks {
@@ -268,8 +251,7 @@ mod tests {
             .set_len(truncated_len)
             .unwrap();
 
-        let mut reader = WavChunkReader::open(&path, 0, 0).unwrap();
-        let mut chunks = reader.chunks();
+        let mut chunks = WavChunkReader::open(&path, 0, 0).unwrap();
 
         assert!(matches!(chunks.next(), Some(Err(_))));
         assert!(chunks.next().is_none());
