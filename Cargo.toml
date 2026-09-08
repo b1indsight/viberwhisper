@@ -1,6 +1,6 @@
 [package]
 name = "viberwhisper"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["b1indsight"]
 description = "Voice-to-text input for macOS and Windows"
