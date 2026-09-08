@@ -891,10 +891,10 @@ fn transcribe_sample(
     max_chunk_size_bytes: u64,
     language: Option<String>,
 ) -> std::result::Result<String, String> {
-    let mut reader = WavChunkReader::open(path, max_chunk_duration_secs, max_chunk_size_bytes)
+    let reader = WavChunkReader::open(path, max_chunk_duration_secs, max_chunk_size_bytes)
         .map_err(|error| error.to_string())?;
     let mut texts = Vec::new();
-    for chunk in reader.chunks() {
+    for chunk in reader {
         let chunk = chunk.map_err(|error| error.to_string())?;
         texts.push(
             transcriber

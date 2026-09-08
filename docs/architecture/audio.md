@@ -21,6 +21,8 @@ src/audio/
 `WavChunk` owns an `Arc<[u8]>` containing one complete WAV payload. It deliberately contains no
 path, session id, index, retry policy, or transcription state. Clones share the immutable bytes,
 which lets retries create fresh multipart readers without copying the payload.
+Live and offline WAV encoders reserve output capacity from the encoded header and sample count,
+using checked arithmetic before allocating the byte buffer.
 
 ## Audible-Window Classification
 
@@ -64,8 +66,15 @@ The setup wizard uses the recorder module's device enumeration and the same reso
 verification recording. Its hotkey-controlled verification loop drains ready chunks while the
 session remains active, matching the normal listener's bounded PCM-buffer behavior.
 
-The cpal callback downmixes input to mono `i16`, applies microphone gain, appends PCM to the shared
-buffer, and updates the number of complete chunks. Crossing a new complete-chunk boundary also
+`AudioRecorder` keeps persistent configuration separately from `Option<ActiveRecording>`, which
+owns the session ID, stream, sample rate, and chunk progress. Each session gets its own shared
+PCM buffer, callback recording switch, and sample/readiness counters. Failed starts never publish
+an active session; stop and cancel consume the matching session without resetting reusable fields.
+
+The I16 and F32 cpal callbacks share a pipeline that downmixes input to mono `i16`, applies microphone
+gain with format-specific clipping, and reuses a callback-owned scratch vector outside the PCM lock.
+It appends PCM to the shared buffer and updates the number of complete chunks.
+Crossing a new complete-chunk boundary also
 sends one readiness callback containing the active `SessionId`. The existing ready-chunk count
 prevents repeated notifications within the same boundary, while the fixed chunk policy keeps the
 wakeup rate independent of audio sample-buffer traffic. The callback never performs WAV encoding,
@@ -81,8 +90,9 @@ the PCM buffered for stop-time recovery.
 Each boundary notification is independent, so a boundary published while the listener is draining
 queues its own wakeup without a pending flag, re-arm protocol, or timer retry. Extra notifications
 are harmless because the listener drains until `take_ready_chunk()` returns `None`, and events
-from an old `SessionId` are ignored after stop or session replacement. On stop, complete remaining
-slices and the final tail are encoded the same way.
+from an old `SessionId` are ignored after stop or session replacement. On stop, the existing
+200 ms wait remains before stream destruction. The remaining PCM vector is then moved out of
+the mutex without copying, and complete slices plus the final tail are encoded outside the lock.
 `RecorderStopOutcome::Stopped` therefore owns `Vec<WavChunk>` rather than file paths.
 
 Prompt-lab recording optionally clones these immutable chunks into a session-owned, capacity-two
@@ -95,8 +105,8 @@ unreferenced WAV for dataset validation to report.
 
 ## Local WAV Reader
 
-`WavChunkReader::open(path, duration_limit, size_limit)` opens the source once. Its `chunks()` method
-returns an `Iterator<Item = Result<WavChunk, ChunkError>>` that reads, encodes, and yields one chunk
+`WavChunkReader::open(path, duration_limit, size_limit)` opens the source once. The reader itself
+implements `Iterator<Item = Result<WavChunk, ChunkError>>`, reading, encoding, and yielding one chunk
 at a time. Integer and float sample formats, channel count, sample rate, and bit depth are preserved.
 
 The iterator has no chunk-count cap. A decode error is yielded once and is terminal; subsequent
