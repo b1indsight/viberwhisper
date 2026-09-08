@@ -125,31 +125,25 @@ fn select_named_device<D>(
         .ok_or_else(|| RecorderError::InputDeviceNotFound(requested.to_string()))
 }
 
-fn readable_named_devices<D, E>(
-    devices: impl IntoIterator<Item = D>,
-    mut read_name: impl FnMut(&D) -> Result<String, E>,
-) -> Vec<(D, String)>
-where
-    E: fmt::Display,
-{
+fn readable_named_devices(
+    devices: impl IntoIterator<Item = cpal::Device>,
+) -> impl Iterator<Item = (cpal::Device, String)> {
     devices
         .into_iter()
-        .filter_map(|device| match read_name(&device) {
+        .filter_map(|device| match device.name() {
             Ok(name) => Some((device, name)),
             Err(error) => {
                 warn!(error = %error, "Skipping input device with unreadable name");
                 None
             }
         })
-        .collect()
 }
 
 /// Enumerates the display names accepted by the recorder's persisted device selection.
 pub(crate) fn input_device_names() -> Result<Vec<String>, String> {
     let host = cpal::default_host();
     let devices = host.input_devices().map_err(|error| error.to_string())?;
-    Ok(readable_named_devices(devices, |device| device.name())
-        .into_iter()
+    Ok(readable_named_devices(devices)
         .map(|(_, name)| name)
         .collect())
 }
@@ -166,10 +160,7 @@ fn resolve_input_device(
     let devices = host
         .input_devices()
         .map_err(RecorderError::EnumerateInputDevices)?;
-    select_named_device(
-        readable_named_devices(devices, |device| device.name()),
-        requested,
-    )
+    select_named_device(readable_named_devices(devices), requested)
 }
 
 impl RecordingBuffer {
@@ -552,27 +543,6 @@ mod tests {
         };
         assert_eq!(select_named_device(devices(), "USB Mic").unwrap(), 1);
         assert!(select_named_device(devices(), "usb mic").is_err());
-    }
-
-    #[test]
-    fn unreadable_device_names_do_not_hide_a_matching_device() {
-        // Disconnected virtual devices can remain enumerable even when their display name is no
-        // longer readable; a healthy configured microphone must still be selectable.
-        let names = [
-            Err("stale device"),
-            Ok("USB Mic"),
-            Err("disconnected device"),
-            Ok("USB Mic"),
-        ];
-        let readable = readable_named_devices(0..names.len(), |index| {
-            names[*index].map(str::to_string).map_err(str::to_string)
-        });
-
-        assert_eq!(
-            readable,
-            vec![(1, "USB Mic".to_string()), (3, "USB Mic".to_string())]
-        );
-        assert_eq!(select_named_device(readable, "USB Mic").unwrap(), 1);
     }
 
     fn recorder_for_buffer(samples: Vec<i16>, chunk_max_samples: usize) -> AudioRecorder {

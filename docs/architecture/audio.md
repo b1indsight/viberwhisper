@@ -64,6 +64,8 @@ short recordings and the final tail of longer files use their remaining frames.
 default input device. A configured value enumerates input devices and selects the first exact name
 match each time recording starts. Devices whose individual display names cannot be read are logged
 and skipped; a missing configured name is still an operational error rather than a silent fallback.
+The shared name reader accepts concrete cpal devices and yields device/name pairs lazily.
+Setup collects all readable names, while configured-device lookup stops at its first exact match.
 The setup wizard uses the recorder module's device enumeration and the same resolver for its
 verification recording. Its hotkey-controlled verification loop drains ready chunks while the
 session remains active, matching the normal listener's bounded PCM-buffer behavior.
