@@ -2,8 +2,8 @@
 
 ## Status
 
-Implementation complete — approved by the user on 2026-09-08; local checks passed,
-with independent review and hosted CI pending.
+Implemented — approved by the user on 2026-09-08; local checks, independent review,
+and macOS/Windows hosted CI passed. The completed PR is ready for final review.
 
 This plan continues on PR #129 and bookmark `refactor/hotkey-warning-inline`.
 The previously reviewed passthrough-warning inlining remains in that PR. The plan
@@ -126,5 +126,8 @@ review gate. Keep the same PR open for final implementation review.
   independent name expectations remain, all keypad aliases are covered, and catalog
   uniqueness plus both modes after filtered events are checked.
 - macOS formatting, locked build, 189 tests, and Clippy with warnings denied passed.
-- Independent code review and macOS/Windows hosted CI are pending.
+- Independent review of implementation commit `25a77e46c119` returned no findings.
+- Both macOS and Windows jobs passed in
+  [CI run 34198740173](https://github.com/b1indsight/viberwhisper/actions/runs/34198740173),
+  including the Windows GUI feature build, tests, and all-targets Clippy.
 - Native keyboard smoke tests were not performed locally.
