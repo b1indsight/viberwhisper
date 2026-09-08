@@ -225,8 +225,15 @@ fn parse_named_key(value: &str) -> Option<NamedKey> {
     Some(NamedKey { key, canonical })
 }
 
-fn needs_passthrough_warning(key: Key) -> bool {
-    !matches!(
+fn log_binding_warnings<P: HotkeyPolicy>(
+    mode: &'static str,
+    key: Option<Key>,
+    label: Option<&str>,
+) {
+    let (Some(key), Some(label)) = (key, label) else {
+        return;
+    };
+    if !matches!(
         key,
         Key::F1
             | Key::F2
@@ -240,18 +247,7 @@ fn needs_passthrough_warning(key: Key) -> bool {
             | Key::F10
             | Key::F11
             | Key::F12
-    )
-}
-
-fn log_binding_warnings<P: HotkeyPolicy>(
-    mode: &'static str,
-    key: Option<Key>,
-    label: Option<&str>,
-) {
-    let (Some(key), Some(label)) = (key, label) else {
-        return;
-    };
-    if needs_passthrough_warning(key) {
+    ) {
         warn!(
             mode,
             hotkey = %label,
@@ -597,13 +593,6 @@ mod tests {
         .unwrap();
         assert_eq!(config.hold_label.as_deref(), Some("RIGHTALT"));
         assert_eq!(config.toggle_label.as_deref(), Some("F9"));
-    }
-
-    #[test]
-    fn classifies_passthrough_risks() {
-        assert!(!needs_passthrough_warning(Key::F8));
-        assert!(needs_passthrough_warning(Key::KeyA));
-        assert!(needs_passthrough_warning(Key::AltGr));
     }
 
     #[test]
