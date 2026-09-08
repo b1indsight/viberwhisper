@@ -183,11 +183,19 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
         );
     }
 
-    if let Some(hotkey) = config.hotkeys.hold_label.as_deref() {
-        info!(mode = "hold", hotkey, "Recording hotkey enabled");
+    if let Some(binding) = config.hotkeys.hold {
+        info!(
+            mode = "hold",
+            hotkey = binding.canonical,
+            "Recording hotkey enabled"
+        );
     }
-    if let Some(hotkey) = config.hotkeys.toggle_label.as_deref() {
-        info!(mode = "toggle", hotkey, "Recording hotkey enabled");
+    if let Some(binding) = config.hotkeys.toggle {
+        info!(
+            mode = "toggle",
+            hotkey = binding.canonical,
+            "Recording hotkey enabled"
+        );
     }
     info!("Listener ready; press Ctrl+C to exit");
 
@@ -264,7 +272,10 @@ mod tests {
         document.inference.api.post_process.api_url = Some("not a URL".to_string());
         // Dataset capture archives raw STT, so an incomplete cleanup setup must not block it.
         let config = RecordingConfig::from_config(&document).unwrap();
-        assert_eq!(config.hotkeys.hold_label.as_deref(), Some("F8"));
+        assert_eq!(
+            config.hotkeys.hold.map(|binding| binding.canonical),
+            Some("F8")
+        );
         assert!(ListenerConfig::from_config(&document).is_err());
     }
 }

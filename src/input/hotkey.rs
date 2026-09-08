@@ -1,4 +1,3 @@
-use std::sync::Mutex;
 use std::thread;
 
 use rdev::{Event, EventType, Key, listen};
@@ -6,12 +5,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::core::config::{ConfigKey, InputSection};
 
+/// Parsed and platform-validated Hold/Toggle bindings for the recording listener.
 #[derive(Debug)]
 pub struct HotkeyConfig {
-    hold_key: Option<Key>,
-    toggle_key: Option<Key>,
-    pub(crate) hold_label: Option<String>,
-    pub(crate) toggle_label: Option<String>,
+    pub(crate) hold: Option<NamedKey>,
+    pub(crate) toggle: Option<NamedKey>,
 }
 
 /// Target policy used when constructing hotkeys and reporting listener diagnostics.
@@ -27,37 +25,32 @@ pub(crate) trait HotkeyPolicy: Send + 'static {
     }
 }
 
+/// A parsed physical key paired with its canonical configuration spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NamedKey {
+pub(crate) struct NamedKey {
     key: Key,
-    canonical: &'static str,
+    pub(crate) canonical: &'static str,
 }
 
 impl HotkeyConfig {
     /// Parses configured names into distinct, supported bindings for the target.
     pub(crate) fn from_section<P: HotkeyPolicy>(section: &InputSection) -> anyhow::Result<Self> {
-        let hold_binding = parse_binding::<P>(ConfigKey::InputHoldHotkey, &section.hold_hotkey)?;
-        let toggle_binding =
-            parse_binding::<P>(ConfigKey::InputToggleHotkey, &section.toggle_hotkey)?;
+        let hold = parse_binding::<P>(ConfigKey::InputHoldHotkey, &section.hold_hotkey)?;
+        let toggle = parse_binding::<P>(ConfigKey::InputToggleHotkey, &section.toggle_hotkey)?;
 
-        if hold_binding.is_some()
-            && hold_binding.map(|binding| binding.key) == toggle_binding.map(|binding| binding.key)
+        if let (Some(hold), Some(toggle)) = (hold, toggle)
+            && hold.key == toggle.key
         {
             anyhow::bail!("input.toggle_hotkey: hold and toggle hotkeys must use different keys");
         }
         if let Some(message) = P::pair_conflict(
-            hold_binding.map(|binding| binding.key),
-            toggle_binding.map(|binding| binding.key),
+            hold.map(|binding| binding.key),
+            toggle.map(|binding| binding.key),
         ) {
             anyhow::bail!("input.toggle_hotkey: {message}");
         }
 
-        Ok(Self {
-            hold_key: hold_binding.map(|binding| binding.key),
-            toggle_key: toggle_binding.map(|binding| binding.key),
-            hold_label: hold_binding.map(|binding| binding.canonical.to_string()),
-            toggle_label: toggle_binding.map(|binding| binding.canonical.to_string()),
-        })
+        Ok(Self { hold, toggle })
     }
 }
 
@@ -87,146 +80,144 @@ pub fn parse_key(value: &str) -> Option<Key> {
     parse_named_key(value).map(|named| named.key)
 }
 
+// Shared spellings keep configuration parsing and captured-key labels in sync.
+const NAMED_KEYS: &[(Key, &str, &[&str])] = &[
+    (Key::F1, "F1", &[]),
+    (Key::F2, "F2", &[]),
+    (Key::F3, "F3", &[]),
+    (Key::F4, "F4", &[]),
+    (Key::F5, "F5", &[]),
+    (Key::F6, "F6", &[]),
+    (Key::F7, "F7", &[]),
+    (Key::F8, "F8", &[]),
+    (Key::F9, "F9", &[]),
+    (Key::F10, "F10", &[]),
+    (Key::F11, "F11", &[]),
+    (Key::F12, "F12", &[]),
+    (Key::KeyA, "A", &[]),
+    (Key::KeyB, "B", &[]),
+    (Key::KeyC, "C", &[]),
+    (Key::KeyD, "D", &[]),
+    (Key::KeyE, "E", &[]),
+    (Key::KeyF, "F", &[]),
+    (Key::KeyG, "G", &[]),
+    (Key::KeyH, "H", &[]),
+    (Key::KeyI, "I", &[]),
+    (Key::KeyJ, "J", &[]),
+    (Key::KeyK, "K", &[]),
+    (Key::KeyL, "L", &[]),
+    (Key::KeyM, "M", &[]),
+    (Key::KeyN, "N", &[]),
+    (Key::KeyO, "O", &[]),
+    (Key::KeyP, "P", &[]),
+    (Key::KeyQ, "Q", &[]),
+    (Key::KeyR, "R", &[]),
+    (Key::KeyS, "S", &[]),
+    (Key::KeyT, "T", &[]),
+    (Key::KeyU, "U", &[]),
+    (Key::KeyV, "V", &[]),
+    (Key::KeyW, "W", &[]),
+    (Key::KeyX, "X", &[]),
+    (Key::KeyY, "Y", &[]),
+    (Key::KeyZ, "Z", &[]),
+    (Key::Num0, "0", &[]),
+    (Key::Num1, "1", &[]),
+    (Key::Num2, "2", &[]),
+    (Key::Num3, "3", &[]),
+    (Key::Num4, "4", &[]),
+    (Key::Num5, "5", &[]),
+    (Key::Num6, "6", &[]),
+    (Key::Num7, "7", &[]),
+    (Key::Num8, "8", &[]),
+    (Key::Num9, "9", &[]),
+    (Key::Backspace, "BACKSPACE", &[]),
+    (Key::Delete, "DELETE", &[]),
+    (Key::Insert, "INSERT", &[]),
+    (Key::Return, "ENTER", &["RETURN"]),
+    (Key::Space, "SPACE", &[]),
+    (Key::Tab, "TAB", &[]),
+    (Key::Escape, "ESCAPE", &["ESC"]),
+    (Key::UpArrow, "UP", &["UPARROW"]),
+    (Key::DownArrow, "DOWN", &["DOWNARROW"]),
+    (Key::LeftArrow, "LEFT", &["LEFTARROW"]),
+    (Key::RightArrow, "RIGHT", &["RIGHTARROW"]),
+    (Key::Home, "HOME", &[]),
+    (Key::End, "END", &[]),
+    (Key::PageUp, "PAGEUP", &[]),
+    (Key::PageDown, "PAGEDOWN", &[]),
+    (Key::Alt, "LEFTALT", &["ALT", "LEFTOPTION", "OPTION"]),
+    (Key::AltGr, "RIGHTALT", &["ALTGR", "RIGHTOPTION"]),
+    (Key::ControlLeft, "LEFTCTRL", &[]),
+    (Key::ControlRight, "RIGHTCTRL", &[]),
+    (Key::ShiftLeft, "LEFTSHIFT", &[]),
+    (Key::ShiftRight, "RIGHTSHIFT", &[]),
+    (Key::MetaLeft, "LEFTMETA", &["COMMAND", "WIN", "SUPER"]),
+    (Key::MetaRight, "RIGHTMETA", &[]),
+    (Key::CapsLock, "CAPSLOCK", &[]),
+    (Key::NumLock, "NUMLOCK", &[]),
+    (Key::ScrollLock, "SCROLLLOCK", &[]),
+    (Key::PrintScreen, "PRINTSCREEN", &[]),
+    (Key::Pause, "PAUSE", &[]),
+    (Key::Function, "FUNCTION", &[]),
+    (Key::BackQuote, "BACKQUOTE", &[]),
+    (Key::Minus, "MINUS", &[]),
+    (Key::Equal, "EQUAL", &[]),
+    (Key::LeftBracket, "LEFTBRACKET", &[]),
+    (Key::RightBracket, "RIGHTBRACKET", &[]),
+    (Key::SemiColon, "SEMICOLON", &[]),
+    (Key::Quote, "QUOTE", &[]),
+    (Key::BackSlash, "BACKSLASH", &[]),
+    (Key::IntlBackslash, "INTLBACKSLASH", &[]),
+    (Key::Comma, "COMMA", &[]),
+    (Key::Dot, "DOT", &[]),
+    (Key::Slash, "SLASH", &[]),
+    (Key::Kp0, "NUMPAD0", &["KP0"]),
+    (Key::Kp1, "NUMPAD1", &["KP1"]),
+    (Key::Kp2, "NUMPAD2", &["KP2"]),
+    (Key::Kp3, "NUMPAD3", &["KP3"]),
+    (Key::Kp4, "NUMPAD4", &["KP4"]),
+    (Key::Kp5, "NUMPAD5", &["KP5"]),
+    (Key::Kp6, "NUMPAD6", &["KP6"]),
+    (Key::Kp7, "NUMPAD7", &["KP7"]),
+    (Key::Kp8, "NUMPAD8", &["KP8"]),
+    (Key::Kp9, "NUMPAD9", &["KP9"]),
+    (Key::KpReturn, "NUMPADENTER", &["KPENTER"]),
+    (Key::KpMinus, "NUMPADMINUS", &["KPMINUS"]),
+    (Key::KpPlus, "NUMPADPLUS", &["KPPLUS"]),
+    (Key::KpMultiply, "NUMPADMULTIPLY", &["KPMULTIPLY"]),
+    (Key::KpDivide, "NUMPADDIVIDE", &["KPDIVIDE"]),
+    (Key::KpDelete, "NUMPADDELETE", &["KPDELETE"]),
+];
+
 /// Converts a captured physical key into the canonical configuration spelling.
-pub(crate) fn canonical_key_name(key: Key) -> Option<String> {
-    let debug_name = format!("{key:?}");
-    let candidate = if let Some(letter) = debug_name.strip_prefix("Key") {
-        letter.to_string()
-    } else if let Some(digit) = debug_name
-        .strip_prefix("Num")
-        .filter(|value| value.len() == 1 && value.as_bytes()[0].is_ascii_digit())
-    {
-        digit.to_string()
-    } else {
-        match key {
-            Key::ControlLeft => "LEFTCTRL".to_string(),
-            Key::ControlRight => "RIGHTCTRL".to_string(),
-            Key::ShiftLeft => "LEFTSHIFT".to_string(),
-            Key::ShiftRight => "RIGHTSHIFT".to_string(),
-            Key::MetaLeft => "LEFTMETA".to_string(),
-            Key::MetaRight => "RIGHTMETA".to_string(),
-            Key::KpReturn => "NUMPADENTER".to_string(),
-            Key::Unknown(_) => return None,
-            _ => debug_name.to_ascii_uppercase(),
-        }
-    };
-    parse_named_key(&candidate).map(|named| named.canonical.to_string())
+pub(crate) fn canonical_key_name(key: Key) -> Option<&'static str> {
+    NAMED_KEYS
+        .iter()
+        .find_map(|&(candidate, canonical, _)| (candidate == key).then_some(canonical))
 }
 
 fn parse_named_key(value: &str) -> Option<NamedKey> {
-    let (key, canonical) = match value.trim().to_ascii_uppercase().as_str() {
-        "F1" => (Key::F1, "F1"),
-        "F2" => (Key::F2, "F2"),
-        "F3" => (Key::F3, "F3"),
-        "F4" => (Key::F4, "F4"),
-        "F5" => (Key::F5, "F5"),
-        "F6" => (Key::F6, "F6"),
-        "F7" => (Key::F7, "F7"),
-        "F8" => (Key::F8, "F8"),
-        "F9" => (Key::F9, "F9"),
-        "F10" => (Key::F10, "F10"),
-        "F11" => (Key::F11, "F11"),
-        "F12" => (Key::F12, "F12"),
-        "A" => (Key::KeyA, "A"),
-        "B" => (Key::KeyB, "B"),
-        "C" => (Key::KeyC, "C"),
-        "D" => (Key::KeyD, "D"),
-        "E" => (Key::KeyE, "E"),
-        "F" => (Key::KeyF, "F"),
-        "G" => (Key::KeyG, "G"),
-        "H" => (Key::KeyH, "H"),
-        "I" => (Key::KeyI, "I"),
-        "J" => (Key::KeyJ, "J"),
-        "K" => (Key::KeyK, "K"),
-        "L" => (Key::KeyL, "L"),
-        "M" => (Key::KeyM, "M"),
-        "N" => (Key::KeyN, "N"),
-        "O" => (Key::KeyO, "O"),
-        "P" => (Key::KeyP, "P"),
-        "Q" => (Key::KeyQ, "Q"),
-        "R" => (Key::KeyR, "R"),
-        "S" => (Key::KeyS, "S"),
-        "T" => (Key::KeyT, "T"),
-        "U" => (Key::KeyU, "U"),
-        "V" => (Key::KeyV, "V"),
-        "W" => (Key::KeyW, "W"),
-        "X" => (Key::KeyX, "X"),
-        "Y" => (Key::KeyY, "Y"),
-        "Z" => (Key::KeyZ, "Z"),
-        "0" => (Key::Num0, "0"),
-        "1" => (Key::Num1, "1"),
-        "2" => (Key::Num2, "2"),
-        "3" => (Key::Num3, "3"),
-        "4" => (Key::Num4, "4"),
-        "5" => (Key::Num5, "5"),
-        "6" => (Key::Num6, "6"),
-        "7" => (Key::Num7, "7"),
-        "8" => (Key::Num8, "8"),
-        "9" => (Key::Num9, "9"),
-        "BACKSPACE" => (Key::Backspace, "BACKSPACE"),
-        "DELETE" => (Key::Delete, "DELETE"),
-        "INSERT" => (Key::Insert, "INSERT"),
-        "ENTER" | "RETURN" => (Key::Return, "ENTER"),
-        "SPACE" => (Key::Space, "SPACE"),
-        "TAB" => (Key::Tab, "TAB"),
-        "ESCAPE" | "ESC" => (Key::Escape, "ESCAPE"),
-        "UP" | "UPARROW" => (Key::UpArrow, "UP"),
-        "DOWN" | "DOWNARROW" => (Key::DownArrow, "DOWN"),
-        "LEFT" | "LEFTARROW" => (Key::LeftArrow, "LEFT"),
-        "RIGHT" | "RIGHTARROW" => (Key::RightArrow, "RIGHT"),
-        "HOME" => (Key::Home, "HOME"),
-        "END" => (Key::End, "END"),
-        "PAGEUP" => (Key::PageUp, "PAGEUP"),
-        "PAGEDOWN" => (Key::PageDown, "PAGEDOWN"),
-        "LEFTALT" | "ALT" | "LEFTOPTION" | "OPTION" => (Key::Alt, "LEFTALT"),
-        "RIGHTALT" | "ALTGR" | "RIGHTOPTION" => (Key::AltGr, "RIGHTALT"),
-        "LEFTCTRL" => (Key::ControlLeft, "LEFTCTRL"),
-        "RIGHTCTRL" => (Key::ControlRight, "RIGHTCTRL"),
-        "LEFTSHIFT" => (Key::ShiftLeft, "LEFTSHIFT"),
-        "RIGHTSHIFT" => (Key::ShiftRight, "RIGHTSHIFT"),
-        "LEFTMETA" | "COMMAND" | "WIN" | "SUPER" => (Key::MetaLeft, "LEFTMETA"),
-        "RIGHTMETA" => (Key::MetaRight, "RIGHTMETA"),
-        "CAPSLOCK" => (Key::CapsLock, "CAPSLOCK"),
-        "NUMLOCK" => (Key::NumLock, "NUMLOCK"),
-        "SCROLLLOCK" => (Key::ScrollLock, "SCROLLLOCK"),
-        "PRINTSCREEN" => (Key::PrintScreen, "PRINTSCREEN"),
-        "PAUSE" => (Key::Pause, "PAUSE"),
-        "FUNCTION" => (Key::Function, "FUNCTION"),
-        "BACKQUOTE" => (Key::BackQuote, "BACKQUOTE"),
-        "MINUS" => (Key::Minus, "MINUS"),
-        "EQUAL" => (Key::Equal, "EQUAL"),
-        "LEFTBRACKET" => (Key::LeftBracket, "LEFTBRACKET"),
-        "RIGHTBRACKET" => (Key::RightBracket, "RIGHTBRACKET"),
-        "SEMICOLON" => (Key::SemiColon, "SEMICOLON"),
-        "QUOTE" => (Key::Quote, "QUOTE"),
-        "BACKSLASH" => (Key::BackSlash, "BACKSLASH"),
-        "INTLBACKSLASH" => (Key::IntlBackslash, "INTLBACKSLASH"),
-        "COMMA" => (Key::Comma, "COMMA"),
-        "DOT" => (Key::Dot, "DOT"),
-        "SLASH" => (Key::Slash, "SLASH"),
-        "NUMPAD0" | "KP0" => (Key::Kp0, "NUMPAD0"),
-        "NUMPAD1" | "KP1" => (Key::Kp1, "NUMPAD1"),
-        "NUMPAD2" | "KP2" => (Key::Kp2, "NUMPAD2"),
-        "NUMPAD3" | "KP3" => (Key::Kp3, "NUMPAD3"),
-        "NUMPAD4" | "KP4" => (Key::Kp4, "NUMPAD4"),
-        "NUMPAD5" | "KP5" => (Key::Kp5, "NUMPAD5"),
-        "NUMPAD6" | "KP6" => (Key::Kp6, "NUMPAD6"),
-        "NUMPAD7" | "KP7" => (Key::Kp7, "NUMPAD7"),
-        "NUMPAD8" | "KP8" => (Key::Kp8, "NUMPAD8"),
-        "NUMPAD9" | "KP9" => (Key::Kp9, "NUMPAD9"),
-        "NUMPADENTER" | "KPENTER" => (Key::KpReturn, "NUMPADENTER"),
-        "NUMPADMINUS" | "KPMINUS" => (Key::KpMinus, "NUMPADMINUS"),
-        "NUMPADPLUS" | "KPPLUS" => (Key::KpPlus, "NUMPADPLUS"),
-        "NUMPADMULTIPLY" | "KPMULTIPLY" => (Key::KpMultiply, "NUMPADMULTIPLY"),
-        "NUMPADDIVIDE" | "KPDIVIDE" => (Key::KpDivide, "NUMPADDIVIDE"),
-        "NUMPADDELETE" | "KPDELETE" => (Key::KpDelete, "NUMPADDELETE"),
-        _ => return None,
-    };
-    Some(NamedKey { key, canonical })
+    let value = value.trim();
+    NAMED_KEYS
+        .iter()
+        .find(|(_, canonical, aliases)| {
+            canonical.eq_ignore_ascii_case(value)
+                || aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(value))
+        })
+        .map(|&(key, canonical, _)| NamedKey { key, canonical })
 }
 
-fn needs_passthrough_warning(key: Key) -> bool {
-    !matches!(
+fn log_binding_warnings<P: HotkeyPolicy>(mode: &'static str, binding: Option<NamedKey>) {
+    let Some(NamedKey {
+        key,
+        canonical: label,
+    }) = binding
+    else {
+        return;
+    };
+    if !matches!(
         key,
         Key::F1
             | Key::F2
@@ -240,18 +231,7 @@ fn needs_passthrough_warning(key: Key) -> bool {
             | Key::F10
             | Key::F11
             | Key::F12
-    )
-}
-
-fn log_binding_warnings<P: HotkeyPolicy>(
-    mode: &'static str,
-    key: Option<Key>,
-    label: Option<&str>,
-) {
-    let (Some(key), Some(label)) = (key, label) else {
-        return;
-    };
-    if needs_passthrough_warning(key) {
+    ) {
         warn!(
             mode,
             hotkey = %label,
@@ -319,16 +299,12 @@ impl EventMapper {
         }
     }
 
-    fn reset(&mut self) {
-        self.hold_down = false;
-        self.toggle_down = false;
-    }
-
     fn map_filtered(&mut self, event_type: Option<EventType>) -> Option<HotkeyEvent> {
         match event_type {
             Some(event_type) => self.map(&event_type),
             None => {
-                self.reset();
+                self.hold_down = false;
+                self.toggle_down = false;
                 None
             }
         }
@@ -348,34 +324,32 @@ pub(crate) fn start_hotkey_listener<P, F>(
     P: HotkeyPolicy,
     F: Fn(EventType) -> Option<EventType> + Send + 'static,
 {
-    let hold_key = config.hold_key;
-    let toggle_key = config.toggle_key;
+    let hold_key = config.hold.map(|binding| binding.key);
+    let toggle_key = config.toggle.map(|binding| binding.key);
     spawn_listener(EventMapper::new(hold_key, toggle_key), filter, notify);
 
-    log_binding_warnings::<P>("hold", hold_key, config.hold_label.as_deref());
-    log_binding_warnings::<P>("toggle", toggle_key, config.toggle_label.as_deref());
+    log_binding_warnings::<P>("hold", config.hold);
+    log_binding_warnings::<P>("toggle", config.toggle);
 
-    if let Some(label) = config.hold_label.as_deref() {
-        info!(hotkey = %label, "hold hotkey registered");
+    if let Some(binding) = config.hold {
+        info!(hotkey = %binding.canonical, "hold hotkey registered");
     }
-    if let Some(label) = config.toggle_label.as_deref() {
-        info!(hotkey = %label, "toggle hotkey registered");
+    if let Some(binding) = config.toggle {
+        info!(hotkey = %binding.canonical, "toggle hotkey registered");
     }
 }
 
-fn spawn_listener<F>(mapper: EventMapper, filter: F, notify: impl Fn(HotkeyEvent) + Send + 'static)
-where
+fn spawn_listener<F>(
+    mut mapper: EventMapper,
+    filter: F,
+    notify: impl Fn(HotkeyEvent) + Send + 'static,
+) where
     F: Fn(EventType) -> Option<EventType> + Send + 'static,
 {
     thread::spawn(move || {
         debug!("rdev listener thread started");
-        let mapper = Mutex::new(mapper);
         let callback = move |event: Event| {
             let event_type = filter(event.event_type);
-
-            let mut mapper = mapper
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(event) = mapper.map_filtered(event_type) {
                 notify(event);
             }
@@ -405,16 +379,16 @@ mod tests {
     fn constructs_default_disabled_and_invalid_hotkey_sections() {
         let config =
             HotkeyConfig::from_section::<TestHotkeyPolicy>(&InputSection::default()).unwrap();
-        assert_eq!(config.hold_key, Some(Key::F8));
-        assert_eq!(config.toggle_key, Some(Key::F9));
+        assert_eq!(config.hold.map(|binding| binding.key), Some(Key::F8));
+        assert_eq!(config.toggle.map(|binding| binding.key), Some(Key::F9));
 
         let tray_only = InputSection {
             hold_hotkey: String::new(),
             toggle_hotkey: String::new(),
         };
         let config = HotkeyConfig::from_section::<TestHotkeyPolicy>(&tray_only).unwrap();
-        assert_eq!(config.hold_key, None);
-        assert_eq!(config.toggle_key, None);
+        assert_eq!(config.hold, None);
+        assert_eq!(config.toggle, None);
 
         let invalid = InputSection {
             hold_hotkey: "F13".to_string(),
@@ -437,6 +411,22 @@ mod tests {
                 .to_string()
                 .contains("hold and toggle hotkeys must use different keys")
         );
+    }
+
+    #[test]
+    fn named_key_catalog_has_unique_keys_and_spellings() {
+        // A duplicate row or alias would make capture/parsing depend on catalog order.
+        let mut keys = std::collections::HashSet::new();
+        let mut spellings = std::collections::HashSet::new();
+        for &(key, canonical, aliases) in NAMED_KEYS {
+            assert!(keys.insert(key), "duplicate key: {key:?}");
+            for name in std::iter::once(canonical).chain(aliases.iter().copied()) {
+                assert!(
+                    spellings.insert(name.to_ascii_uppercase()),
+                    "duplicate spelling: {name}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -551,7 +541,7 @@ mod tests {
 
         for (name, expected) in cases {
             assert_eq!(parse_key(name), Some(expected), "name: {name}");
-            assert_eq!(canonical_key_name(expected).as_deref(), Some(name));
+            assert_eq!(canonical_key_name(expected), Some(name));
         }
         assert_eq!(canonical_key_name(Key::Unknown(42)), None);
     }
@@ -574,6 +564,14 @@ mod tests {
             ("LEFTARROW", Key::LeftArrow),
             ("RIGHTARROW", Key::RightArrow),
             ("KP0", Key::Kp0),
+            ("KP1", Key::Kp1),
+            ("KP2", Key::Kp2),
+            ("KP3", Key::Kp3),
+            ("KP4", Key::Kp4),
+            ("KP5", Key::Kp5),
+            ("KP6", Key::Kp6),
+            ("KP7", Key::Kp7),
+            ("KP8", Key::Kp8),
             ("KP9", Key::Kp9),
             ("KPENTER", Key::KpReturn),
             ("KPMINUS", Key::KpMinus),
@@ -595,30 +593,28 @@ mod tests {
             toggle_hotkey: "f9".to_string(),
         })
         .unwrap();
-        assert_eq!(config.hold_label.as_deref(), Some("RIGHTALT"));
-        assert_eq!(config.toggle_label.as_deref(), Some("F9"));
-    }
-
-    #[test]
-    fn classifies_passthrough_risks() {
-        assert!(!needs_passthrough_warning(Key::F8));
-        assert!(needs_passthrough_warning(Key::KeyA));
-        assert!(needs_passthrough_warning(Key::AltGr));
+        assert_eq!(
+            config.hold.map(|binding| binding.canonical),
+            Some("RIGHTALT")
+        );
+        assert_eq!(config.toggle.map(|binding| binding.canonical), Some("F9"));
     }
 
     #[test]
     fn maps_events_in_order_and_suppresses_key_repeat() {
-        let mut mapper = EventMapper::new(Some(Key::F8), Some(Key::F9));
+        let mut mapper = EventMapper::new(Some(Key::AltGr), Some(Key::F9));
 
         assert_eq!(
-            mapper.map(&EventType::KeyPress(Key::F8)),
+            mapper.map(&EventType::KeyPress(Key::AltGr)),
             Some(HotkeyEvent::Pressed(HotkeySource::Hold))
         );
-        assert_eq!(mapper.map(&EventType::KeyPress(Key::F8)), None);
+        assert_eq!(mapper.map(&EventType::KeyPress(Key::AltGr)), None);
         assert_eq!(
-            mapper.map(&EventType::KeyRelease(Key::F8)),
+            mapper.map(&EventType::KeyRelease(Key::AltGr)),
             Some(HotkeyEvent::Released(HotkeySource::Hold))
         );
+        // Standalone right Alt must remain distinct from left Alt.
+        assert_eq!(mapper.map(&EventType::KeyPress(Key::Alt)), None);
         assert_eq!(
             mapper.map(&EventType::KeyPress(Key::F9)),
             Some(HotkeyEvent::Pressed(HotkeySource::Toggle))
@@ -633,31 +629,21 @@ mod tests {
 
     #[test]
     fn callback_filter_can_drop_an_event_and_reset_mapper_state() {
-        let mut mapper = EventMapper::new(Some(Key::KeyV), Some(Key::F9));
-
-        assert_eq!(
-            mapper.map_filtered(Some(EventType::KeyPress(Key::KeyV))),
-            Some(HotkeyEvent::Pressed(HotkeySource::Hold))
-        );
-        assert_eq!(mapper.map_filtered(None), None);
-        assert_eq!(
-            mapper.map_filtered(Some(EventType::KeyPress(Key::KeyV))),
-            Some(HotkeyEvent::Pressed(HotkeySource::Hold))
-        );
-    }
-
-    #[test]
-    fn maps_standalone_right_alt_hold_press_and_release() {
-        let mut mapper = EventMapper::new(Some(Key::AltGr), Some(Key::F9));
-
-        assert_eq!(
-            mapper.map(&EventType::KeyPress(Key::AltGr)),
-            Some(HotkeyEvent::Pressed(HotkeySource::Hold))
-        );
-        assert_eq!(
-            mapper.map(&EventType::KeyRelease(Key::AltGr)),
-            Some(HotkeyEvent::Released(HotkeySource::Hold))
-        );
-        assert_eq!(mapper.map(&EventType::KeyPress(Key::Alt)), None);
+        // Paste suppression can hide a key-up event; either binding must accept the next press.
+        for (key, source) in [
+            (Key::KeyV, HotkeySource::Hold),
+            (Key::F9, HotkeySource::Toggle),
+        ] {
+            let mut mapper = EventMapper::new(Some(Key::KeyV), Some(Key::F9));
+            assert_eq!(
+                mapper.map_filtered(Some(EventType::KeyPress(key))),
+                Some(HotkeyEvent::Pressed(source))
+            );
+            assert_eq!(mapper.map_filtered(None), None);
+            assert_eq!(
+                mapper.map_filtered(Some(EventType::KeyPress(key))),
+                Some(HotkeyEvent::Pressed(source))
+            );
+        }
     }
 }

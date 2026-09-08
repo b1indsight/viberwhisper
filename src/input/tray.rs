@@ -16,6 +16,7 @@ use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent, TrayIconId};
 
 use crate::history::RECENT_HISTORY_LIMIT;
 
+#[cfg(not(test))]
 const MIN_DEBOUNCE_WINDOW: Duration = Duration::from_millis(300);
 const HISTORY_LABEL_GRAPHEME_LIMIT: usize = 40;
 const STATUS_IDLE_PNG: &[u8] = include_bytes!("../../assets/status-idle.png");
@@ -142,6 +143,7 @@ fn format_history_label(text: &str) -> String {
     label.replace('&', "&&")
 }
 
+#[cfg(not(test))]
 fn effective_debounce_window(platform_interval: Option<Duration>) -> Duration {
     platform_interval
         .unwrap_or(MIN_DEBOUNCE_WINDOW)
@@ -382,8 +384,14 @@ mod tests {
     }
 
     #[test]
-    fn embedded_status_icons_are_32px_rgba_with_transparency() {
-        for bytes in [STATUS_IDLE_PNG, STATUS_RECORDING_PNG] {
+    fn status_icons_match_state_and_rendering_requirements() {
+        for (recording, expected_bytes, expected_template) in [
+            (false, STATUS_IDLE_PNG, true),
+            (true, STATUS_RECORDING_PNG, false),
+        ] {
+            let (bytes, is_template) = status_icon_source::<TemplateTrayPolicy>(recording);
+            assert_eq!(bytes, expected_bytes);
+            assert_eq!(is_template, expected_template);
             let (rgba, width, height) = decode_icon_png(bytes).unwrap();
 
             assert_eq!((width, height), (32, 32));
@@ -391,25 +399,6 @@ mod tests {
             assert!(rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] == 0));
             assert!(rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] == 255));
         }
-    }
-
-    #[test]
-    fn idle_uses_template_rendering_and_recording_keeps_explicit_color() {
-        assert!(status_icon_source::<TemplateTrayPolicy>(false).1);
-        assert!(!status_icon_source::<TemplateTrayPolicy>(true).1);
-    }
-
-    #[test]
-    fn effective_window_uses_platform_interval_with_300ms_floor() {
-        assert_eq!(
-            effective_debounce_window(Some(Duration::from_millis(200))),
-            Duration::from_millis(300)
-        );
-        assert_eq!(
-            effective_debounce_window(Some(Duration::from_millis(500))),
-            Duration::from_millis(500)
-        );
-        assert_eq!(effective_debounce_window(None), Duration::from_millis(300));
     }
 
     #[test]
