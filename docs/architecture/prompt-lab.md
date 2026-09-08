@@ -17,11 +17,11 @@ src/prompt_lab/
   metrics.rs       — versioned WER alignment and proper-noun matching
   regression.rs    — fresh WAV execution, report contract, shared review rules, comparison
   review.rs        — coding-agent input identity/coverage validation and report completion
-src/application/prompt_lab.rs — CLI/config/backend assembly
+src/core/prompt_lab.rs — CLI/config/backend assembly
 ```
 
-The domain modules contain no winit or native platform types. The application layer reuses the
-existing listener only for capture controls and assembles offline regression from the resolved STT
+The domain modules contain no winit or native platform types. `core::prompt_lab` reuses
+`ui::listener` only for capture controls and assembles offline regression from the resolved STT
 configuration, `WavChunkReader`, `ApiTranscriber`, and the shared language-aware merge helper.
 
 ## Dataset and Capture

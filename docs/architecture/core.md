@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The `core` module contains strict v3 configuration persistence and typed field selection, CLI parsing, recording lifecycle state, and transcription orchestration. Configuration callers declare the fields they need and supply their own constructors; `core::config` has no dependency on business or application modules.
+The `core` module owns process entry points, CLI parsing and command execution, strict v3 configuration persistence and typed field selection, recording lifecycle state, and transcription orchestration. Configuration callers declare the fields they need and supply their own constructors; `core::config` has no dependency on workflows or UI modules.
 
 ## Config (`src/core/config/`)
 
@@ -55,7 +55,7 @@ enabled. Constructors parse URL values and require the fields needed for enabled
 HTTP protocol and empty-model errors are left to the request layer. Hotkey construction resolves
 named keys and rejects unsupported or conflicting bindings.
 
-Workflow composition lives at the application boundary. `RecordingConfig` combines hotkeys,
+Workflow settings are assembled in `core`. `core::listener::RecordingConfig` combines hotkeys,
 audio, orchestrator, and STT settings for raw dataset capture. `ListenerConfig` adds cleanup
 for normal delivery and setup verification. Offline `ConvertConfig` combines STT, cleanup,
 and merge language; WAV chunk limits remain audio-owned constants. Prompt-lab evaluation
@@ -70,7 +70,7 @@ independent of component construction and support incremental configuration.
 ## CLI (`src/core/cli.rs`)
 
 The no-subcommand listener and the no-console desktop entry point pass through
-`application::setup` before constructing runtime services. A valid listener document bypasses the
+`ui::setup` before constructing runtime services. A valid listener document bypasses the
 wizard; missing or invalid configuration opens the same modal flow on macOS and Windows. The
 explicit `setup` command reruns it without starting the listener after saving. Interactive hotkey
 editing launches a short-lived helper instance of the same executable so the existing `rdev`
@@ -167,7 +167,7 @@ events do not consume IDs and a failed startup cannot reuse its ID.
 
 The machine consumes source-free requests plus `SessionStarted`, `SessionStartFailed`, `SessionStopped`, and `SessionStopFailed` results. It emits composite `StartSession` and `StopSession` effects instead of exposing recorder/orchestrator startup phases.
 
-`application::listener` executes `StartSession` as an all-or-nothing recorder/orchestrator
+`ui::listener` executes `StartSession` as an all-or-nothing recorder/orchestrator
 acquisition with rollback. `StopSession` stops the recorder and submits tail chunks in order, then
 starts a session-scoped background task for orchestrator convergence and the selected application
 output. Normal delivery performs post-processing and text history persistence followed by
@@ -181,26 +181,26 @@ Exit is represented as `ShutdownRequested`. It cancels recorder/orchestrator wor
 
 ## Main Integration Notes
 
-`src/main.rs` remains the console process entry and delegates to `application::run`, which parses
+`src/main.rs` remains the console process entry and delegates to `core::run`, which parses
 CLI commands and preserves stdout, stderr, waiting, and exit behavior. Windows release packages
 also build the feature-gated `src/bin/viberwhisper-app.rs` as a GUI-subsystem executable. That
-entry delegates to `application::run_desktop`, bypasses CLI parsing, and enters the same configured
+entry delegates to `core::run_desktop`, bypasses CLI parsing, and enters the same configured
 listener directly. Before tracing starts, the Windows GUI entry redirects stdout and stderr to
 `NUL`, providing valid handles without allocating a console. Fatal desktop startup errors cross
 the Windows platform boundary into a native error dialog because ordinary diagnostics are not
 visible. macOS packaging continues to expose only the established `.app` entry.
 
-`application` loads one `ConfigDocument`; configuration constructors request their typed fields
+CLI workflows in `core` and desktop setup in `ui` load a `ConfigDocument`; configuration constructors request their typed fields
 through `ConfigDocument::select`, and the workflow passes each narrow value to its runtime consumer. Listener mode then creates one main-thread winit
 `EventLoop<AppEvent>` in `ControlFlow::Wait` mode. Opaque platform input, audio-readiness, and
 background completion producers use `EventLoopProxy` to wake that loop; winit owns AppKit/Win32
 dispatch and no window is created. CLI-only workflows do not construct the event loop.
 
-`src/application/listener/event_loop.rs` passes opaque native payloads back through
+`src/ui/listener/event_loop.rs` passes opaque native payloads back through
 `NativePlatform::handle_event`, normalizes returned semantic actions, executes state-machine
 effects, drains ready chunks, coordinates background finalization, and handles history-copy actions
-without routing them through the recording state machine. Winit types remain in the application
-layer. `core`, `audio`, and `input` expose only domain values or narrow callbacks; platform-specific
+without routing them through the recording state machine. Winit types remain in `ui`.
+The existing business interfaces expose only domain values or narrow callbacks; platform-specific
 values remain behind `NativePlatform`.
 Finalization uses an atomic cancellation flag checked before post-processing, history persistence,
 and final text injection. History persistence appends one timestamped record to `history.jsonl`;
@@ -211,8 +211,11 @@ loading at that boundary without being repaired. Exit does not wait for persiste
 already in progress.
 
 The configurable API backend is shared by the recording/orchestration, offline conversion, setup,
-and prompt-lab workflows; no endpoint rewriting or persisted-document mutation occurs in the
-application layer. Both process entry files only delegate startup to explicit library entry points.
+and prompt-lab workflows; their assembly does not rewrite endpoints or persist temporary request
+overrides. Both process entry files only delegate startup to explicit library entry points.
+
+See [UI architecture](ui.md) for the desktop interaction boundary. The existing listener and setup
+call chains live there intact and directly use core, audio, and platform services.
 
 Prompt-lab evaluation is a CLI-only workflow: it does not construct winit, a post-processor,
 history, or native typing. It resolves the configured backend, replaces only the consumed
