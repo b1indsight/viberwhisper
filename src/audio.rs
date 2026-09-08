@@ -1,27 +1,23 @@
 use crate::core::config::{ConfigDocument, fields};
 
 // Keep API payloads below common service limits while producing chunks often enough for live STT.
-pub(crate) const MAX_CHUNK_DURATION_SECS: u32 = 30;
-pub(crate) const MAX_CHUNK_SIZE_BYTES: u64 = 23 * 1024 * 1024;
+const MAX_CHUNK_DURATION_SECS: u32 = 30;
+const MAX_CHUNK_SIZE_BYTES: u64 = 23 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioConfig {
     input_device: Option<String>,
     mic_gain: f32,
-    max_chunk_duration_secs: u32,
-    max_chunk_size_bytes: u64,
 }
 
 impl AudioConfig {
-    /// Selects recording settings and applies the audio module's fixed chunk policy.
+    /// Selects the microphone device and gain settings.
     pub(crate) fn from_config(document: &ConfigDocument) -> Self {
         document.select(
             (fields::AudioInputDevice, fields::AudioMicGain),
             |(input_device, mic_gain)| Self {
                 input_device,
                 mic_gain,
-                max_chunk_duration_secs: MAX_CHUNK_DURATION_SECS,
-                max_chunk_size_bytes: MAX_CHUNK_SIZE_BYTES,
             },
         )
     }

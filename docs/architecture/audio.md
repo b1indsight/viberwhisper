@@ -46,15 +46,17 @@ Production uses one module-owned policy for both live recording and offline conv
 limited to 30 seconds or 23 MiB, whichever produces fewer complete frames. These safety values are
 not persisted configuration.
 
-`max_frames_per_chunk(max_duration_secs, max_size_bytes, output_spec)` is the only duration/size
+`max_frames_per_chunk(output_spec)` is the only duration/size
 conversion. It works in complete audio frames and accounts for channel count, sample width, and
-the 44-byte or 68-byte header that `hound` emits for the output spec. Its explicit parameters keep
-the capacity calculation independently testable; production callers pass the module policy.
+the 44-byte or 68-byte header that `hound` emits for the output spec. It owns the fixed policy;
+configuration and application callers do not carry limit fields or arguments.
 
-- `Ok(None)`: both limits are disabled; the producer does not proactively slice.
-- `Ok(Some(0))`: a nonzero size limit can hold no more than 0.5 seconds; the producer emits no
+- `Ok(0)`: the size limit can hold no more than 0.5 seconds; the producer emits no
   chunk and therefore makes no STT request.
-- `Ok(Some(frames))`: producers slice at the smaller valid duration/size capacity.
+- `Ok(frames)` with a positive count: producers slice at the smaller duration/size capacity.
+
+Recording and offline reader capacities are plain integers. There is no unlimited mode;
+short recordings and the final tail of longer files use their remaining frames.
 
 ## Live Recorder
 
@@ -105,12 +107,13 @@ unreferenced WAV for dataset validation to report.
 
 ## Local WAV Reader
 
-`WavChunkReader::open(path, duration_limit, size_limit)` opens the source once. The reader itself
+`WavChunkReader::open(path)` opens the source once. The reader itself
 implements `Iterator<Item = Result<WavChunk, ChunkError>>`, reading, encoding, and yielding one chunk
 at a time. Integer and float sample formats, channel count, sample rate, and bit depth are preserved.
 
 The iterator has no chunk-count cap. A decode error is yielded once and is terminal; subsequent
-`next()` calls return `None`. With both limits disabled, a non-empty file is returned as one chunk.
+`next()` calls return `None`. A 65-second file that fits the byte limit per chunk yields
+30-, 30-, and 5-second WAV chunks from the same retained source reader.
 
 ## Dependencies
 
