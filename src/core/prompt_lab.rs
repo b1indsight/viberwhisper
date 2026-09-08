@@ -142,7 +142,7 @@ fn record(root: PathBuf) -> Result<()> {
     let dataset = DatasetStore::open_or_create(root)?;
     let (_, document) = load_config()?;
     let config = RecordingConfig::from_config(&document)?;
-    super::listener::run_capture(config, dataset)
+    crate::ui::listener::run_capture(config, dataset)
 }
 
 fn sample(action: PromptLabSampleCommand) -> Result<()> {

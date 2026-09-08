@@ -3,64 +3,15 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::{info, warn};
 
-use crate::audio::AudioConfig;
-use crate::core::config::{ConfigDocument, InputSection, fields};
-use crate::core::orchestrator::OrchestratorConfig;
+use crate::core::listener::{ListenerConfig, RecordingConfig};
 use crate::core::recording_session::{RecordingState, SessionEvent};
 use crate::history::{HistoryStore, HistoryTyper};
-use crate::input::hotkey::HotkeyConfig;
 use crate::platform::PlatformAction;
 use crate::postprocess::PostProcessConfig;
 use crate::prompt_lab::{DatasetStore, PromptLabCapture, SttSnapshot};
-use crate::transcriber::TranscriberConfig;
 use crate::{audio, core, postprocess, transcriber};
 
 mod event_loop;
-
-/// Settings shared by live delivery and raw STT capture.
-#[derive(Debug)]
-pub(super) struct RecordingConfig {
-    pub(super) hotkeys: HotkeyConfig,
-    pub(super) audio: AudioConfig,
-    pub(super) orchestrator: OrchestratorConfig,
-    pub(super) transcriber: TranscriberConfig,
-}
-
-impl RecordingConfig {
-    pub(super) fn from_config(document: &ConfigDocument) -> Result<Self> {
-        let hotkeys = document.select(
-            (fields::InputHoldHotkey, fields::InputToggleHotkey),
-            |(hold_hotkey, toggle_hotkey)| {
-                crate::platform::hotkey_config(&InputSection {
-                    hold_hotkey,
-                    toggle_hotkey,
-                })
-            },
-        )?;
-        Ok(Self {
-            hotkeys,
-            audio: AudioConfig::from_config(document),
-            orchestrator: document.select(fields::TranscriptionLanguage, OrchestratorConfig::new),
-            transcriber: TranscriberConfig::from_config(document)?,
-        })
-    }
-}
-
-/// Live text delivery adds optional cleanup to the recording settings.
-#[derive(Debug)]
-pub(super) struct ListenerConfig {
-    pub(super) recording: RecordingConfig,
-    pub(super) post_process: PostProcessConfig,
-}
-
-impl ListenerConfig {
-    pub(super) fn from_config(document: &ConfigDocument) -> Result<Self> {
-        Ok(Self {
-            recording: RecordingConfig::from_config(document)?,
-            post_process: PostProcessConfig::from_config(document)?,
-        })
-    }
-}
 
 fn platform_session_event(action: PlatformAction, state: &RecordingState) -> Option<SessionEvent> {
     match action {
@@ -85,14 +36,14 @@ fn toggle_session_event(state: &RecordingState) -> Option<SessionEvent> {
 }
 
 /// Runs the listener using an already resolved workflow configuration.
-pub(super) fn run_with_config(config: ListenerConfig) -> Result<()> {
+pub(crate) fn run_with_config(config: ListenerConfig) -> Result<()> {
     run_with_mode(
         config.recording,
         ListenerMode::Delivery(config.post_process),
     )
 }
 
-pub(super) fn run_capture(config: RecordingConfig, store: DatasetStore) -> Result<()> {
+pub(crate) fn run_capture(config: RecordingConfig, store: DatasetStore) -> Result<()> {
     run_with_mode(config, ListenerMode::Capture(Arc::new(store)))
 }
 
@@ -207,8 +158,6 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::platform_session_event;
-    use super::{ListenerConfig, RecordingConfig};
-    use crate::core::config::{ConfigDocument, SecretSource};
     use crate::core::recording_session::{RecordingState, SessionEvent};
     use crate::platform::PlatformAction;
     use crate::session::SessionId;
@@ -255,27 +204,5 @@ mod tests {
             platform_session_event(PlatformAction::ToggleRecording, &starting),
             None
         );
-    }
-
-    struct EmptySecrets;
-
-    impl SecretSource for EmptySecrets {
-        fn get(&self, _name: &str) -> Option<String> {
-            None
-        }
-    }
-
-    #[test]
-    fn raw_capture_settings_ignore_invalid_cleanup_configuration() {
-        let mut document = ConfigDocument::new(EmptySecrets);
-        document.post_process.enabled = true;
-        document.inference.api.post_process.api_url = Some("not a URL".to_string());
-        // Dataset capture archives raw STT, so an incomplete cleanup setup must not block it.
-        let config = RecordingConfig::from_config(&document).unwrap();
-        assert_eq!(
-            config.hotkeys.hold.map(|binding| binding.canonical),
-            Some("F8")
-        );
-        assert!(ListenerConfig::from_config(&document).is_err());
     }
 }

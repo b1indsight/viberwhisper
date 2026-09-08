@@ -39,7 +39,7 @@ native dependencies remain selected by Cargo target dependency tables.
 - one text writer, one native clipboard function, and the native hotkey filter.
 
 The compiler checks the selected backend's associated policies. There is no runtime OS enum,
-feature flag, or OS-name match in the application layer.
+feature flag, or OS-name match in the desktop listener.
 
 ## Application Interface
 
@@ -77,7 +77,7 @@ pub(crate) enum PlatformAction {
 `TrayAction::CopyHistory` stays inside the runtime and calls the selected backend directly rather
 than entering the recording state machine. Toggle hotkey releases, key repeats, unrelated tray/menu
 IDs, rejected clicks, and native double-click tails produce no action. Recording-state decisions remain in
-`application::listener`; platform actions are mapped there to source-free `SessionEvent` values.
+`ui::listener`; platform actions are mapped there to source-free `SessionEvent` values.
 
 ## Ownership and Event Flow
 

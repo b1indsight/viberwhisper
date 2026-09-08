@@ -73,7 +73,7 @@ read the binding's canonical name.
 ### Recording Input Normalization
 
 Hotkey and tray source details stop at `platform::PlatformRuntime`. It converts opaque native
-payloads into Hold/Toggle/Exit `PlatformAction` values. `application::listener` then reads the
+payloads into Hold/Toggle/Exit `PlatformAction` values. `ui::listener` then reads the
 session machine's current state without mutating it and publishes only source-free core requests:
 
 | Raw gesture | Idle | Recording | Transitional/shutdown state |
@@ -129,8 +129,8 @@ the same key, and a Windows `LEFTCTRL`/`RIGHTALT` pair produce construction erro
 the affected configuration field.
 
 Configuration persistence intentionally does not construct runtime hotkeys. `config set`
-stores the string; `config check` and listener startup construct the application-owned
-`ListenerConfig` and return the first construction error.
+stores the string; `config check` and listener startup construct
+`core::listener::ListenerConfig` and return the first construction error.
 
 Key names identify `rdev::Key` values rather than produced characters. The macOS backend maps
 hardware key codes, while the Windows backend maps virtual-key values; letter and punctuation

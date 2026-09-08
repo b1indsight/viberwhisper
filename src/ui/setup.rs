@@ -14,12 +14,12 @@ use anyhow::{Result as AnyhowResult, anyhow};
 use rdev::EventType;
 use tinyfiledialogs::{MessageBoxIcon, YesNo};
 
-use super::listener::ListenerConfig;
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
 use crate::core::config::{
     ConfigDocument, ConfigStore,
     fields::{self, SecretStatus},
 };
+use crate::core::listener::ListenerConfig;
 use crate::postprocess::PostProcessor;
 use crate::session::SessionId;
 use crate::transcriber::{ApiTranscriber, Transcriber};
@@ -31,7 +31,7 @@ const DEFAULT_POST_PROCESS_MODEL: &str = "gpt-4o-mini";
 const HOTKEY_CAPTURE_HELPER_ENV: &str = "VIBERWHISPER_CAPTURE_HOTKEY";
 const HOTKEY_CAPTURE_EXIT_TIMEOUT: Duration = Duration::from_secs(1);
 
-pub(super) fn run_hotkey_capture_helper_if_requested() -> AnyhowResult<bool> {
+pub(crate) fn run_hotkey_capture_helper_if_requested() -> AnyhowResult<bool> {
     if hotkey::run_helper_if_requested()? {
         return Ok(true);
     }
@@ -64,7 +64,7 @@ pub(super) fn run_hotkey_capture_helper_if_requested() -> AnyhowResult<bool> {
     }
 }
 
-pub(super) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
+pub(crate) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
     let store = ConfigStore::discover()?;
     let (initial, reason) = match store.load() {
         Ok(None) => (
@@ -109,7 +109,7 @@ pub(super) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
     }
 }
 
-pub(super) fn run_explicit() -> AnyhowResult<()> {
+pub(crate) fn run_explicit() -> AnyhowResult<()> {
     let store = ConfigStore::discover()?;
     let initial = match store.load() {
         Ok(Some(document)) => document,

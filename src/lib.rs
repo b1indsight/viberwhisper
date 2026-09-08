@@ -1,4 +1,3 @@
-mod application;
 mod audio;
 mod core;
 mod history;
@@ -9,5 +8,6 @@ mod prompt_lab;
 mod session;
 mod text;
 mod transcriber;
+mod ui;
 
-pub use application::{run, run_desktop};
+pub use core::{run, run_desktop};

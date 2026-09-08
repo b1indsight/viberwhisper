@@ -88,12 +88,11 @@ src/
   bin/
     viberwhisper-app.rs      — Feature-gated Windows GUI-subsystem desktop entry point
   lib.rs                     — Crate module root and public CLI/desktop application entry exports
-  application.rs             — Logging, CLI dispatch, config/convert workflows
-  application/
+  ui.rs                      — Desktop interaction module declarations
+  ui/
     listener.rs              — Platform-action loop, session effects, transcription delivery
     listener/
       event_loop.rs          — Winit application handler driving platform and session events
-    prompt_lab.rs            — Dataset capture, regression, and agent-review CLI assembly
     setup.rs                 — First-run and on-demand setup orchestration
     setup/
       hotkey.rs              — Isolated hotkey capture and binding verification helper
@@ -107,8 +106,10 @@ src/
     metrics.rs               — Versioned WER alignment and proper-noun matching
     regression.rs            — Fresh full-dataset STT execution and canonical JSON reports
     review.rs                — Coding-agent review validation and final threshold gates
-  core.rs                    — Core module entry and submodule declarations
+  core.rs                    — Process entry points, logging, CLI dispatch, config/convert workflows
   core/
+    listener.rs              — Recording and listener configuration assembly
+    prompt_lab.rs            — Dataset capture, regression, and agent-review CLI assembly
     config.rs                — Config facade, typed field selection, errors, and safe value types
     config/
       document.rs            — Strict v3 configuration document
