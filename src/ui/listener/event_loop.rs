@@ -245,98 +245,83 @@ impl ListenerApplication {
         }
     }
 
+    /// Start resources in order, cleaning up the matching sessions when a step fails.
     fn start_session(&mut self, session_id: SessionId) -> SessionEvent {
-        match self.recorder.start_recording(session_id) {
-            RecorderStartOutcome::Started { session_id } => {
-                match self.orchestrator.start_session(session_id) {
-                    Ok(()) => match self.output.start_session(session_id) {
-                        Ok(()) => SessionEvent::SessionStarted { session_id },
-                        Err(error) => {
-                            let cancel_outcome = self.recorder.cancel_recording(session_id);
-                            debug!(
-                                session_id = session_id.0,
-                                ?cancel_outcome,
-                                "Recorder startup rollback handled"
-                            );
-                            if let Err(abort_error) = self.orchestrator.abort_session(session_id) {
-                                debug!(
-                                    session_id = session_id.0,
-                                    error = %abort_error,
-                                    "Orchestrator startup rollback had no matching session"
-                                );
-                            }
-                            error!(
-                                session_id = session_id.0,
-                                error, "Failed to start prompt-lab capture"
-                            );
-                            SessionEvent::SessionStartFailed { session_id, error }
-                        }
-                    },
-                    Err(error) => {
-                        let active_session_id = error.active;
-                        let cancel_outcome = self.recorder.cancel_recording(session_id);
-                        self.output.cancel_session(active_session_id);
-                        debug!(
-                            session_id = session_id.0,
-                            ?cancel_outcome,
-                            "Recorder startup rollback handled"
-                        );
-                        if let Err(abort_error) = self.orchestrator.abort_session(active_session_id)
-                        {
-                            debug!(
-                                session_id = active_session_id.0,
-                                error = %abort_error,
-                                "Orchestrator startup rollback had no matching session"
-                            );
-                        }
-                        error!(
-                            session_id = session_id.0,
-                            error = %error,
-                            "Failed to start recording session"
-                        );
-                        SessionEvent::SessionStartFailed {
-                            session_id,
-                            error: error.to_string(),
-                        }
-                    }
-                }
-            }
+        let session_id = match self.recorder.start_recording(session_id) {
+            RecorderStartOutcome::Started { session_id } => session_id,
             RecorderStartOutcome::AlreadyRecording {
                 requested_session_id,
                 active_session_id,
             } => {
                 self.output.cancel_session(active_session_id);
-                let cancel_outcome = self.recorder.cancel_recording(active_session_id);
-                debug!(
-                    session_id = active_session_id.0,
-                    ?cancel_outcome,
-                    "Orphan recorder cleanup handled"
-                );
-                if let Err(error) = self.orchestrator.abort_session(active_session_id) {
-                    debug!(
-                        session_id = active_session_id.0,
-                        error = %error,
-                        "Orphan orchestrator cleanup had no matching session"
-                    );
-                }
+                self.cancel_recorder(active_session_id);
+                self.abort_orchestrator(active_session_id);
                 let error = format!("recorder session {} is already active", active_session_id.0);
                 error!(
                     requested_session_id = requested_session_id.0,
                     active_session_id = active_session_id.0,
                     "Failed to start recording session"
                 );
-                SessionEvent::SessionStartFailed {
+                return SessionEvent::SessionStartFailed {
                     session_id: requested_session_id,
                     error,
-                }
+                };
             }
             RecorderStartOutcome::Failed { session_id, error } => {
                 error!(
                     session_id = session_id.0,
                     error, "Failed to start recording session"
                 );
+                return SessionEvent::SessionStartFailed { session_id, error };
+            }
+        };
+
+        if let Err(error) = self.orchestrator.start_session(session_id) {
+            // The new recorder and the existing orchestrator may belong to different sessions.
+            self.cancel_recorder(session_id);
+            self.output.cancel_session(error.active);
+            self.abort_orchestrator(error.active);
+            error!(
+                session_id = session_id.0,
+                error = %error,
+                "Failed to start recording session"
+            );
+            return SessionEvent::SessionStartFailed {
+                session_id,
+                error: error.to_string(),
+            };
+        }
+
+        match self.output.start_session(session_id) {
+            Ok(()) => SessionEvent::SessionStarted { session_id },
+            Err(error) => {
+                self.cancel_recorder(session_id);
+                self.abort_orchestrator(session_id);
+                error!(
+                    session_id = session_id.0,
+                    error, "Failed to start prompt-lab capture"
+                );
                 SessionEvent::SessionStartFailed { session_id, error }
             }
+        }
+    }
+
+    fn cancel_recorder(&mut self, session_id: SessionId) {
+        let cancel_outcome = self.recorder.cancel_recording(session_id);
+        debug!(
+            session_id = session_id.0,
+            ?cancel_outcome,
+            "Recorder startup rollback handled"
+        );
+    }
+
+    fn abort_orchestrator(&self, session_id: SessionId) {
+        if let Err(error) = self.orchestrator.abort_session(session_id) {
+            debug!(
+                session_id = session_id.0,
+                error = %error,
+                "Orchestrator startup rollback had no matching session"
+            );
         }
     }
 
