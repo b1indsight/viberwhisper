@@ -74,3 +74,4 @@
 2026-09-08: Keep the recording sample rate and chunk capacity in the session buffer, simplifying PCM publication and sharing one configuration across live and stop-time encoding
 2026-09-08: Merge application entry points, CLI workflows, and recording settings into core; move the existing desktop listener and setup flows into ui while preserving their interfaces and behavior
 2026-09-08: Flatten listener startup failures and reuse recorder/orchestrator rollback while preserving the cleanup order and session targets
+2026-09-08: Release 0.2.0 with first-run setup, a console-free Windows launcher and per-user installer, API-only configuration after removing bundled Local inference, and simplified configuration, audio, session, and desktop UI internals
