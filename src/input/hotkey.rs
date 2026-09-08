@@ -602,17 +602,19 @@ mod tests {
 
     #[test]
     fn maps_events_in_order_and_suppresses_key_repeat() {
-        let mut mapper = EventMapper::new(Some(Key::F8), Some(Key::F9));
+        let mut mapper = EventMapper::new(Some(Key::AltGr), Some(Key::F9));
 
         assert_eq!(
-            mapper.map(&EventType::KeyPress(Key::F8)),
+            mapper.map(&EventType::KeyPress(Key::AltGr)),
             Some(HotkeyEvent::Pressed(HotkeySource::Hold))
         );
-        assert_eq!(mapper.map(&EventType::KeyPress(Key::F8)), None);
+        assert_eq!(mapper.map(&EventType::KeyPress(Key::AltGr)), None);
         assert_eq!(
-            mapper.map(&EventType::KeyRelease(Key::F8)),
+            mapper.map(&EventType::KeyRelease(Key::AltGr)),
             Some(HotkeyEvent::Released(HotkeySource::Hold))
         );
+        // Standalone right Alt must remain distinct from left Alt.
+        assert_eq!(mapper.map(&EventType::KeyPress(Key::Alt)), None);
         assert_eq!(
             mapper.map(&EventType::KeyPress(Key::F9)),
             Some(HotkeyEvent::Pressed(HotkeySource::Toggle))
@@ -643,20 +645,5 @@ mod tests {
                 Some(HotkeyEvent::Pressed(source))
             );
         }
-    }
-
-    #[test]
-    fn maps_standalone_right_alt_hold_press_and_release() {
-        let mut mapper = EventMapper::new(Some(Key::AltGr), Some(Key::F9));
-
-        assert_eq!(
-            mapper.map(&EventType::KeyPress(Key::AltGr)),
-            Some(HotkeyEvent::Pressed(HotkeySource::Hold))
-        );
-        assert_eq!(
-            mapper.map(&EventType::KeyRelease(Key::AltGr)),
-            Some(HotkeyEvent::Released(HotkeySource::Hold))
-        );
-        assert_eq!(mapper.map(&EventType::KeyPress(Key::Alt)), None);
     }
 }

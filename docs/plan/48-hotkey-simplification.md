@@ -125,9 +125,14 @@ review gate. Keep the same PR open for final implementation review.
 - A shared static catalog preserves all 105 canonical keys and 30 aliases. Existing
   independent name expectations remain, all keypad aliases are covered, and catalog
   uniqueness plus both modes after filtered events are checked.
-- macOS formatting, locked build, 189 tests, and Clippy with warnings denied passed.
-- Independent review of implementation commit `25a77e46c119` returned no findings.
-- Both macOS and Windows jobs passed in
+- Follow-up test cleanup merges right-Alt coverage into the main event-mapping test,
+  combines icon resource and template checks, and removes the simple debounce-window
+  calculation test. The native-only window helper uses the same compilation condition
+  as its tray constructor.
+- The current suite contains 186 tests; local and hosted validation results for the
+  latest revision are recorded on PR #129.
+- Independent review of the initial implementation commit `25a77e46c119` returned no findings.
+- Both macOS and Windows jobs for that implementation passed in
   [CI run 34198740173](https://github.com/b1indsight/viberwhisper/actions/runs/34198740173),
   including the Windows GUI feature build, tests, and all-targets Clippy.
 - Native keyboard smoke tests were not performed locally.
