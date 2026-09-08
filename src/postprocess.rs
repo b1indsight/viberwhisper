@@ -2,7 +2,7 @@ mod llm;
 
 use crate::core::config::{ApiAuth, ConfigDocument, fields};
 use anyhow::Context;
-use llm::LlmPostProcessor;
+pub use llm::{ConservativeLlmSession, LlmPostProcessor, PreheatLlmSession};
 use std::fmt;
 use tracing::warn;
 
@@ -104,75 +104,80 @@ impl From<serde_json::Error> for PostProcessError {
 ///
 /// LLM client construction falls back to pass-through behavior because cleanup
 /// is optional and must not make speech-to-text unavailable.
-pub struct PostProcessor(Box<dyn TextPostProcessor>);
-
-/// Text-cleanup behavior selected once from the validated runtime config.
-trait TextPostProcessor: Send + Sync {
-    fn process(&self, text: &str) -> Result<String, PostProcessError>;
-    fn start_session(&self) -> Box<dyn TextPostProcessorSession>;
-}
-
-/// Mutable cleanup state owned by one recording session.
-trait TextPostProcessorSession: Send {
-    fn push_stable_chunk(&mut self, text: &str);
-    fn finish(&mut self) -> Result<String, PostProcessError>;
+pub enum PostProcessor {
+    Disabled,
+    Llm(LlmPostProcessor),
 }
 
 impl PostProcessor {
+    /// Creates a processor from resolved runtime settings.
     pub fn new(config: PostProcessConfig) -> Self {
-        let processor: Box<dyn TextPostProcessor> = match config {
-            PostProcessConfig::Disabled => Box::new(NoopPostProcessor),
+        match config {
+            PostProcessConfig::Disabled => Self::Disabled,
             PostProcessConfig::Llm(config) => match LlmPostProcessor::new(config) {
-                Ok(processor) => Box::new(processor),
+                Ok(processor) => Self::Llm(processor),
                 Err(error) => {
                     warn!(error = %error, "Failed to create LLM post-processor, falling back to noop");
-                    Box::new(NoopPostProcessor)
+                    Self::Disabled
                 }
             },
-        };
-        Self(processor)
+        }
     }
 
-    pub fn process(&self, text: &str) -> Result<String, PostProcessError> {
-        self.0.process(text)
+    /// Processes a complete text input in one call.
+    pub fn process_text(&self, text: &str) -> Result<String, PostProcessError> {
+        match self {
+            Self::Disabled => Ok(text.to_string()),
+            Self::Llm(processor) => processor.process_text(text),
+        }
     }
 
-    pub fn start_session(&self) -> PostProcessorSession {
-        PostProcessorSession(self.0.start_session())
+    /// Creates independent state for incremental text cleanup.
+    pub fn create_session(&self) -> PostProcessorSession {
+        match self {
+            Self::Disabled => PostProcessorSession::Noop(NoopSession::default()),
+            Self::Llm(processor) => processor.create_session(),
+        }
     }
 }
 
-/// Incremental cleanup state for one recording session.
-pub struct PostProcessorSession(Box<dyn TextPostProcessorSession>);
+/// Incremental text cleanup state for one recording session.
+///
+/// Created by [`PostProcessor::create_session`]. Feed stable text chunks with
+/// [`Self::push_stable_chunk`], then call [`Self::finish`] for the final text.
+pub enum PostProcessorSession {
+    Noop(NoopSession),
+    Conservative(ConservativeLlmSession),
+    Preheat(PreheatLlmSession),
+}
 
 impl PostProcessorSession {
+    /// Adds a stable text fragment to the session's accumulated input.
     pub fn push_stable_chunk(&mut self, text: &str) {
-        self.0.push_stable_chunk(text);
+        match self {
+            Self::Noop(session) => session.push_stable_chunk(text),
+            Self::Conservative(session) => session.push_stable_chunk(text),
+            Self::Preheat(session) => session.push_stable_chunk(text),
+        }
     }
 
+    /// Completes cleanup and returns the processed text.
     pub fn finish(&mut self) -> Result<String, PostProcessError> {
-        self.0.finish()
+        match self {
+            Self::Noop(session) => session.finish(),
+            Self::Conservative(session) => session.finish(),
+            Self::Preheat(session) => session.finish(),
+        }
     }
 }
 
-struct NoopPostProcessor;
-
-impl TextPostProcessor for NoopPostProcessor {
-    fn process(&self, text: &str) -> Result<String, PostProcessError> {
-        Ok(text.to_string())
-    }
-
-    fn start_session(&self) -> Box<dyn TextPostProcessorSession> {
-        Box::new(NoopSession::default())
-    }
-}
-
+/// Pass-through state owned by [`PostProcessorSession::Noop`].
 #[derive(Default)]
-struct NoopSession {
+pub struct NoopSession {
     chunks: Vec<String>,
 }
 
-impl TextPostProcessorSession for NoopSession {
+impl NoopSession {
     fn push_stable_chunk(&mut self, text: &str) {
         if !text.is_empty() {
             self.chunks.push(text.to_string());
@@ -190,16 +195,16 @@ mod tests {
     use crate::core::config::SecretSource;
 
     #[test]
-    fn test_noop_process() {
+    fn test_noop_process_text() {
         let p = PostProcessor::new(PostProcessConfig::Disabled);
-        assert_eq!(p.process("hello").unwrap(), "hello");
-        assert_eq!(p.process("").unwrap(), "");
+        assert_eq!(p.process_text("hello").unwrap(), "hello");
+        assert_eq!(p.process_text("").unwrap(), "");
     }
 
     #[test]
     fn test_noop_session() {
         let p = PostProcessor::new(PostProcessConfig::Disabled);
-        let mut session = p.start_session();
+        let mut session = p.create_session();
         session.push_stable_chunk("hello");
         session.push_stable_chunk("world");
         assert_eq!(session.finish().unwrap(), "helloworld");

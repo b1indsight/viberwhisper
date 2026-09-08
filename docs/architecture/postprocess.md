@@ -8,33 +8,40 @@ Optional LLM-based text cleanup applied after STT transcription. Adds punctuatio
 
 ```
 src/
-  postprocess.rs      — processor/session traits and facades, typed config and errors
+  postprocess.rs      — processor/session enums, typed config and errors
   postprocess/
     llm.rs            — LlmPostProcessor, ConservativeLlmSession, PreheatLlmSession
 ```
 
-## `PostProcessor` Facade
+## `PostProcessor`
 
 ```rust
-pub struct PostProcessor(Box<dyn TextPostProcessor>);
+pub enum PostProcessor {
+    Disabled,
+    Llm(LlmPostProcessor),
+}
 
 impl PostProcessor {
     pub fn new(config: PostProcessConfig) -> Self;
-    pub fn process(&self, text: &str) -> Result<String, PostProcessError>;
-    pub fn start_session(&self) -> PostProcessorSession;
+    pub fn process_text(&self, text: &str) -> Result<String, PostProcessError>;
+    pub fn create_session(&self) -> PostProcessorSession;
 }
 ```
 
 Two interfaces for different use cases:
-- `process`: one-shot processing for the `convert` CLI path
-- `start_session`: incremental session for the `run_listener` path
+- `process_text`: one-shot processing for the `convert` CLI path
+- `create_session`: creates independent incremental cleanup state for the `run_listener` path
 
-`TextPostProcessor` defines the shared behavior implemented by `NoopPostProcessor` and `LlmPostProcessor`. The facade selects and boxes one implementation during construction, then delegates directly through the trait without repeating implementation-specific matches. The trait remains private so callers depend only on the stable `PostProcessor` API. If HTTP-client initialization fails, construction logs the error and selects the pass-through implementation because cleanup is optional.
+`PostProcessor` selects `Disabled` or `Llm` from the resolved configuration. Its methods match the selected variant: disabled cleanup passes text through and creates a `Noop` session, while enabled cleanup delegates to the owned `LlmPostProcessor`. If HTTP-client initialization fails, construction logs the error and selects `Disabled` because cleanup is optional. LLM configuration fields remain private, and callers use `PostProcessor::new` to construct configured cleanup.
 
 ## `PostProcessorSession`
 
 ```rust
-pub struct PostProcessorSession(Box<dyn TextPostProcessorSession>);
+pub enum PostProcessorSession {
+    Noop(NoopSession),
+    Conservative(ConservativeLlmSession),
+    Preheat(PreheatLlmSession),
+}
 
 impl PostProcessorSession {
     pub fn push_stable_chunk(&mut self, text: &str);
@@ -42,7 +49,11 @@ impl PostProcessorSession {
 }
 ```
 
-`TextPostProcessorSession` provides the common incremental interface implemented by `NoopSession`, `ConservativeLlmSession`, and `PreheatLlmSession`. The session facade delegates to the boxed implementation. The interface accepts stable STT chunks incrementally, and `finish` returns the final processed text.
+`PostProcessorSession` owns one of the three concrete session states inline. Its methods use exhaustive matches to dispatch to the selected implementation. The interface accepts stable STT chunks incrementally, and `finish` returns the final processed text. Variant payload types are public with private state fields; sessions are created through `PostProcessor::create_session`.
+
+`PostProcessor::create_session` returns the concrete `PostProcessorSession` enum. Creation only initializes state; text processing starts in subsequent session calls. The listener owns the session and borrows it as `&mut PostProcessorSession` during finalization. Both processor and session selection use enums with inline state and exhaustive matches.
+
+The desktop listener currently pushes the complete transcription once after STT convergence, then finishes the session. Feeding stable chunks during recording to use preheat's latency benefit is planned for a later version.
 
 ## Implementations
 

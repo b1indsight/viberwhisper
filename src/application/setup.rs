@@ -323,7 +323,7 @@ impl SetupVerifier for NativeVerifier {
             return Err("转写服务返回了空文本".to_string());
         }
         let final_text = post_processor
-            .process(&raw)
+            .process_text(&raw)
             .map_err(|error| error.to_string())?;
         Ok(VerificationResult { raw, final_text })
     }

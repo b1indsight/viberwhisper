@@ -145,7 +145,7 @@ src/
   transcriber.rs             — Transcriber traits, errors, and exports
   transcriber/
     api.rs                   — API-backed transcriber implementation
-  postprocess.rs             — PostProcessor facade, session traits, NoopPostProcessor
+  postprocess.rs             — Processor/session enums, typed config/errors, pass-through state
   postprocess/
     llm.rs                   — LlmPostProcessor with conservative and preheat sessions
 docs/

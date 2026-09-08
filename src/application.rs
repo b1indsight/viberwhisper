@@ -170,7 +170,7 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
     let text = if stt_text.is_empty() {
         stt_text
     } else {
-        match post_processor.process(&stt_text) {
+        match post_processor.process_text(&stt_text) {
             Ok(processed) if !processed.is_empty() => processed,
             Ok(_) => {
                 // Empty post-process output is not useful; keep the STT text.
