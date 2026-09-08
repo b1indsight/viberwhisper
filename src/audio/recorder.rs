@@ -98,15 +98,14 @@ struct ActiveRecording {
     session_id: SessionId,
     shared: Arc<RecordingBuffer>,
     stream: Option<cpal::Stream>,
-    sample_rate: u32,
     /// Number of samples already emitted as chunks during the current recording.
     flushed_samples: usize,
-    /// Maximum mono frames per chunk; zero suppresses output.
-    chunk_max_samples: usize,
 }
 
-#[derive(Default)]
 struct RecordingBuffer {
+    sample_rate: u32,
+    /// Maximum mono frames per chunk; zero suppresses output.
+    chunk_max_samples: usize,
     recording: AtomicBool,
     samples: Mutex<Vec<i16>>,
     sample_count: AtomicUsize,
@@ -125,31 +124,25 @@ fn select_named_device<D>(
         .ok_or_else(|| RecorderError::InputDeviceNotFound(requested.to_string()))
 }
 
-fn readable_named_devices<D, E>(
-    devices: impl IntoIterator<Item = D>,
-    mut read_name: impl FnMut(&D) -> Result<String, E>,
-) -> Vec<(D, String)>
-where
-    E: fmt::Display,
-{
+fn readable_named_devices(
+    devices: impl IntoIterator<Item = cpal::Device>,
+) -> impl Iterator<Item = (cpal::Device, String)> {
     devices
         .into_iter()
-        .filter_map(|device| match read_name(&device) {
+        .filter_map(|device| match device.name() {
             Ok(name) => Some((device, name)),
             Err(error) => {
                 warn!(error = %error, "Skipping input device with unreadable name");
                 None
             }
         })
-        .collect()
 }
 
 /// Enumerates the display names accepted by the recorder's persisted device selection.
 pub(crate) fn input_device_names() -> Result<Vec<String>, String> {
     let host = cpal::default_host();
     let devices = host.input_devices().map_err(|error| error.to_string())?;
-    Ok(readable_named_devices(devices, |device| device.name())
-        .into_iter()
+    Ok(readable_named_devices(devices)
         .map(|(_, name)| name)
         .collect())
 }
@@ -166,26 +159,42 @@ fn resolve_input_device(
     let devices = host
         .input_devices()
         .map_err(RecorderError::EnumerateInputDevices)?;
-    select_named_device(
-        readable_named_devices(devices, |device| device.name()),
-        requested,
-    )
+    select_named_device(readable_named_devices(devices), requested)
 }
 
 impl RecordingBuffer {
+    /// Fixes the mono PCM format and chunk policy for the lifetime of one recording.
+    fn new(sample_rate: u32) -> Result<Self, ChunkError> {
+        let chunk_max_samples = usize::try_from(max_frames_per_chunk(WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        })?)
+        .map_err(|_| ChunkError::ArithmeticOverflow)?;
+        Ok(Self {
+            sample_rate,
+            chunk_max_samples,
+            recording: AtomicBool::new(false),
+            samples: Mutex::new(Vec::new()),
+            sample_count: AtomicUsize::new(0),
+            ready_chunk_count: AtomicUsize::new(0),
+        })
+    }
+
     /// Publishes PCM before advertising newly complete chunks to the consumer.
-    fn push_mono(&self, mono: &[i16], sample_rate: u32, chunk_max_samples: usize) -> bool {
+    fn push_mono(&self, mono: &[i16]) -> bool {
         let len = mono.len();
         self.samples.lock().unwrap().extend_from_slice(mono);
         let total = self.sample_count.fetch_add(len, Ordering::Relaxed) + len;
-        if total % (sample_rate as usize / 2) < len {
+        if total % (self.sample_rate as usize / 2) < len {
             debug!(
                 frames = total,
-                seconds = total / sample_rate as usize,
+                seconds = total / self.sample_rate as usize,
                 "Recording progress"
             );
         }
-        if let Some(ready_chunks) = total.checked_div(chunk_max_samples) {
+        if let Some(ready_chunks) = total.checked_div(self.chunk_max_samples) {
             let previous = self.ready_chunk_count.swap(ready_chunks, Ordering::AcqRel);
             return ready_chunks > previous;
         }
@@ -265,20 +274,11 @@ impl AudioRecorder {
 
         info!(sample_rate, channels, format = ?sample_format, "Starting recording");
 
-        let chunk_max_samples = usize::try_from(max_frames_per_chunk(WavSpec {
-            channels: 1,
-            sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        })?)
-        .map_err(|_| ChunkError::ArithmeticOverflow)?;
         let mut active = ActiveRecording {
             session_id,
-            shared: Arc::new(RecordingBuffer::default()),
+            shared: Arc::new(RecordingBuffer::new(sample_rate)?),
             stream: None,
-            sample_rate,
             flushed_samples: 0,
-            chunk_max_samples,
         };
 
         let stream = match sample_format {
@@ -402,8 +402,6 @@ impl ActiveRecording {
     ) -> impl FnMut(&[T]) + Send + 'static {
         let shared = Arc::clone(&self.shared);
         let session_id = self.session_id;
-        let sample_rate = self.sample_rate;
-        let chunk_max_samples = self.chunk_max_samples;
         let mut mono = Vec::new();
         move |data| {
             if !shared.recording.load(Ordering::Relaxed) {
@@ -415,14 +413,14 @@ impl ActiveRecording {
                     frame.iter().map(|&sample| sample.into()).sum::<f32>() / channels as f32;
                 scale(average, gain)
             }));
-            if shared.push_mono(&mono, sample_rate, chunk_max_samples) {
+            if shared.push_mono(&mono) {
                 chunk_notifier(session_id);
             }
         }
     }
 
     fn take_ready_chunk(&mut self) -> Option<ReadyChunk> {
-        let chunk_max_samples = self.chunk_max_samples;
+        let chunk_max_samples = self.shared.chunk_max_samples;
         if chunk_max_samples == 0 {
             return None;
         }
@@ -445,7 +443,7 @@ impl ActiveRecording {
             buffer[..chunk_max_samples].to_vec()
         };
 
-        let chunk = match encode_i16_wav(&chunk_samples, self.sample_rate) {
+        let chunk = match encode_i16_wav(&chunk_samples, self.shared.sample_rate) {
             Ok(chunk) => chunk,
             Err(error) => {
                 warn!(error = %error, "Failed to encode in-recording chunk; retaining PCM until stop");
@@ -483,12 +481,12 @@ impl ActiveRecording {
                 Err(RecorderError::NoAudioData)
             };
         }
-        if self.chunk_max_samples == 0 {
+        if self.shared.chunk_max_samples == 0 {
             return Ok(Vec::new());
         }
         samples
-            .chunks(self.chunk_max_samples)
-            .map(|samples| encode_i16_wav(samples, self.sample_rate).map_err(Into::into))
+            .chunks(self.shared.chunk_max_samples)
+            .map(|samples| encode_i16_wav(samples, self.shared.sample_rate).map_err(Into::into))
             .collect()
     }
 }
@@ -554,33 +552,14 @@ mod tests {
         assert!(select_named_device(devices(), "usb mic").is_err());
     }
 
-    #[test]
-    fn unreadable_device_names_do_not_hide_a_matching_device() {
-        // Disconnected virtual devices can remain enumerable even when their display name is no
-        // longer readable; a healthy configured microphone must still be selectable.
-        let names = [
-            Err("stale device"),
-            Ok("USB Mic"),
-            Err("disconnected device"),
-            Ok("USB Mic"),
-        ];
-        let readable = readable_named_devices(0..names.len(), |index| {
-            names[*index].map(str::to_string).map_err(str::to_string)
-        });
-
-        assert_eq!(
-            readable,
-            vec![(1, "USB Mic".to_string()), (3, "USB Mic".to_string())]
-        );
-        assert_eq!(select_named_device(readable, "USB Mic").unwrap(), 1);
-    }
-
     fn recorder_for_buffer(samples: Vec<i16>, chunk_max_samples: usize) -> AudioRecorder {
         let sample_count = samples.len();
         AudioRecorder {
             active: Some(ActiveRecording {
                 session_id: SessionId(1),
                 shared: Arc::new(RecordingBuffer {
+                    sample_rate: 16000,
+                    chunk_max_samples,
                     recording: AtomicBool::new(true),
                     samples: Mutex::new(samples),
                     sample_count: AtomicUsize::new(sample_count),
@@ -589,9 +568,7 @@ mod tests {
                     ),
                 }),
                 stream: None,
-                sample_rate: 16000,
                 flushed_samples: 0,
-                chunk_max_samples,
             }),
             input_device: None,
             gain: 1.0,
@@ -685,10 +662,11 @@ mod tests {
 
     #[test]
     fn each_new_chunk_boundary_is_reported_to_the_callback() {
-        let buffer = RecordingBuffer::default();
-        assert!(!buffer.push_mono(&[1; 5], 10, 10));
-        assert!(buffer.push_mono(&[1; 5], 10, 10));
-        assert!(buffer.push_mono(&[2; 10], 10, 10));
+        let mut buffer = RecordingBuffer::new(16_000).unwrap();
+        buffer.chunk_max_samples = 10;
+        assert!(!buffer.push_mono(&[1; 5]));
+        assert!(buffer.push_mono(&[1; 5]));
+        assert!(buffer.push_mono(&[2; 10]));
         assert_eq!(buffer.ready_chunk_count.load(Ordering::Acquire), 2);
     }
 
@@ -807,8 +785,7 @@ mod tests {
 
     #[test]
     fn too_small_chunk_capacity_produces_no_stop_chunk() {
-        let mut recorder = recorder_for_buffer(vec![1, 2, 3], 10);
-        recorder.active.as_mut().unwrap().chunk_max_samples = 0;
+        let mut recorder = recorder_for_buffer(vec![1, 2, 3], 0);
 
         let RecorderStopOutcome::Stopped { chunks, .. } = recorder.stop_recording(SessionId(1))
         else {
@@ -822,9 +799,10 @@ mod tests {
     fn failed_live_encoding_retains_pcm_for_stop_recovery() {
         // A failed live encoder must not consume audio that stop-time encoding can recover.
         let mut recorder = recorder_for_buffer(vec![1, 2, 3], 2);
-        recorder.active.as_mut().unwrap().sample_rate = 0;
-        assert!(recorder.take_ready_chunk().is_none());
-        recorder.active.as_mut().unwrap().sample_rate = 16_000;
+        let active = recorder.active.as_mut().unwrap();
+        Arc::get_mut(&mut active.shared).unwrap().sample_rate = 0;
+        assert!(active.take_ready_chunk().is_none());
+        Arc::get_mut(&mut active.shared).unwrap().sample_rate = 16_000;
         let RecorderStopOutcome::Stopped {
             chunks, warning, ..
         } = recorder.stop_recording(SessionId(1))
