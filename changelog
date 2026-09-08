@@ -71,3 +71,4 @@
 2026-09-08: Share audio callback conversion with reusable scratch storage, own recording state per session, move stop-time PCM without copying, simplify device selection and WAV iteration, and preallocate encoded WAV buffers while preserving the stop delay
 2026-09-08: Require fixed 30-second / 23-MiB audio chunk capacities, remove unlimited-mode options and limit plumbing, and retain streaming offline WAV iteration with shorter final chunks
 2026-09-08: Read microphone names directly from cpal devices through a lazy iterator, removing test-only naming callbacks and intermediate device-name collections
+2026-09-08: Keep the recording sample rate and chunk capacity in the session buffer, simplifying PCM publication and sharing one configuration across live and stop-time encoding

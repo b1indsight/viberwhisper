@@ -71,8 +71,10 @@ verification recording. Its hotkey-controlled verification loop drains ready chu
 session remains active, matching the normal listener's bounded PCM-buffer behavior.
 
 `AudioRecorder` keeps persistent configuration separately from `Option<ActiveRecording>`, which
-owns the session ID, stream, sample rate, and chunk progress. Each session gets its own shared
-PCM buffer, callback recording switch, and sample/readiness counters. Failed starts never publish
+owns the session ID, stream, and chunk progress. Each session gets its own shared `RecordingBuffer`,
+which fixes its sample rate and chunk capacity at construction and owns the PCM samples, callback
+recording switch, and sample/readiness counters. `push_mono` receives only PCM samples; live and
+stop-time chunk encoding read the same buffer-owned rate and capacity. Failed starts never publish
 an active session; stop and cancel consume the matching session without resetting reusable fields.
 
 The I16 and F32 cpal callbacks share a pipeline that downmixes input to mono `i16`, applies microphone
