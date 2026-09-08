@@ -52,6 +52,9 @@ Per-binding key-down state suppresses operating-system key repeat so one physica
 produces one action. `P` supplies target validation/warning policy. The filter is constructed by the
 same selected backend that constructs the text writer: `Some(event)` reaches `EventMapper`, while
 `None` drops the event and resets its key-down bookkeeping.
+The `FnMut` callback owns its mutable `EventMapper` directly. Its state is not shared
+with another thread, so event mapping does not take a mutex. Dropping a filtered event
+clears both Hold and Toggle key-down flags in that branch.
 
 **`HotkeyConfig`**
 
@@ -60,6 +63,12 @@ enabled string to one `rdev::Key` plus a canonical display label, rejects duplic
 platform-unavailable bindings, and keeps empty strings disabled. Persisted strings are not
 canonicalized: `config get/list` return the user's input, while listener output and logs use the
 canonical runtime label.
+
+`hold` and `toggle` each store an `Option<NamedKey>`. An enabled `NamedKey` pairs its
+physical key with an `&'static str` canonical name from the key catalog; a disabled
+binding is `None`. This keeps key/name presence together and avoids allocating runtime
+label strings. Physical keys remain private to the hotkey driver; application diagnostics
+read the binding's canonical name.
 
 ### Recording Input Normalization
 
@@ -103,6 +112,12 @@ covers `F1`–`F12`, letters, number-row keys, editing/whitespace, navigation, l
 locks/system keys, punctuation, and numeric-keypad keys. Explicit aliases normalize platform terms:
 `ALTGR` and `RIGHTOPTION` map to canonical `RIGHTALT`/`Key::AltGr`; `ALT` and `OPTION` map to
 `LEFTALT`/`Key::Alt`.
+
+One private static catalog stores each physical key, its canonical name, and its aliases.
+Forward lookup trims the input and compares spellings with `eq_ignore_ascii_case`.
+`canonical_key_name(key) -> Option<&'static str>` looks up the same catalog by physical
+key for setup capture, without Debug formatting or reparsing. An unlisted key returns
+`None`.
 
 `parse_key` recognizes the shared vocabulary independently of platform. The selected
 `HotkeyPolicy` supplies an error reason when the current `rdev 0.5.3` backend cannot emit the named

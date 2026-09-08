@@ -66,3 +66,4 @@
 2026-09-07: Simplify core session ID allocation, chunk notifications and state updates, and pass owned language configuration through transcription result merging
 2026-09-08: Rename text cleanup methods to process_text and create_session, and use concrete processor/session enums while preserving disabled pass-through, conservative cleanup, preheat, and client-initialization fallback
 2026-09-08: Inline the hotkey passthrough warning check and remove its redundant helper test without changing warning behavior
+2026-09-08: Simplify hotkey callback state and paired bindings, and share an allocation-free catalog for canonical key names and aliases while preserving platform validation and recording events

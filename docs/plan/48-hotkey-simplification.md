@@ -2,11 +2,12 @@
 
 ## Status
 
-Draft — awaiting approval of the four changes below before implementation.
+Implementation complete — approved by the user on 2026-09-08; local checks passed,
+with independent review and hosted CI pending.
 
 This plan continues on PR #129 and bookmark `refactor/hotkey-warning-inline`.
-The previously reviewed passthrough-warning inlining remains in that PR. This
-planning update adds documentation only; implementation continues on the same PR.
+The previously reviewed passthrough-warning inlining remains in that PR. The plan
+and the approved implementation continue on the same PR.
 
 ## Goal
 
@@ -115,3 +116,15 @@ smoke test without actually exercising it.
 Completion means all four simplifications are implemented, compatibility coverage
 passes, both platform CI jobs pass, and the completed diff has passed the repository
 review gate. Keep the same PR open for final implementation review.
+
+## Implementation record
+
+- The callback owns mutable mapper state, and filtered-event reset is inline.
+- Runtime configuration stores two optional `NamedKey` bindings; diagnostics read
+  their borrowed canonical names.
+- A shared static catalog preserves all 105 canonical keys and 30 aliases. Existing
+  independent name expectations remain, all keypad aliases are covered, and catalog
+  uniqueness plus both modes after filtered events are checked.
+- macOS formatting, locked build, 189 tests, and Clippy with warnings denied passed.
+- Independent code review and macOS/Windows hosted CI are pending.
+- Native keyboard smoke tests were not performed locally.
