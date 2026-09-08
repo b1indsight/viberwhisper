@@ -5,7 +5,6 @@ use anyhow::Result;
 
 use super::listener::RecordingConfig;
 use super::load_config;
-use crate::audio::{MAX_CHUNK_DURATION_SECS, MAX_CHUNK_SIZE_BYTES};
 use crate::core::cli::{
     PromptLabCommand, PromptLabDatasetCommand, PromptLabReportCommand, PromptLabSampleCommand,
     PromptLabSampleStatus,
@@ -94,8 +93,6 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
         EvaluationRequest {
             stt,
             language,
-            max_chunk_duration_secs: MAX_CHUNK_DURATION_SECS,
-            max_chunk_size_bytes: MAX_CHUNK_SIZE_BYTES,
             thresholds: command.thresholds,
             output: command.output,
             compare_to: prior,

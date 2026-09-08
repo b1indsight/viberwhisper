@@ -101,8 +101,6 @@ impl Thresholds {
 pub(crate) struct EvaluationRequest {
     pub(crate) stt: SttSnapshot,
     pub(crate) language: Option<String>,
-    pub(crate) max_chunk_duration_secs: u32,
-    pub(crate) max_chunk_size_bytes: u64,
     pub(crate) thresholds: Thresholds,
     pub(crate) output: Option<PathBuf>,
     pub(crate) compare_to: Option<EvaluationReport>,
@@ -717,8 +715,6 @@ pub(crate) fn evaluate(
         let result = transcribe_sample(
             &store.root().join(&sample.audio.path),
             transcriber,
-            request.max_chunk_duration_secs,
-            request.max_chunk_size_bytes,
             request.language.clone(),
         );
         match result {
@@ -887,12 +883,9 @@ fn validate_scoring_dataset(dataset: &ScoringDataset) -> Result<()> {
 fn transcribe_sample(
     path: &Path,
     transcriber: &dyn Transcriber,
-    max_chunk_duration_secs: u32,
-    max_chunk_size_bytes: u64,
     language: Option<String>,
 ) -> std::result::Result<String, String> {
-    let reader = WavChunkReader::open(path, max_chunk_duration_secs, max_chunk_size_bytes)
-        .map_err(|error| error.to_string())?;
+    let reader = WavChunkReader::open(path).map_err(|error| error.to_string())?;
     let mut texts = Vec::new();
     for chunk in reader {
         let chunk = chunk.map_err(|error| error.to_string())?;
@@ -1147,8 +1140,6 @@ mod tests {
         EvaluationRequest {
             stt: snapshot(Some("candidate")),
             language: Some("zh".to_string()),
-            max_chunk_duration_secs: 30,
-            max_chunk_size_bytes: 23 * 1024 * 1024,
             thresholds: Thresholds {
                 max_wer_percent: 20.0,
                 min_llm_score: 90.0,

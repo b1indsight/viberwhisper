@@ -157,11 +157,7 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
     let transcriber = ApiTranscriber::new(config.transcriber)?;
     let post_processor = PostProcessor::new(config.post_process);
 
-    let chunk_reader = audio::WavChunkReader::open(
-        Path::new(input),
-        audio::MAX_CHUNK_DURATION_SECS,
-        audio::MAX_CHUNK_SIZE_BYTES,
-    )?;
+    let chunk_reader = audio::WavChunkReader::open(Path::new(input))?;
     let mut chunk_texts = Vec::new();
     for chunk in chunk_reader {
         chunk_texts.push(transcriber.transcribe(&chunk?)?);

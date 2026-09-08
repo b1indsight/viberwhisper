@@ -65,40 +65,22 @@ impl WavChunk {
     }
 }
 
-pub(crate) fn max_frames_per_chunk(
-    max_duration_secs: u32,
-    max_size_bytes: u64,
-    output_spec: WavSpec,
-) -> Result<Option<u64>, ChunkError> {
+/// Applies the fixed duration/size policy; zero capacity suppresses chunk output.
+pub(crate) fn max_frames_per_chunk(output_spec: WavSpec) -> Result<u64, ChunkError> {
     validate_spec(output_spec)?;
 
-    let duration_capacity = (max_duration_secs > 0)
-        .then(|| u64::from(max_duration_secs) * u64::from(output_spec.sample_rate));
-    let size_capacity = if max_size_bytes == 0 {
-        None
-    } else {
-        let header_bytes = encoded_header_bytes(output_spec);
-        let bytes_per_sample = u64::from(output_spec.bits_per_sample).div_ceil(8);
-        let bytes_per_frame = u64::from(output_spec.channels)
-            .checked_mul(bytes_per_sample)
-            .ok_or(ChunkError::ArithmeticOverflow)?;
-        let frames = max_size_bytes
-            .checked_sub(header_bytes)
-            .map(|payload_bytes| payload_bytes / bytes_per_frame)
-            .unwrap_or(0);
+    let duration_capacity =
+        u64::from(super::MAX_CHUNK_DURATION_SECS) * u64::from(output_spec.sample_rate);
+    let bytes_per_sample = u64::from(output_spec.bits_per_sample).div_ceil(8);
+    let bytes_per_frame = u64::from(output_spec.channels) * bytes_per_sample;
+    let size_capacity = super::MAX_CHUNK_SIZE_BYTES
+        .saturating_sub(encoded_header_bytes(output_spec))
+        / bytes_per_frame;
 
-        if frames.saturating_mul(2) <= u64::from(output_spec.sample_rate) {
-            return Ok(Some(0));
-        }
-        Some(frames)
-    };
-
-    Ok(match (duration_capacity, size_capacity) {
-        (Some(duration), Some(size)) => Some(duration.min(size)),
-        (Some(duration), None) => Some(duration),
-        (None, Some(size)) => Some(size),
-        (None, None) => None,
-    })
+    if size_capacity * 2 <= u64::from(output_spec.sample_rate) {
+        return Ok(0);
+    }
+    Ok(duration_capacity.min(size_capacity))
 }
 
 pub(crate) fn encode_i16_wav(samples: &[i16], sample_rate: u32) -> Result<WavChunk, ChunkError> {
@@ -169,52 +151,41 @@ mod tests {
     }
 
     #[test]
-    fn disabled_limits_do_not_slice() {
-        assert_eq!(
-            max_frames_per_chunk(0, 0, spec(1, 16_000, 16)).unwrap(),
-            None
-        );
+    fn ordinary_audio_uses_the_fixed_thirty_second_capacity() {
+        assert_eq!(max_frames_per_chunk(spec(1, 16_000, 16)).unwrap(), 480_000);
     }
 
     #[test]
     fn duration_and_size_limits_use_the_smaller_frame_capacity() {
-        let one_second_mono_wav = 44 + 16_000 * 2;
-
         assert_eq!(
-            max_frames_per_chunk(2, one_second_mono_wav, spec(1, 16_000, 16)).unwrap(),
-            Some(16_000)
+            max_frames_per_chunk(spec(1, 1_000_000, 16)).unwrap(),
+            (23 * 1024 * 1024 - 44) / 2
         );
     }
 
     #[test]
     fn size_capacity_of_half_a_second_or_less_produces_no_chunks() {
-        let half_second_mono_wav = 44 + 8_000 * 2;
-
+        // A dense multi-channel format can exhaust the fixed byte budget within half a second.
+        assert_eq!(max_frames_per_chunk(spec(32, 753_660, 16)).unwrap(), 0);
         assert_eq!(
-            max_frames_per_chunk(0, half_second_mono_wav, spec(1, 16_000, 16)).unwrap(),
-            Some(0)
-        );
-        assert_eq!(
-            max_frames_per_chunk(0, half_second_mono_wav + 2, spec(1, 16_000, 16)).unwrap(),
-            Some(8_001)
+            max_frames_per_chunk(spec(32, 753_659, 16)).unwrap(),
+            376_830
         );
     }
 
     #[test]
     fn size_limit_uses_the_header_emitted_for_extended_wav_specs() {
-        let one_second_three_channel_wav = 68 + 48_000 * 3 * 2;
-
         assert_eq!(
-            max_frames_per_chunk(0, one_second_three_channel_wav, spec(3, 48_000, 16)).unwrap(),
-            Some(48_000)
+            max_frames_per_chunk(spec(3, 192_000, 32)).unwrap(),
+            (23 * 1024 * 1024 - 68) / (3 * 4)
         );
     }
 
     #[test]
     fn invalid_wav_spec_is_rejected() {
-        assert!(max_frames_per_chunk(1, 0, spec(0, 16_000, 16)).is_err());
-        assert!(max_frames_per_chunk(1, 0, spec(1, 0, 16)).is_err());
-        assert!(max_frames_per_chunk(1, 0, spec(1, 16_000, 0)).is_err());
+        assert!(max_frames_per_chunk(spec(0, 16_000, 16)).is_err());
+        assert!(max_frames_per_chunk(spec(1, 0, 16)).is_err());
+        assert!(max_frames_per_chunk(spec(1, 16_000, 0)).is_err());
     }
 
     #[test]

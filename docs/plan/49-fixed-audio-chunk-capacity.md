@@ -30,3 +30,10 @@ WAV reader and yield bounded chunks until EOF, including a shorter final tail.
 4. Run focused audio tests, formatting, build, the full test suite, Clippy,
    and diff whitespace checks. Run the independent review gate before pushing
    implementation, then verify macOS and Windows CI on this follow-up PR.
+
+## Local result
+
+The fixed-policy API and caller cleanup are implemented. All 27 audio tests and
+the full 188-test suite passed. Build, formatting, Clippy with warnings denied,
+and diff whitespace checks passed. No real-device recording was required for
+this capacity/API change; the existing stop and callback behavior is preserved.

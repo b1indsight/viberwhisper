@@ -92,8 +92,6 @@ pub struct AudioRecorder {
     input_device: Option<String>,
     gain: f32,
     chunk_notifier: Arc<dyn Fn(SessionId) + Send + Sync>,
-    max_chunk_duration_secs: u32,
-    max_chunk_size_bytes: u64,
 }
 
 struct ActiveRecording {
@@ -103,8 +101,8 @@ struct ActiveRecording {
     sample_rate: u32,
     /// Number of samples already emitted as chunks during the current recording.
     flushed_samples: usize,
-    /// Maximum mono frames per chunk. `None` means unlimited and `Some(0)` suppresses output.
-    chunk_max_samples: Option<usize>,
+    /// Maximum mono frames per chunk; zero suppresses output.
+    chunk_max_samples: usize,
 }
 
 #[derive(Default)]
@@ -202,8 +200,6 @@ impl AudioRecorder {
         chunk_notifier: impl Fn(SessionId) + Send + Sync + 'static,
     ) -> Self {
         let gain = config.mic_gain;
-        let max_chunk_duration_secs = config.max_chunk_duration_secs;
-        let max_chunk_size_bytes = config.max_chunk_size_bytes;
         let host = cpal::default_host();
 
         let default_device_name = host
@@ -224,7 +220,9 @@ impl AudioRecorder {
 
         info!(
             gain,
-            max_chunk_duration_secs, max_chunk_size_bytes, "Audio recorder configured"
+            max_chunk_duration_secs = super::MAX_CHUNK_DURATION_SECS,
+            max_chunk_size_bytes = super::MAX_CHUNK_SIZE_BYTES,
+            "Audio recorder configured"
         );
 
         AudioRecorder {
@@ -232,8 +230,6 @@ impl AudioRecorder {
             input_device: config.input_device.clone(),
             gain,
             chunk_notifier: Arc::new(chunk_notifier),
-            max_chunk_duration_secs,
-            max_chunk_size_bytes,
         }
     }
 
@@ -269,18 +265,13 @@ impl AudioRecorder {
 
         info!(sample_rate, channels, format = ?sample_format, "Starting recording");
 
-        let chunk_max_samples = max_frames_per_chunk(
-            self.max_chunk_duration_secs,
-            self.max_chunk_size_bytes,
-            WavSpec {
-                channels: 1,
-                sample_rate,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            },
-        )?
-        .map(|frames| usize::try_from(frames).map_err(|_| ChunkError::ArithmeticOverflow))
-        .transpose()?;
+        let chunk_max_samples = usize::try_from(max_frames_per_chunk(WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        })?)
+        .map_err(|_| ChunkError::ArithmeticOverflow)?;
         let mut active = ActiveRecording {
             session_id,
             shared: Arc::new(RecordingBuffer::default()),
@@ -412,7 +403,7 @@ impl ActiveRecording {
         let shared = Arc::clone(&self.shared);
         let session_id = self.session_id;
         let sample_rate = self.sample_rate;
-        let chunk_max_samples = self.chunk_max_samples.unwrap_or(0);
+        let chunk_max_samples = self.chunk_max_samples;
         let mut mono = Vec::new();
         move |data| {
             if !shared.recording.load(Ordering::Relaxed) {
@@ -431,7 +422,10 @@ impl ActiveRecording {
     }
 
     fn take_ready_chunk(&mut self) -> Option<ReadyChunk> {
-        let chunk_max_samples = self.chunk_max_samples.filter(|&samples| samples > 0)?;
+        let chunk_max_samples = self.chunk_max_samples;
+        if chunk_max_samples == 0 {
+            return None;
+        }
         let flushed_chunk_count = self.flushed_samples / chunk_max_samples;
         if self.shared.ready_chunk_count.load(Ordering::Acquire) <= flushed_chunk_count {
             return None;
@@ -489,14 +483,13 @@ impl ActiveRecording {
                 Err(RecorderError::NoAudioData)
             };
         }
-        match self.chunk_max_samples {
-            Some(0) => Ok(Vec::new()),
-            Some(max_samples) => samples
-                .chunks(max_samples)
-                .map(|samples| encode_i16_wav(samples, self.sample_rate).map_err(Into::into))
-                .collect(),
-            None => Ok(vec![encode_i16_wav(&samples, self.sample_rate)?]),
+        if self.chunk_max_samples == 0 {
+            return Ok(Vec::new());
         }
+        samples
+            .chunks(self.chunk_max_samples)
+            .map(|samples| encode_i16_wav(samples, self.sample_rate).map_err(Into::into))
+            .collect()
     }
 }
 
@@ -598,13 +591,11 @@ mod tests {
                 stream: None,
                 sample_rate: 16000,
                 flushed_samples: 0,
-                chunk_max_samples: Some(chunk_max_samples),
+                chunk_max_samples,
             }),
             input_device: None,
             gain: 1.0,
             chunk_notifier: Arc::new(|_| {}),
-            max_chunk_duration_secs: 0,
-            max_chunk_size_bytes: 0,
         }
     }
 
@@ -817,7 +808,7 @@ mod tests {
     #[test]
     fn too_small_chunk_capacity_produces_no_stop_chunk() {
         let mut recorder = recorder_for_buffer(vec![1, 2, 3], 10);
-        recorder.active.as_mut().unwrap().chunk_max_samples = Some(0);
+        recorder.active.as_mut().unwrap().chunk_max_samples = 0;
 
         let RecorderStopOutcome::Stopped { chunks, .. } = recorder.stop_recording(SessionId(1))
         else {

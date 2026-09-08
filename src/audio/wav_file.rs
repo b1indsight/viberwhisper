@@ -11,22 +11,17 @@ use super::max_frames_per_chunk;
 pub struct WavChunkReader {
     reader: WavReader<BufReader<File>>,
     spec: WavSpec,
-    frames_per_chunk: Option<u64>,
+    frames_per_chunk: u64,
     remaining_samples: u64,
     finished: bool,
 }
 
 impl WavChunkReader {
-    /// Opens a WAV with duration and byte limits; zero disables the corresponding limit.
-    pub fn open(
-        path: &Path,
-        max_chunk_duration_secs: u32,
-        max_chunk_size_bytes: u64,
-    ) -> Result<Self, ChunkError> {
+    /// Opens a WAV using the audio module's fixed 30-second / 23-MiB chunk policy.
+    pub fn open(path: &Path) -> Result<Self, ChunkError> {
         let reader = WavReader::open(path)?;
         let spec = reader.spec();
-        let frames_per_chunk =
-            max_frames_per_chunk(max_chunk_duration_secs, max_chunk_size_bytes, spec)?;
+        let frames_per_chunk = max_frames_per_chunk(spec)?;
         let remaining_samples = u64::from(reader.len());
 
         Ok(Self {
@@ -43,15 +38,12 @@ impl Iterator for WavChunkReader {
     type Item = Result<WavChunk, ChunkError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.finished || self.remaining_samples == 0 || self.frames_per_chunk == Some(0) {
+        if self.finished || self.remaining_samples == 0 || self.frames_per_chunk == 0 {
             self.finished = true;
             return None;
         }
 
-        let sample_capacity = match self.frames_per_chunk {
-            Some(frames) => frames.saturating_mul(u64::from(self.spec.channels)),
-            None => self.remaining_samples,
-        };
+        let sample_capacity = self.frames_per_chunk * u64::from(self.spec.channels);
         let sample_count = self.remaining_samples.min(sample_capacity);
         let result = match self.spec.sample_format {
             hound::SampleFormat::Float => {
@@ -150,22 +142,30 @@ mod tests {
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
-        write_int_wav(&path, spec, 10);
+        // The same reader must preserve all samples when a 65-second file yields 30/30/5 seconds.
+        write_int_wav(&path, spec, 260);
 
-        let reader = WavChunkReader::open(&path, 1, 0).unwrap();
+        let reader = WavChunkReader::open(&path).unwrap();
         let chunks = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
         assert_eq!(chunks.len(), 3);
         assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| read_i16_samples(chunk).len())
+                .collect::<Vec<_>>(),
+            [120, 120, 20]
+        );
+        assert_eq!(
             chunks.iter().flat_map(read_i16_samples).collect::<Vec<_>>(),
-            (0..10).collect::<Vec<_>>()
+            (0..260).collect::<Vec<_>>()
         );
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn disabled_limits_return_the_whole_file_as_one_chunk() {
-        let path = test_path("unlimited");
+    fn short_file_returns_one_tail_chunk() {
+        let path = test_path("short");
         let spec = WavSpec {
             channels: 1,
             sample_rate: 16_000,
@@ -174,7 +174,7 @@ mod tests {
         };
         write_int_wav(&path, spec, 100);
 
-        let reader = WavChunkReader::open(&path, 0, 0).unwrap();
+        let reader = WavChunkReader::open(&path).unwrap();
         let chunks = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
         assert_eq!(chunks.len(), 1);
@@ -186,14 +186,14 @@ mod tests {
     fn too_small_size_capacity_yields_no_chunks() {
         let path = test_path("too-small");
         let spec = WavSpec {
-            channels: 1,
-            sample_rate: 16_000,
+            channels: 32,
+            sample_rate: 753_660,
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
-        write_int_wav(&path, spec, 16_000);
+        write_int_wav(&path, spec, u32::from(spec.channels));
 
-        let reader = WavChunkReader::open(&path, 0, 44 + 8_000 * 2).unwrap();
+        let reader = WavChunkReader::open(&path).unwrap();
 
         assert_eq!(reader.count(), 0);
         let _ = std::fs::remove_file(path);
@@ -208,9 +208,9 @@ mod tests {
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
-        write_int_wav(&path, spec, 202);
+        write_int_wav(&path, spec, 6_060);
 
-        let reader = WavChunkReader::open(&path, 1, 0).unwrap();
+        let reader = WavChunkReader::open(&path).unwrap();
 
         assert_eq!(reader.collect::<Result<Vec<_>, _>>().unwrap().len(), 101);
         let _ = std::fs::remove_file(path);
@@ -219,12 +219,12 @@ mod tests {
     #[test]
     fn chunks_preserve_float_wav_format() {
         let path = test_path("float");
-        write_float_wav(&path, 8);
+        write_float_wav(&path, 260);
 
-        let reader = WavChunkReader::open(&path, 1, 0).unwrap();
+        let reader = WavChunkReader::open(&path).unwrap();
         let chunks = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
-        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks.len(), 3);
         for chunk in chunks {
             let reader = WavReader::new(Cursor::new(chunk.bytes())).unwrap();
             assert_eq!(reader.spec().sample_format, SampleFormat::Float);
@@ -251,7 +251,7 @@ mod tests {
             .set_len(truncated_len)
             .unwrap();
 
-        let mut chunks = WavChunkReader::open(&path, 0, 0).unwrap();
+        let mut chunks = WavChunkReader::open(&path).unwrap();
 
         assert!(matches!(chunks.next(), Some(Err(_))));
         assert!(chunks.next().is_none());
