@@ -96,6 +96,7 @@ src/
     setup.rs                 — First-run and on-demand setup orchestration
     setup/
       hotkey.rs              — Isolated hotkey capture and binding verification helper
+      windows.rs             — Native Unicode text and password inputs for Windows setup
   session.rs                 — Shared SessionId value type
   text.rs                    — Shared language-aware transcription text merge
   history.rs                 — Bounded JSONL transcription history persistence and tail repair
