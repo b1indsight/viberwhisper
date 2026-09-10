@@ -61,8 +61,8 @@ public static class SetupDialogSmoke {
                 var input = GetDlgItem(window, 1001);
                 if (((GetWindowLong(input, -16) & 0x20) != 0) != password)
                     throw new Exception("Unexpected setup password masking");
-                if (password && ReadText(input) != "")
-                    throw new Exception("Setup password input was not initially empty");
+                // Password text cannot be inspected reliably from this other process. Empty
+                // defaults are checked in-process by ui/setup/windows/tests.rs in this same job.
                 if (!password) {
                     UIntPtr result;
                     if (WriteMessage(input, 0x000C, UIntPtr.Zero, value, 2, 2000, out result) == IntPtr.Zero || result == UIntPtr.Zero)
