@@ -5,6 +5,9 @@
 
 mod hotkey;
 
+#[cfg(target_os = "windows")]
+mod windows;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -148,8 +151,8 @@ enum WizardOutcome {
 
 trait SetupUi {
     fn confirm(&mut self, message: &str, default_yes: bool) -> bool;
-    fn input(&mut self, message: &str, default: &str) -> Option<String>;
-    fn password(&mut self, message: &str) -> Option<String>;
+    fn input(&mut self, message: &str, default: &str) -> AnyhowResult<Option<String>>;
+    fn password(&mut self, message: &str) -> AnyhowResult<Option<String>>;
     fn capture_hotkey(&mut self, message: &str) -> Result<Option<String>, String>;
     fn message(&mut self, message: &str);
 }
@@ -166,12 +169,22 @@ impl SetupUi for NativeSetupUi {
         ) == YesNo::Yes
     }
 
-    fn input(&mut self, message: &str, default: &str) -> Option<String> {
-        tinyfiledialogs::input_box(TITLE, message, default)
+    fn input(&mut self, message: &str, default: &str) -> AnyhowResult<Option<String>> {
+        #[cfg(target_os = "windows")]
+        return windows::input_box(TITLE, message, Some(default));
+        #[cfg(not(target_os = "windows"))]
+        Ok(tinyfiledialogs::input_box(
+            TITLE,
+            message,
+            &safe_dialog_text(default),
+        ))
     }
 
-    fn password(&mut self, message: &str) -> Option<String> {
-        tinyfiledialogs::password_box(TITLE, message)
+    fn password(&mut self, message: &str) -> AnyhowResult<Option<String>> {
+        #[cfg(target_os = "windows")]
+        return windows::input_box(TITLE, message, None);
+        #[cfg(not(target_os = "windows"))]
+        Ok(tinyfiledialogs::password_box(TITLE, message))
     }
 
     fn capture_hotkey(&mut self, message: &str) -> Result<Option<String>, String> {
@@ -340,7 +353,8 @@ fn run_wizard(
         ui,
         "请输入 OpenAI 兼容的 STT API 地址",
         &document.inference.api.transcription.api_url,
-    ) else {
+    )?
+    else {
         return Ok(WizardOutcome::Cancelled);
     };
     document.inference.api.transcription.api_url = url;
@@ -349,7 +363,8 @@ fn run_wizard(
         ui,
         "请输入 STT 模型名称",
         &document.inference.api.transcription.model,
-    ) else {
+    )?
+    else {
         return Ok(WizardOutcome::Cancelled);
     };
     document.inference.api.transcription.model = model;
@@ -364,7 +379,7 @@ fn run_wizard(
     } else {
         "请输入 STT API Key。留空会保留已有磁盘密钥，也可使用 TRANSCRIPTION_API_KEY 环境变量。"
     };
-    let Some(key) = ui.password(stt_key_message) else {
+    let Some(key) = ui.password(stt_key_message)? else {
         return Ok(WizardOutcome::Cancelled);
     };
     if !key.is_empty() {
@@ -380,7 +395,7 @@ fn run_wizard(
             .api_url
             .as_deref()
             .unwrap_or(DEFAULT_POST_PROCESS_URL);
-        let Some(url) = required_input(ui, "请输入 LLM Chat Completions API 地址", current_url)
+        let Some(url) = required_input(ui, "请输入 LLM Chat Completions API 地址", current_url)?
         else {
             return Ok(WizardOutcome::Cancelled);
         };
@@ -393,7 +408,7 @@ fn run_wizard(
             .model
             .as_deref()
             .unwrap_or(DEFAULT_POST_PROCESS_MODEL);
-        let Some(model) = required_input(ui, "请输入 LLM 模型名称", current_model) else {
+        let Some(model) = required_input(ui, "请输入 LLM 模型名称", current_model)? else {
             return Ok(WizardOutcome::Cancelled);
         };
         document.inference.api.post_process.model = Some(model);
@@ -407,7 +422,7 @@ fn run_wizard(
         } else {
             "请输入 LLM API Key。留空会保留已有磁盘密钥，也可使用 POST_PROCESS_API_KEY 环境变量。"
         };
-        let Some(key) = ui.password(post_key_message) else {
+        let Some(key) = ui.password(post_key_message)? else {
             return Ok(WizardOutcome::Cancelled);
         };
         if !key.is_empty() {
@@ -420,9 +435,9 @@ fn run_wizard(
     }
 
     document.audio.input_device =
-        match choose_input_device(ui, document.audio.input_device.as_deref(), device_names) {
-            Ok(device) => device,
-            Err(()) => return Ok(WizardOutcome::Cancelled),
+        match choose_input_device(ui, document.audio.input_device.as_deref(), device_names)? {
+            DeviceChoice::Use(device) => device,
+            DeviceChoice::Cancelled => return Ok(WizardOutcome::Cancelled),
         };
 
     if let Err(error) = resolve_document(&document) {
@@ -479,11 +494,17 @@ fn run_wizard(
     Ok(WizardOutcome::Saved(Box::new(document)))
 }
 
-fn required_input(ui: &mut dyn SetupUi, message: &str, default: &str) -> Option<String> {
+fn required_input(
+    ui: &mut dyn SetupUi,
+    message: &str,
+    default: &str,
+) -> AnyhowResult<Option<String>> {
     loop {
-        let value = ui.input(message, &safe_dialog_text(default))?;
+        let Some(value) = ui.input(message, default)? else {
+            return Ok(None);
+        };
         if !value.trim().is_empty() {
-            return Some(value.trim().to_string());
+            return Ok(Some(value.trim().to_string()));
         }
         ui.message("该项不能为空。");
     }
@@ -556,11 +577,16 @@ fn display_binding(value: &str) -> String {
     }
 }
 
+enum DeviceChoice {
+    Use(Option<String>),
+    Cancelled,
+}
+
 fn choose_input_device(
     ui: &mut dyn SetupUi,
     current: Option<&str>,
     device_names: Result<Vec<String>, String>,
-) -> Result<Option<String>, ()> {
+) -> AnyhowResult<DeviceChoice> {
     let names = match device_names {
         Ok(names) => names,
         Err(error) => {
@@ -568,7 +594,7 @@ fn choose_input_device(
                 "无法列出麦克风，将使用系统默认设备：\n{}",
                 safe_dialog_text(&error)
             ));
-            return Ok(None);
+            return Ok(DeviceChoice::Use(None));
         }
     };
     let mut prompt = String::from("请选择麦克风编号：\n0 = 系统默认");
@@ -586,11 +612,11 @@ fn choose_input_device(
         .and_then(|current| names.iter().position(|name| name == current))
         .map_or_else(|| "0".to_string(), |index| (index + 1).to_string());
     loop {
-        let Some(choice) = ui.input(&prompt, &default) else {
-            return Err(());
+        let Some(choice) = ui.input(&prompt, &default)? else {
+            return Ok(DeviceChoice::Cancelled);
         };
         match selected_input_device(choice.trim(), &names) {
-            Ok(device) => return Ok(device),
+            Ok(device) => return Ok(DeviceChoice::Use(device)),
             Err(error) => ui.message(&error),
         }
     }
@@ -708,10 +734,11 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
     struct ScriptedUi {
         confirms: VecDeque<bool>,
-        inputs: VecDeque<Option<String>>,
-        passwords: VecDeque<Option<String>>,
+        inputs: VecDeque<AnyhowResult<Option<String>>>,
+        passwords: VecDeque<AnyhowResult<Option<String>>>,
         captures: VecDeque<Result<Option<String>, String>>,
         messages: Vec<String>,
         confirm_messages: Vec<String>,
@@ -723,11 +750,11 @@ mod tests {
             self.confirms.pop_front().unwrap()
         }
 
-        fn input(&mut self, _message: &str, _default: &str) -> Option<String> {
+        fn input(&mut self, _message: &str, _default: &str) -> AnyhowResult<Option<String>> {
             self.inputs.pop_front().unwrap()
         }
 
-        fn password(&mut self, message: &str) -> Option<String> {
+        fn password(&mut self, message: &str) -> AnyhowResult<Option<String>> {
             self.messages.push(message.to_string());
             self.passwords.pop_front().unwrap()
         }
@@ -775,11 +802,13 @@ mod tests {
         let mut ui = ScriptedUi {
             confirms: VecDeque::from([false, true, true, true]),
             inputs: VecDeque::from([
-                Some("https://example.com/v1/audio/transcriptions".to_string()),
-                Some("whisper-test".to_string()),
-                Some("0".to_string()),
+                Ok(Some(
+                    "https://example.com/v1/audio/transcriptions".to_string(),
+                )),
+                Ok(Some("whisper-test".to_string())),
+                Ok(Some("0".to_string())),
             ]),
-            passwords: VecDeque::from([Some("disk-secret".to_string())]),
+            passwords: VecDeque::from([Ok(Some("disk-secret".to_string()))]),
             captures: VecDeque::new(),
             messages: Vec::new(),
             confirm_messages: Vec::new(),
@@ -817,15 +846,17 @@ mod tests {
         let mut ui = ScriptedUi {
             confirms: VecDeque::from([true, true, false, true]),
             inputs: VecDeque::from([
-                Some("https://example.com/v1/audio/transcriptions".to_string()),
-                Some("whisper-test".to_string()),
-                Some("https://example.com/v1/chat/completions".to_string()),
-                Some("cleanup-test".to_string()),
-                Some("2".to_string()),
+                Ok(Some(
+                    "https://example.com/v1/audio/transcriptions".to_string(),
+                )),
+                Ok(Some("whisper-test".to_string())),
+                Ok(Some("https://example.com/v1/chat/completions".to_string())),
+                Ok(Some("cleanup-test".to_string())),
+                Ok(Some("2".to_string())),
             ]),
             passwords: VecDeque::from([
-                Some("disk-secret".to_string()),
-                Some("cleanup-disk-secret".to_string()),
+                Ok(Some("disk-secret".to_string())),
+                Ok(Some("cleanup-disk-secret".to_string())),
             ]),
             captures: VecDeque::new(),
             messages: Vec::new(),
@@ -866,7 +897,7 @@ mod tests {
         let store = ConfigStore::at(path.clone());
         let mut ui = ScriptedUi {
             confirms: VecDeque::new(),
-            inputs: VecDeque::from([None]),
+            inputs: VecDeque::from([Ok(None)]),
             passwords: VecDeque::new(),
             captures: VecDeque::new(),
             messages: Vec::new(),
@@ -884,5 +915,44 @@ mod tests {
 
         assert!(matches!(outcome, WizardOutcome::Cancelled));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn input_failures_are_errors_and_preserve_existing_configuration() {
+        // A failed Windows input must not look like cancellation or overwrite a user's config.
+        for fail_password in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            std::fs::write(&path, "original configuration").unwrap();
+            let mut ui = ScriptedUi::default();
+            if fail_password {
+                ui.inputs = VecDeque::from([
+                    Ok(Some(
+                        "https://example.com/v1/audio/transcriptions".to_string(),
+                    )),
+                    Ok(Some("whisper-test".to_string())),
+                ]);
+                ui.passwords
+                    .push_back(Err(anyhow!("dialog creation failed")));
+            } else {
+                ui.inputs.push_back(Err(anyhow!("dialog creation failed")));
+            }
+
+            let result = run_wizard(
+                &ConfigStore::at(path.clone()),
+                ConfigDocument::default(),
+                Ok(Vec::new()),
+                &mut ui,
+                &mut UnexpectedVerifier,
+            );
+            match result {
+                Err(error) => assert!(error.to_string().contains("dialog creation failed")),
+                Ok(_) => panic!("input failure must propagate"),
+            }
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                "original configuration"
+            );
+        }
     }
 }

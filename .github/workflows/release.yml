@@ -229,6 +229,13 @@ jobs:
         shell: pwsh
         run: cargo build --release --locked --target x86_64-pc-windows-msvc --features windows-app
 
+      - name: Smoke-test native setup inputs and released entry points
+        shell: pwsh
+        run: |
+          cargo test --release --locked --target x86_64-pc-windows-msvc --features windows-app native_input_dialogs_show_and_return
+          if ($LASTEXITCODE -ne 0) { throw "Native setup input test failed" }
+          ./scripts/test-windows-setup.ps1 -BinaryDirectory target/x86_64-pc-windows-msvc/release
+
       - name: Smoke-test executable subsystems and runtime dependencies
         shell: pwsh
         run: |

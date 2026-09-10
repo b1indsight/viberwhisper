@@ -35,6 +35,17 @@ doubles. `NativeVerifier` handles one complete hotkey-driven recording and verif
 the existing audio, STT, and post-processing interfaces. `core::config` owns configuration
 loading and atomic persistence; the wizard selects when to load, retry, cancel, or save.
 
+Windows text and password input use in-process Win32 dialogs in `ui/setup/windows.rs`, with
+Unicode controls and a native modal message loop. They do not launch VBScript/HTA input scripts
+or poll for another process's window. Text/password methods distinguish an accepted value,
+cancellation, and a native error; failures propagate without saving the candidate configuration.
+The CLI reports errors through its existing error return and the desktop launcher shows its
+existing startup-error dialog. Other platforms keep their existing tinyfiledialogs inputs.
+
+Windows tests drive real native inputs in a bounded child process. Release packaging also runs
+`scripts/test-windows-setup.ps1` against both release executables on a clean runner account,
+checking that the text/password windows appear and cancellation exits without writing config.
+
 The process entry points check for helper mode before tracing and CLI initialization. Normal
 listener startup and the explicit setup command use the same wizard. CLI-only workflows run
 without creating a desktop event loop.

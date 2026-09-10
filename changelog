@@ -75,3 +75,4 @@
 2026-09-08: Merge application entry points, CLI workflows, and recording settings into core; move the existing desktop listener and setup flows into ui while preserving their interfaces and behavior
 2026-09-08: Flatten listener startup failures and reuse recorder/orchestrator rollback while preserving the cleanup order and session targets
 2026-09-08: Release 0.2.0 with first-run setup, a console-free Windows launcher and per-user installer, API-only configuration after removing bundled Local inference, and simplified configuration, audio, session, and desktop UI internals
+2026-09-10: Replace Windows setup script inputs with native Unicode text/password dialogs, propagate input failures without saving, and smoke-test both release entry points against missing-window hangs

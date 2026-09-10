@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed on 2026-09-10. Plan only; awaiting approval before implementation.
+Approved for implementation on 2026-09-10. Native Windows inputs and regression coverage are
+implemented. Local format/build/Clippy checks, all 188 macOS tests, and Windows GNU target
+test compilation and Clippy passed. Hosted Windows MSVC release validation is pending.
 
 ## Problem and evidence
 
@@ -99,6 +101,12 @@ wizard never saves its candidate configuration.
 | 3 | `src/ui/setup.rs` | Connect the Windows adapter and propagate fallible input results through existing wizard helpers. |
 | 4 | `docs/architecture/ui.md`, `changelog`, this plan | Document the dialog boundary and record actual validation results. |
 
+The release workflow also runs the native input test with the static CRT and
+`scripts/test-windows-setup.ps1` against both actual release executables. That smoke check goes
+through the STT address and model windows to the masked password window, then cancels and
+requires process termination without saving configuration. It refuses to run over an existing
+configuration and bounds native message delivery and window appearance waits.
+
 Do not change MSI UI, CLI dispatch, hotkeys, verification recording, or configuration schema as
 part of this fix. If launch details instead identify an installer issue, revise this plan and
 the same PR before implementation.
@@ -126,4 +134,4 @@ the same PR before implementation.
    error output and leave no process spinning while searching for a missing window. Retain the
    published application data throughout manual checks by using an isolated Windows test account.
 
-Implementation and validation continue on the same bookmark and PR after plan approval.
+Implementation and validation continue on the same bookmark and PR.

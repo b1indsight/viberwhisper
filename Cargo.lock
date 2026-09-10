@@ -3950,6 +3950,7 @@ dependencies = [
  "tray-icon",
  "unicode-normalization",
  "unicode-segmentation",
+ "windows-sys 0.61.2",
  "winit",
 ]
 
