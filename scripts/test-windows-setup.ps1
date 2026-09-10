@@ -61,7 +61,7 @@ public static class SetupDialogSmoke {
                     throw new Exception("Unexpected first-run confirmation");
                 if (GetWindow(window, 4) != IntPtr.Zero) // GW_OWNER
                     throw new Exception("First-run confirmation borrowed an external owner");
-                if (!PostMessage(window, 0x0111, (UIntPtr)6, IntPtr.Zero))
+                if (!PostMessage(window, 0x0111, (UIntPtr)6, GetDlgItem(window, 6)))
                     throw new Exception("First-run confirmation did not accept Yes");
                 return;
             }

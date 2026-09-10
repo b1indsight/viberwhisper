@@ -1,5 +1,5 @@
 use std::os::windows::process::CommandExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,24 +38,38 @@ fn native_setup_dialogs_show_and_return() {
         .env("SSH_CLIENT", "127.0.0.1 12345 22")
         .env_remove("DISPLAY")
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            assert!(status.success(), "native input test failed: {status}");
+        if child.try_wait().unwrap().is_some() {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "native setup test failed: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
             break;
         }
         if Instant::now() >= deadline {
             child.kill().unwrap();
-            child.wait().unwrap();
-            panic!("native input did not appear or finish within 30 seconds");
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "native setup did not finish within 30 seconds\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         thread::sleep(Duration::from_millis(20));
     }
 }
 
 fn exercise_message(answer: Option<bool>) {
+    eprintln!("opening native message: {answer:?}");
     // SAFETY: GetCurrentThreadId has no preconditions.
     let ui_thread = unsafe { GetCurrentThreadId() };
     let driver = thread::spawn(move || {
@@ -70,6 +84,7 @@ fn exercise_message(answer: Option<bool>) {
                     (&mut dialog as *mut HWND) as LPARAM,
                 );
                 if !dialog.is_null() {
+                    eprintln!("native message visible; reading controls");
                     assert_eq!(read_text(dialog).unwrap(), TITLE);
                     assert_eq!(read_text(GetDlgItem(dialog, 0xffff)).unwrap(), PROMPT);
                     assert!(
@@ -81,7 +96,16 @@ fn exercise_message(answer: Option<bool>) {
                         Some(false) => IDNO,
                         None => IDOK,
                     };
-                    assert_ne!(PostMessageW(dialog, WM_COMMAND, button as WPARAM, 0), 0);
+                    eprintln!("completing native message with button {button}");
+                    assert_ne!(
+                        PostMessageW(
+                            dialog,
+                            WM_COMMAND,
+                            button as WPARAM,
+                            GetDlgItem(dialog, button) as LPARAM
+                        ),
+                        0
+                    );
                     break;
                 }
             }
@@ -97,6 +121,7 @@ fn exercise_message(answer: Option<bool>) {
         Some(answer) => assert_eq!(ui.confirm(PROMPT, answer).unwrap(), answer),
         None => ui.message(PROMPT).unwrap(),
     }
+    eprintln!("native message returned: {answer:?}");
     driver.join().unwrap();
 }
 
