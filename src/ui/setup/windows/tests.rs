@@ -91,21 +91,24 @@ fn exercise_message(answer: Option<bool>) {
                         GetWindow(dialog, GW_OWNER).is_null(),
                         "setup must not borrow another application's window"
                     );
-                    let button = match answer {
-                        Some(true) => IDYES,
-                        Some(false) => IDNO,
-                        None => IDOK,
-                    };
-                    eprintln!("completing native message with button {button}");
-                    assert_ne!(
-                        PostMessageW(
-                            dialog,
-                            WM_COMMAND,
-                            button as WPARAM,
-                            GetDlgItem(dialog, button) as LPARAM
-                        ),
-                        0
-                    );
+                    if let Some(answer) = answer {
+                        let button = if answer { IDYES } else { IDNO };
+                        eprintln!("completing native confirmation with button {button}");
+                        assert_ne!(
+                            PostMessageW(
+                                dialog,
+                                WM_COMMAND,
+                                button as WPARAM,
+                                GetDlgItem(dialog, button) as LPARAM
+                            ),
+                            0
+                        );
+                    } else {
+                        // Dismiss the informational message through its normal Close action.
+                        // A synthetic IDOK command was ignored by the hosted Windows dialog.
+                        eprintln!("closing native informational message");
+                        assert_ne!(PostMessageW(dialog, WM_CLOSE, 0, 0), 0);
+                    }
                     break;
                 }
             }
