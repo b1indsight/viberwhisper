@@ -2,9 +2,27 @@
 
 ## Status
 
-Approved for implementation on 2026-09-10. Native Windows inputs and regression coverage are
-implemented. Local format/build/Clippy checks, all 188 macOS tests, and Windows GNU target
-test compilation and Clippy passed. Hosted Windows MSVC release validation is pending.
+Implemented and validated on 2026-09-10 in [PR #136](https://github.com/b1indsight/viberwhisper/pull/136).
+Local checks, hosted macOS/Windows CI, and the two-platform release packaging dry run passed.
+
+## Validation results
+
+- Local formatting, build, all 188 macOS tests, macOS Clippy, Windows GNU test compilation and
+  Clippy, and the release contract check passed. Both independent code reviews had no findings.
+- [Hosted CI](https://github.com/b1indsight/viberwhisper/actions/runs/34441640013) passed on code
+  commit `71394fad2065f49b9c287ddd3813eeee737acb04`; the Windows suite includes 176 tests and
+  actually creates and drives native Unicode/password inputs in a bounded child process.
+- [Release dry run](https://github.com/b1indsight/viberwhisper/actions/runs/34441637979) passed
+  on the same code commit. The static-CRT native input test passed, and both `viberwhisper.exe
+  setup` and first-run `viberwhisper-app.exe` displayed text and masked-password inputs, then
+  exited successfully on cancellation without writing configuration.
+- The Windows executable subsystem/dependency checks, MSI extraction, per-user installation,
+  machine upgrade, shortcut and uninstall checks, and portable ZIP inspection passed. The
+  [Windows MSI/ZIP artifact](https://github.com/b1indsight/viberwhisper/actions/runs/34441637979/artifacts/10138263157)
+  is retained for seven days. The macOS packaging job also passed. `publish=false` skipped
+  GitHub Release publication.
+- The original reporting machine has not been retested. Hosted automation establishes window
+  creation and input behavior, not a captured stack or reproduction of the original script hang.
 
 ## Problem and evidence
 
