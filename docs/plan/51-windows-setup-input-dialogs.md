@@ -4,7 +4,32 @@
 
 The initial input-dialog change passed CI and release packaging in
 [PR #136](https://github.com/b1indsight/viberwhisper/pull/136). A follow-up on 2026-09-10 addresses
-missing first-run confirmation in the GUI entry; its Windows release validation is pending.
+missing first-run confirmation in the GUI entry. The follow-up now passes native Windows CI
+and both-platform release packaging; the reporting machine still needs the new artifact.
+
+## Follow-up validation results
+
+- Local 191-test macOS suite, formatting, and macOS/Windows cross-target Clippy passed. Each
+  follow-up code-bearing push passed the independent review gate with no findings.
+- [Hosted CI](https://github.com/b1indsight/viberwhisper/actions/runs/34451194897) passed all
+  179 Windows and 191 macOS tests on `930871ab3d49f6812ad818cdb4cb2865365c384f`.
+- [Release dry run](https://github.com/b1indsight/viberwhisper/actions/runs/34451193551) passed
+  on that same commit. The static-CRT dialog test completed in 0.87 seconds. The six actual-EXE
+  launch cases passed: explicit CLI setup, first-run CLI, and first-run GUI via direct and shell
+  execution with `SSH_CLIENT` both absent and present (`DISPLAY` absent). Every first-run case
+  displayed its initial confirmation; all cases displayed text/password inputs and cancelled
+  successfully without saving configuration.
+- Windows PE/dependency checks, MSI validation/extraction, per-user installation, per-machine
+  upgrade, shortcut/uninstall checks and portable ZIP inspection passed. macOS packaging also
+  passed; GitHub Release publication was skipped (`publish=false`).
+- [Updated Windows MSI/ZIP artifact](https://github.com/b1indsight/viberwhisper/actions/runs/34451193551/artifacts/10141761129)
+  is retained for seven days. Use this artifact for the remaining machine-level verification;
+  the earlier artifact predates the confirmation/message fix.
+- The first follow-up test run timed out when its driver tried to dismiss an informational
+  message with a synthetic IDOK command. Capturing the no-console child's output showed that
+  both Yes/No confirmations and the informational message were visible. The test now dismisses
+  the informational message through its normal Close action; the runtime adapter did not need
+  another change for this automation issue.
 
 ## Initial validation results
 
