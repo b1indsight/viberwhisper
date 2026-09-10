@@ -39,12 +39,18 @@ Windows text and password input use in-process Win32 dialogs in `ui/setup/window
 Unicode controls and a native modal message loop. They do not launch VBScript/HTA input scripts
 or poll for another process's window. Text/password methods distinguish an accepted value,
 cancellation, and a native error; failures propagate without saving the candidate configuration.
+Windows confirmations and informational messages also call `MessageBoxW` directly, using no
+external owner window. They never select console input based on `SSH_CLIENT`/`DISPLAY`.
+Confirmation/message creation errors abort the current workflow instead of becoming a No
+answer; failure of the final saved notification does not undo an already completed save.
 The CLI reports errors through its existing error return and the desktop launcher shows its
 existing startup-error dialog. Other platforms keep their existing tinyfiledialogs inputs.
 
 Windows tests drive real native inputs in a bounded child process. Release packaging also runs
 `scripts/test-windows-setup.ps1` against both release executables on a clean runner account,
-checking that the text/password windows appear and cancellation exits without writing config.
+checking the initial confirmation, text/password windows, and cancellation without writing
+config. It covers explicit setup, both first-run entries, and direct/ShellExecute GUI launches
+with and without the environment that previously selected console-only confirmations.
 
 The process entry points check for helper mode before tracing and CLI initialization. Normal
 listener startup and the explicit setup command use the same wizard. CLI-only workflows run

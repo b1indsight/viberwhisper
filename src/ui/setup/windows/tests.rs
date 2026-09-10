@@ -1,3 +1,4 @@
+use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -8,14 +9,17 @@ use super::*;
 use crate::ui::setup::{NativeSetupUi, SetupUi, TITLE};
 
 const CHILD_ENV: &str = "VIBERWHISPER_NATIVE_INPUT_TEST_CHILD";
-const TEST_NAME: &str = "ui::setup::windows::tests::native_input_dialogs_show_and_return";
+const TEST_NAME: &str = "ui::setup::windows::tests::native_setup_dialogs_show_and_return";
 const PROMPT: &str = "请输入中文、引号 \" 和密码 🦀";
 
 #[test]
-fn native_input_dialogs_show_and_return() {
+fn native_setup_dialogs_show_and_return() {
     // The old script adapter spins forever if its Chinese input window never appears. A child
     // process bounds this regression test even if either the UI or its driver stops responding.
     if std::env::var_os(CHILD_ENV).is_some() {
+        exercise_message(Some(true));
+        exercise_message(Some(false));
+        exercise_message(None);
         for (default, entered, accept) in [
             (Some("默认值 \"中文\" 🦀"), "输入 \"中文\" 🦀", true),
             (None, "测试密钥", true),
@@ -30,6 +34,10 @@ fn native_input_dialogs_show_and_return() {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", TEST_NAME, "--nocapture"])
         .env(CHILD_ENV, "1")
+        // This environment used to select a console-only confirmation even in a GUI process.
+        .env("SSH_CLIENT", "127.0.0.1 12345 22")
+        .env_remove("DISPLAY")
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -45,6 +53,62 @@ fn native_input_dialogs_show_and_return() {
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn exercise_message(answer: Option<bool>) {
+    // SAFETY: GetCurrentThreadId has no preconditions.
+    let ui_thread = unsafe { GetCurrentThreadId() };
+    let driver = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut dialog: HWND = std::ptr::null_mut();
+            // SAFETY: The callback only writes to the live local HWND.
+            unsafe {
+                EnumThreadWindows(
+                    ui_thread,
+                    Some(find_message),
+                    (&mut dialog as *mut HWND) as LPARAM,
+                );
+                if !dialog.is_null() {
+                    assert_eq!(read_text(dialog).unwrap(), TITLE);
+                    assert_eq!(read_text(GetDlgItem(dialog, 0xffff)).unwrap(), PROMPT);
+                    assert!(
+                        GetWindow(dialog, GW_OWNER).is_null(),
+                        "setup must not borrow another application's window"
+                    );
+                    let button = match answer {
+                        Some(true) => IDYES,
+                        Some(false) => IDNO,
+                        None => IDOK,
+                    };
+                    assert_ne!(PostMessageW(dialog, WM_COMMAND, button as WPARAM, 0), 0);
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "native confirmation or message did not appear"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let mut ui = NativeSetupUi;
+    match answer {
+        Some(answer) => assert_eq!(ui.confirm(PROMPT, answer).unwrap(), answer),
+        None => ui.message(PROMPT).unwrap(),
+    }
+    driver.join().unwrap();
+}
+
+unsafe extern "system" fn find_message(window: HWND, data: LPARAM) -> i32 {
+    // SAFETY: EnumThreadWindows supplies a live window; data points to a live local HWND.
+    unsafe {
+        if IsWindowVisible(window) != 0 && !GetDlgItem(window, 0xffff).is_null() {
+            *(data as *mut HWND) = window;
+            return 0;
+        }
+    }
+    1
 }
 
 fn exercise_input(default: Option<&'static str>, entered: &'static str, accept: bool) {

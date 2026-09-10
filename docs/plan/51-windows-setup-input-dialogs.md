@@ -2,10 +2,11 @@
 
 ## Status
 
-Implemented and validated on 2026-09-10 in [PR #136](https://github.com/b1indsight/viberwhisper/pull/136).
-Local checks, hosted macOS/Windows CI, and the two-platform release packaging dry run passed.
+The initial input-dialog change passed CI and release packaging in
+[PR #136](https://github.com/b1indsight/viberwhisper/pull/136). A follow-up on 2026-09-10 addresses
+missing first-run confirmation in the GUI entry; its Windows release validation is pending.
 
-## Validation results
+## Initial validation results
 
 - Local formatting, build, all 188 macOS tests, macOS Clippy, Windows GNU test compilation and
   Clippy, and the release contract check passed. Both independent code reviews had no findings.
@@ -21,8 +22,10 @@ Local checks, hosted macOS/Windows CI, and the two-platform release packaging dr
   [Windows MSI/ZIP artifact](https://github.com/b1indsight/viberwhisper/actions/runs/34441637979/artifacts/10138263157)
   is retained for seven days. The macOS packaging job also passed. `publish=false` skipped
   GitHub Release publication.
-- The original reporting machine has not been retested. Hosted automation establishes window
-  creation and input behavior, not a captured stack or reproduction of the original script hang.
+- The user subsequently confirmed that with configuration absent, `viberwhisper.exe` works
+  while `viberwhisper-app.exe` still has the missing-window issue. Whether the tested binaries
+  came from this artifact and the exact blocking stage are not yet confirmed. The initial
+  automation does not establish resolution on that machine.
 
 ## Problem and evidence
 
@@ -74,8 +77,9 @@ the relevant [text-stream conversion](https://learn.microsoft.com/en-us/cpp/c-ru
 
 Add `src/ui/setup/windows.rs`, compiled only on Windows, and route `NativeSetupUi::input` and
 `NativeSetupUi::password` through it. Keep the existing wizard navigation and configuration
-ownership in `src/ui/setup.rs`. The existing message and confirmation dialogs already use
-Win32 message boxes on Windows; retain those and the current non-Windows input adapter.
+ownership in `src/ui/setup.rs`. The initial change retained message and confirmation dialogs;
+the follow-up below removes their remaining environment-dependent console fallback. Keep the
+current non-Windows adapters.
 
 Use `DialogBoxIndirectParamW` with a small in-memory dialog template containing a prompt,
 single-line edit control, OK, and Cancel. Its own modal message loop works before the tray's
@@ -99,7 +103,7 @@ and [edit control styles](https://learn.microsoft.com/en-us/windows/win32/contro
 
 ### Distinguish cancellation from failure
 
-Change only the text/password methods of the existing `SetupUi` boundary to return
+Change the text/password methods of the existing `SetupUi` boundary to return
 `anyhow::Result<Option<String>>`: `Ok(Some(value))` means accepted, `Ok(None)` means Cancel,
 Escape, or close, and `Err` means the native dialog or input retrieval failed. Propagate errors
 through the wizard's input helpers and its existing `anyhow::Result` return path. Adapt the
@@ -108,7 +112,34 @@ non-Windows implementation and test doubles to the same signature.
 Preserve the Win32 error immediately on failure and add context naming the failed operation,
 without including entered values or secrets. The CLI reports the error with a failing exit
 code; the GUI launcher uses its existing native startup-error dialog. A failed or cancelled
-wizard never saves its candidate configuration.
+wizard never saves its candidate configuration before explicit confirmation. A failure showing
+the final saved notification reports an error but does not undo the completed save.
+
+## Follow-up: first-run GUI confirmation
+
+The remaining `tinyfiledialogs::message_box_yes_no` / `message_box_ok` adapter calls
+`tinyfd_messageBox`. In tinyfiledialogs 3.9.1, the Windows implementation selects the GUI only
+when `!getenv("SSH_CLIENT") || getenvDISPLAY()` (along with its force-console check). With
+`SSH_CLIENT` present and `DISPLAY` absent it can reach a `do ... _getch() ... while` console
+loop. A GUI-subsystem process has no usable console for that prompt. This is a concrete
+unbounded fallback that the initial clean-environment, input-focused smoke test did not cover;
+it is not yet proof of the original machine's environment or stack.
+
+- Route all Windows setup confirmations and informational prompts, including hotkey capture,
+  through direct Unicode `MessageBoxW` calls in the existing Windows adapter.
+- Use a null owner with `MB_TASKMODAL | MB_SETFOREGROUND`. Setup has no main window yet;
+  borrowing `GetForegroundWindow()` would attach the prompt to an unrelated application.
+- Propagate native confirmation/message failures. Preserve No, cancelled hotkey capture and
+  native failure as separate outcomes, and release the capture helper if its prompt fails.
+- Extend bounded native tests to confirmations and messages under `CREATE_NO_WINDOW` with
+  `SSH_CLIENT` set and `DISPLAY` removed. Assert Unicode content and no borrowed owner.
+- Check the first-run confirmation explicitly before advancing to inputs. Run both EXEs with
+  no configuration, explicit CLI setup, and GUI direct/ShellExecute launches in clean and
+  console-fallback environments. Cancel before secrets, networking or persistence.
+- Keep the same bookmark and PR, and rerun CI and `publish=false` release packaging.
+
+Microsoft documents the null-owner and task-modal behavior in
+[`MessageBoxW`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-messageboxw).
 
 ## Files and implementation order
 

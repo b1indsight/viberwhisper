@@ -1,5 +1,4 @@
-//! In-process Windows setup input. Native controls avoid tinyfiledialogs' script-host dependency
-//! and its unbounded polling for a script window that may never be created.
+//! In-process Windows setup dialogs, independent of script hosts and console availability.
 
 use std::io;
 use std::ptr::null_mut;
@@ -13,6 +12,51 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const PROMPT_ID: u16 = 1000;
 const INPUT_ID: u16 = 1001;
+
+pub(super) fn confirm(title: &str, message: &str, default_yes: bool) -> Result<bool> {
+    let flags = MB_YESNO
+        | MB_ICONQUESTION
+        | if default_yes {
+            MB_DEFBUTTON1
+        } else {
+            MB_DEFBUTTON2
+        };
+    match message_box(title, message, flags)? {
+        IDYES => Ok(true),
+        IDNO => Ok(false),
+        _ => Err(anyhow!(
+            "Windows setup confirmation returned an unexpected result"
+        )),
+    }
+}
+
+pub(super) fn message(title: &str, message: &str) -> Result<()> {
+    ensure!(
+        message_box(title, message, MB_OK | MB_ICONINFORMATION)? == IDOK,
+        "Windows setup message returned an unexpected result"
+    );
+    Ok(())
+}
+
+fn message_box(title: &str, message: &str, flags: MESSAGEBOX_STYLE) -> Result<i32> {
+    let title = wide(title)?;
+    let message = wide(message)?;
+    // Bypass tinyfiledialogs' environment-based console fallback. Setup has no owner window;
+    // borrowing GetForegroundWindow would instead tie it to Explorer or another application.
+    // SAFETY: Both strings are live and NUL-terminated. A null owner is valid before startup.
+    let result = unsafe {
+        MessageBoxW(
+            null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            flags | MB_SETFOREGROUND | MB_TASKMODAL,
+        )
+    };
+    if result == 0 {
+        return Err(io::Error::last_os_error()).context("failed to create Windows setup message");
+    }
+    Ok(result)
+}
 
 struct DialogState {
     title: Vec<u16>,

@@ -16,6 +16,7 @@ public static class SetupDialogSmoke {
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr data);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
     [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr window, int id);
     [DllImport("user32.dll", EntryPoint="GetWindowLongW")] private static extern int GetWindowLong(IntPtr window, int index);
     [DllImport("user32.dll", EntryPoint="PostMessageW")] private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
@@ -33,29 +34,47 @@ public static class SetupDialogSmoke {
         return text.ToString();
     }
 
-    private static IntPtr FindInput(int process) {
+    private static IntPtr FindDialog(int process, int control) {
         IntPtr found = IntPtr.Zero;
         EnumWindows((window, data) => {
             uint owner;
             GetWindowThreadProcessId(window, out owner);
             if (owner != process || !IsWindowVisible(window)) return true;
-            if (GetDlgItem(window, 1001) != IntPtr.Zero) {
+            if (GetDlgItem(window, control) != IntPtr.Zero) {
                 found = window;
                 return false;
             }
-            // The desktop entry asks whether to configure before opening its first input.
-            if (GetDlgItem(window, 6) != IntPtr.Zero && GetDlgItem(window, 7) != IntPtr.Zero)
-                PostMessage(window, 0x0111, (UIntPtr)6, IntPtr.Zero);
             return true;
         }, IntPtr.Zero);
         return found;
+    }
+
+    public static void ConfirmFirstRun(Process process) {
+        // Check the initial confirmation separately: an input-only test can miss its fallback.
+        var deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed < TimeSpan.FromSeconds(30)) {
+            if (process.HasExited) throw new Exception("App exited before first-run confirmation");
+            var window = FindDialog(process.Id, 6);
+            if (window != IntPtr.Zero && GetDlgItem(window, 7) != IntPtr.Zero) {
+                var message = ReadText(GetDlgItem(window, 0xffff));
+                if (message == null || !message.Contains("尚未找到配置文件"))
+                    throw new Exception("Unexpected first-run confirmation");
+                if (GetWindow(window, 4) != IntPtr.Zero) // GW_OWNER
+                    throw new Exception("First-run confirmation borrowed an external owner");
+                if (!PostMessage(window, 0x0111, (UIntPtr)6, IntPtr.Zero))
+                    throw new Exception("First-run confirmation did not accept Yes");
+                return;
+            }
+            Thread.Sleep(25);
+        }
+        throw new Exception("First-run confirmation did not appear within 30 seconds");
     }
 
     public static void CompleteStep(Process process, string prompt, string value, bool password) {
         var deadline = Stopwatch.StartNew();
         while (deadline.Elapsed < TimeSpan.FromSeconds(30)) {
             if (process.HasExited) throw new Exception("Setup exited before showing its input window");
-            var window = FindInput(process.Id);
+            var window = FindDialog(process.Id, 1001);
             var actualPrompt = window == IntPtr.Zero ? null : ReadText(GetDlgItem(window, 1000));
             if (actualPrompt != null && actualPrompt.Contains(prompt)) {
                 var input = GetDlgItem(window, 1001);
@@ -80,14 +99,37 @@ public static class SetupDialogSmoke {
 }
 '@
 
-foreach ($binaryName in @('viberwhisper.exe', 'viberwhisper-app.exe')) {
+$launches = @(
+    @{ Name = 'viberwhisper.exe'; Setup = $true; Shell = $false; Ssh = $false },
+    @{ Name = 'viberwhisper.exe'; Setup = $false; Shell = $false; Ssh = $false },
+    @{ Name = 'viberwhisper-app.exe'; Setup = $false; Shell = $false; Ssh = $false },
+    @{ Name = 'viberwhisper-app.exe'; Setup = $false; Shell = $true; Ssh = $false },
+    @{ Name = 'viberwhisper-app.exe'; Setup = $false; Shell = $false; Ssh = $true },
+    @{ Name = 'viberwhisper-app.exe'; Setup = $false; Shell = $true; Ssh = $true }
+)
+foreach ($launch in $launches) {
+    $binaryName = $launch.Name
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = (Resolve-Path (Join-Path $BinaryDirectory $binaryName)).Path
-    $startInfo.UseShellExecute = $false
+    $startInfo.UseShellExecute = $launch.Shell
     $startInfo.CreateNoWindow = $true
-    if ($binaryName -eq 'viberwhisper.exe') { $startInfo.ArgumentList.Add('setup') }
-    $setupProcess = [Diagnostics.Process]::Start($startInfo)
+    if ($launch.Setup) { $startInfo.ArgumentList.Add('setup') }
+    # ShellExecute inherits the caller's environment. Restore it immediately after spawning.
+    $previousSsh = [Environment]::GetEnvironmentVariable('SSH_CLIENT', 'Process')
+    $previousDisplay = [Environment]::GetEnvironmentVariable('DISPLAY', 'Process')
     try {
+        [Environment]::SetEnvironmentVariable('SSH_CLIENT', $(if ($launch.Ssh) { '127.0.0.1 12345 22' } else { $null }), 'Process')
+        [Environment]::SetEnvironmentVariable('DISPLAY', $null, 'Process')
+        $setupProcess = [Diagnostics.Process]::Start($startInfo)
+    } finally {
+        [Environment]::SetEnvironmentVariable('SSH_CLIENT', $previousSsh, 'Process')
+        [Environment]::SetEnvironmentVariable('DISPLAY', $previousDisplay, 'Process')
+    }
+    try {
+        if (!$launch.Setup) {
+            [SetupDialogSmoke]::ConfirmFirstRun($setupProcess)
+            Write-Host "${binaryName}: first-run confirmation appeared (shell=$($launch.Shell), SSH_CLIENT=$($launch.Ssh))."
+        }
         [SetupDialogSmoke]::CompleteStep($setupProcess, 'STT API 地址', 'https://example.com/v1/audio/transcriptions', $false)
         [SetupDialogSmoke]::CompleteStep($setupProcess, 'STT 模型名称', 'whisper-test', $false)
         [SetupDialogSmoke]::CompleteStep($setupProcess, 'API', '', $true)

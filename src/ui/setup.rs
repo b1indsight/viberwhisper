@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result as AnyhowResult, anyhow};
 use rdev::EventType;
+#[cfg(not(target_os = "windows"))]
 use tinyfiledialogs::{MessageBoxIcon, YesNo};
 
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
@@ -95,7 +96,7 @@ pub(crate) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
     };
 
     let mut ui = NativeSetupUi;
-    if !ui.confirm(&reason, true) {
+    if !ui.confirm(&reason, true)? {
         return Ok(Some(resolve_document(&ConfigDocument::default())?));
     }
 
@@ -122,7 +123,7 @@ pub(crate) fn run_explicit() -> AnyhowResult<()> {
             ui.message(&format!(
                 "现有配置无法读取，将从默认值开始。原文件只有在最终确认保存后才会被替换。\n\n{}",
                 safe_dialog_text(&error.to_string())
-            ));
+            ))?;
             ConfigDocument::default()
         }
     };
@@ -150,23 +151,26 @@ enum WizardOutcome {
 }
 
 trait SetupUi {
-    fn confirm(&mut self, message: &str, default_yes: bool) -> bool;
+    fn confirm(&mut self, message: &str, default_yes: bool) -> AnyhowResult<bool>;
     fn input(&mut self, message: &str, default: &str) -> AnyhowResult<Option<String>>;
     fn password(&mut self, message: &str) -> AnyhowResult<Option<String>>;
     fn capture_hotkey(&mut self, message: &str) -> Result<Option<String>, String>;
-    fn message(&mut self, message: &str);
+    fn message(&mut self, message: &str) -> AnyhowResult<()>;
 }
 
 struct NativeSetupUi;
 
 impl SetupUi for NativeSetupUi {
-    fn confirm(&mut self, message: &str, default_yes: bool) -> bool {
-        tinyfiledialogs::message_box_yes_no(
+    fn confirm(&mut self, message: &str, default_yes: bool) -> AnyhowResult<bool> {
+        #[cfg(target_os = "windows")]
+        return windows::confirm(TITLE, message, default_yes);
+        #[cfg(not(target_os = "windows"))]
+        Ok(tinyfiledialogs::message_box_yes_no(
             TITLE,
             message,
             MessageBoxIcon::Question,
             if default_yes { YesNo::Yes } else { YesNo::No },
-        ) == YesNo::Yes
+        ) == YesNo::Yes)
     }
 
     fn input(&mut self, message: &str, default: &str) -> AnyhowResult<Option<String>> {
@@ -191,8 +195,14 @@ impl SetupUi for NativeSetupUi {
         capture_hotkey_with_helper(message)
     }
 
-    fn message(&mut self, message: &str) {
-        tinyfiledialogs::message_box_ok(TITLE, message, MessageBoxIcon::Info);
+    fn message(&mut self, message: &str) -> AnyhowResult<()> {
+        #[cfg(target_os = "windows")]
+        return windows::message(TITLE, message);
+        #[cfg(not(target_os = "windows"))]
+        {
+            tinyfiledialogs::message_box_ok(TITLE, message, MessageBoxIcon::Info);
+            Ok(())
+        }
     }
 }
 
@@ -214,7 +224,12 @@ fn capture_hotkey_with_helper(message: &str) -> Result<Option<String>, String> {
         .spawn()
         .map_err(|error| format!("无法启动热键捕获：{error}"))?;
 
-    tinyfiledialogs::message_box_ok(TITLE, message, MessageBoxIcon::Info);
+    if let Err(error) = NativeSetupUi.message(message) {
+        // The helper already owns the keyboard hook; release it if its prompt cannot be shown.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("无法显示热键捕获提示：{error:#}"));
+    }
     let deadline = Instant::now() + HOTKEY_CAPTURE_EXIT_TIMEOUT;
     loop {
         match child.try_wait() {
@@ -386,7 +401,7 @@ fn run_wizard(
         document.set_transcription_api_key(Some(key));
     }
 
-    document.post_process.enabled = ui.confirm("是否启用 LLM 文本整理？", false);
+    document.post_process.enabled = ui.confirm("是否启用 LLM 文本整理？", false)?;
     if document.post_process.enabled {
         let current_url = document
             .inference
@@ -430,7 +445,7 @@ fn run_wizard(
         }
     }
 
-    if configure_hotkeys(&mut document, ui).is_err() {
+    if !configure_hotkeys(&mut document, ui)? {
         return Ok(WizardOutcome::Cancelled);
     }
 
@@ -444,7 +459,7 @@ fn run_wizard(
         ui.message(&format!(
             "配置仍有问题，未保存：\n{}",
             safe_dialog_text(&error.to_string())
-        ));
+        ))?;
         return Ok(WizardOutcome::Cancelled);
     }
 
@@ -453,7 +468,7 @@ fn run_wizard(
         display_binding(&document.input.hold_hotkey),
         display_binding(&document.input.toggle_hotkey)
     );
-    if ui.confirm(&verification_prompt, true) {
+    if ui.confirm(&verification_prompt, true)? {
         loop {
             match verifier.verify(&document, ui) {
                 Ok(result) => {
@@ -461,7 +476,7 @@ fn run_wizard(
                         "原始转写：\n{}\n\n最终文本：\n{}",
                         safe_dialog_text(&result.raw),
                         safe_dialog_text(&result.final_text)
-                    ));
+                    ))?;
                     break;
                 }
                 Err(error) => {
@@ -471,7 +486,7 @@ fn run_wizard(
                             safe_dialog_text(&error)
                         ),
                         true,
-                    );
+                    )?;
                     if !retry {
                         break;
                     }
@@ -483,14 +498,14 @@ fn run_wizard(
     if !ui.confirm(
         "API Key 若写入配置文件会以本机明文保存。是否确认保存当前配置？",
         true,
-    ) {
+    )? {
         return Ok(WizardOutcome::Cancelled);
     }
     store.save(&document)?;
     ui.message(&format!(
         "配置已保存到：\n{}",
         safe_dialog_text(&store.path().display().to_string())
-    ));
+    ))?;
     Ok(WizardOutcome::Saved(Box::new(document)))
 }
 
@@ -506,27 +521,33 @@ fn required_input(
         if !value.trim().is_empty() {
             return Ok(Some(value.trim().to_string()));
         }
-        ui.message("该项不能为空。");
+        ui.message("该项不能为空。")?;
     }
 }
 
-fn configure_hotkeys(document: &mut ConfigDocument, ui: &mut dyn SetupUi) -> Result<(), ()> {
+fn configure_hotkeys(document: &mut ConfigDocument, ui: &mut dyn SetupUi) -> AnyhowResult<bool> {
     let current_valid = crate::platform::hotkey_config(&document.input).is_ok();
     let summary = format!(
         "当前录音热键：\n按住录音：{}\n切换录音：{}\n\n是否保留当前设置？",
         display_binding(&document.input.hold_hotkey),
         display_binding(&document.input.toggle_hotkey)
     );
-    if current_valid && ui.confirm(&summary, true) {
-        return Ok(());
+    if current_valid && ui.confirm(&summary, true)? {
+        return Ok(true);
     }
     if !current_valid {
-        ui.message("当前热键设置无效，请重新设置。");
+        ui.message("当前热键设置无效，请重新设置。")?;
     }
 
     loop {
-        let hold_hotkey = capture_binding(ui, "按住录音", &document.input.hold_hotkey)?;
-        let toggle_hotkey = capture_binding(ui, "切换录音", &document.input.toggle_hotkey)?;
+        let Some(hold_hotkey) = capture_binding(ui, "按住录音", &document.input.hold_hotkey)?
+        else {
+            return Ok(false);
+        };
+        let Some(toggle_hotkey) = capture_binding(ui, "切换录音", &document.input.toggle_hotkey)?
+        else {
+            return Ok(false);
+        };
         let candidate = crate::core::config::InputSection {
             hold_hotkey,
             toggle_hotkey,
@@ -538,33 +559,37 @@ fn configure_hotkeys(document: &mut ConfigDocument, ui: &mut dyn SetupUi) -> Res
                     display_binding(&candidate.hold_hotkey),
                     display_binding(&candidate.toggle_hotkey)
                 );
-                if ui.confirm(&summary, true) {
+                if ui.confirm(&summary, true)? {
                     document.input = candidate;
-                    return Ok(());
+                    return Ok(true);
                 }
             }
             Err(error) => {
                 ui.message(&format!(
                     "热键设置无效：\n{}",
                     safe_dialog_text(&error.to_string())
-                ));
+                ))?;
             }
         }
     }
 }
 
-fn capture_binding(ui: &mut dyn SetupUi, mode: &str, current: &str) -> Result<String, ()> {
+fn capture_binding(
+    ui: &mut dyn SetupUi,
+    mode: &str,
+    current: &str,
+) -> AnyhowResult<Option<String>> {
     let current_label = display_binding(current);
     loop {
         let prompt =
             format!("{mode}当前热键：{current_label}\n\n请按下一个键，然后点击“确定”继续。");
         match ui.capture_hotkey(&prompt) {
-            Ok(Some(key)) => return Ok(key),
-            Ok(None) => ui.message("未检测到按键。"),
-            Err(error) => ui.message(&format!("无法记录热键：\n{}", safe_dialog_text(&error))),
+            Ok(Some(key)) => return Ok(Some(key)),
+            Ok(None) => ui.message("未检测到按键。")?,
+            Err(error) => ui.message(&format!("无法记录热键：\n{}", safe_dialog_text(&error)))?,
         }
-        if !ui.confirm("是否重试记录这个热键？", true) {
-            return Err(());
+        if !ui.confirm("是否重试记录这个热键？", true)? {
+            return Ok(None);
         }
     }
 }
@@ -593,7 +618,7 @@ fn choose_input_device(
             ui.message(&format!(
                 "无法列出麦克风，将使用系统默认设备：\n{}",
                 safe_dialog_text(&error)
-            ));
+            ))?;
             return Ok(DeviceChoice::Use(None));
         }
     };
@@ -617,7 +642,7 @@ fn choose_input_device(
         };
         match selected_input_device(choice.trim(), &names) {
             Ok(device) => return Ok(DeviceChoice::Use(device)),
-            Err(error) => ui.message(&error),
+            Err(error) => ui.message(&error)?,
         }
     }
 }
@@ -660,12 +685,13 @@ mod tests {
     fn hotkey_setup_keeps_the_displayed_defaults() {
         let mut document = ConfigDocument::default();
         let mut ui = ScriptedUi {
-            confirms: VecDeque::from([true]),
+            confirms: VecDeque::from([Ok(true)]),
             inputs: VecDeque::new(),
             passwords: VecDeque::new(),
             captures: VecDeque::new(),
             messages: Vec::new(),
             confirm_messages: Vec::new(),
+            message_error: None,
         };
 
         configure_hotkeys(&mut document, &mut ui).unwrap();
@@ -678,12 +704,13 @@ mod tests {
     fn hotkey_setup_captures_custom_keys_sequentially() {
         let mut document = ConfigDocument::default();
         let mut ui = ScriptedUi {
-            confirms: VecDeque::from([false, true]),
+            confirms: VecDeque::from([Ok(false), Ok(true)]),
             inputs: VecDeque::new(),
             passwords: VecDeque::new(),
             captures: VecDeque::from([Ok(Some("F10".to_string())), Ok(Some("F11".to_string()))]),
             messages: Vec::new(),
             confirm_messages: Vec::new(),
+            message_error: None,
         };
 
         configure_hotkeys(&mut document, &mut ui).unwrap();
@@ -696,7 +723,7 @@ mod tests {
     fn hotkey_setup_only_applies_the_confirmed_pair() {
         let mut document = ConfigDocument::default();
         let mut ui = ScriptedUi {
-            confirms: VecDeque::from([false, false, true]),
+            confirms: VecDeque::from([Ok(false), Ok(false), Ok(true)]),
             inputs: VecDeque::new(),
             passwords: VecDeque::new(),
             captures: VecDeque::from([
@@ -707,6 +734,7 @@ mod tests {
             ]),
             messages: Vec::new(),
             confirm_messages: Vec::new(),
+            message_error: None,
         };
 
         configure_hotkeys(&mut document, &mut ui).unwrap();
@@ -736,16 +764,17 @@ mod tests {
 
     #[derive(Default)]
     struct ScriptedUi {
-        confirms: VecDeque<bool>,
+        confirms: VecDeque<AnyhowResult<bool>>,
         inputs: VecDeque<AnyhowResult<Option<String>>>,
         passwords: VecDeque<AnyhowResult<Option<String>>>,
         captures: VecDeque<Result<Option<String>, String>>,
         messages: Vec<String>,
         confirm_messages: Vec<String>,
+        message_error: Option<anyhow::Error>,
     }
 
     impl SetupUi for ScriptedUi {
-        fn confirm(&mut self, message: &str, _default_yes: bool) -> bool {
+        fn confirm(&mut self, message: &str, _default_yes: bool) -> AnyhowResult<bool> {
             self.confirm_messages.push(message.to_string());
             self.confirms.pop_front().unwrap()
         }
@@ -763,8 +792,9 @@ mod tests {
             self.captures.pop_front().unwrap()
         }
 
-        fn message(&mut self, message: &str) {
+        fn message(&mut self, message: &str) -> AnyhowResult<()> {
             self.messages.push(message.to_string());
+            self.message_error.take().map_or(Ok(()), Err)
         }
     }
 
@@ -800,7 +830,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = ConfigStore::at(temp.path().join("config.json"));
         let mut ui = ScriptedUi {
-            confirms: VecDeque::from([false, true, true, true]),
+            confirms: VecDeque::from([Ok(false), Ok(true), Ok(true), Ok(true)]),
             inputs: VecDeque::from([
                 Ok(Some(
                     "https://example.com/v1/audio/transcriptions".to_string(),
@@ -812,6 +842,7 @@ mod tests {
             captures: VecDeque::new(),
             messages: Vec::new(),
             confirm_messages: Vec::new(),
+            message_error: None,
         };
 
         run_wizard(
@@ -844,7 +875,7 @@ mod tests {
         let path = temp.path().join("config.json");
         let store = ConfigStore::at(path.clone());
         let mut ui = ScriptedUi {
-            confirms: VecDeque::from([true, true, false, true]),
+            confirms: VecDeque::from([Ok(true), Ok(true), Ok(false), Ok(true)]),
             inputs: VecDeque::from([
                 Ok(Some(
                     "https://example.com/v1/audio/transcriptions".to_string(),
@@ -861,6 +892,7 @@ mod tests {
             captures: VecDeque::new(),
             messages: Vec::new(),
             confirm_messages: Vec::new(),
+            message_error: None,
         };
 
         let outcome = run_wizard(
@@ -902,6 +934,7 @@ mod tests {
             captures: VecDeque::new(),
             messages: Vec::new(),
             confirm_messages: Vec::new(),
+            message_error: None,
         };
 
         let outcome = run_wizard(
@@ -954,5 +987,63 @@ mod tests {
                 "original configuration"
             );
         }
+    }
+    #[test]
+    fn confirmation_and_message_failures_preserve_configuration() {
+        for fail_confirmation in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            std::fs::write(&path, "original configuration").unwrap();
+            let mut ui = ScriptedUi::default();
+            if fail_confirmation {
+                ui.inputs = VecDeque::from([
+                    Ok(Some("https://example.com/transcribe".to_string())),
+                    Ok(Some("whisper-test".to_string())),
+                ]);
+                ui.passwords.push_back(Ok(Some(String::new())));
+                ui.confirms
+                    .push_back(Err(anyhow!("dialog creation failed")));
+            } else {
+                ui.inputs.push_back(Ok(Some(String::new())));
+                ui.message_error = Some(anyhow!("dialog creation failed"));
+            }
+            let result = run_wizard(
+                &ConfigStore::at(path.clone()),
+                ConfigDocument::default(),
+                Ok(Vec::new()),
+                &mut ui,
+                &mut UnexpectedVerifier,
+            );
+            match result {
+                Err(error) => assert!(error.to_string().contains("dialog creation failed")),
+                Ok(_) => panic!("failed confirmation or message must abort setup"),
+            }
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                "original configuration"
+            );
+        }
+    }
+
+    #[test]
+    fn hotkey_confirmation_failure_is_not_cancellation() {
+        let mut ui = ScriptedUi::default();
+        ui.confirms
+            .push_back(Err(anyhow!("dialog creation failed")));
+        let error = configure_hotkeys(&mut ConfigDocument::default(), &mut ui).unwrap_err();
+        assert!(error.to_string().contains("dialog creation failed"));
+    }
+
+    #[test]
+    fn cancelling_hotkey_capture_preserves_bindings() {
+        let mut document = ConfigDocument::default();
+        let mut ui = ScriptedUi {
+            confirms: VecDeque::from([Ok(false), Ok(false)]),
+            captures: VecDeque::from([Ok(None)]),
+            ..Default::default()
+        };
+        assert!(!configure_hotkeys(&mut document, &mut ui).unwrap());
+        assert_eq!(document.input.hold_hotkey, "F8");
+        assert_eq!(document.input.toggle_hotkey, "F9");
     }
 }
