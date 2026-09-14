@@ -5,7 +5,8 @@
 The initial input-dialog change passed CI and release packaging in
 [PR #136](https://github.com/b1indsight/viberwhisper/pull/136). A follow-up on 2026-09-10 addresses
 missing first-run confirmation in the GUI entry. The follow-up now passes native Windows CI
-and both-platform release packaging; the reporting machine still needs the new artifact.
+and both-platform release packaging; the user confirmed successful testing on the reporting machine on 2026-09-14 and authorized
+publishing the fix as v0.2.1.
 
 ## Follow-up validation results
 
