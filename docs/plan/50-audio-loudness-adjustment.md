@@ -34,9 +34,15 @@ and packaging validation follow the local checks listed below.
   improvement or representative Chinese/noise false-rejection rate is claimed.
   The 16-sample retention check does not establish each chunk or word survived.
 - Local Windows MSVC cross-compilation cannot build existing C dependencies because
-  this macOS host lacks Windows SDK headers. Hosted Windows CI uses the release
-  static-CRT flags and runs real model inference; release dry runs additionally
+  this macOS host lacks Windows SDK headers. Hosted Windows CI uses the normal
+  development CRT and runs real model inference; release dry runs additionally
   check both packaged executables and the absence of external runtime DLLs.
+- The first hosted run exposed dynamic-CRT references in the prebuilt Windows
+  inference archive. Release packaging now builds CPU-only ONNX Runtime from its
+  pinned v1.20.0 commit with the static CRT. Ordinary development builds retain
+  the toolchain's default CRT. The macOS packaging run passed universal-binary and
+  model checks but exhausted the automatically sized DMG volume; it now reserves
+  256 MiB before compression to accommodate the bundled native runtime.
 
 ## Goal and scope
 

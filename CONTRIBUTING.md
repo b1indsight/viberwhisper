@@ -20,6 +20,12 @@ cargo run
 运行时无需下载。请同时保持 `ort` / `ort-sys` 的固定版本，升级前验证 macOS 11 和
 Windows 静态 CRT 兼容性，详见 [VAD 资源说明](assets/vad/README.md)。
 
+Windows 普通开发构建使用 Visual Studio 提供的动态 CRT。发行包要求静态 CRT，需先在
+PowerShell 7.3+ 中运行 `./scripts/build-windows-vad-runtime.ps1`，再设置
+`$env:RUSTFLAGS = "-C target-feature=+crt-static"` 构建；发行工作流会自动执行。
+该脚本需要 Visual Studio C++ 工具、CMake、Ninja、Python 和 Git，并从固定提交编译 CPU
+推理库。构建输出保存在当天的 `.cache` 目录中，可重复运行复用。
+
 应用需要麦克风权限；macOS 的文字输入还需要辅助功能权限。API 和运行配置方法见
 [README 的使用指南](README.md#使用指南)。
 

@@ -6,8 +6,12 @@ https://github.com/snakers4/silero-vad/blob/v6.2/src/silero_vad/data/silero_vad.
 SHA-256: `1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3`.
 
 The model is embedded with `include_bytes!`. CPU-only ONNX Runtime 1.20.0 is
-statically linked by pinned `ort` / `ort-sys` 2.0.0-rc.9. Their build script obtains
-platform archives and verifies the hashes in its distribution table. No runtime
+statically linked by pinned `ort` / `ort-sys` 2.0.0-rc.9. On macOS their build script
+obtains platform archives and verifies their hashes. Windows development archives
+use a dynamic CRT; Windows releases instead run `scripts/build-windows-vad-runtime.ps1`
+to build CPU-only ONNX Runtime at commit `1a313abba7f72af26c1e9c7e0b1688eae9952644`
+with `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`, preserving the static CRT contract.
+No runtime
 download, Python installation, model directory, DLL, or dylib is needed.
 
 Keep both Rust bindings pinned together. rc.10's macOS archives require macOS 13.3;

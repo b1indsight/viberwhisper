@@ -73,9 +73,6 @@ jobs:
   check-windows:
     runs-on: windows-latest
     name: CI (Windows)
-    env:
-      # Exercise the same ONNX Runtime / CRT linkage as the distributed executables.
-      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
