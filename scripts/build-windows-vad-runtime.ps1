@@ -59,6 +59,8 @@ cmake --compile-no-warning-as-error -S (Join-Path $source "cmake") -B $build -G 
     -Donnxruntime_USE_XNNPACK=OFF `
     -Donnxruntime_ENABLE_LTO=OFF
 cmake --build $build --config Release --parallel 4
+# ORT excludes some external targets from ALL, but ort-sys explicitly links re2.
+cmake --build $build --config Release --target re2 --parallel 4
 
 if (!(Test-Path (Join-Path $build "onnxruntime_session.lib"))) {
     throw "Static ONNX Runtime libraries were not produced"
