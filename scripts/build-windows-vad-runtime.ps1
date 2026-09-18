@@ -41,9 +41,10 @@ if (!$visualStudio) { throw "Visual Studio x64 C++ tools are required" }
 
 # New MSVC releases warn about attributes used by this pinned third-party runtime.
 # ORT 1.20's mutex header also relies on a transitive <chrono> include removed in newer MSVC.
+# Its pinned Eigen still uses the standard denorm types deprecated by current MSVC.
 cmake --compile-no-warning-as-error -S (Join-Path $source "cmake") -B $build -G Ninja `
     -DCMAKE_BUILD_TYPE=Release `
-    "-DCMAKE_CXX_FLAGS=/FIchrono" `
+    "-DCMAKE_CXX_FLAGS=/FIchrono /D_SILENCE_CXX23_DENORM_DEPRECATION_WARNING" `
     -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
     -DONNX_USE_MSVC_STATIC_RUNTIME=ON `
     -Dprotobuf_MSVC_STATIC_RUNTIME=ON `
