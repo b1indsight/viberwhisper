@@ -40,8 +40,10 @@ if (!$visualStudio) { throw "Visual Studio x64 C++ tools are required" }
 & (Join-Path $visualStudio "Common7/Tools/Launch-VsDevShell.ps1") -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 
 # New MSVC releases warn about attributes used by this pinned third-party runtime.
+# ORT 1.20's mutex header also relies on a transitive <chrono> include removed in newer MSVC.
 cmake --compile-no-warning-as-error -S (Join-Path $source "cmake") -B $build -G Ninja `
     -DCMAKE_BUILD_TYPE=Release `
+    "-DCMAKE_CXX_FLAGS=/FIchrono" `
     -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
     -DONNX_USE_MSVC_STATIC_RUNTIME=ON `
     -Dprotobuf_MSVC_STATIC_RUNTIME=ON `
