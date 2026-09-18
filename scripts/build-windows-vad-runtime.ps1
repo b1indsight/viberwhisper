@@ -21,6 +21,19 @@ if ((git -C $source rev-parse HEAD).Trim() -ne $revision) {
 }
 git -C $source submodule update --init --recursive
 
+# The GitLab archive no longer matches ORT's hash; fetch the same pinned source commit.
+$eigen = Join-Path $cache "eigen"
+$eigenRevision = "e7248b26a1ed53fa030c5c459f7ea095dfd276ac"
+if (!(Test-Path (Join-Path $eigen ".git"))) {
+    git init $eigen
+    git -C $eigen remote add origin https://gitlab.com/libeigen/eigen.git
+    git -C $eigen fetch --depth 1 origin $eigenRevision
+    git -C $eigen checkout --detach FETCH_HEAD
+}
+if ((git -C $eigen rev-parse HEAD).Trim() -ne $eigenRevision) {
+    throw "Unexpected Eigen source revision in $eigen"
+}
+
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $visualStudio = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
 if (!$visualStudio) { throw "Visual Studio x64 C++ tools are required" }
@@ -33,7 +46,9 @@ cmake -S (Join-Path $source "cmake") -B $build -G Ninja `
     -Dprotobuf_MSVC_STATIC_RUNTIME=ON `
     -DABSL_MSVC_STATIC_RUNTIME=ON `
     -Dgtest_force_shared_crt=OFF `
-    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
+    "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" `
+    -Donnxruntime_USE_PREINSTALLED_EIGEN=ON `
+    "-Deigen_SOURCE_PATH=$eigen" `
     -Donnxruntime_BUILD_UNIT_TESTS=OFF `
     -Donnxruntime_BUILD_SHARED_LIB=OFF `
     -Donnxruntime_USE_DML=OFF `
