@@ -29,6 +29,10 @@ if (!$visualStudio) { throw "Visual Studio x64 C++ tools are required" }
 cmake -S (Join-Path $source "cmake") -B $build -G Ninja `
     -DCMAKE_BUILD_TYPE=Release `
     -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+    -DONNX_USE_MSVC_STATIC_RUNTIME=ON `
+    -Dprotobuf_MSVC_STATIC_RUNTIME=ON `
+    -DABSL_MSVC_STATIC_RUNTIME=ON `
+    -Dgtest_force_shared_crt=OFF `
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
     -Donnxruntime_BUILD_UNIT_TESTS=OFF `
     -Donnxruntime_BUILD_SHARED_LIB=OFF `
