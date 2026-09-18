@@ -16,6 +16,10 @@ cargo build --locked
 cargo run
 ```
 
+首次构建会下载校验过哈希的 CPU ONNX Runtime 静态库；Silero VAD 模型已随源码提供，
+运行时无需下载。请同时保持 `ort` / `ort-sys` 的固定版本，升级前验证 macOS 11 和
+Windows 静态 CRT 兼容性，详见 [VAD 资源说明](assets/vad/README.md)。
+
 应用需要麦克风权限；macOS 的文字输入还需要辅助功能权限。API 和运行配置方法见
 [README 的使用指南](README.md#使用指南)。
 

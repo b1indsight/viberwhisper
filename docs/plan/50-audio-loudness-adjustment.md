@@ -2,10 +2,39 @@
 
 ## Status
 
-Proposed; awaiting user approval before implementation. This draft assumes automatic
-pre-transcription adjustment rather than a one-time change to `audio.mic_gain`.
-The user requested adding VAD to this scope on 2026-09-18; the concrete VAD design
-below is proposed for review together with the loudness policy.
+Approved and implemented on PR #137 on 2026-09-18. The shared STT entry point now
+applies the existing silence gate, local VAD, and bounded upload gain. Source audio
+is preserved. Hosted Windows/packaging validation and independent review follow
+the local checks listed below.
+
+### Implementation decisions and local validation
+
+- Embedded Silero v6.2 with its checksum and attribution. Pinned ort/ort-sys rc.9
+  and CPU ONNX Runtime 1.20.0 for static linkage: inspected rc.10's arm64 archive
+  requires macOS 13.3, while rc.9 retains the promised macOS 11 target. Rubato 0.16.2
+  handles anti-aliased analysis resampling with filter-delay/tail compensation.
+- WAV validation/preparation lives in `audio/preprocess.rs`, shared by gain and VAD.
+  Unsupported VAD rates outside 8–192 kHz fail open; uploads retain source format.
+- New tests were first run before implementation and failed on missing behavior.
+  Final local suite: 205 passed, one opt-in dataset test ignored by default.
+  Formatting, Clippy (all targets), release-contract validation, native release
+  build and macOS bundle creation passed. Native release reports macOS 11.0 and
+  contains statically linked inference plus embedded model; notices are bundled.
+- Opt-in dataset test passed separately on all 16 locally available ready samples:
+  none were entirely rejected. On this machine the optimized preparation median
+  was 8.19 ms and maximum 49.06 ms (including initial model setup). Native release
+  executable size was 33,383,728 bytes. These are measurements, not performance SLAs.
+- Real model speech/noise, phase-inverted stereo, short/tail frame policy,
+  resampling anti-aliasing, WAV integer/float formats, bounded gain, immutability,
+  no-request rejection, error bypass and identical retry payloads are covered.
+- Online recognition comparison could not start: the existing local configuration
+  uses schema v2, while current master requires v3. It was left unchanged. No WER
+  improvement or representative Chinese/noise false-rejection rate is claimed.
+  The 16-sample retention check does not establish each chunk or word survived.
+- Local Windows MSVC cross-compilation cannot build existing C dependencies because
+  this macOS host lacks Windows SDK headers. Hosted Windows CI uses the release
+  static-CRT flags and runs real model inference; release dry runs additionally
+  check both packaged executables and the absence of external runtime DLLs.
 
 ## Goal and scope
 
@@ -20,7 +49,7 @@ future regression runs can reproduce preprocessing from the same source audio.
 Keep the existing microphone gain configuration and recording callback unchanged.
 Previously clipped microphone samples cannot be recovered by this processing.
 
-## Proposed policy
+## Loudness policy
 
 1. Run the existing silence classifier on the original chunk. Keep its 50 ms,
    -50 dBFS threshold and successful empty-result behavior.
