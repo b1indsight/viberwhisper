@@ -7,7 +7,7 @@ $project = Split-Path $PSScriptRoot -Parent
 $cache = Join-Path $project ".cache/$(Get-Date -Format yyyy-MM-dd)/onnxruntime-windows"
 $source = Join-Path $cache "source"
 $build = Join-Path $cache "build"
-$revision = "1a313abba7f72af26c1e9c7e0b1688eae9952644" # ONNX Runtime v1.20.0
+$revision = "c4fb724e810bb496165b9015c77f402727392933" # ONNX Runtime v1.20.0 commit, not its annotated tag object
 New-Item -ItemType Directory -Force $cache | Out-Null
 
 if (!(Test-Path (Join-Path $source ".git"))) {

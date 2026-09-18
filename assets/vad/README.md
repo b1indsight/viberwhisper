@@ -9,7 +9,7 @@ The model is embedded with `include_bytes!`. CPU-only ONNX Runtime 1.20.0 is
 statically linked by pinned `ort` / `ort-sys` 2.0.0-rc.9. On macOS their build script
 obtains platform archives and verifies their hashes. Windows development archives
 use a dynamic CRT; Windows releases instead run `scripts/build-windows-vad-runtime.ps1`
-to build CPU-only ONNX Runtime at commit `1a313abba7f72af26c1e9c7e0b1688eae9952644`
+to build CPU-only ONNX Runtime at commit `c4fb724e810bb496165b9015c77f402727392933`
 with `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`, preserving the static CRT contract.
 No runtime
 download, Python installation, model directory, DLL, or dylib is needed.
