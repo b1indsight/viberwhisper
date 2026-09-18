@@ -4,8 +4,8 @@
 
 Approved and implemented on PR #137 on 2026-09-18. The shared STT entry point now
 applies the existing silence gate, local VAD, and bounded upload gain. Source audio
-is preserved. Hosted Windows/packaging validation and independent review follow
-the local checks listed below.
+is preserved. Independent review passed with no critical findings. Hosted Windows
+and packaging validation follow the local checks listed below.
 
 ### Implementation decisions and local validation
 
@@ -20,6 +20,8 @@ the local checks listed below.
   Formatting, Clippy (all targets), release-contract validation, native release
   build and macOS bundle creation passed. Native release reports macOS 11.0 and
   contains statically linked inference plus embedded model; notices are bundled.
+  Intel release also built successfully; the combined universal app contains both
+  x86_64 and arm64 slices at deployment target 11.0 and its CLI launch passed.
 - Opt-in dataset test passed separately on all 16 locally available ready samples:
   none were entirely rejected. On this machine the optimized preparation median
   was 8.19 ms and maximum 49.06 ms (including initial model setup). Native release
