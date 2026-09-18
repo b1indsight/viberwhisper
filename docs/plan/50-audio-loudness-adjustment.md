@@ -4,8 +4,8 @@
 
 Approved and implemented on PR #137 on 2026-09-18. The shared STT entry point now
 applies the existing silence gate, local VAD, and bounded upload gain. Source audio
-is preserved. Independent review passed with no critical findings. Hosted Windows
-and packaging validation follow the local checks listed below.
+is preserved. Independent review passed with no critical findings. Both platform
+CI jobs and the macOS/Windows release dry run passed; no release was published.
 
 ### Implementation decisions and local validation
 
@@ -43,6 +43,14 @@ and packaging validation follow the local checks listed below.
   the toolchain's default CRT. The macOS packaging run passed universal-binary and
   model checks but exhausted the automatically sized DMG volume; it now reserves
   256 MiB before compression to accommodate the bundled native runtime.
+- Hosted release run [35335070706](https://github.com/b1indsight/viberwhisper/actions/runs/35335070706)
+  passed on implementation commit `1fb767e5fb70`. Windows passed static linking,
+  embedded-model inference, runtime dependency checks, MSI install/upgrade/uninstall,
+  and portable archive checks; macOS universal packaging also passed. The Windows
+  native runtime build took 31m16s; its complete packaging job took 37m42s on that
+  hosted runner. These are first-build development costs, not end-user setup work.
+  The script pins Eigen's original Git commit, accommodates current MSVC headers
+  and diagnostics, and explicitly builds the re2 archive required by ort-sys.
 
 ## Goal and scope
 
