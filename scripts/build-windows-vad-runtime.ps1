@@ -39,7 +39,8 @@ $visualStudio = (& $vswhere -latest -products * -requires Microsoft.VisualStudio
 if (!$visualStudio) { throw "Visual Studio x64 C++ tools are required" }
 & (Join-Path $visualStudio "Common7/Tools/Launch-VsDevShell.ps1") -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 
-cmake -S (Join-Path $source "cmake") -B $build -G Ninja `
+# New MSVC releases warn about attributes used by this pinned third-party runtime.
+cmake --compile-no-warning-as-error -S (Join-Path $source "cmake") -B $build -G Ninja `
     -DCMAKE_BUILD_TYPE=Release `
     -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
     -DONNX_USE_MSVC_STATIC_RUNTIME=ON `
