@@ -26,6 +26,11 @@ anyhow = "1"
 rdev = "0.5"
 cpal = "0.15"
 hound = "3.5"
+# rc.9's CPU archives retain macOS 11 support; rc.10 archives require macOS 13.3.
+ort = { version = "=2.0.0-rc.9", default-features = false, features = ["download-binaries"] }
+# ort's prerelease dependency range otherwise permits an incompatible newer ort-sys.
+ort-sys = "=2.0.0-rc.9"
+rubato = "0.16.2"
 dirs = "5.0"
 reqwest = { version = "0.12", features = ["blocking", "multipart", "json"] }
 serde = { version = "1", features = ["derive"] }
@@ -65,3 +70,4 @@ copyright = "Copyright (c) 2026 b1indsight"
 osx_minimum_system_version = "11.0"
 short_description = "Voice-to-text input tool"
 osx_info_plist_exts = ["assets/Info.plist.ext"]
+resources = ["assets/vad/THIRD-PARTY-NOTICES.txt"]

@@ -22,6 +22,7 @@
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="DesktopExecutable" />
       <ComponentRef Id="LicenseFile" />
+      <ComponentRef Id="AudioNotices" />
     </Feature>
   </Package>
 
@@ -49,6 +50,9 @@
 
     <Component Id="LicenseFile" Directory="INSTALLFOLDER" Guid="E00D51FC-3B38-470F-B9AB-94CCF01B4826">
       <File Id="License" Source="LICENSE" KeyPath="yes" />
+    </Component>
+    <Component Id="AudioNotices" Directory="INSTALLFOLDER" Guid="5DD780A4-56D2-4BA4-AF37-988C87D5E564">
+      <File Id="AudioThirdPartyNotices" Source="assets\vad\THIRD-PARTY-NOTICES.txt" KeyPath="yes" />
     </Component>
   </Fragment>
 </Wix>

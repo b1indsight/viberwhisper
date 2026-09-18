@@ -78,3 +78,4 @@
 2026-09-10: Replace Windows setup script inputs with native Unicode text/password dialogs, propagate input failures without saving, and smoke-test both release entry points against missing-window hangs
 2026-09-10: Keep Windows setup confirmations and messages native even in console-fallback environments; verify first-run GUI launches through direct and shell execution
 2026-09-14: Release 0.2.1 with native Windows setup dialogs and reliable first-run GUI confirmations; verified on the reporting Windows machine
+2026-09-18: Add bundled local Silero voice detection and bounded upload loudness adjustment after silence filtering; preserve source recordings, full speech-containing chunks and retry payloads, with fail-open preprocessing and packaged third-party notices
