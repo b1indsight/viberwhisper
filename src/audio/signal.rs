@@ -4,9 +4,9 @@ use hound::{SampleFormat, WavReader};
 
 use super::chunk::WavChunk;
 
-const ANALYSIS_WINDOW_MS: u64 = 50;
+pub(super) const ANALYSIS_WINDOW_MS: u64 = 50;
 // RMS -50 dBFS expressed as mean square: 10 ^ (-50 / 10).
-const ACTIVE_WINDOW_POWER: f64 = 0.000_01;
+pub(super) const ACTIVE_WINDOW_POWER: f64 = 0.000_01;
 
 pub(crate) fn contains_audible_window(chunk: &WavChunk) -> Result<bool, hound::Error> {
     let mut reader = WavReader::new(Cursor::new(chunk.shared_bytes()))?;

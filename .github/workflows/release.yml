@@ -101,6 +101,7 @@ jobs:
           set -euo pipefail
           cargo build --release --locked --target aarch64-apple-darwin
           cargo build --release --locked --target x86_64-apple-darwin
+          cargo test --release --locked --target aarch64-apple-darwin bundled_model_rejects_noise_and_resets_between_chunks
 
       - name: Build universal application bundle
         shell: bash
@@ -125,6 +126,11 @@ jobs:
           test -x "${binary}"
           test -f "${plist}"
           test -f "${app}/Contents/Resources/ViberWhisper.icns"
+          test -n "$(find "${app}/Contents/Resources" -name THIRD-PARTY-NOTICES.txt -print -quit)"
+          if otool -L "${binary}" | grep -qi onnxruntime; then
+            echo "ONNX Runtime must be statically linked" >&2
+            exit 1
+          fi
 
           archs="$(lipo -archs "${binary}")"
           [[ " ${archs} " == *" arm64 "* ]]
@@ -168,6 +174,7 @@ jobs:
           hdiutil create \
             -volname ViberWhisper \
             -srcfolder dmg-root \
+            -size 256m \
             -format UDZO \
             -ov \
             "release-assets/${ASSET_PREFIX}.dmg"
@@ -225,6 +232,10 @@ jobs:
         shell: pwsh
         run: wix eula accept wix7
 
+      - name: Build CPU inference runtime with static CRT
+        shell: pwsh
+        run: ./scripts/build-windows-vad-runtime.ps1
+
       - name: Build locked static-CRT executables
         shell: pwsh
         run: cargo build --release --locked --target x86_64-pc-windows-msvc --features windows-app
@@ -234,6 +245,8 @@ jobs:
         run: |
           cargo test --release --locked --target x86_64-pc-windows-msvc --features windows-app native_setup_dialogs_show_and_return
           if ($LASTEXITCODE -ne 0) { throw "Native setup dialog test failed" }
+          cargo test --release --locked --target x86_64-pc-windows-msvc --features windows-app bundled_model_rejects_noise_and_resets_between_chunks
+          if ($LASTEXITCODE -ne 0) { throw "Bundled VAD model test failed" }
           ./scripts/test-windows-setup.ps1 -BinaryDirectory target/x86_64-pc-windows-msvc/release
 
       - name: Smoke-test executable subsystems and runtime dependencies
@@ -266,6 +279,9 @@ jobs:
             $dependencies | Write-Host
             if ($dependencies -match '(?im)^\s*(VCRUNTIME|MSVCP)[^\s]*\.dll\s*$') {
               throw "$candidate still depends on the dynamic MSVC runtime"
+            }
+            if ($dependencies -match '(?i)onnxruntime.*\.dll') {
+              throw "$candidate requires an unbundled ONNX Runtime DLL"
             }
           }
 
@@ -533,6 +549,7 @@ jobs:
           Copy-Item "target/x86_64-pc-windows-msvc/release/viberwhisper.exe" $portable
           Copy-Item "target/x86_64-pc-windows-msvc/release/viberwhisper-app.exe" $portable
           Copy-Item LICENSE $portable
+          Copy-Item assets/vad/THIRD-PARTY-NOTICES.txt $portable
           Compress-Archive -Path $portable -DestinationPath "release-assets/$env:ASSET_PREFIX.zip"
 
           Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -542,7 +559,8 @@ jobs:
             if ($names -notcontains "ViberWhisper/viberwhisper.exe") { throw "Portable CLI executable missing" }
             if ($names -notcontains "ViberWhisper/viberwhisper-app.exe") { throw "Portable desktop executable missing" }
             if ($names -notcontains "ViberWhisper/LICENSE") { throw "Portable license missing" }
-            if ($names.Count -ne 3) { throw "Unexpected portable archive entries: $($names -join ', ')" }
+            if ($names -notcontains "ViberWhisper/THIRD-PARTY-NOTICES.txt") { throw "Audio notices missing" }
+            if ($names.Count -ne 4) { throw "Unexpected portable archive entries: $($names -join ', ')" }
           } finally {
             $zip.Dispose()
           }

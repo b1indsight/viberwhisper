@@ -24,11 +24,15 @@ impl AudioConfig {
 }
 
 pub mod chunk;
+mod loudness;
+mod preprocess;
 pub mod recorder;
 mod signal;
+mod vad;
 pub mod wav_file;
 pub use chunk::WavChunk;
 pub(crate) use chunk::max_frames_per_chunk;
+pub(crate) use preprocess::prepare_for_transcription;
 pub use recorder::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
 pub(crate) use signal::contains_audible_window;
 pub use wav_file::WavChunkReader;

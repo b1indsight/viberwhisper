@@ -13,6 +13,9 @@ src/audio/
   chunk.rs     — WavChunk, ChunkError, WAV encoding, and shared capacity calculation
   recorder.rs  — cpal microphone capture and live WavChunk production
   signal.rs    — compact normalized RMS-window check for effectively silent chunks
+  preprocess.rs — shared upload preparation and validated WAV decoding
+  vad.rs       — bundled Silero model, analysis-only resampling, whole-chunk speech gate
+  loudness.rs  — bounded constant-gain adjustment with peak protection
   wav_file.rs  — streaming local-WAV reader and fallible chunk iterator
 ```
 
@@ -39,6 +42,41 @@ audible window. These values are fixed module policy rather than persisted confi
 Malformed WAV decoding returns `hound::Error`; invalid specifications, non-finite samples, and
 unrepresentable window sizes are treated as audible. The transcriber also fails open on the decode
 error, so uncertain local analysis always preserves the previous upload/error behavior.
+
+## Speech Detection and Upload Loudness
+
+`ApiTranscriber` calls `prepare_for_transcription` once before its retry loop. The
+processing order is original energy gate, original-audio VAD, then loudness
+adjustment. A rejected chunk returns the existing successful empty transcription;
+an accepted chunk retains every frame, channel and pause. Recording callbacks,
+source WAVs, prompt-lab archives, and chunk boundaries remain unchanged.
+
+Silero VAD v6.2 runs locally using CPU-only ONNX Runtime 1.20.0, statically linked
+through pinned ort/ort-sys rc.9. The model is embedded in the binary. A process-wide
+mutex serializes inference; recurrent state and context reset for every channel
+and chunk. Channels are analyzed separately to avoid phase cancellation. Rubato
+performs anti-aliased conversion to 16 kHz for analysis only, compensating delay
+and flushing its tail. Input rates outside 8–192 kHz bypass VAD with a diagnostic.
+
+Any 512-sample frame scoring at least 0.3 accepts the entire chunk. A trailing frame
+is zero-padded only for inference; inputs shorter than one frame pass conservatively.
+Only a completely successful no-speech analysis suppresses an audible chunk. Model
+or resampling failures bypass VAD. Decode/non-finite-data and gain-encoding errors
+preserve original upload bytes. There is no first-launch model/runtime download.
+
+Loudness uses RMS of energy-active 50 ms windows, excluding long silent pauses.
+Target RMS is -20 dBFS, boost is capped at +12 dB, and sample peaks at -1 dBFS.
+One gain applies to all samples/channels. Already-loud audio is attenuated only for
+peak protection; unchanged audio reuses its original bytes. Changed WAVs preserve
+sample rate, format, bit depth and frame count and remain within the upload limit.
+Every network retry receives the same prepared bytes.
+
+This does not repair capture clipping or remove noise. Background conversation
+may pass VAD; quiet speech below the original -50 dBFS gate is still skipped. The
+fixed VAD threshold favors speech retention, but can still reject speech. Verify
+on representative recordings; loudness and model smoke tests do not establish an
+improvement in word/character error rates. See `assets/vad/README.md` for model
+provenance, checksum, runtime compatibility and distributed licenses.
 
 ## Chunk Capacity
 
