@@ -201,10 +201,12 @@ macOS 的 Chromium/兜底粘贴会在极短的内部注入窗口暂停 ViberWhis
   `NUMPAD*` 名称。
 - Windows：`RIGHTMETA`、`FUNCTION`、`NUMPADENTER`；数字键盘的报告方式还会受到 Num Lock 影响。
 
-内部可靠性策略不作为用户配置：实时与离线音频统一按 30 秒或 23 MiB 的较小限制分片；每个 STT 请求
+原 HTTP 识别路径的内部可靠性策略不作为用户配置：实时与离线音频统一按 30 秒或 23 MiB 的较小限制分片；每个 STT 请求
 最多等待 12 秒，网络错误或 HTTP 5xx 最多重试一次；停止录音后的 session 收敛窗口固定为 30 秒。
 
 #### 转写 API
+
+也可启用下述 Realtime 听写路径，替代 HTTP STT 和独立 LLM 后处理。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -214,6 +216,64 @@ macOS 的 Chromium/兜底粘贴会在极短的内部注入窗口暂停 ViberWhis
 | `inference.api.transcription.api_url` | URL | Groq Whisper URL | OpenAI-compatible multipart 地址 |
 | `inference.api.transcription.model` | 字符串 | `whisper-large-v3-turbo` | 转写模型 |
 | `inference.api.transcription.api_key` | secret | 无 | 只读状态；环境变量为 `TRANSCRIPTION_API_KEY` |
+
+#### Realtime 听写与语境记忆
+
+仅通过配置文件设置，修改后重启生效；不新增设置窗口、托盘配置或专用管理命令。
+在 `viberwhisper config path` 显示的文件中加入以下片段（完整示例见 `config.example.json`）：
+
+```json
+"dictation": {
+  "enabled": true,
+  "url": "ws://127.0.0.1:8080/v1/realtime",
+  "model": "mlx-community/gemma-4-e4b-it-4bit",
+  "api_key_env": "REALTIME_API_KEY",
+  "prompt": null,
+  "memory": {
+    "enabled": true,
+    "long_term": [
+      {"context": "Rust 项目", "kind": "proper_noun", "text": "ViberWhisper"},
+      {"context": "Rust 项目", "kind": "phrase", "text": "提交一个草稿 PR"}
+    ]
+  }
+}
+```
+
+`enabled` 缺省为 `false`，旧配置继续使用原路径。启用后忽略旧 STT 和后处理的连接设置，
+不再发起第二次 LLM 清理请求。鉴权读取 `api_key_env` 指定的环境变量；变量未设置则不发
+Authorization。地址使用 `ws://` 或 `wss://`，不要在 URL 中放密钥、查询参数或片段。
+`prompt` 为完整任务提示词，包含元指令、听写规则和结果格式要求；`null` 使用内置默认值，
+字符串完整替换默认值，空字符串清空指令。候选提示仍须让模型返回约定的 JSON 字段。
+`memory.enabled=false` 同时关闭长短期记忆的读取与学习。
+
+模型在同一次音频响应中输出纠错与标点后的文字、自动判断的语境以及新增专有词/
+常见说法。客户端只交付经过校验的最终文字，JSON 和记忆不会输入到活动应用。纠错质量通过
+任务提示词和真实语音评测验证。
+
+短期记忆在配置文件同目录的 `dictation-memory.json` 保存，按最近独立观察滚动 24 小时过期，
+持续运行时也会过期，重启不会延长期限。长期条目直接在 `memory.long_term` 中编辑，不自动过期，也不被模型
+改写。`kind` 为 `proper_noun` 或 `phrase`，每条最多 80 字，语境标签最多 64 字，长期最多
+512 条。模型再次返回的已有词也会更新短期观察和支持次数。
+单轮最多提供 4 个语境、每个语境最多 16 个长期词条、总计 6000 个序列化字符；
+先按配置顺序选择长期语境与词条，再填充近期语境和历史。超出单轮预算的配置仍保留。
+要清空短期记忆，先退出客户端，再删除该运行数据文件；长期配置不受影响。
+
+长录音按 30 秒预算分段，同连接可持续多轮且累计超过 60 秒。完整响应校验后交付，明确重复
+口述会保留。网络、录音或清理失败时保留已验证分段，不更新本次记忆；主动取消不交付文字。
+断线不自动重放已提交音频，也不切换云端。
+
+服务需要支持[通用 Realtime 协议及生命周期要求](docs/architecture/dictation.md#audio-and-lifecycle)。
+当前局域网 Gemma 实现尚有兼容性缺口，真实质量和延迟待服务增强后验证；
+实测阻塞及命令见[实现记录](docs/plan/52-contextual-streaming-dictation.md#待完成)。
+
+`convert` 使用所选 Realtime 路径，但默认禁用个人记忆。`prompt-lab evaluate` 关闭个人记忆输入，
+用于迭代完整任务提示词：不加参数使用配置/内置默认值，`--prompt-file` 完整替换提示词，
+`--no-prompt` 清空指令。候选只对本次评测生效；采用后写入 `dictation.prompt`，重启客户端生效。
+报告记录实际使用的提示词；缺少约定 JSON 输出的结果会按识别失败记录。
+Realtime 多音频块评测、实际交付与离线转换统一使用 `transcription.language` 的拼接规则：
+中文不添加分隔符，其他语言或未指定时添加空格，保留重复口述。
+评测沿用原 JSON 报告、WER、专有词指标和语义审阅流程。
+原始录音采集 `prompt-lab record` 仍使用原 HTTP STT，避免把整理结果伪装成 raw-STT 样本。
 
 #### LLM 后处理
 

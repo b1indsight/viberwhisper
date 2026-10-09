@@ -19,6 +19,17 @@
     "prompt": null,
     "temperature": 0.0
   },
+  "dictation": {
+    "enabled": false,
+    "url": "ws://127.0.0.1:8080/v1/realtime",
+    "model": "mlx-community/gemma-4-e4b-it-4bit",
+    "api_key_env": "REALTIME_API_KEY",
+    "prompt": null,
+    "memory": {
+      "enabled": true,
+      "long_term": []
+    }
+  },
   "inference": {
     "api": {
       "transcription": {

@@ -55,7 +55,11 @@ order. Its dataset digest covers only the scoring-policy version, IDs, WAV SHA-2
 references, and proper-noun annotations. Initial capture text is excluded. At least one ready sample,
 one scoreable reference token, and one expected proper-noun occurrence are required.
 
-The resolved `TranscriberConfig` is consumed by an in-memory prompt override. For each snapshot WAV,
+The selected recognizer receives an in-memory prompt override. Realtime evaluates the full task
+instructions, including the initial meta instructions and base prompt. `--prompt-file` replaces them;
+`--no-prompt` sends empty instructions. Personal memory is disabled, and reports store the actual
+prompt without embedding context data. Candidates do not modify application configuration.
+For each snapshot WAV,
 the runner recreates production-sized chunks, makes fresh sequential STT requests, merges ordered
 results, and computes local metrics. It continues after a sample failure so one `incomplete` report
 contains all reachable outcomes, but returns nonzero and cannot be reviewed or compared as a

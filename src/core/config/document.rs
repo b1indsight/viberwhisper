@@ -18,6 +18,8 @@ pub struct ConfigDocument {
     pub(crate) transcription: TranscriptionSection,
     pub(crate) post_process: PostProcessSection,
     pub(crate) inference: InferenceSection,
+    #[serde(default)]
+    pub(crate) dictation: crate::dictation::config::DictationConfig,
     #[serde(skip, default = "default_secrets")]
     pub(super) secrets: Arc<dyn SecretSource>,
 }
@@ -33,6 +35,15 @@ impl Default for ConfigDocument {
 }
 
 impl ConfigDocument {
+    pub(crate) fn dictation_key(&self) -> Option<super::SecretValue> {
+        if self.dictation.api_key_env.is_empty() {
+            return None;
+        }
+        self.secrets
+            .get(&self.dictation.api_key_env)
+            .filter(|key| !key.is_empty())
+            .map(super::SecretValue::new)
+    }
     /// Creates default configuration bound to an owned source without reading credentials.
     /// Default construction and deserialization otherwise use environment variables.
     pub fn new(secrets: impl SecretSource + 'static) -> Self {
@@ -43,6 +54,7 @@ impl ConfigDocument {
             transcription: TranscriptionSection::default(),
             post_process: PostProcessSection::default(),
             inference: InferenceSection::default(),
+            dictation: Default::default(),
             secrets: Arc::new(secrets),
         }
     }
@@ -61,6 +73,7 @@ impl fmt::Debug for ConfigDocument {
         formatter
             .debug_struct("ConfigDocument")
             .field("schema_version", &self.schema_version)
+            .field("dictation", &self.dictation)
             .field("input", &self.input)
             .field("audio", &self.audio)
             .field("transcription", &self.transcription)
@@ -79,6 +92,7 @@ impl PartialEq for ConfigDocument {
             && self.transcription == other.transcription
             && self.post_process == other.post_process
             && self.inference == other.inference
+            && self.dictation == other.dictation
     }
 }
 

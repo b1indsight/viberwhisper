@@ -1,5 +1,6 @@
 mod audio;
 mod core;
+mod dictation;
 mod history;
 mod input;
 mod platform;
