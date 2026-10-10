@@ -54,7 +54,7 @@ impl Connection {
         })?;
         let mut connection = Self {
             socket,
-            instructions: settings.prompt().to_owned(),
+            instructions: settings.prompt(),
             response_id: None,
             audio_id: None,
             commit_pending: false,
