@@ -54,6 +54,19 @@ struct EvaluateCommand {
     output: Option<PathBuf>,
 }
 
+/// Freeze personal memory and select invocation-scoped instructions without mutating the saved config.
+fn dictation_evaluation_settings(
+    mut settings: crate::dictation::config::DictationConfig,
+    prompt: Option<String>,
+) -> crate::dictation::config::DictationConfig {
+    settings.memory.enabled = false;
+    if let Some(prompt) = prompt {
+        settings.prompt = Some(prompt);
+        settings.prompt_components = None;
+    }
+    settings
+}
+
 fn evaluate_command(command: EvaluateCommand) -> Result<()> {
     use crate::transcriber::ApiTranscriber;
 
@@ -76,13 +89,12 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
         .transpose()?;
     let (_, document) = load_config()?;
     let (transcriber, stt): (Box<dyn Transcriber>, SttSnapshot) = if document.dictation.enabled {
-        let mut settings = document.dictation.clone();
-        settings.memory.enabled = false;
-        if command.no_prompt {
-            settings.prompt = Some(String::new());
-        } else if let Some(prompt) = candidate_from_file {
-            settings.prompt = Some(prompt);
-        }
+        let prompt = if command.no_prompt {
+            Some(String::new())
+        } else {
+            candidate_from_file
+        };
+        let settings = dictation_evaluation_settings(document.dictation.clone(), prompt);
         let transcriber = crate::dictation::OfflineDictation::new(
             settings,
             document.dictation_key(),
@@ -229,5 +241,33 @@ fn dataset(action: PromptLabDatasetCommand) -> Result<()> {
                 .into())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dictation::config::{DictationConfig, PromptComponents};
+
+    #[test]
+    fn realtime_evaluation_keeps_components_unless_a_full_override_is_requested() {
+        let source = DictationConfig {
+            prompt_components: Some(PromptComponents::default()),
+            ..Default::default()
+        };
+        let original = serde_json::to_value(&source).unwrap();
+        let unchanged = dictation_evaluation_settings(source.clone(), None);
+        assert!(!unchanged.memory.enabled);
+        assert!(unchanged.prompt_components.is_some());
+        assert_eq!(unchanged.prompt(), source.prompt());
+        // Prompt-file and no-prompt must override a user's component object, including empty instructions.
+        for text in ["  candidate\n", ""] {
+            let settings = dictation_evaluation_settings(source.clone(), Some(text.into()));
+            settings.validate().unwrap();
+            assert!(!settings.memory.enabled);
+            assert!(settings.prompt_components.is_none());
+            assert_eq!(settings.prompt(), text);
+        }
+        assert_eq!(serde_json::to_value(source).unwrap(), original);
     }
 }

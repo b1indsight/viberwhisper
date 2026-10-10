@@ -81,3 +81,4 @@
 2026-09-18: Add bundled local Silero voice detection and bounded upload loudness adjustment after silence filtering; preserve source recordings, full speech-containing chunks and retry payloads, with fail-open preprocessing and packaged third-party notices
 2026-09-20: Release 0.3.0 with embedded Silero VAD v6.2 and bounded STT upload loudness adjustment, macOS 11-compatible universal packaging, and a statically linked CPU runtime for Windows releases
 2026-10-09: Add opt-in generic Realtime dictation with reusable multi-turn WebSockets, guarded text/metadata output, speech-selected context, 24-hour local observations and configuration-owned long-term terms; support fixed-context offline evaluation and preserve the existing HTTP capture path
+2026-10-11: Move Realtime default instructions into a JSON resource and support seven editable prompt components in config.json with fixed-order composition, strict validation and compatible full-string evaluation overrides

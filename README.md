@@ -229,6 +229,7 @@ macOS 的 Chromium/兜底粘贴会在极短的内部注入窗口暂停 ViberWhis
   "model": "mlx-community/gemma-4-e4b-it-4bit",
   "api_key_env": "REALTIME_API_KEY",
   "prompt": null,
+  "prompt_components": null,
   "memory": {
     "enabled": true,
     "long_term": [
@@ -242,8 +243,27 @@ macOS 的 Chromium/兜底粘贴会在极短的内部注入窗口暂停 ViberWhis
 `enabled` 缺省为 `false`，旧配置继续使用原路径。启用后忽略旧 STT 和后处理的连接设置，
 不再发起第二次 LLM 清理请求。鉴权读取 `api_key_env` 指定的环境变量；变量未设置则不发
 Authorization。地址使用 `ws://` 或 `wss://`，不要在 URL 中放密钥、查询参数或片段。
-`prompt` 为完整任务提示词，包含元指令、听写规则和结果格式要求；`null` 使用内置默认值，
-字符串完整替换默认值，空字符串清空指令。候选提示仍须让模型返回约定的 JSON 字段。
+默认提示词正文维护在 [`assets/dictation-prompt.default.json`](assets/dictation-prompt.default.json)，
+Rust 只负责读取和组合。要独立修改规则，将 `config.example.json` 中完整的
+`dictation.prompt_components` 对象复制到本机配置，保持 `prompt` 为 `null`，然后编辑对应项：
+
+| 组件 | 用途 |
+|------|------|
+| `task` | 当前音频的任务与忠实转写原则 |
+| `language` | 中国大陆简体中文（zh-CN）和外语规则 |
+| `numbers` | 数量、金额、日期、时间的数字格式 |
+| `cleanup` | 填充词、自我修正、原措辞和语气 |
+| `output_format` | JSON 字段、转义和静音输出 |
+| `context` | 已有、新建或不确定语境的选择 |
+| `memory` | 词语候选的内容、类型和长度限制 |
+
+组件按表中顺序组合；首尾空白移除，空白项跳过，其余用换行连接。对象必须包含七个
+字符串字段，不能只提供其中一项。修改本机组件后重启即可生效，无需编译。
+未提供组件时使用应用内嵌的 JSON 默认资源；发布新的内置默认值仍需更新应用。
+
+`prompt` 仍支持完整任务提示词覆盖：字符串完整替换所有组件，空字符串清空指令。
+它与 `prompt_components` 不能同时设置；两者为 `null` 时使用默认组件。
+候选提示仍须让模型返回约定的 JSON 字段，组合全文最多 4096 个字符。
 `memory.enabled=false` 同时关闭长短期记忆的读取与学习。
 
 模型在同一次音频响应中输出纠错与标点后的文字、自动判断的语境以及新增专有词/
@@ -268,7 +288,9 @@ Authorization。地址使用 `ws://` 或 `wss://`，不要在 URL 中放密钥�
 
 `convert` 使用所选 Realtime 路径，但默认禁用个人记忆。`prompt-lab evaluate` 关闭个人记忆输入，
 用于迭代完整任务提示词：不加参数使用配置/内置默认值，`--prompt-file` 完整替换提示词，
-`--no-prompt` 清空指令。候选只对本次评测生效；采用后写入 `dictation.prompt`，重启客户端生效。
+`--no-prompt` 清空指令；这两种临时全文覆盖都会忽略配置组件，且不会写回配置。
+候选采用后可编辑 `dictation.prompt_components`，或清空组件并写入整段 `dictation.prompt`，
+重启客户端生效。
 报告记录实际使用的提示词；缺少约定 JSON 输出的结果会按识别失败记录。
 Realtime 多音频块评测、实际交付与离线转换统一使用 `transcription.language` 的拼接规则：
 中文不添加分隔符，其他语言或未指定时添加空格，保留重复口述。
