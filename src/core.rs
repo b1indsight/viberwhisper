@@ -5,6 +5,7 @@ pub mod config;
 pub(crate) mod listener;
 pub mod orchestrator;
 mod prompt_lab;
+pub(crate) mod recognition;
 pub mod recording_session;
 
 use std::process::ExitCode;
@@ -159,6 +160,28 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
     info!(input, "Transcribing audio file");
 
     let (_, document) = load_config()?;
+    if document.dictation.enabled {
+        let mut settings = document.dictation.clone();
+        // Offline conversion is reproducible and does not use personal memory by default.
+        settings.memory = crate::dictation::config::MemoryConfig {
+            enabled: false,
+            long_term: Vec::new(),
+        };
+        let recognizer = crate::dictation::OfflineDictation::new(
+            settings,
+            document.dictation_key(),
+            document.transcription.language.clone(),
+        )?;
+        let text = recognizer.convert(Path::new(input))?;
+        match output {
+            Some(path) => {
+                std::fs::write(path, text)?;
+                println!("Saved to: {path}");
+            }
+            None => println!("{text}"),
+        }
+        return Ok(());
+    }
     let config = ConvertConfig::from_config(&document)?;
     let transcriber = ApiTranscriber::new(config.transcriber)?;
     let post_processor = PostProcessor::new(config.post_process);

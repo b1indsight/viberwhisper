@@ -13,7 +13,7 @@ use crate::prompt_lab::{
     DatasetStore, EvaluationReport, EvaluationRequest, ProperNounAnnotation, ReferenceStatus,
     RunStatus, SttSnapshot, Thresholds, apply_review, evaluate,
 };
-use crate::transcriber::TranscriberConfig;
+use crate::transcriber::{Transcriber, TranscriberConfig};
 
 pub(super) fn handle(action: PromptLabCommand) -> Result<()> {
     match action {
@@ -75,21 +75,38 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
         .map(EvaluationReport::read)
         .transpose()?;
     let (_, document) = load_config()?;
-    let mut config = TranscriberConfig::from_config(&document)?;
-    let prompt = if command.no_prompt {
-        None
-    } else if let Some(prompt) = candidate_from_file {
-        Some(prompt)
+    let (transcriber, stt): (Box<dyn Transcriber>, SttSnapshot) = if document.dictation.enabled {
+        let mut settings = document.dictation.clone();
+        settings.memory.enabled = false;
+        if command.no_prompt {
+            settings.prompt = Some(String::new());
+        } else if let Some(prompt) = candidate_from_file {
+            settings.prompt = Some(prompt);
+        }
+        let transcriber = crate::dictation::OfflineDictation::new(
+            settings,
+            document.dictation_key(),
+            document.transcription.language.clone(),
+        )?;
+        let stt = SttSnapshot::from(transcriber.metadata());
+        (Box::new(transcriber), stt)
     } else {
-        config.metadata().prompt
+        let mut config = TranscriberConfig::from_config(&document)?;
+        let prompt = if command.no_prompt {
+            None
+        } else if let Some(prompt) = candidate_from_file {
+            Some(prompt)
+        } else {
+            config.metadata().prompt
+        };
+        config = config.with_prompt(prompt);
+        let stt = SttSnapshot::from(config.metadata());
+        (Box::new(ApiTranscriber::new(config)?), stt)
     };
-    config = config.with_prompt(prompt);
-    let stt = SttSnapshot::from(config.metadata());
     let language = stt.language.clone();
-    let transcriber = ApiTranscriber::new(config)?;
     let outcome = evaluate(
         &dataset,
-        &transcriber,
+        transcriber.as_ref(),
         EvaluationRequest {
             stt,
             language,

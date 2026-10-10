@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info, warn};
 
+use super::config::SecretValue;
 use crate::audio::WavChunk;
+use crate::dictation::{DictationWorker, RealtimeSession, config::DictationConfig};
 use crate::session::SessionId;
 use crate::text::merge_texts;
 use crate::transcriber::Transcriber;
@@ -24,7 +26,7 @@ const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrchestratorConfig {
     language: Option<String>,
     convergence_timeout: Duration,
@@ -171,49 +173,67 @@ enum WorkerEvent {
     },
 }
 
-struct ActiveSessionInner {
-    session_id: SessionId,
-    chunk_entries: Vec<ChunkEntry>,
-    chunk_tx: mpsc::SyncSender<WorkerMsg>,
-    result_rx: mpsc::Receiver<WorkerEvent>,
-    worker: thread::JoinHandle<()>,
-    next_index: usize,
-    cancelled: Arc<AtomicBool>,
+enum SessionBackend {
+    Http {
+        transcriber: Arc<dyn Transcriber>,
+        config: OrchestratorConfig,
+    },
+    Realtime(DictationWorker),
 }
 
-// ─── SessionOrchestrator ──────────────────────────────────────────────────────
+struct ActiveSessionInner {
+    session_id: SessionId,
+    worker: SessionWorker,
+}
 
-/// Coordinates recording session lifecycle, background transcription, convergence
-/// wait, and result merging for both Hold and Toggle modes.
+enum SessionWorker {
+    Http(HttpSession),
+    Realtime(RealtimeSession),
+}
+
+impl SessionWorker {
+    fn abort(self) {
+        match self {
+            Self::Http(session) => session.cancelled.store(true, Ordering::Release),
+            Self::Realtime(session) => session.abort(),
+        }
+    }
+}
+
+/// Owns session routing and lifecycle for both HTTP chunks and Realtime audio.
 pub struct SessionOrchestrator {
-    transcriber: Arc<dyn Transcriber>,
-    language: Option<String>,
-    convergence_timeout: Duration,
+    backend: SessionBackend,
     inner: Mutex<Option<ActiveSessionInner>>,
 }
 
 impl SessionOrchestrator {
-    /// Create an orchestrator.
-    ///
-    /// - `transcriber`: injected for testability (use `MockTranscriber` in tests).
-    /// - `config`: already validated at the application boundary.
     pub fn new(transcriber: Arc<dyn Transcriber>, config: OrchestratorConfig) -> Self {
-        info!(
-            language = config.language.as_deref().unwrap_or("auto"),
-            convergence_timeout_secs = config.convergence_timeout.as_secs(),
-            "Session orchestrator configured"
-        );
         Self {
-            transcriber,
-            language: config.language,
-            convergence_timeout: config.convergence_timeout,
+            backend: SessionBackend::Http {
+                transcriber,
+                config,
+            },
             inner: Mutex::new(None),
         }
     }
 
-    /// Start a new recording session.
-    ///
-    /// Returns an error without replacing an existing active session.
+    pub(crate) fn new_realtime(
+        settings: DictationConfig,
+        key: Option<SecretValue>,
+        memory_path: Option<std::path::PathBuf>,
+        language: Option<String>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            backend: SessionBackend::Realtime(DictationWorker::new(
+                settings,
+                key,
+                memory_path,
+                language,
+            )?),
+            inner: Mutex::new(None),
+        })
+    }
+
     pub fn start_session(&self, session_id: SessionId) -> Result<(), SessionStartError> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(active) = inner.as_ref() {
@@ -222,55 +242,128 @@ impl SessionOrchestrator {
                 active: active.session_id,
             });
         }
+        let worker = match &self.backend {
+            SessionBackend::Http {
+                transcriber,
+                config,
+            } => SessionWorker::Http(HttpSession::new(Arc::clone(transcriber), config.clone())),
+            SessionBackend::Realtime(worker) => SessionWorker::Realtime(worker.start_session()),
+        };
+        *inner = Some(ActiveSessionInner { session_id, worker });
+        info!(session_id = session_id.0, "Session started");
+        Ok(())
+    }
 
+    pub fn on_chunk_ready(&self, session_id: SessionId, chunk: WavChunk) {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(session) = inner.as_mut().filter(|s| s.session_id == session_id) else {
+            warn!(
+                session_id = session_id.0,
+                "Rejecting chunk without matching active session"
+            );
+            return;
+        };
+        match &mut session.worker {
+            SessionWorker::Http(session) => session.on_chunk_ready(session_id, chunk),
+            SessionWorker::Realtime(session) => session.on_chunk_ready(chunk),
+        }
+    }
+
+    /// Detach only the requested session; stale stop/cancel events leave the active one intact.
+    fn take_session(&self, session_id: SessionId) -> Result<SessionWorker, SessionRoutingError> {
+        let mut inner = self.inner.lock().unwrap();
+        let active = inner.as_ref().ok_or(SessionRoutingError::NoActiveSession {
+            requested: session_id,
+        })?;
+        if active.session_id != session_id {
+            return Err(SessionRoutingError::SessionMismatch {
+                requested: session_id,
+                active: active.session_id,
+            });
+        }
+        Ok(inner.take().unwrap().worker)
+    }
+
+    /// Close input and collect the selected worker's completed or partial result.
+    pub fn finish_session(&self, session_id: SessionId) -> Result<String, SessionError> {
+        match self
+            .take_session(session_id)
+            .map_err(SessionError::Routing)?
+        {
+            SessionWorker::Http(session) => session.finish(),
+            SessionWorker::Realtime(session) => session.finish(),
+        }
+    }
+
+    pub fn abort_session(&self, session_id: SessionId) -> Result<(), SessionRoutingError> {
+        self.take_session(session_id)?.abort();
+        info!(session_id = session_id.0, "Session aborted");
+        Ok(())
+    }
+
+    pub(crate) fn recording_error(&self, session_id: SessionId) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        match &inner
+            .as_ref()
+            .filter(|s| s.session_id == session_id)?
+            .worker
+        {
+            SessionWorker::Realtime(session) => session.recording_error(),
+            SessionWorker::Http(_) => None,
+        }
+    }
+
+    pub(crate) fn fail_session(&self, session_id: SessionId, error: &str) {
+        let inner = self.inner.lock().unwrap();
+        if let Some(ActiveSessionInner {
+            worker: SessionWorker::Realtime(session),
+            ..
+        }) = inner.as_ref().filter(|s| s.session_id == session_id)
+        {
+            session.fail(error);
+        }
+    }
+}
+
+impl Drop for SessionOrchestrator {
+    fn drop(&mut self) {
+        if let Some(session) = self.inner.get_mut().unwrap().take() {
+            session.worker.abort();
+        }
+    }
+}
+
+struct HttpSession {
+    chunk_entries: Vec<ChunkEntry>,
+    chunk_tx: mpsc::SyncSender<WorkerMsg>,
+    result_rx: mpsc::Receiver<WorkerEvent>,
+    worker: thread::JoinHandle<()>,
+    next_index: usize,
+    cancelled: Arc<AtomicBool>,
+    config: OrchestratorConfig,
+}
+
+impl HttpSession {
+    fn new(transcriber: Arc<dyn Transcriber>, config: OrchestratorConfig) -> Self {
         let (chunk_tx, chunk_rx) = mpsc::sync_channel::<WorkerMsg>(2);
         let (result_tx, result_rx) = mpsc::channel::<WorkerEvent>();
         let cancelled = Arc::new(AtomicBool::new(false));
-
-        let transcriber = Arc::clone(&self.transcriber);
         let worker_cancelled = Arc::clone(&cancelled);
-
-        let worker = thread::spawn(move || {
-            worker_loop(chunk_rx, result_tx, transcriber, worker_cancelled);
-        });
-
-        *inner = Some(ActiveSessionInner {
-            session_id,
+        let worker =
+            thread::spawn(move || worker_loop(chunk_rx, result_tx, transcriber, worker_cancelled));
+        Self {
             chunk_entries: Vec::new(),
             chunk_tx,
             result_rx,
             worker,
             next_index: 0,
             cancelled,
-        });
-
-        info!(session_id = session_id.0, "Session started");
-        Ok(())
+            config,
+        }
     }
 
-    /// Register a ready chunk and attempt non-blocking submission to the worker.
-    ///
-    /// Invalid session notifications are logged and ignored. Submission failures
-    /// are retained as failed entries and reported by `finish_session`.
-    pub fn on_chunk_ready(&self, session_id: SessionId, chunk: WavChunk) {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(session) = inner.as_mut() else {
-            warn!(
-                session_id = session_id.0,
-                "Chunk arrived without an active session"
-            );
-            return;
-        };
-        if session.session_id != session_id {
-            let active = session.session_id;
-            warn!(
-                requested = session_id.0,
-                active = active.0,
-                "Rejecting stale chunk"
-            );
-            return;
-        }
-
+    fn on_chunk_ready(&mut self, session_id: SessionId, chunk: WavChunk) {
+        let session = self;
         let index = session.next_index;
         session.next_index += 1;
 
@@ -297,37 +390,8 @@ impl SessionOrchestrator {
         }
     }
 
-    /// Stop the current session and block until all chunks reach a terminal state
-    /// (or `convergence_timeout` elapses).
-    ///
-    /// Returns:
-    /// - `Ok(text)` — all chunks succeeded; `text` is the language-aware merge.
-    /// - `Err(SessionError::NoChunks)` — recording produced no chunks.
-    /// - `Err(SessionError::PartialFailure { … })` — some chunks failed; partial text included.
-    /// - `Err(SessionError::ConvergenceTimeout { … })` — timeout hit; partial text included.
-    pub fn finish_session(&self, session_id: SessionId) -> Result<String, SessionError> {
-        let session = {
-            let mut inner = self.inner.lock().unwrap();
-            let Some(active) = inner.take() else {
-                return Err(SessionError::Routing(
-                    SessionRoutingError::NoActiveSession {
-                        requested: session_id,
-                    },
-                ));
-            };
-            if active.session_id != session_id {
-                let active_session_id = active.session_id;
-                *inner = Some(active);
-                return Err(SessionError::Routing(
-                    SessionRoutingError::SessionMismatch {
-                        requested: session_id,
-                        active: active_session_id,
-                    },
-                ));
-            }
-            active
-        };
-
+    fn finish(self) -> Result<String, SessionError> {
+        let session = self;
         if session.next_index == 0 {
             // Closing the channel lets the idle worker exit immediately.
             drop(session.chunk_tx);
@@ -343,7 +407,7 @@ impl SessionOrchestrator {
         let mut chunk_entries = session.chunk_entries;
         let result_rx = session.result_rx;
         let worker = session.worker;
-        let deadline = Instant::now() + self.convergence_timeout;
+        let deadline = Instant::now() + session.config.convergence_timeout;
         let mut timed_out = false;
 
         loop {
@@ -401,36 +465,11 @@ impl SessionOrchestrator {
                 .count();
             return Err(SessionError::ConvergenceTimeout {
                 pending_count,
-                partial_text: merge_texts(&texts, self.language.clone()),
+                partial_text: merge_texts(&texts, session.config.language.clone()),
             });
         }
 
-        collect_results(&chunk_entries, self.language.clone())
-    }
-
-    pub fn abort_session(&self, session_id: SessionId) -> Result<(), SessionRoutingError> {
-        let session = {
-            let mut inner = self.inner.lock().unwrap();
-            let Some(active) = inner.take() else {
-                return Err(SessionRoutingError::NoActiveSession {
-                    requested: session_id,
-                });
-            };
-            if active.session_id != session_id {
-                let active_session_id = active.session_id;
-                *inner = Some(active);
-                return Err(SessionRoutingError::SessionMismatch {
-                    requested: session_id,
-                    active: active_session_id,
-                });
-            }
-            active
-        };
-
-        session.cancelled.store(true, Ordering::Release);
-        drop(session);
-        info!(session_id = session_id.0, "Session aborted");
-        Ok(())
+        collect_results(&chunk_entries, session.config.language.clone())
     }
 }
 
@@ -965,7 +1004,10 @@ mod tests {
             "enqueueing blocked on a full worker queue"
         );
         let inner = orch.inner.lock().unwrap();
-        let chunk_entries = &inner.as_ref().unwrap().chunk_entries;
+        let SessionWorker::Http(session) = &inner.as_ref().unwrap().worker else {
+            panic!("expected HTTP worker");
+        };
+        let chunk_entries = &session.chunk_entries;
         // When STT falls behind recording, rejected submissions must remain in
         // the session so finalization cannot silently report complete success.
         assert_eq!(chunk_entries.len(), 100);

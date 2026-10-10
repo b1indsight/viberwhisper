@@ -26,7 +26,7 @@ use crate::core::config::{
 use crate::core::listener::ListenerConfig;
 use crate::postprocess::PostProcessor;
 use crate::session::SessionId;
-use crate::transcriber::{ApiTranscriber, Transcriber};
+use crate::transcriber::ApiTranscriber;
 use crate::{audio, text};
 
 const TITLE: &str = "ViberWhisper 设置";
@@ -282,8 +282,26 @@ impl SetupVerifier for NativeVerifier {
         _ui: &mut dyn SetupUi,
     ) -> Result<VerificationResult, String> {
         let config = ListenerConfig::from_config(document).map_err(|error| format!("{error:#}"))?;
-        let transcriber =
-            ApiTranscriber::new(config.recording.transcriber).map_err(|error| error.to_string())?;
+        let transcriber: Box<dyn crate::transcriber::Transcriber> = if document.dictation.enabled {
+            let mut settings = document.dictation.clone();
+            settings.memory.enabled = false;
+            Box::new(
+                crate::dictation::OfflineDictation::new(
+                    settings,
+                    document.dictation_key(),
+                    document.transcription.language.clone(),
+                )
+                .map_err(|error| error.to_string())?,
+            )
+        } else {
+            Box::new(
+                ApiTranscriber::new(
+                    crate::transcriber::TranscriberConfig::from_config(document)
+                        .map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?,
+            )
+        };
         let post_processor = PostProcessor::new(config.post_process);
         let mut recorder = AudioRecorder::with_config(&config.recording.audio, |_| {});
         let session_id = SessionId(1);

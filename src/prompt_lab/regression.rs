@@ -12,7 +12,6 @@ use super::{
     score_proper_nouns, score_wer,
 };
 use crate::audio::WavChunkReader;
-use crate::text::merge_texts;
 use crate::transcriber::Transcriber;
 
 pub(crate) const REPORT_SCHEMA_VERSION: u32 = 1;
@@ -833,7 +832,7 @@ fn validate_stt(stt: &SttSnapshot) -> Result<()> {
     }
     let endpoint = reqwest::Url::parse(&stt.endpoint)
         .map_err(|error| RegressionError::Invalid(format!("invalid STT endpoint: {error}")))?;
-    if !matches!(endpoint.scheme(), "http" | "https")
+    if !matches!(endpoint.scheme(), "http" | "https" | "ws" | "wss")
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
         || endpoint.query().is_some()
@@ -898,7 +897,7 @@ fn transcribe_sample(
     if texts.is_empty() {
         return Err("WAV produced no transcribable chunks".to_string());
     }
-    let text = merge_texts(&texts, language);
+    let text = crate::text::merge_texts(&texts, language);
     if text.is_empty() {
         Err("STT returned empty text".to_string())
     } else {

@@ -100,9 +100,14 @@ No subcommand runs the recording listener. Other commands are:
 
 ### Purpose
 
-`SessionOrchestrator` unifies the lifecycle of Hold and Toggle recording sessions, managing background transcription of audio chunks with convergence timeout and error handling.
+`SessionOrchestrator` owns active-session identity, routing and start/finish/abort for both HTTP and
+Realtime. Its backend creates either an HTTP chunk worker or recording-scoped Realtime I/O; both
+return the existing session result/error contract. Finishing detaches the session and closes input
+before collecting results; abort and orchestrator drop cancel active work. The HTTP chunk tracking
+and convergence rules below remain unchanged. Realtime connection/audio details live in
+[dictation](dictation.md).
 
-### Key Concepts
+### HTTP Worker Concepts
 
 - **Chunk State Machine**: `Flushed → Uploading → Transcribed / Failed`
 - **Session-owned Results**: Each active session exclusively owns its `chunk_entries: Vec<ChunkEntry>`. These are tracking records, not WAV data. The worker never reads or mutates chunk state; it reports `UploadStarted` and `Completed` events through a session-specific result channel.

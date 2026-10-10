@@ -4,22 +4,24 @@ use anyhow::Result;
 
 use crate::audio::AudioConfig;
 use crate::core::config::{ConfigDocument, InputSection, fields};
-use crate::core::orchestrator::OrchestratorConfig;
+use crate::core::recognition::RecognitionConfig;
 use crate::input::hotkey::HotkeyConfig;
 use crate::postprocess::PostProcessConfig;
-use crate::transcriber::TranscriberConfig;
 
 /// Settings shared by live delivery and raw STT capture.
 #[derive(Debug)]
 pub(crate) struct RecordingConfig {
     pub(crate) hotkeys: HotkeyConfig,
     pub(crate) audio: AudioConfig,
-    pub(crate) orchestrator: OrchestratorConfig,
-    pub(crate) transcriber: TranscriberConfig,
+    pub(crate) recognition: RecognitionConfig,
 }
 
 impl RecordingConfig {
     pub(crate) fn from_config(document: &ConfigDocument) -> Result<Self> {
+        Self::build(document, true)
+    }
+
+    fn build(document: &ConfigDocument, raw_capture: bool) -> Result<Self> {
         let hotkeys = document.select(
             (fields::InputHoldHotkey, fields::InputToggleHotkey),
             |(hold_hotkey, toggle_hotkey)| {
@@ -32,8 +34,7 @@ impl RecordingConfig {
         Ok(Self {
             hotkeys,
             audio: AudioConfig::from_config(document),
-            orchestrator: document.select(fields::TranscriptionLanguage, OrchestratorConfig::new),
-            transcriber: TranscriberConfig::from_config(document)?,
+            recognition: RecognitionConfig::from_config(document, raw_capture)?,
         })
     }
 }
@@ -48,8 +49,12 @@ pub(crate) struct ListenerConfig {
 impl ListenerConfig {
     pub(crate) fn from_config(document: &ConfigDocument) -> Result<Self> {
         Ok(Self {
-            recording: RecordingConfig::from_config(document)?,
-            post_process: PostProcessConfig::from_config(document)?,
+            recording: RecordingConfig::build(document, false)?,
+            post_process: if document.dictation.enabled {
+                PostProcessConfig::Disabled
+            } else {
+                PostProcessConfig::from_config(document)?
+            },
         })
     }
 }

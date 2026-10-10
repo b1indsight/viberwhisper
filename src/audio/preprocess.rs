@@ -8,6 +8,14 @@ use tracing::{info, warn};
 
 use super::{MAX_CHUNK_SIZE_BYTES, WavChunk, contains_audible_window, vad};
 
+/// Classifies a complete streamed segment without changing already uploaded gain or timing.
+pub(crate) fn contains_speech_for_dictation(chunk: &WavChunk) -> Result<bool> {
+    if !contains_audible_window(chunk)? {
+        return Ok(false);
+    }
+    vad::contains_speech(&DecodedWav::read(chunk)?)
+}
+
 /// Returns `None` for silence/non-speech, otherwise one immutable payload for all retries.
 pub(crate) fn prepare_for_transcription(chunk: &WavChunk) -> Option<WavChunk> {
     prepare_with_vad(chunk, vad::contains_speech)

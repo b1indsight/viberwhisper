@@ -191,6 +191,17 @@ impl ListenerApplication {
         }
 
         while let Some(chunk) = self.recorder.take_ready_chunk() {
+            if self.recorder.streaming_overflowed() {
+                self.orchestrator.fail_session(
+                    session_id,
+                    "Realtime recorder backlog exceeded its capacity",
+                );
+            }
+            if let Some(error) = self.orchestrator.recording_error(session_id) {
+                error!(%error, "Stopping failed Realtime recording");
+                self.drive_session(event_loop, SessionEvent::StopRequested);
+                return;
+            }
             self.drive_session(
                 event_loop,
                 SessionEvent::ChunkReady {
@@ -335,6 +346,7 @@ impl ListenerApplication {
                 warning,
             } => {
                 if let Some(warning) = warning.as_deref() {
+                    self.orchestrator.fail_session(session_id, warning);
                     warn!(
                         session_id = session_id.0,
                         warning, "Recorder stopped with a warning"

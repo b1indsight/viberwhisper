@@ -2,6 +2,9 @@
 
 ## Purpose
 
+This document describes the HTTP STT path. The optional generic Realtime path, including
+context and memory, is documented in [Realtime dictation](dictation.md).
+
 The transcriber consumes exactly one in-memory WAV chunk and returns one transcription result. It
 does not open local files, split audio, assign chunk indexes, or merge results.
 

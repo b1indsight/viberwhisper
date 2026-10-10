@@ -24,6 +24,7 @@ enum RecorderError {
     InputDeviceNotFound(String),
     UnsupportedSampleFormat,
     NoAudioData,
+    StreamingOverflow,
 }
 
 impl fmt::Display for RecorderError {
@@ -42,6 +43,7 @@ impl fmt::Display for RecorderError {
             }
             Self::UnsupportedSampleFormat => write!(f, "unsupported sample format"),
             Self::NoAudioData => write!(f, "no audio data recorded"),
+            Self::StreamingOverflow => write!(f, "Realtime recorder backlog exceeded its capacity"),
         }
     }
 }
@@ -57,7 +59,8 @@ impl error::Error for RecorderError {
             Self::NoInputDevice
             | Self::InputDeviceNotFound(_)
             | Self::UnsupportedSampleFormat
-            | Self::NoAudioData => None,
+            | Self::NoAudioData
+            | Self::StreamingOverflow => None,
         }
     }
 }
@@ -91,6 +94,7 @@ pub struct AudioRecorder {
     active: Option<ActiveRecording>,
     input_device: Option<String>,
     gain: f32,
+    streaming_frames: bool,
     chunk_notifier: Arc<dyn Fn(SessionId) + Send + Sync>,
 }
 
@@ -111,6 +115,8 @@ struct RecordingBuffer {
     sample_count: AtomicUsize,
     /// Number of complete chunks observed by the audio callback.
     ready_chunk_count: AtomicUsize,
+    capacity: Option<usize>,
+    overflowed: AtomicBool,
 }
 
 fn select_named_device<D>(
@@ -179,13 +185,32 @@ impl RecordingBuffer {
             samples: Mutex::new(Vec::new()),
             sample_count: AtomicUsize::new(0),
             ready_chunk_count: AtomicUsize::new(0),
+            capacity: None,
+            overflowed: AtomicBool::new(false),
         })
+    }
+
+    fn enable_streaming(&mut self) {
+        self.chunk_max_samples = (self.sample_rate as usize / 5).max(1);
+        self.capacity = Some(self.sample_rate as usize * 60);
     }
 
     /// Publishes PCM before advertising newly complete chunks to the consumer.
     fn push_mono(&self, mono: &[i16]) -> bool {
         let len = mono.len();
-        self.samples.lock().unwrap().extend_from_slice(mono);
+        let mut samples = self.samples.lock().unwrap();
+        if self.overflowed.load(Ordering::Acquire) {
+            return false;
+        }
+        if self
+            .capacity
+            .is_some_and(|cap| samples.len().saturating_add(len) > cap)
+        {
+            self.overflowed.store(true, Ordering::Release);
+            return true;
+        }
+        samples.extend_from_slice(mono);
+        drop(samples);
         let total = self.sample_count.fetch_add(len, Ordering::Relaxed) + len;
         if total % (self.sample_rate as usize / 2) < len {
             debug!(
@@ -238,8 +263,20 @@ impl AudioRecorder {
             active: None,
             input_device: config.input_device.clone(),
             gain,
+            streaming_frames: false,
             chunk_notifier: Arc::new(chunk_notifier),
         }
+    }
+
+    /// Keeps the existing WAV envelope internally, but emits a frame every 200 ms for Realtime.
+    pub(crate) fn enable_streaming_frames(&mut self) {
+        self.streaming_frames = true;
+    }
+
+    pub(crate) fn streaming_overflowed(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|a| a.shared.overflowed.load(Ordering::Acquire))
     }
 
     /// Starts a session, preserving any recording that is already active.
@@ -274,9 +311,13 @@ impl AudioRecorder {
 
         info!(sample_rate, channels, format = ?sample_format, "Starting recording");
 
+        let mut buffer = RecordingBuffer::new(sample_rate)?;
+        if self.streaming_frames {
+            buffer.enable_streaming();
+        }
         let mut active = ActiveRecording {
             session_id,
-            shared: Arc::new(RecordingBuffer::new(sample_rate)?),
+            shared: Arc::new(buffer),
             stream: None,
             flushed_samples: 0,
         };
@@ -472,6 +513,12 @@ impl ActiveRecording {
         drop(self.stream.take());
         debug!("Stream stopped");
 
+        // Check after callbacks have stopped: the queued readiness notification
+        // may not have been handled before the user's stop request.
+        if self.shared.overflowed.load(Ordering::Acquire) {
+            return Err(RecorderError::StreamingOverflow);
+        }
+
         let samples = std::mem::take(&mut *self.shared.samples.lock().unwrap());
         debug!(samples = samples.len(), "Buffer size");
         if samples.is_empty() {
@@ -537,6 +584,38 @@ pub enum RecorderCancelOutcome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stop_before_overflow_notification_preserves_failure() {
+        let mut recorder = recorder_for_buffer(vec![1; 3200], 3200);
+        // A native stop event can arrive before the queued AudioChunkAvailable event.
+        recorder
+            .active
+            .as_ref()
+            .unwrap()
+            .shared
+            .overflowed
+            .store(true, Ordering::Release);
+        let RecorderStopOutcome::Stopped {
+            chunks, warning, ..
+        } = recorder.stop_recording(SessionId(1))
+        else {
+            panic!("not stopped")
+        };
+        assert!(chunks.is_empty());
+        assert!(warning.unwrap().contains("capacity"));
+    }
+    #[test]
+    fn streaming_frames_are_small_and_backlog_failure_is_explicit() {
+        let mut buffer = super::RecordingBuffer::new(16_000).unwrap();
+        buffer.enable_streaming();
+        assert_eq!(buffer.chunk_max_samples, 3200);
+        assert!(!buffer.push_mono(&[0; 3199]));
+        assert!(buffer.push_mono(&[0]));
+        assert!(buffer.push_mono(&vec![0; 16_000 * 60]));
+        assert!(buffer.overflowed.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(buffer.samples.lock().unwrap().len(), 3200);
+    }
+
     use super::*;
 
     #[test]
@@ -566,12 +645,15 @@ mod tests {
                     ready_chunk_count: AtomicUsize::new(
                         sample_count.checked_div(chunk_max_samples).unwrap_or(0),
                     ),
+                    capacity: None,
+                    overflowed: AtomicBool::new(false),
                 }),
                 stream: None,
                 flushed_samples: 0,
             }),
             input_device: None,
             gain: 1.0,
+            streaming_frames: false,
             chunk_notifier: Arc::new(|_| {}),
         }
     }

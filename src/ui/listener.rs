@@ -9,7 +9,7 @@ use crate::history::{HistoryStore, HistoryTyper};
 use crate::platform::PlatformAction;
 use crate::postprocess::PostProcessConfig;
 use crate::prompt_lab::{DatasetStore, PromptLabCapture, SttSnapshot};
-use crate::{audio, core, postprocess, transcriber};
+use crate::{audio, postprocess};
 
 mod event_loop;
 
@@ -56,10 +56,8 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
     use std::sync::Arc;
 
     use audio::AudioRecorder;
-    use core::orchestrator::SessionOrchestrator;
     use event_loop::{AppEvent, ListenerApplication, ListenerOutput};
     use postprocess::PostProcessor;
-    use transcriber::ApiTranscriber;
     use winit::event_loop::{ControlFlow, EventLoop};
 
     use crate::platform::NativePlatform;
@@ -68,12 +66,15 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
 
     let capture_stt = match &mode {
         ListenerMode::Delivery(_) => None,
-        ListenerMode::Capture(_) => Some(SttSnapshot::from(config.transcriber.metadata())),
+        ListenerMode::Capture(_) => Some(SttSnapshot::from(
+            config
+                .recognition
+                .metadata()
+                .expect("raw capture uses HTTP STT"),
+        )),
     };
-    let orchestrator = Arc::new(SessionOrchestrator::new(
-        Arc::new(ApiTranscriber::new(config.transcriber)?),
-        config.orchestrator,
-    ));
+    let streaming = config.recognition.is_realtime();
+    let orchestrator = Arc::new(config.recognition.build()?);
 
     let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -122,9 +123,12 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
     };
 
     let audio_proxy = proxy.clone();
-    let recorder = AudioRecorder::with_config(&config.audio, move |session_id| {
+    let mut recorder = AudioRecorder::with_config(&config.audio, move |session_id| {
         let _ = audio_proxy.send_event(AppEvent::AudioChunkAvailable { session_id });
     });
+    if streaming {
+        recorder.enable_streaming_frames();
+    }
 
     info!("System tray icon started");
 
