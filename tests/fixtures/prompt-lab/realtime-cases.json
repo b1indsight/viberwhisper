@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "cases": [{
+    "id": "project",
+    "at": 100,
+    "seed": {
+      "long_term": [{"context": "project", "kind": "proper_noun", "text": "ViberWhisper"}],
+      "observations": [{"recording": "seed-history", "segment": 0, "at": 100,
+        "context": "project", "text": "history-only sentinel", "terms": []}]
+    },
+    "steps": [
+      {"sample_id": "first", "expect": {
+        "input": {"contexts_present": ["project"], "history_present": ["history-only sentinel"]},
+        "context": {"kind": "existing", "id": "project"},
+        "candidates_present": [{"kind": "proper_noun", "text": "ViberWhisper"}],
+        "memory": {"terms_present": [{"context": "project", "kind": "proper_noun",
+          "text": "ViberWhisper", "supporting_recordings": 1}]},
+        "forbidden_text": ["history-only sentinel"]
+      }},
+      {"sample_id": "second", "advance_seconds": 86400, "expect": {
+        "input": {"history_absent": ["history-only sentinel"],
+          "terms_present": [{"context": "project", "kind": "proper_noun", "text": "ViberWhisper"}],
+          "terms_absent": [{"context": "project", "kind": "proper_noun",
+            "text": "ViberWhisper", "supporting_recordings": 1}]},
+        "forbidden_text": ["history-only sentinel"]
+      }}
+    ]
+  }]
+}

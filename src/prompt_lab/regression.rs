@@ -14,7 +14,7 @@ use super::{
 use crate::audio::WavChunkReader;
 use crate::transcriber::Transcriber;
 
-pub(crate) const REPORT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const REPORT_SCHEMA_VERSION: u32 = 2;
 pub(crate) const SCORING_POLICY_VERSION: &str = "stt-prompt-scoring-v2";
 pub(crate) const AGENT_REVIEW_RUBRIC_VERSION: &str = "semantic-equivalence-v1";
 
@@ -103,6 +103,7 @@ pub(crate) struct EvaluationRequest {
     pub(crate) thresholds: Thresholds,
     pub(crate) output: Option<PathBuf>,
     pub(crate) compare_to: Option<EvaluationReport>,
+    pub(crate) realtime: Option<super::realtime::RealtimeRun>,
 }
 
 #[derive(Debug)]
@@ -232,6 +233,8 @@ pub(crate) struct GateResults {
     pub(crate) wer: bool,
     pub(crate) llm: bool,
     pub(crate) proper_nouns: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) realtime: Option<bool>,
 }
 
 impl GateResults {
@@ -246,12 +249,13 @@ impl GateResults {
             llm: mean_score >= thresholds.min_llm_score,
             proper_nouns: aggregates.proper_nouns.accuracy_percent
                 >= thresholds.min_proper_noun_percent,
+            realtime: None,
         }
     }
 
     /// Reports whether every metric meets its threshold.
     pub(super) fn all_passed(&self) -> bool {
-        self.wer && self.llm && self.proper_nouns
+        self.wer && self.llm && self.proper_nouns && self.realtime != Some(false)
     }
 }
 
@@ -295,6 +299,10 @@ pub(crate) struct RunComparison {
     pub(crate) proper_noun_percent_delta: f64,
     pub(crate) llm_score_delta: Option<f64>,
     pub(crate) prior_llm_mean_score: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) realtime_inputs_changed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) realtime_seed_changes: Option<Vec<super::realtime::SeedChange>>,
     pub(crate) samples: Vec<SampleComparison>,
 }
 
@@ -319,6 +327,8 @@ pub(crate) struct EvaluationReport {
     pub(crate) samples: Vec<SampleResult>,
     pub(crate) failures: Vec<RunFailure>,
     pub(crate) comparison: Option<RunComparison>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) realtime: Option<super::realtime::RealtimeReport>,
 }
 
 impl EvaluationReport {
@@ -343,7 +353,9 @@ impl EvaluationReport {
     }
 
     pub(crate) fn validate_contract(&self) -> Result<()> {
-        if self.schema_version != REPORT_SCHEMA_VERSION {
+        if ![1, REPORT_SCHEMA_VERSION].contains(&self.schema_version)
+            || (self.schema_version == 1 && self.realtime.is_some())
+        {
             return Err(RegressionError::Invalid(format!(
                 "unsupported report schema_version {}; expected {REPORT_SCHEMA_VERSION}",
                 self.schema_version
@@ -387,6 +399,45 @@ impl EvaluationReport {
         if sample_ids != ready_ids || unique_ids.len() != sample_ids.len() {
             return Err(RegressionError::Invalid(
                 "report sample coverage does not match the dataset summary".to_string(),
+            ));
+        }
+        if let Some(realtime) = &self.realtime {
+            if self
+                .comparison
+                .as_ref()
+                .is_some_and(|comparison| comparison.realtime_inputs_changed.is_none())
+            {
+                return Err(RegressionError::Invalid(
+                    "comparison lacks Realtime input marker".into(),
+                ));
+            }
+            if !self.stt.endpoint.starts_with("ws://") && !self.stt.endpoint.starts_with("wss://") {
+                return Err(RegressionError::Invalid(
+                    "Realtime report requires a WebSocket endpoint".into(),
+                ));
+            }
+            realtime
+                .validate(&self.samples, self.stt.language.clone())
+                .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
+            if let Some(comparison) = &self.comparison {
+                realtime
+                    .validate_seed_changes(
+                        comparison.realtime_seed_changes.as_deref().ok_or_else(|| {
+                            RegressionError::Invalid("missing Realtime seed changes".into())
+                        })?,
+                        comparison.realtime_inputs_changed.unwrap(),
+                    )
+                    .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
+            }
+        }
+        if self.realtime.is_none()
+            && self.comparison.as_ref().is_some_and(|comparison| {
+                comparison.realtime_inputs_changed.is_some()
+                    || comparison.realtime_seed_changes.is_some()
+            })
+        {
+            return Err(RegressionError::Invalid(
+                "ordinary comparison contains Realtime input marker".into(),
             ));
         }
         let local_aggregates = aggregate_local_scores(&self.samples);
@@ -555,8 +606,7 @@ impl EvaluationReport {
         }
         // Preserve threshold decisions based on the stored mean after tolerating JSON
         // round-trip differences in the aggregate comparison above.
-        let expected_gates =
-            GateResults::evaluate(&self.aggregates, llm.mean_score, &self.thresholds);
+        let expected_gates = self.gate_results(llm.mean_score);
         let gates = self.gates.as_ref().expect("complete gates were checked");
         if gates != &expected_gates || self.meets_targets != Some(gates.all_passed()) {
             return Err(RegressionError::Invalid(
@@ -564,6 +614,15 @@ impl EvaluationReport {
             ));
         }
         Ok(())
+    }
+
+    pub(super) fn gate_results(&self, mean_score: f64) -> GateResults {
+        let mut gates = GateResults::evaluate(&self.aggregates, mean_score, &self.thresholds);
+        gates.realtime = self
+            .realtime
+            .as_ref()
+            .map(super::realtime::RealtimeReport::passed);
+        gates
     }
 
     fn validate_comparison_contract(&self) -> Result<()> {
@@ -689,8 +748,47 @@ pub(crate) fn evaluate(
     validate_stt(&request.stt)?;
     let dataset = store.scoring_snapshot(SCORING_POLICY_VERSION)?;
     validate_scoring_dataset(&dataset)?;
+    if let Some(run) = &request.realtime {
+        run.settings
+            .validate()
+            .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
+        if request.stt.endpoint != run.settings.url
+            || request.stt.model != run.settings.model
+            || request.stt.prompt.as_deref() != Some(run.settings.prompt().as_str())
+            || request.language != request.stt.language
+        {
+            return Err(RegressionError::Invalid(
+                "Realtime settings differ from recorded STT metadata".into(),
+            ));
+        }
+        run.cases
+            .validate(
+                &dataset
+                    .samples
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
+    }
     if let Some(prior) = request.compare_to.as_ref() {
         validate_comparison(prior, &dataset, &request.stt)?;
+        let compatible = match (&prior.realtime, &request.realtime) {
+            (None, None) => true,
+            (Some(old), Some(new)) => {
+                old.contract_sha256
+                    == new
+                        .cases
+                        .contract_digest()
+                        .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?
+            }
+            _ => false,
+        };
+        if !compatible {
+            return Err(RegressionError::Invalid(
+                "Realtime comparison must keep case order, clock and assertions unchanged".into(),
+            ));
+        }
     }
 
     let created_at_unix_ms = unix_time_ms()?;
@@ -702,6 +800,19 @@ pub(crate) fn evaluate(
         .unwrap_or_else(|| store.root().join("runs").join(format!("{run_id}.json")));
     validate_new_output_path(&path)?;
 
+    let (realtime, mut outcomes) = if let Some(run) = request.realtime {
+        let audio = dataset
+            .samples
+            .iter()
+            .map(|s| (s.id.clone(), store.root().join(&s.audio.path)))
+            .collect();
+        let (report, outcomes) = super::realtime::run(run, &audio, request.language.clone())
+            .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
+        (Some(report), outcomes)
+    } else {
+        (None, std::collections::HashMap::new())
+    };
+
     let mut samples = Vec::with_capacity(dataset.samples.len());
     let mut failures = Vec::new();
     for sample in &dataset.samples {
@@ -711,11 +822,17 @@ pub(crate) fn evaluate(
             .as_deref()
             .expect("scoring snapshots contain ready references")
             .to_string();
-        let result = transcribe_sample(
-            &store.root().join(&sample.audio.path),
-            transcriber,
-            request.language.clone(),
-        );
+        let result = if realtime.is_some() {
+            outcomes
+                .remove(&sample.id)
+                .expect("validated scenario coverage")
+        } else {
+            transcribe_sample(
+                &store.root().join(&sample.audio.path),
+                transcriber,
+                request.language.clone(),
+            )
+        };
         match result {
             Ok(hypothesis) => samples.push(SampleResult {
                 sample_id: sample.id.clone(),
@@ -758,10 +875,18 @@ pub(crate) fn evaluate(
     } else {
         RunStatus::Incomplete
     };
-    let comparison = request
+    let mut comparison = request
         .compare_to
         .as_ref()
         .map(|prior| build_comparison(prior, &samples, &aggregates));
+    if let (Some(comparison), Some(current), Some(prior)) =
+        (&mut comparison, &realtime, &request.compare_to)
+    {
+        comparison.realtime_inputs_changed =
+            Some(current.cases_sha256 != prior.realtime.as_ref().unwrap().cases_sha256);
+        comparison.realtime_seed_changes =
+            Some(current.seed_changes(prior.realtime.as_ref().unwrap()));
+    }
     let report = EvaluationReport {
         schema_version: REPORT_SCHEMA_VERSION,
         run_id,
@@ -791,6 +916,7 @@ pub(crate) fn evaluate(
         samples,
         failures,
         comparison,
+        realtime,
     };
     report.validate_contract()?;
     report.write(&path)?;
@@ -1015,6 +1141,8 @@ fn build_comparison(
         })
         .collect();
     RunComparison {
+        realtime_inputs_changed: None,
+        realtime_seed_changes: None,
         prior_run_id: prior.run_id.clone(),
         wer_percent_delta: aggregates.wer.wer_percent - prior.aggregates.wer.wer_percent,
         proper_noun_percent_delta: aggregates.proper_nouns.accuracy_percent
@@ -1146,6 +1274,7 @@ mod tests {
             },
             output: Some(output),
             compare_to: None,
+            realtime: None,
         }
     }
 
@@ -1349,6 +1478,85 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("proper-noun"));
+    }
+
+    #[test]
+    fn realtime_report_replays_checks_and_blocks_completion_targets_on_metadata_failure() {
+        use crate::prompt_lab::realtime::{RealtimeCases, RealtimeReport, StepResult};
+        let directory = tempdir().unwrap();
+        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
+        add_ready_sample(&store, 1, "使用 Codex", "Codex");
+        let output = directory.path().join("run.json");
+        let mut report = evaluate(
+            &store,
+            &SequenceTranscriber::new([Ok("使用 Codex".into())]),
+            request(output.clone()),
+        )
+        .unwrap()
+        .report;
+        let cases:RealtimeCases = serde_json::from_value(serde_json::json!({"schema_version":1,"cases":[{"id":"case","at":100,"steps":[{"sample_id":"sample-1-1","expect":{"context":{"kind":"uncertain"}}}]}]})).unwrap();
+        let empty = crate::dictation::Snapshot { contexts: vec![] };
+        let segments = vec![crate::dictation::SegmentTrace {
+            index: 0,
+            input: empty.clone(),
+            output: serde_json::json!({"text":"使用 Codex","context":{"kind":"existing","id":"unknown"},"memory_candidates":[]}),
+        }];
+        let checks = cases.cases[0].steps[0]
+            .expect
+            .check(&empty, &segments, &empty, "使用 Codex");
+        report.stt.endpoint = "ws://localhost/v1/realtime".into();
+        report.realtime = Some(RealtimeReport {
+            policy_version: super::super::realtime::POLICY.into(),
+            cases_sha256: cases.digest().unwrap(),
+            contract_sha256: cases.contract_digest().unwrap(),
+            cases,
+            steps: vec![StepResult {
+                case_id: "case".into(),
+                sample_id: "sample-1-1".into(),
+                at: 100,
+                before: empty.clone(),
+                segments,
+                after: empty,
+                checks,
+            }],
+        });
+        report.validate_contract().unwrap();
+        assert_eq!(report.gate_results(100.0).realtime, Some(false));
+        let mut tampered = report.clone();
+        tampered.realtime.as_mut().unwrap().steps[0]
+            .checks
+            .iter_mut()
+            .for_each(|check| check.passed = true);
+        assert!(tampered.validate_contract().is_err());
+        fs::write(&output, serde_json::to_vec(&report).unwrap()).unwrap();
+        let review_path = directory.path().join("review.json");
+        write_review(&review_path, &report.run_id, 100, false);
+        let complete = crate::prompt_lab::review::apply_review(&output, &review_path).unwrap();
+        assert_eq!(complete.status, RunStatus::Complete);
+        assert_eq!(complete.meets_targets, Some(false));
+        complete.validate_contract().unwrap();
+    }
+
+    #[test]
+    fn legacy_v1_ordinary_reports_still_read_without_claiming_memory_validation() {
+        let directory = tempdir().unwrap();
+        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
+        add_ready_sample(&store, 1, "使用 Codex", "Codex");
+        let output = directory.path().join("run.json");
+        let report = evaluate(
+            &store,
+            &SequenceTranscriber::new([Ok("使用 Codex".into())]),
+            request(output.clone()),
+        )
+        .unwrap()
+        .report;
+        let mut value = serde_json::to_value(&report).unwrap();
+        value["schema_version"] = 1.into();
+        value.as_object_mut().unwrap().remove("realtime");
+        fs::write(&output, serde_json::to_vec(&value).unwrap()).unwrap();
+        let legacy = EvaluationReport::read(&output).unwrap();
+        assert!(legacy.realtime.is_none());
+        assert!(legacy.gate_results(100.0).realtime.is_none());
     }
 
     fn write_review(path: &Path, run_id: &str, score: u8, with_difference: bool) {

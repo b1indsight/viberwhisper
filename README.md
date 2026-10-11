@@ -295,6 +295,11 @@ Rust 只负责读取和组合。要独立修改规则，将 `config.example.json
 Realtime 多音频块评测、实际交付与离线转换统一使用 `transcription.language` 的拼接规则：
 中文不添加分隔符，其他语言或未指定时添加空格，保留重复口述。
 评测沿用原 JSON 报告、WER、专有词指标和语义审阅流程。
+需要验证语境和记忆时，添加 `--realtime-cases cases.json`，用显式种子和模拟时钟顺序
+播放 WAV。每个 ready 样本须恰好出现一次；场景之间独立，步骤之间学习记忆。
+报告记录实际发送的快照、原始结构化输出、记忆变化和本地断言，并把断言纳入最终 gate。
+场景模式同样不接触个人记忆文件；场景历史会保存在评估报告中。
+格式和用法见[场景示例](docs/architecture/prompt-lab.md#realtime-context-and-memory-scenarios)。
 原始录音采集 `prompt-lab record` 仍使用原 HTTP STT，避免把整理结果伪装成 raw-STT 样本。
 
 #### LLM 后处理

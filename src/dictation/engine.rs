@@ -223,6 +223,7 @@ pub(super) struct Recording {
     segment: Vec<i16>,
     results: Vec<super::result::DictationResult>,
     index: usize,
+    evaluation: Option<(u64, Vec<super::evaluation::SegmentTrace>)>,
 }
 
 impl Recording {
@@ -240,7 +241,22 @@ impl Recording {
             segment: Vec::new(),
             results: Vec::new(),
             index: 0,
+            evaluation: None,
         }
+    }
+
+    pub(super) fn for_evaluation(id: String, at: u64) -> Self {
+        let mut recording = Self::new();
+        recording.id = id;
+        recording.evaluation = Some((at, Vec::new()));
+        recording
+    }
+
+    pub(super) fn traces(&self) -> Vec<super::evaluation::SegmentTrace> {
+        self.evaluation
+            .as_ref()
+            .map(|(_, traces)| traces.clone())
+            .unwrap_or_default()
     }
 
     pub fn text(&self, language: Option<String>) -> String {
@@ -320,7 +336,12 @@ impl Recording {
                 .append(&vec![0; 2400 - self.segment.len()])
                 .await?;
         }
-        let snapshot = memory.snapshot(now());
+        let at = self
+            .evaluation
+            .as_ref()
+            .map(|(at, _)| *at)
+            .unwrap_or_else(now);
+        let snapshot = memory.snapshot(at);
         let result = connection
             .finish(&snapshot, &format!("{}-{}", self.id, self.index))
             .await?;
@@ -329,11 +350,18 @@ impl Recording {
             final_chars = result.text.chars().count(),
             "Dictation completed"
         );
+        if let Some((_, traces)) = &mut self.evaluation {
+            traces.push(super::evaluation::SegmentTrace {
+                index: self.index,
+                input: snapshot,
+                output: result.raw.clone(),
+            });
+        }
         self.results.push(result);
         // Cleanup is fallible even after the model has completed and passed validation.
         // Keep the text for partial delivery, but learn only once cleanup succeeds.
         connection.delete_audio().await?;
-        memory.learn(&self.id, self.index, self.results.last().unwrap(), now());
+        memory.learn(&self.id, self.index, self.results.last().unwrap(), at);
         Ok(())
     }
 }

@@ -167,11 +167,11 @@ pub(crate) struct LongTerm {
     pub text: String,
 }
 
-pub(super) fn valid_label(text: &str) -> bool {
+pub(crate) fn valid_label(text: &str) -> bool {
     !text.trim().is_empty() && text.chars().count() <= 64 && !text.chars().any(char::is_control)
 }
 
-pub(super) fn valid_term(text: &str) -> bool {
+pub(crate) fn valid_term(text: &str) -> bool {
     !text.trim().is_empty() && text.chars().count() <= 80 && !text.chars().any(char::is_control)
 }
 
