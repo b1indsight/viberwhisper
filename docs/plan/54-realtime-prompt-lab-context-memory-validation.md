@@ -1,7 +1,7 @@
 # Realtime prompt-lab 语境与记忆校验 — Feature record
 
-**阶段：** 实现和本地验证完成，等待独立代码审阅及 CI。
-**PR：** [#142](https://github.com/b1indsight/viberwhisper/pull/142)（草稿）。
+**阶段：** 实现、本地验证及独立代码审阅完成；跨平台 CI 状态见 PR。
+**PR：** [#142](https://github.com/b1indsight/viberwhisper/pull/142)。
 
 ## 1. 初始方案
 
@@ -183,3 +183,4 @@
 - **验证：** `cargo test --locked` 239 通过、2 个既有外部服务/私人数据测试忽略；新增
   fixture 和学习消融测试通过。`cargo fmt --check`、`cargo build --locked`、
   `cargo clippy --locked --all-targets -- -D warnings` 及 `git diff --check` 通过。
+  独立代码审阅检查提交 `b9b05e9faf24`，无 findings，门禁通过。
