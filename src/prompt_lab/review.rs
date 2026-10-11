@@ -5,7 +5,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use super::regression::{
-    AGENT_REVIEW_RUBRIC_VERSION, AgentDifference, AgentSampleReview, EvaluationReport, GateResults,
+    AGENT_REVIEW_RUBRIC_VERSION, AgentDifference, AgentSampleReview, EvaluationReport,
     RegressionError, ReviewSummary, RunStatus, unix_time_ms,
 };
 
@@ -88,7 +88,7 @@ pub(crate) fn apply_review(report_path: &Path, review_path: &Path) -> Result<Eva
     }
     let llm = report.review_aggregate();
     let mean_score = llm.mean_score;
-    let gates = GateResults::evaluate(&report.aggregates, mean_score, &report.thresholds);
+    let gates = report.gate_results(mean_score);
     let meets_targets = gates.all_passed();
     let reviewed_at_unix_ms = unix_time_ms()?;
     report.status = RunStatus::Complete;
@@ -169,6 +169,7 @@ mod tests {
         let hypothesis = "使用 Codex".to_string();
         EvaluationReport {
             schema_version: REPORT_SCHEMA_VERSION,
+            realtime: None,
             run_id: "run-test-1".to_string(),
             created_at_unix_ms: 1,
             completed_at_unix_ms: None,

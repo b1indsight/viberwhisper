@@ -1,6 +1,7 @@
 mod capture;
 mod dataset;
 mod metrics;
+pub(crate) mod realtime;
 mod regression;
 mod review;
 

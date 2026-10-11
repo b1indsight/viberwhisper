@@ -24,6 +24,7 @@ pub(super) fn handle(action: PromptLabCommand) -> Result<()> {
             dataset,
             prompt_file,
             no_prompt,
+            realtime_cases,
             max_wer_percent,
             min_llm_score,
             min_proper_noun_percent,
@@ -33,6 +34,7 @@ pub(super) fn handle(action: PromptLabCommand) -> Result<()> {
             dataset,
             prompt_file,
             no_prompt,
+            realtime_cases,
             thresholds: Thresholds {
                 max_wer_percent,
                 min_llm_score,
@@ -49,6 +51,7 @@ struct EvaluateCommand {
     dataset: PathBuf,
     prompt_file: Option<PathBuf>,
     no_prompt: bool,
+    realtime_cases: Option<PathBuf>,
     thresholds: Thresholds,
     compare_to: Option<PathBuf>,
     output: Option<PathBuf>,
@@ -88,6 +91,13 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
         .map(EvaluationReport::read)
         .transpose()?;
     let (_, document) = load_config()?;
+    if command.realtime_cases.is_some() && !document.dictation.enabled {
+        return Err(std::io::Error::other(
+            "--realtime-cases requires the Realtime dictation backend",
+        )
+        .into());
+    }
+    let mut realtime = None;
     let (transcriber, stt): (Box<dyn Transcriber>, SttSnapshot) = if document.dictation.enabled {
         let prompt = if command.no_prompt {
             Some(String::new())
@@ -95,6 +105,13 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
             candidate_from_file
         };
         let settings = dictation_evaluation_settings(document.dictation.clone(), prompt);
+        if let Some(path) = command.realtime_cases.as_deref() {
+            realtime = Some(crate::prompt_lab::realtime::RealtimeRun {
+                cases: crate::prompt_lab::realtime::RealtimeCases::read(path)?,
+                settings: settings.clone(),
+                key: document.dictation_key(),
+            });
+        }
         let transcriber = crate::dictation::OfflineDictation::new(
             settings,
             document.dictation_key(),
@@ -125,10 +142,21 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
             thresholds: command.thresholds,
             output: command.output,
             compare_to: prior,
+            realtime,
         },
     )?;
     println!("report: {}", outcome.path.display());
     println!("status: {}", outcome.report.status.as_str());
+    if let Some(realtime) = &outcome.report.realtime {
+        let failed = realtime
+            .steps
+            .iter()
+            .flat_map(|step| &step.checks)
+            .filter(|check| !check.passed)
+            .count();
+        println!("realtime_checks_passed: {}", realtime.passed());
+        println!("realtime_failed_checks: {failed}");
+    }
     println!("wer_percent: {}", outcome.report.aggregates.wer.wer_percent);
     println!(
         "proper_noun_percent: {}",

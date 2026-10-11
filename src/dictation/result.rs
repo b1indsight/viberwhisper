@@ -4,26 +4,27 @@ use serde_json::Value;
 
 use super::config::{TermKind, valid_label, valid_term};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum ContextChoice {
+pub(crate) enum ContextChoice {
     Existing { id: String },
     New { label: String },
     Uncertain,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Candidate {
+pub(crate) struct Candidate {
     pub kind: TermKind,
     pub text: String,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct DictationResult {
+pub(crate) struct DictationResult {
     pub text: String,
     pub context: Option<ContextChoice>,
     pub memory_candidates: Vec<Candidate>,
+    pub raw: Value,
 }
 
 impl DictationResult {
@@ -39,7 +40,8 @@ impl DictationResult {
             #[serde(default)]
             memory_candidates: Value,
         }
-        let wire: Wire = serde_json::from_str(text)?;
+        let raw: Value = serde_json::from_str(text)?;
+        let wire: Wire = serde_json::from_value(raw.clone())?;
         ensure!(wire.text.len() <= 16_384, "dictation text is too long");
         ensure!(!wire.text.contains('\0'), "invalid text");
         let context = serde_json::from_value::<ContextChoice>(wire.context)
@@ -60,6 +62,7 @@ impl DictationResult {
             text: wire.text,
             context,
             memory_candidates: candidates,
+            raw,
         })
     }
 }

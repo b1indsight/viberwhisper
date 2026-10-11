@@ -64,6 +64,9 @@ pub enum PromptLabCommand {
         prompt_file: Option<PathBuf>,
         #[arg(long, conflicts_with = "prompt_file")]
         no_prompt: bool,
+        /// Replay explicit context and memory scenarios through the Realtime backend
+        #[arg(long)]
+        realtime_cases: Option<PathBuf>,
         #[arg(long)]
         max_wer_percent: f64,
         #[arg(long)]
@@ -319,6 +322,7 @@ mod tests {
                     dataset,
                     prompt_file,
                     no_prompt,
+                    realtime_cases,
                     max_wer_percent,
                     min_llm_score,
                     min_proper_noun_percent,
@@ -332,6 +336,7 @@ mod tests {
         assert_eq!(dataset, PathBuf::from("/tmp/lab"));
         assert_eq!(prompt_file, Some(PathBuf::from("candidate.txt")));
         assert!(!no_prompt);
+        assert!(realtime_cases.is_none());
         assert_eq!(max_wer_percent, 8.0);
         assert_eq!(min_llm_score, 95.0);
         assert_eq!(min_proper_noun_percent, 98.0);

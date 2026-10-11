@@ -10,15 +10,15 @@ use super::{
 
 const DAY: u64 = 86_400;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Observation {
-    recording: String,
-    segment: usize,
-    at: u64,
-    context: String,
-    text: String,
-    terms: Vec<LongTerm>,
+pub(crate) struct Observation {
+    pub recording: String,
+    pub segment: usize,
+    pub at: u64,
+    pub context: String,
+    pub text: String,
+    pub terms: Vec<LongTerm>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -28,20 +28,23 @@ struct MemoryFile {
     observations: Vec<Observation>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(super) struct SupportedTerm {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SupportedTerm {
     #[serde(flatten)]
-    term: LongTerm,
-    supporting_recordings: usize,
+    pub term: LongTerm,
+    pub supporting_recordings: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(super) struct Snapshot {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Snapshot {
     pub contexts: Vec<Context>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(super) struct Context {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Context {
     pub id: String,
     pub label: String,
     pub long_term: Vec<LongTerm>,
@@ -106,6 +109,18 @@ impl Memory {
         }
     }
 
+    /// Build isolated evaluation state; seed validation belongs to the explicit evaluation boundary.
+    pub(super) fn seeded(settings: MemoryConfig, observations: Vec<Observation>, at: u64) -> Self {
+        let mut memory = Self {
+            path: None,
+            settings,
+            observations,
+            frozen: false,
+        };
+        memory.prune(at);
+        memory
+    }
+
     fn prune(&mut self, now: u64) {
         self.observations.retain(|o| {
             now >= o.at
@@ -146,6 +161,12 @@ impl Memory {
     }
 
     pub fn snapshot(&self, now: u64) -> Snapshot {
+        let mut snapshot = self.untrimmed_snapshot(now);
+        Self::trim_snapshot(&mut snapshot);
+        snapshot
+    }
+
+    pub(super) fn untrimmed_snapshot(&self, now: u64) -> Snapshot {
         if !self.settings.enabled {
             return Snapshot {
                 contexts: Vec::new(),
@@ -222,9 +243,13 @@ impl Memory {
             };
             snapshot.contexts.push(context);
         }
+        snapshot
+    }
+
+    fn trim_snapshot(snapshot: &mut Snapshot) {
         // Trim globally by priority, so one context's history cannot crowd out
         // another context's configured terms. Configuration order breaks ties.
-        while serde_json::to_string(&snapshot)
+        while serde_json::to_string(&*snapshot)
             .expect("serializable snapshot")
             .chars()
             .count()
@@ -250,7 +275,6 @@ impl Memory {
             }
             snapshot.contexts.pop();
         }
-        snapshot
     }
 
     pub fn learn(&mut self, recording: &str, segment: usize, result: &DictationResult, now: u64) {

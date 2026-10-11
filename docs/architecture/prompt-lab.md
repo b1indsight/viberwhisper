@@ -70,6 +70,66 @@ results, and computes local metrics. It continues after a sample failure so one 
 contains all reachable outcomes, but returns nonzero and cannot be reviewed or compared as a
 baseline. References never enter an STT request.
 
+## Realtime Context and Memory Scenarios
+
+`prompt-lab evaluate --realtime-cases cases.json` opts into seeded sequential Realtime evaluation.
+It requires the enabled Realtime backend. Without this flag, evaluation retains frozen empty memory.
+Use the normal dataset, prompt, thresholds, output and agent-review arguments.
+
+The strict version-1 JSON file contains `cases`. Each case has an `id`, Unix-seconds `at`, optional
+`seed` and ordered `steps`. Every ready dataset ID must appear exactly once across all cases.
+Cases reset connection and memory; steps reuse them and learn only from successful recordings.
+`advance_seconds` moves the simulated clock before that step. No personal memory file is opened.
+
+```json
+{
+  "schema_version": 1,
+  "cases": [{
+    "id": "project", "at": 100,
+    "seed": {"long_term": [
+      {"context": "project", "kind": "proper_noun", "text": "ViberWhisper"}
+    ]},
+    "steps": [{
+      "sample_id": "REPLACE_WITH_READY_ID",
+      "expect": {
+        "input": {"contexts_present": ["project"]},
+        "context": {"kind": "existing", "id": "project"},
+        "candidates_present": [{"kind": "proper_noun", "text": "ViberWhisper"}],
+        "memory": {"terms_present": [{"context": "project", "kind": "proper_noun",
+          "text": "ViberWhisper", "supporting_recordings": 1}]},
+        "forbidden_text": ["history-only sentinel"]
+      }
+    }]
+  }]
+}
+```
+
+Replace the ID and assertions with the actual recording's requirements and include all ready IDs.
+A [two-step fixture](../../tests/fixtures/prompt-lab/realtime-cases.json) illustrates seeded history,
+learning support and expiration; replace its `first`/`second` IDs before running against your dataset.
+`seed.observations` entries have `recording`, `segment`, `at`, `context`, `text`, `terms` (the same
+shape as long-term terms). Seed recording names cannot begin with `sample:`. Future timestamps,
+invalid fields, excessive memory counts and initial snapshots over the production budget are rejected
+before networking. Production snapshot limits still expose the newest three histories per context.
+
+Both `input` and `memory` accept `contexts_present/absent`, `terms_present/absent` and
+`history_present/absent`. History and `forbidden_text` use exact substring matching. Term assertions
+match context, kind and text; an optional `supporting_recordings` requires a short-term candidate with
+that exact independent-recording support count. `candidates_absent` complements `candidates_present`.
+`context` accepts existing/new/uncertain and checks the final segment; candidate checks cover all
+segments. Metadata validity is always checked, including fields discarded by production parsing.
+
+The response uses the production `input_text` Snapshot and audio reference. References, assertions
+and forbidden strings are never sent. Reports include seeds and history, so store them appropriately.
+Schema-2 reports replay traces through production Memory and recompute assertions on read and review.
+Malformed metadata or failed assertions preserve an awaiting-review report but fail `gates.realtime`;
+transport or transcription errors yield an incomplete report. Semantic review must also inspect
+history contamination beyond declared strings. Ordinary schema-1 reports remain readable.
+`--compare-to` requires identical case IDs, order, clocks and assertions; seeds may differ, recorded
+by `comparison.realtime_inputs_changed` and per-case `realtime_seed_changes` with before/after seeds.
+Ordinary and scenario reports cannot compare directly. A new topic reusing a known label fails the
+metadata gate even though the live text parser tolerates it.
+
 ## Metrics
 
 The scoring policy is versioned as `stt-prompt-scoring-v2`:
