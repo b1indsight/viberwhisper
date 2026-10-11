@@ -1,6 +1,7 @@
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use unicode_normalization::UnicodeNormalization;
 
 use super::config::{TermKind, valid_label, valid_term};
 
@@ -56,7 +57,8 @@ impl DictationResult {
         if context.is_none() || candidates.len() > 8 {
             candidates.clear();
         } else {
-            candidates.retain(|c| valid_term(&c.text));
+            let spoken = normalized(&wire.text);
+            candidates.retain(|c| valid_term(&c.text) && spoken.contains(&normalized(&c.text)));
         }
         Ok(Self {
             text: wire.text,
@@ -65,4 +67,9 @@ impl DictationResult {
             raw,
         })
     }
+}
+
+/// Match metadata against delivered text without treating casing or compatibility glyphs as omissions.
+fn normalized(text: &str) -> String {
+    text.nfkc().flat_map(char::to_lowercase).collect()
 }

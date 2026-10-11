@@ -21,6 +21,31 @@ fn invalid_memory_does_not_discard_text_and_cannot_invent_context() {
 }
 
 #[test]
+fn candidates_absent_from_current_text_cannot_pollute_learned_memory() {
+    // A real response invented a candidate absent even from its own transcript.
+    // Keep the transcript and grounded names, including harmless case/full-width differences.
+    let wire = json!({"text":"使用ｒｅｄｉｓ缓存。", "context":{"kind":"new","label":"开发"},
+        "memory_candidates":[{"kind":"proper_noun","text":"Redis"},
+            {"kind":"phrase","text":"3核38都是无统的"}]});
+    let result = DictationResult::parse(&wire.to_string(), &[]).unwrap();
+    assert_eq!(result.text, "使用ｒｅｄｉｓ缓存。");
+    assert_eq!(result.memory_candidates.len(), 1);
+    assert_eq!(result.memory_candidates[0].text, "Redis");
+    assert_eq!(result.raw["memory_candidates"].as_array().unwrap().len(), 2);
+    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    memory.learn("recording", 0, &result, 100);
+    let snapshot = serde_json::to_value(memory.snapshot(100)).unwrap();
+    assert_eq!(
+        snapshot["contexts"][0]["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(snapshot["contexts"][0]["candidates"][0]["text"], "Redis");
+}
+
+#[test]
 fn short_term_memory_expires_live_and_after_restart_but_long_term_survives() {
     for configured in [false, true] {
         let settings: DictationConfig =

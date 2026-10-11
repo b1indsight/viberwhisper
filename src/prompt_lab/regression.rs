@@ -776,17 +776,19 @@ pub(crate) fn evaluate(
         let compatible = match (&prior.realtime, &request.realtime) {
             (None, None) => true,
             (Some(old), Some(new)) => {
-                old.contract_sha256
-                    == new
-                        .cases
-                        .contract_digest()
-                        .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?
+                old.policy_version == super::realtime::POLICY
+                    && old.contract_sha256
+                        == new
+                            .cases
+                            .contract_digest()
+                            .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?
             }
             _ => false,
         };
         if !compatible {
             return Err(RegressionError::Invalid(
-                "Realtime comparison must keep case order, clock and assertions unchanged".into(),
+                "Realtime comparison must keep policy, case order, clock and assertions unchanged"
+                    .into(),
             ));
         }
     }
@@ -1522,6 +1524,9 @@ mod tests {
         });
         report.validate_contract().unwrap();
         assert_eq!(report.gate_results(100.0).realtime, Some(false));
+        let mut legacy = report.clone();
+        legacy.realtime.as_mut().unwrap().policy_version = "realtime-context-memory-v1".into();
+        legacy.validate_contract().unwrap();
         let mut tampered = report.clone();
         tampered.realtime.as_mut().unwrap().steps[0]
             .checks
@@ -1535,6 +1540,26 @@ mod tests {
         assert_eq!(complete.status, RunStatus::Complete);
         assert_eq!(complete.meets_targets, Some(false));
         complete.validate_contract().unwrap();
+        // Policy-v1 baselines remain readable when their evidence is safe, but cannot
+        // be compared against newly strengthened candidate-grounding validation.
+        let mut legacy = complete.clone();
+        legacy.realtime.as_mut().unwrap().policy_version = "realtime-context-memory-v1".into();
+        legacy.validate_contract().unwrap();
+        let mut next = request(directory.path().join("next.json"));
+        next.stt = complete.stt.clone();
+        next.realtime = Some(crate::prompt_lab::realtime::RealtimeRun {
+            cases: complete.realtime.unwrap().cases,
+            settings: crate::dictation::config::DictationConfig {
+                url: next.stt.endpoint.clone(),
+                model: next.stt.model.clone(),
+                prompt: next.stt.prompt.clone(),
+                ..Default::default()
+            },
+            key: None,
+        });
+        next.compare_to = Some(legacy);
+        let error = evaluate(&store, &SequenceTranscriber::new([]), next).unwrap_err();
+        assert!(error.to_string().contains("policy"));
     }
 
     #[test]

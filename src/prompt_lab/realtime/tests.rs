@@ -136,3 +136,27 @@ fn new_topic_cannot_redeclare_an_existing_snapshot_label() {
             .any(|check| !check.passed)
     );
 }
+
+#[test]
+fn ungrounded_candidates_fail_metadata_checks_even_when_text_is_valid() {
+    let empty = Snapshot { contexts: vec![] };
+    let traces = vec![SegmentTrace {
+        index: 0,
+        input: empty.clone(),
+        output: json!({
+            "text":"使用Redis缓存。","context":{"kind":"new","label":"开发"},
+            "memory_candidates":[{"kind":"proper_noun","text":"Redis"},
+                {"kind":"phrase","text":"3核38都是无统的"}]
+        }),
+    }];
+    let learned = Replay::new(&MemorySeed::default(), 100)
+        .replay("first", 100, &traces, true)
+        .unwrap()
+        .snapshot(100);
+    let checks = Expectations::default().check(&empty, &traces, &learned, "使用Redis缓存。");
+    assert!(
+        checks
+            .iter()
+            .any(|check| check.name == "segment.0.metadata" && !check.passed)
+    );
+}
