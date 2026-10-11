@@ -59,6 +59,11 @@ The selected recognizer receives an in-memory prompt override. Realtime evaluate
 instructions, including the initial meta instructions and base prompt. `--prompt-file` replaces them;
 `--no-prompt` sends empty instructions. Personal memory is disabled, and reports store the actual
 prompt without embedding context data. Candidates do not modify application configuration.
+Realtime resolves the fixed-order `dictation.prompt_components` object, or the embedded JSON
+default components, through the same configuration-owned composition used by live requests.
+Full-string and no-prompt evaluation overrides clear the cloned component selection, so a saved
+component object cannot conflict with an invocation-scoped full override. Reports and prompt
+digests describe the actual composed or overridden instructions, never just one component.
 For each snapshot WAV,
 the runner recreates production-sized chunks, makes fresh sequential STT requests, merges ordered
 results, and computes local metrics. It continues after a sample failure so one `incomplete` report

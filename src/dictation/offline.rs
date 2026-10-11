@@ -39,7 +39,7 @@ impl OfflineDictation {
             endpoint: self.settings.url.clone(),
             model: self.settings.model.clone(),
             language: self.language.clone(),
-            prompt: Some(self.settings.prompt().to_owned()),
+            prompt: Some(self.settings.prompt()),
             temperature: 0.0,
         }
     }

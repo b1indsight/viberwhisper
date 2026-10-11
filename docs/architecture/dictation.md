@@ -9,7 +9,7 @@ Raw prompt-lab capture deliberately retains the HTTP transcriber.
 ## Ownership
 
 - `config`: typed optional v3 configuration, endpoint validation, environment authentication,
-  default/overridden complete task instructions and user-owned long-term terms. Debug output omits content.
+  strict prompt components, full-string overrides and user-owned long-term terms. Debug output omits content.
 - `engine`: one persistent async worker and reusable connection, recording-scoped I/O and cancellation,
   bounded backlog, ordered 30-second response segments, final text concatenation without deduplication.
 - `audio::PcmResampler`: shared stateful 24 kHz conversion with filter-delay and final-tail compensation.
@@ -20,6 +20,27 @@ Raw prompt-lab capture deliberately retains the HTTP transcriber.
 - `memory`: 24-hour observations with provenance and independent-recording support counts; bounded
   per-topic recent history, candidate retrieval and user-configured persistent terms; atomic storage.
 - `offline`: conversion and regression with frozen context and no live-memory persistence.
+
+## Prompt configuration
+
+`assets/dictation-prompt.default.json` is the sole source of default instruction text. The JSON
+resource is embedded for portable macOS/Windows packaging; Rust contains only its strict seven-field
+type, source selection, validation and composition. Users edit `dictation.prompt_components` in
+their existing config file and restart; no compilation or auxiliary files are needed.
+
+Components are joined in the fixed order task, language, numbers, cleanup, output_format, context,
+memory. Each string is trimmed at its edges; empty components are skipped; remaining components
+are separated by a newline. Content is literal, with no template substitutions. All seven keys
+are required for a custom object; unknown keys and non-string values are rejected.
+The final instructions retain the 4096-Unicode-character limit, including separators.
+
+`prompt` and `prompt_components` default to null. With both absent/null, the embedded JSON provides
+the default components. A full-string `prompt`, including an empty string, replaces all components;
+explicitly configuring both sources is an error. Old full-string configs remain valid and are
+not rewritten on read. Config examples include complete editable default components.
+The same resolved string is used for session instructions, response instructions and offline
+report metadata. Prompt-lab overrides operate on a cloned configuration, clear component selection
+and disable personal memory; saved configuration is untouched.
 
 ## Audio and lifecycle
 
