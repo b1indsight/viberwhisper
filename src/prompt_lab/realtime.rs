@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const POLICY: &str = "realtime-context-memory-v1";
+pub(super) const POLICY: &str = "realtime-context-memory-v2";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -414,7 +414,7 @@ impl RealtimeReport {
                 .collect::<Vec<_>>(),
         )?;
         ensure!(
-            self.policy_version == POLICY
+            [POLICY, "realtime-context-memory-v1"].contains(&self.policy_version.as_str())
                 && self.cases_sha256 == self.cases.digest()?
                 && self.contract_sha256 == self.cases.contract_digest()?,
             "Realtime report identity mismatch"

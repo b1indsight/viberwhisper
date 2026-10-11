@@ -83,8 +83,11 @@ only unexpired observations and configured terms supply labels, including in lon
 Model-returned observations of already
 known terms refresh their short-term lifetime; merely including a term in the prompt does not.
 Uncertain/new topics are model decisions, not proof
-of accurate classification; unknown existing IDs are rejected. Candidates contain only kind and text; no evidence field or
-text-evidence matching is required.
+of accurate classification; unknown existing IDs are rejected. Candidates contain only kind and text;
+no evidence field is required. Candidates must occur as a substring of the delivered text after
+NFKC normalization and lowercasing. Unsupported candidates are discarded without losing text;
+the original JSON remains available for prompt-lab metadata validation. This checks textual
+support, not acoustic accuracy or whether a phrase is suitable for future memory.
 
 While awaiting microphone frames, the existing worker also polls the connection for incoming
 control traffic. Ping receives Pong and server errors fail the recording before stop. Other

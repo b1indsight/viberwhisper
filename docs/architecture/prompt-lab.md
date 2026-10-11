@@ -130,6 +130,11 @@ by `comparison.realtime_inputs_changed` and per-case `realtime_seed_changes` wit
 Ordinary and scenario reports cannot compare directly. A new topic reusing a known label fails the
 metadata gate even though the live text parser tolerates it.
 
+Realtime policy `realtime-context-memory-v2` also rejects candidates absent from the delivered
+text under production NFKC/lowercase matching. Policy-v1 reports remain readable only when their
+snapshots and checks still replay under current parsing. Cross-policy comparisons are rejected
+before networking; rerun the baseline to compare with policy v2.
+
 ## Metrics
 
 The scoring policy is versioned as `stt-prompt-scoring-v2`:
