@@ -17,14 +17,22 @@ The config package intentionally has four files:
 
 `ConfigDocument` accepts the canonical document with `schema_version: 3`. Missing or unknown fields,
 wrong versions, invalid JSON, and non-finite floats are errors, except that optional
-`audio.input_device` defaults to the system device when absent.
+`audio.input_device` defaults to the system device and missing `dictation` fields use
+their typed defaults.
 Retired fields such as `chunking`, `session`, and `inference.api.provider` are not accepted. A
 missing file is represented as `None` by `ConfigStore::load`; ordinary callers explicitly select
 the in-memory defaults while setup uses the absence to trigger the first-run flow.
 
 `ConfigStore::discover()` gets the application directory from its own `config_dir()` helper and appends
 `config.json`. Reads and writes therefore use the same canonical path independent of the launch
-working directory. Writes use a temporary file in the destination directory followed by atomic
+directory. After successful desktop listener resolution, an explicit store operation
+fills absent keys only under `dictation` and persists them atomically. Existing values,
+including nulls and empty prompts, and unrelated sections are preserved. Complete files
+are not rewritten. Source comparisons detect changes before persistence; the final
+check-to-replace interval is not protected by a file lock. Ordinary loads and CLI
+inspection do not trigger this backfill. Missing prompt defaults persist as null,
+so bundled prompt improvements continue to apply.
+Writes use a temporary file in the destination directory followed by atomic
 publication. `ConfigStore::load` is the single read and parse path: `None` distinguishes a missing
 file, `Some` carries a loaded document, and malformed or unreadable files remain errors.
 

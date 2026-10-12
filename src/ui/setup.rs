@@ -77,7 +77,10 @@ pub(crate) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
                 .to_string(),
         ),
         Ok(Some(document)) => match resolve_document(&document) {
-            Ok(config) => return Ok(Some(config)),
+            Ok(config) => {
+                store.materialize_dictation_defaults(&document)?;
+                return Ok(Some(config));
+            }
             Err(error) => (
                 document,
                 format!(

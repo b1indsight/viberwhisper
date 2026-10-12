@@ -30,6 +30,9 @@ pub enum ConfigError {
         source: serde_json::Error,
     },
     Serialize(serde_json::Error),
+    SourceChanged {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -54,6 +57,11 @@ impl fmt::Display for ConfigError {
             Self::Serialize(source) => {
                 write!(formatter, "failed to serialize configuration: {source}")
             }
+            Self::SourceChanged { path } => write!(
+                formatter,
+                "configuration {} changed during startup; restart to load the latest settings",
+                path.display()
+            ),
         }
     }
 }
@@ -63,7 +71,7 @@ impl std::error::Error for ConfigError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::InvalidDocument { source, .. } | Self::Serialize(source) => Some(source),
-            Self::ConfigDirectoryUnavailable => None,
+            Self::ConfigDirectoryUnavailable | Self::SourceChanged { .. } => None,
         }
     }
 }
@@ -224,6 +232,97 @@ mod tests {
             ConfigStore::at(path).load().unwrap_err(),
             ConfigError::InvalidDocument { .. }
         ));
+    }
+
+    #[test]
+    fn startup_materializes_missing_dictation_but_load_stays_read_only() {
+        // Upgrading an existing v3 file must expose defaults without enabling Realtime.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let store = ConfigStore::at(path.clone());
+        let mut original = serde_json::to_value(ConfigDocument::default()).unwrap();
+        original.as_object_mut().unwrap().remove("dictation");
+        let bytes = serde_json::to_vec(&original).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let loaded = store.load().unwrap().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(store.materialize_dictation_defaults(&loaded).unwrap());
+        let updated: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(updated["dictation"]["enabled"], false);
+        assert_eq!(updated["dictation"]["prompt"], serde_json::Value::Null);
+        assert_eq!(
+            updated["dictation"]["prompt_components"],
+            serde_json::Value::Null
+        );
+        let mut expected = original;
+        expected["dictation"] = serde_json::to_value(&loaded.dictation).unwrap();
+        assert_eq!(updated, expected);
+        let complete = std::fs::read(&path).unwrap();
+        assert!(!store.materialize_dictation_defaults(&loaded).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), complete);
+    }
+
+    #[test]
+    fn startup_backfill_preserves_explicit_dictation_and_unrelated_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let store = ConfigStore::at(path.clone());
+        let mut original: serde_json::Value =
+            serde_json::from_str(include_str!("../../config.example.json")).unwrap();
+        let components = serde_json::from_str::<serde_json::Value>(include_str!(
+            "../../assets/dictation-prompt.default.json"
+        ))
+        .unwrap();
+        original["dictation"] = serde_json::json!({
+            "enabled": true,
+            "url": "ws://example.test:8080/v1/realtime",
+            "model": "custom-model",
+            "api_key_env": "",
+            "prompt": null,
+            "prompt_components": components,
+            "memory": {"enabled": false}
+        });
+        std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let loaded = store.load().unwrap().unwrap();
+        assert!(store.materialize_dictation_defaults(&loaded).unwrap());
+        let updated: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        original["dictation"]["memory"]["long_term"] = serde_json::json!([]);
+        assert_eq!(updated, original);
+
+        // An explicit empty prompt must remain an opt-out, not become a default.
+        original["dictation"]["prompt"] = serde_json::json!("");
+        original["dictation"]["prompt_components"] = serde_json::Value::Null;
+        original["dictation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("memory");
+        std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let loaded = store.load().unwrap().unwrap();
+        assert!(store.materialize_dictation_defaults(&loaded).unwrap());
+        assert_eq!(
+            store.load().unwrap().unwrap().dictation.prompt.as_deref(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn startup_backfill_rejects_changed_and_invalid_sources_without_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let store = ConfigStore::at(path.clone());
+        store.save(&ConfigDocument::default()).unwrap();
+        let loaded = store.load().unwrap().unwrap();
+        let mut changed = loaded.clone();
+        changed.dictation.enabled = true;
+        store.save(&changed).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(store.materialize_dictation_defaults(&loaded).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::write(&path, "invalid json").unwrap();
+        assert!(store.materialize_dictation_defaults(&loaded).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid json");
     }
 
     #[test]
