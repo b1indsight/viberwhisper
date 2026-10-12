@@ -1,6 +1,6 @@
 # 55 - macOS hotkey crash and Accessibility permission guidance
 
-**Stage:** Implementation and validation
+**Stage:** Ready for review
 **PR:** [#145](https://github.com/b1indsight/viberwhisper/pull/145)
 
 ## 1. Initial plan
@@ -247,3 +247,18 @@ permission changes, and a new transcript display are outside this PR.
   granted-permission insertion and the settings deep-link destination were not separately
   confirmed in this run; Ghostty input and the visible native dialog were user-confirmed.
   Independent code review and hosted CI are pending.
+
+### [003] — 2026-10-12 — Final review and native CI results
+
+- **Evidence / validation:** The independent Codex review of implementation commit
+  `47955cd4b69a21791a164e4943d85a1bb83e184e` returned no findings. The exact reviewed
+  implementation was published without additional source changes.
+  [macOS CI](https://github.com/b1indsight/viberwhisper/actions/runs/38226534650/job/114735311485)
+  passed native build, application tests, the added dependency-local regression, formatting,
+  and Clippy. [Windows CI](https://github.com/b1indsight/viberwhisper/actions/runs/38226534650/job/114735311168)
+  passed native build, tests, and Clippy with the desktop launcher feature, resolving the
+  native Windows validation pending in entry 002.
+- **Outcome / limitations:** Both fixes are implemented and reviewable on the same PR.
+  This final update changes documentation only. Interactive verification was performed
+  in Ghostty and for the permission dialog; the separate TextEdit and deep-link checks
+  listed in entry 002 remain unconfirmed. No installed release was replaced or published.
