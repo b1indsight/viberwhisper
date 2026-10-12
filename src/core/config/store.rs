@@ -58,24 +58,15 @@ impl ConfigStore {
         &self,
         document: &ConfigDocument,
     ) -> Result<bool, ConfigError> {
-        let read = || {
-            fs::read_to_string(&self.path).map_err(|source| ConfigError::Io {
-                path: self.path.clone(),
-                source,
-            })
-        };
-        let invalid = |source| ConfigError::InvalidDocument {
+        let contents = fs::read_to_string(&self.path).map_err(|source| ConfigError::Io {
             path: self.path.clone(),
             source,
-        };
-        let contents = read()?;
-        let current: ConfigDocument = serde_json::from_str(&contents).map_err(invalid)?;
-        if &current != document {
-            return Err(ConfigError::SourceChanged {
+        })?;
+        let mut value: serde_json::Value =
+            serde_json::from_str(&contents).map_err(|source| ConfigError::InvalidDocument {
                 path: self.path.clone(),
-            });
-        }
-        let mut value: serde_json::Value = serde_json::from_str(&contents).map_err(invalid)?;
+                source,
+            })?;
         let defaults = serde_json::to_value(&document.dictation).map_err(ConfigError::Serialize)?;
         let dictation = value
             .as_object_mut()
@@ -84,12 +75,6 @@ impl ConfigStore {
             .or_insert_with(|| serde_json::json!({}));
         if !fill_missing(dictation, &defaults) {
             return Ok(false);
-        }
-        // Detect edits made while preparing the backfill rather than replacing newer settings.
-        if read()? != contents {
-            return Err(ConfigError::SourceChanged {
-                path: self.path.clone(),
-            });
         }
         self.write_atomic(&value)?;
         Ok(true)

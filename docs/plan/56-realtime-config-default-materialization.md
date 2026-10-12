@@ -1,6 +1,6 @@
 # Persist missing Realtime configuration defaults — Feature record
 
-**Stage:** Implementation
+**Stage:** Review
 **PR:** https://github.com/b1indsight/viberwhisper/pull/147
 
 ## 1. Initial plan
@@ -112,3 +112,34 @@ expected materialization assertion (exit 101). Restoring the operation produced
 the passing full suite. This demonstrates the missing-field regression against
 the previous read-only behavior. Logs remain in `.cache/2026-10-12/` and are not
 committed. Hosted macOS/Windows validation and independent review remain pending.
+
+### 003 — 2026-10-12: Independent review reports a concurrent-write limitation
+
+The independent review passed the critical-only gate and reported one medium
+finding at `src/core/config/store.rs:94`: a successful `config set` between the
+last source comparison and atomic replacement can still be overwritten by
+startup backfill. The optimistic check does not coordinate all writers. The
+review recommends a shared lock and a deterministic interleaved-write test.
+This limitation remains present; no findings-driven code changes have been
+made. Such rework requires a new explicit request under the review skill.
+The implementation was pushed at reviewed commit
+`5049984deec4c4e344720aca9fe3a9947bc04aed`. Local build also passed; hosted CI is
+pending.
+
+### 004 — 2026-10-12: Hosted validation passed
+
+macOS and Windows CI both passed for the pushed implementation and review record:
+https://github.com/b1indsight/viberwhisper/actions/runs/38251202081.
+The PR is ready for review with the concurrent-write finding from entry 003 still
+open. No release has been produced and the installed application is unchanged.
+
+### 005 — 2026-10-12: Remove concurrency handling as requested
+
+The user explicitly requested removal of the low-probability concurrency handling.
+This supersedes the initial source-recheck requirement and entry 001's optimistic
+checks. Removed both source comparisons, `SourceChanged`, and the concurrent-edit
+test. The flow now reads JSON, fills defaults, and atomically saves only on change.
+Concurrent writers are not coordinated; no lock is added. Existing-value,
+idempotency, read-only-load, and invalid-JSON tests remain.
+Validation after removal: 247 tests passed, 2 existing optional tests ignored;
+formatting, all-target Clippy with warnings denied, and diff checks passed.

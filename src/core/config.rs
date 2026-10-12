@@ -30,9 +30,6 @@ pub enum ConfigError {
         source: serde_json::Error,
     },
     Serialize(serde_json::Error),
-    SourceChanged {
-        path: PathBuf,
-    },
 }
 
 impl fmt::Display for ConfigError {
@@ -57,11 +54,6 @@ impl fmt::Display for ConfigError {
             Self::Serialize(source) => {
                 write!(formatter, "failed to serialize configuration: {source}")
             }
-            Self::SourceChanged { path } => write!(
-                formatter,
-                "configuration {} changed during startup; restart to load the latest settings",
-                path.display()
-            ),
         }
     }
 }
@@ -71,7 +63,7 @@ impl std::error::Error for ConfigError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::InvalidDocument { source, .. } | Self::Serialize(source) => Some(source),
-            Self::ConfigDirectoryUnavailable | Self::SourceChanged { .. } => None,
+            Self::ConfigDirectoryUnavailable => None,
         }
     }
 }
@@ -308,18 +300,12 @@ mod tests {
     }
 
     #[test]
-    fn startup_backfill_rejects_changed_and_invalid_sources_without_writing() {
+    fn startup_backfill_rejects_invalid_json_without_writing() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("config.json");
         let store = ConfigStore::at(path.clone());
         store.save(&ConfigDocument::default()).unwrap();
         let loaded = store.load().unwrap().unwrap();
-        let mut changed = loaded.clone();
-        changed.dictation.enabled = true;
-        store.save(&changed).unwrap();
-        let bytes = std::fs::read(&path).unwrap();
-        assert!(store.materialize_dictation_defaults(&loaded).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
         std::fs::write(&path, "invalid json").unwrap();
         assert!(store.materialize_dictation_defaults(&loaded).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid json");
