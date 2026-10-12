@@ -200,6 +200,14 @@ and the retained transcription provides a manual Cmd+V recovery path.
 Accessibility permission is required for both routes. Missing permission is a hard input error and
 leaves the clipboard untouched.
 
+The desktop UI checks `AXIsProcessTrusted` on startup and shows macOS-owned native guidance
+on the main thread when trust is missing. Typed permission errors from full or partial delivery
+also enqueue an application event, covering permission revoked after startup. One per-launch
+flag suppresses repeated alerts, and the main thread rechecks trust before showing a queued
+message. Canceled finalization does not request guidance. Capture, config, and offline conversion
+flows do not show this text-delivery alert. The alert offers settings instructions, history-copy
+recovery, and an explicit Open Settings button; it does not change permission or retry delivery.
+
 ### History clipboard copy
 
 `MacClipboard` shares `MacTyper`'s delivery mutex and reuses the existing AppKit string replacement.

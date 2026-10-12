@@ -55,3 +55,33 @@ pub(crate) fn normalize_setup_hotkey_event(event_type: EventType) -> EventType {
     #[cfg(not(target_os = "macos"))]
     event_type
 }
+
+/// Checks whether the current process can deliver desktop text on this platform.
+pub(crate) fn text_delivery_permission_available() -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::text_delivery_available();
+
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+/// Recognizes the typed macOS denial through anyhow context, without matching error text.
+pub(crate) fn is_text_delivery_permission_error(error: &anyhow::Error) -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::is_text_delivery_permission_error(error);
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+/// Shows platform-owned instructions; callers must run on the desktop main thread.
+pub(crate) fn show_text_delivery_permission_guidance() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    return macos::show_guidance();
+
+    #[cfg(not(target_os = "macos"))]
+    Ok(())
+}

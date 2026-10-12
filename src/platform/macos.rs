@@ -15,6 +15,18 @@ mod accessibility;
 mod application;
 pub(super) mod hotkey;
 mod pasteboard;
+mod permission;
+
+pub(super) use permission::{show_guidance, text_delivery_available};
+
+pub(super) fn is_text_delivery_permission_error(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<MacInjectionError>(),
+        Some(MacInjectionError::Accessibility(
+            AccessibilityError::PermissionDenied
+        ))
+    )
+}
 
 static DESKTOP_WRITE: Mutex<()> = Mutex::new(());
 
@@ -321,6 +333,24 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     use super::*;
+
+    #[test]
+    fn permission_denial_is_recognized_through_context_without_matching_messages() {
+        let denial = anyhow::Error::new(MacInjectionError::Accessibility(
+            AccessibilityError::PermissionDenied,
+        ))
+        .context("finalized transcription delivery");
+        assert!(is_text_delivery_permission_error(&denial));
+        assert!(!is_text_delivery_permission_error(&anyhow::anyhow!(
+            "Accessibility permission is required"
+        )));
+        assert!(!is_text_delivery_permission_error(&anyhow::Error::new(
+            MacInjectionError::Accessibility(AccessibilityError::SecureControl)
+        )));
+        assert!(!is_text_delivery_permission_error(&anyhow::Error::new(
+            MacInjectionError::Paste(PasteError::Delivery("event posting failed".into()))
+        )));
+    }
 
     #[test]
     fn macos_policy_owns_native_hotkey_and_icon_rules() {
