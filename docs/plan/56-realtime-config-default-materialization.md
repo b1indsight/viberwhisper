@@ -143,3 +143,10 @@ Concurrent writers are not coordinated; no lock is added. Existing-value,
 idempotency, read-only-load, and invalid-JSON tests remain.
 Validation after removal: 247 tests passed, 2 existing optional tests ignored;
 formatting, all-target Clippy with warnings denied, and diff checks passed.
+
+### 006 — 2026-10-12: Review of requested removal
+
+Review passed the critical-only gate. One medium finding remains: replacing the
+validated file with non-object JSON before backfill can trigger the object assertion.
+This is within the explicitly excluded concurrent-edit scenario; no further guard
+or findings-driven code change was added. Hosted CI will validate the final PR head.
