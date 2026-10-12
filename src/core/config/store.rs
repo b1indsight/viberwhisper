@@ -49,6 +49,38 @@ impl ConfigStore {
     }
 
     pub fn save(&self, document: &ConfigDocument) -> Result<(), ConfigError> {
+        self.write_atomic(document)
+    }
+
+    /// Persists absent Realtime fields after the desktop caller validates `document`.
+    /// Explicit values and unrelated sections are retained; ordinary `load` stays read-only.
+    pub(crate) fn materialize_dictation_defaults(
+        &self,
+        document: &ConfigDocument,
+    ) -> Result<bool, ConfigError> {
+        let contents = fs::read_to_string(&self.path).map_err(|source| ConfigError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
+        let mut value: serde_json::Value =
+            serde_json::from_str(&contents).map_err(|source| ConfigError::InvalidDocument {
+                path: self.path.clone(),
+                source,
+            })?;
+        let defaults = serde_json::to_value(&document.dictation).map_err(ConfigError::Serialize)?;
+        let dictation = value
+            .as_object_mut()
+            .expect("validated configuration is an object")
+            .entry("dictation")
+            .or_insert_with(|| serde_json::json!({}));
+        if !fill_missing(dictation, &defaults) {
+            return Ok(false);
+        }
+        self.write_atomic(&value)?;
+        Ok(true)
+    }
+
+    fn write_atomic(&self, document: &impl serde::Serialize) -> Result<(), ConfigError> {
         let parent = self.path.parent().ok_or_else(|| ConfigError::Io {
             path: self.path.clone(),
             source: std::io::Error::new(
@@ -88,6 +120,25 @@ impl ConfigStore {
             })?;
         Ok(())
     }
+}
+
+fn fill_missing(value: &mut serde_json::Value, defaults: &serde_json::Value) -> bool {
+    let (Some(value), Some(defaults)) = (value.as_object_mut(), defaults.as_object()) else {
+        return false;
+    };
+    let mut changed = false;
+    for (key, default) in defaults {
+        match value.entry(key.clone()) {
+            serde_json::map::Entry::Vacant(entry) => {
+                entry.insert(default.clone());
+                changed = true;
+            }
+            serde_json::map::Entry::Occupied(mut entry) => {
+                changed |= fill_missing(entry.get_mut(), default);
+            }
+        }
+    }
+    changed
 }
 
 /// Canonical shared directory for configuration and local transcription history.

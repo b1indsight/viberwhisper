@@ -222,6 +222,8 @@ macOS 的 Chromium/兜底粘贴会在极短的内部注入窗口暂停 ViberWhis
 #### Realtime 听写与语境记忆
 
 仅通过配置文件设置，修改后重启生效；不新增设置窗口、托盘配置或专用管理命令。
+升级后，桌面应用成功验证现有配置时会自动补齐并保存缺失的 Realtime 字段，包括 `memory` 的子字段；已有开关、地址、模型和自定义提示词保持原样。缺少整个 `dictation` 时补入默认配置，`enabled` 仍为 `false`。完整配置不会重复写入，`config get/list/check` 等检查命令不会触发补齐。
+缺失的 `prompt` 和 `prompt_components` 保存为 `null`，继续使用内置默认提示词；不会将默认提示词正文写入配置。`prompt: ""` 仍表示不使用提示词。
 在 `viberwhisper config path` 显示的文件中加入以下片段（完整示例见 `config.example.json`）：
 
 ```json

@@ -1,3 +1,4 @@
+2026-10-12: Persist missing Realtime configuration defaults after successful desktop startup validation while preserving explicit settings and read-only config inspection
 2026-10-12: Release 0.4.1 with the macOS hotkey crash fix and once-per-launch Accessibility permission guidance
 2026-10-12: Skip unused macOS character-name decoding in pinned rdev 0.5.3 to avoid background input-source crashes; show once-per-launch Accessibility permission guidance with settings and history recovery instructions
 2026-10-12: Release 0.4.0 with opt-in Realtime dictation and contextual memory, editable prompt components, isolated context/memory regression scenarios, and transcript-grounded memory candidates
