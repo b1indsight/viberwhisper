@@ -10,6 +10,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::WindowId;
 
+use super::permission::PermissionGuidance;
 use super::platform_session_event;
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
 use crate::core::orchestrator::{SessionError, SessionOrchestrator};
@@ -28,6 +29,7 @@ pub(super) enum AppEvent {
     AudioChunkAvailable { session_id: SessionId },
     HistorySaved(String),
     FinalizationFinished { session_id: SessionId },
+    TextDeliveryPermissionRequired,
 }
 
 struct FinalizationTask {
@@ -91,6 +93,7 @@ pub(super) struct ListenerApplication {
     output: ListenerOutput,
     proxy: EventLoopProxy<AppEvent>,
     finalization: Option<FinalizationTask>,
+    permission_guidance: PermissionGuidance,
 }
 
 pub(super) enum ListenerOutput {
@@ -159,6 +162,7 @@ impl ListenerApplication {
             output,
             proxy,
             finalization: None,
+            permission_guidance: PermissionGuidance::default(),
         }
     }
 
@@ -175,10 +179,22 @@ impl ListenerApplication {
                 self.drain_audio_chunks(event_loop, session_id);
             }
             AppEvent::HistorySaved(text) => self.platform.push_history(text),
+            AppEvent::TextDeliveryPermissionRequired => self.show_permission_guidance_if_needed(),
             AppEvent::FinalizationFinished { session_id } => {
                 let event = finalization_completion_event(&mut self.finalization, session_id);
                 self.drive_session(event_loop, event);
             }
+        }
+    }
+
+    fn show_permission_guidance_if_needed(&mut self) {
+        if matches!(self.output, ListenerOutput::Delivery { .. })
+            && self
+                .permission_guidance
+                .request(crate::platform::text_delivery_permission_available())
+            && let Err(error) = crate::platform::show_text_delivery_permission_guidance()
+        {
+            error!(%error, "Failed to show Accessibility permission guidance");
         }
     }
 
@@ -388,6 +404,7 @@ impl ListenerApplication {
                 let mut post_processor = post_processor.create_session();
                 let typer = Arc::clone(typer);
                 let proxy = self.proxy.clone();
+                let permission_proxy = self.proxy.clone();
                 spawn_finalization_worker(
                     session_id,
                     move || {
@@ -396,6 +413,10 @@ impl ListenerApplication {
                             &mut post_processor,
                             typer.as_ref(),
                             gate.as_ref(),
+                            || {
+                                let _ = permission_proxy
+                                    .send_event(AppEvent::TextDeliveryPermissionRequired);
+                            },
                         );
                     },
                     move |session_id| {
@@ -450,7 +471,9 @@ impl ListenerApplication {
 }
 
 impl ApplicationHandler<AppEvent> for ListenerApplication {
-    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
+        self.show_permission_guidance_if_needed();
+    }
 
     fn window_event(
         &mut self,
@@ -474,6 +497,7 @@ fn finish_transcription(
     post_processor: &mut PostProcessorSession,
     typer: &dyn TextTyper,
     gate: &FinalizationGate,
+    notify_permission_required: impl Fn(),
 ) {
     if gate.is_cancelled() {
         return;
@@ -498,9 +522,7 @@ fn finish_transcription(
                 }
             };
             info!(text = %text, "Typing transcribed text");
-            if let Err(error) = gate.type_text_if_active(typer, &text) {
-                error!(error = %error, "Failed to type text");
-            }
+            deliver_text(typer, gate, &text, &notify_permission_required);
         }
         Err(SessionError::NoChunks) => warn!("No audio chunks to transcribe"),
         Err(SessionError::Routing(error)) => {
@@ -514,10 +536,8 @@ fn finish_transcription(
                 failed_chunks = errors.len(),
                 "Partial transcription failure"
             );
-            if !partial_text.is_empty()
-                && let Err(error) = gate.type_text_if_active(typer, &partial_text)
-            {
-                error!(error = %error, "Failed to type partial text");
+            if !partial_text.is_empty() {
+                deliver_text(typer, gate, &partial_text, &notify_permission_required);
             }
         }
         Err(SessionError::ConvergenceTimeout {
@@ -525,11 +545,23 @@ fn finish_transcription(
             partial_text,
         }) => {
             warn!(pending_count, "Convergence timeout");
-            if !partial_text.is_empty()
-                && let Err(error) = gate.type_text_if_active(typer, &partial_text)
-            {
-                error!(error = %error, "Failed to type partial text");
+            if !partial_text.is_empty() {
+                deliver_text(typer, gate, &partial_text, &notify_permission_required);
             }
+        }
+    }
+}
+
+fn deliver_text(
+    typer: &dyn TextTyper,
+    gate: &FinalizationGate,
+    text: &str,
+    notify_permission_required: &impl Fn(),
+) {
+    if let Err(error) = gate.type_text_if_active(typer, text) {
+        error!(%error, "Failed to type text");
+        if !gate.is_cancelled() && crate::platform::is_text_delivery_permission_error(&error) {
+            notify_permission_required();
         }
     }
 }
@@ -575,9 +607,32 @@ mod tests {
     use crate::transcriber::TranscribeError;
 
     use super::{
-        FinalizationGate, FinalizationTask, capture_transcription, finalization_completion_event,
-        spawn_finalization_worker,
+        FinalizationGate, FinalizationTask, capture_transcription, deliver_text,
+        finalization_completion_event, spawn_finalization_worker,
     };
+
+    #[test]
+    fn unrelated_errors_and_canceled_delivery_do_not_request_permission_guidance() {
+        struct FailingTyper(AtomicUsize);
+        impl TextTyper for FailingTyper {
+            fn type_text(&self, _: &str) -> anyhow::Result<()> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                // A matching message is insufficient: only the platform's typed denial counts.
+                anyhow::bail!("Accessibility permission is required")
+            }
+        }
+        let typer = FailingTyper(AtomicUsize::new(0));
+        let prompts = AtomicUsize::new(0);
+        let notify = || {
+            prompts.fetch_add(1, Ordering::Relaxed);
+        };
+        let gate = FinalizationGate::new();
+        deliver_text(&typer, &gate, "test", &notify);
+        gate.cancel();
+        deliver_text(&typer, &gate, "late text", &notify);
+        assert_eq!(typer.0.load(Ordering::Relaxed), 1);
+        assert_eq!(prompts.load(Ordering::Relaxed), 0);
+    }
 
     fn stt_snapshot() -> SttSnapshot {
         SttSnapshot {

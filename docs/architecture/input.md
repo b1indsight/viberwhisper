@@ -56,6 +56,13 @@ The `FnMut` callback owns its mutable `EventMapper` directly. Its state is not s
 with another thread, so event mapping does not take a mutex. Dropping a filtered event
 clears both Hold and Toggle key-down flags in that branch.
 
+The pinned rdev 0.5.3 dependency is patched locally in `vendor/rdev`: macOS event conversion
+keeps physical key events but sets `Event.name` to `None`. Neither the desktop listener nor
+the setup helper consumes character names. Omitting that work removes TIS/TSM input-source
+queries from the background callback, avoiding the observed macOS 26 main-queue assertion.
+Windows event conversion is unchanged. The patch provenance and dependency-local regression
+command are recorded in `vendor/rdev/VIBERWHISPER-PATCH.md`.
+
 **`HotkeyConfig`**
 
 The runtime boundary between persisted hotkey strings and native events. Validation resolves each
