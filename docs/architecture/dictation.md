@@ -34,6 +34,12 @@ are separated by a newline. Content is literal, with no template substitutions. 
 are required for a custom object; unknown keys and non-string values are rejected.
 The final instructions retain the 4096-Unicode-character limit, including separators.
 
+The bundled default keeps the complete evaluated prompt in `task`, with the other six
+components empty, so composition preserves its tested wording and instruction order exactly.
+It prioritizes substantive information, keeps uncertain filler words, and includes JSON,
+word-fidelity, correction and independent-negation examples. Custom component objects still
+use the same seven fields and fixed composition order.
+
 `prompt` and `prompt_components` default to null. With both absent/null, the embedded JSON provides
 the default components. A full-string `prompt`, including an empty string, replaces all components;
 explicitly configuring both sources is an error. Old full-string configs remain valid and are
