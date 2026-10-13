@@ -2,3 +2,6 @@
 
 pub(crate) mod listener;
 pub(crate) mod setup;
+
+#[cfg(feature = "integration")]
+pub(crate) mod preview_demo;

@@ -1,6 +1,6 @@
 # 57 - 悬浮预览与回车确认 — Feature record
 
-**Stage:** Planning
+**Stage:** Implementation validated locally; hosted checks pending
 **PR:** https://github.com/b1indsight/viberwhisper/pull/148
 
 ## 1. Initial plan
@@ -154,3 +154,94 @@ Windows 可能拒绝前台切换，即使满足一般条件也不保证成功；
 ## 2. PR change timeline
 
 <!-- 初始计划。后续有实质需求或方案变更时按发生顺序追加。 -->
+
+### [001] — 2026-10-14 — 原生悬浮预览、目标保留与确认投递
+
+**状态：已实现；本地验证通过，Windows 完整构建与桌面验收仍需后续验证。**
+
+识别和后处理结果先发布到待确认窗口。主线程窗口处理确认、取消和复制，工作线程
+等候命令，确认后恢复目标、校验目标、保存历史一次再投递。取消和退出不会保存未确认
+结果；重复/过期回调不会重复发起投递，可能已部分输入的 Windows 结果禁止全文重试。
+部分识别失败和不可用目标都保留提示，确认失败保留原文供重试或复制。
+
+原生窗口使用 AppKit 的只读 NSTextView / NSScrollView 和 Win32 的只读 EDIT 控件。
+沿用 winit 调度，只有现有依赖的 feature 变化；Cargo.lock 增加的两条边都指向已经
+存在的 libc，没有新增 package。已有 integration feature 下增加独立预览演示入口，
+用示例文字验证 UI；其 --smoke 模式通过真实原生按键处理路径验证按键重复和释放。
+
+**设计调整：** 初始计划拟在主线程显示窗口时获取目标。实现改为在收尾工作线程获取并
+保留原生目标，向主线程只发送文字、目标名称、SessionId 和命令发送端。目标对象的
+获取、恢复、校验及释放都在同一工作线程，避免为 AX 代理或 HWND 添加未经证明的
+Send/Sync 保证，也使等待用户操作及焦点恢复延迟持续留在后台。平台预览通过独立的
+编译期 facade 导出，既有托盘 backend / runtime 无需增加窗口 driver 层。
+
+**验证：** `cargo test --locked --features integration -q` 为 253 passed / 2 ignored；
+7 项 preview 回归覆盖等待确认、取消、重复/过期事件、重试历史去重，以及焦点延迟中
+退出或切换目标时的零注入。`cargo check --locked`、
+`cargo clippy --locked --all-targets --features integration -- -D warnings`、
+`cargo fmt --check` 和发布包契约检查通过。
+`target/debug/viberwhisper-preview --smoke` 在本机 macOS 原生窗口上退出码为 0，
+按住回车期间通知数为 0，释放后为 1。
+
+本机 Windows 完整 cargo check 在现有 C 依赖 tinyfiledialogs / zstd-sys 阶段因缺少
+Windows SDK 头文件失败。使用仅依赖 anyhow / windows-sys 的临时检查包，直接加载
+本次 Win32 源文件，在 x86_64-pc-windows-msvc 上通过 check 与 `clippy -D warnings`；
+此结果是 Rust 接口验证，不能代替 Windows CI、真实窗口焦点恢复或跨应用输入验收。
+TextEdit / Chromium / 终端的实际跨应用投递及 Windows 桌面操作尚未手工验收。
+
+### [002] — 2026-10-14 — 确认机制的消融比较
+
+**决定：保留确认命令等待、末次目标/取消校验、历史去重和按键释放确认。**
+
+在 `.cache/2026-10-14/preview-ablation-148/` 建立同一源代码的隔离副本，仅修改一个
+机制，使用相同模拟候选文字、假目标、命令序列与原生示例窗口。各副本用独立 Cargo
+package identity 防止共用 target 目录导致测试二进制复用；首轮缓存复用结果作废。
+
+| 简化版本 | 同一回归/原生检查的结果 | 保留机制的原因 |
+| --- | --- | --- |
+| 发布预览后立即确认，省去命令等待 | `worker_requires_confirmation_and_cancel_does_not_commit` 失败 | 取消仍会输入并保存历史 |
+| 省去焦点延迟后的目标校验 | `focus_changed_during_platform_delay_prevents_injection` 失败 | 会向已切换目标发起投递 |
+| 省去焦点延迟后的取消校验 | `cancellation_during_platform_focus_delay_prevents_injection` 失败 | 退出后仍会发起投递 |
+| 每次重试都保存历史 | `failed_confirmation_retry_saves_history_once` 失败 | 同一候选保存多次 |
+| KeyDown 即确认 | 原生 --smoke 退出码 1，报告确认早于 Enter 释放 | 确认时键仍按住，剩余事件可能进入目标应用 |
+
+原实现对应回归均通过；KeyUp 原生 --smoke 退出码 0。比较不改变音频、模型、prompt
+或后处理，验证的是交互和投递约束。命令与日志保存在各副本的 `ablation.log` 和
+汇总 `results.json`；这些临时材料不提交版本控制。
+
+### [003] — 2026-10-15 — 可编辑气泡与真实演示投递
+
+**状态：已实现；macOS 原生投递已验证，Windows 桌面验收仍待验证。**
+
+用户查看 [001] 的窗口后要求只保留气泡输入框，去掉按钮，直接编辑并用回车输入，
+并指出示例回车没有写入目标。这次更新替代初始计划和 [001] 的只读预览及按钮设计；
+继续采用应用内预览、工作线程保留目标的路径，不增加输入法组件或依赖包。
+
+macOS 使用透明无标题栏 NSWindow、原生圆角绘制和可编辑 NSTextView；Windows 使用
+圆角 WS_POPUP 和可编辑 EDIT。正常状态只显示编辑框，故障时显示简短的内联说明。
+Enter 在释放时提交编辑器当前文字，Esc 取消，Shift+Enter 换行。macOS 的 marked
+text 和 Windows 的 IME composition 消息让选词回车继续由原生输入法处理。
+确认事件及工作线程命令携带编辑后的文字；清空后回车不保存历史、不投递。
+失败重试不重复保存同一修订，但修改后再次确认会保存新的修订，供失败时恢复。
+
+演示入口现在使用同一个确认工作线程及原生 typer，不录音、不联网、不保存演示历史。
+正常启动后有三秒选择目标，回车实际投递；`--smoke` 使用当前测试目标，通过原生编辑
+API 替换文字、建立 marked text 并输入 Shift+Enter、重复回车及释放，验证不会提前
+确认、通知一次且返回编辑后的文字。原先示例只打印操作的行为已经移除。
+
+**验证：** `cargo test --locked -q` 和 integration 测试均为 254 passed / 2 ignored；
+`cargo clippy --locked --all-targets --features integration -- -D warnings`、
+`cargo fmt --check` 通过。现有依赖仅增加 AppKit 绑定 feature，Cargo.lock 没有新增
+package。本机新建 TextEdit 空白文档，运行 `target/debug/viberwhisper-preview --smoke`
+退出码 0；随后 AppleScript 读取文档得到“已编辑的文字：中文、English 和 emoji 🎙️。”，
+证明实际输出是编辑后的内容。正常演示窗口也完成一次回车投递，退出码 0。
+真实中文输入法候选界面、Chromium / 终端及 Windows 桌面仍未手工覆盖；Win32 源文件
+在隔离检查包的 Windows 目标 check 与 Clippy 通过，该检查不代替完整 Windows CI。
+
+**消融比较：** `.cache/2026-10-14/bubble-ablation.py` 在独立 package identity 的隔离
+副本中各删去一个机制，使用相同输入与同一项回归。恢复原始 STT 文字、忽略确认事件
+的修订，会使 `worker_requires_confirmation_and_cancel_does_not_commit` 失败；历史只
+保存第一版会使 `edited_retry_saves_revised_text` 失败；去掉 marked-text 检查的原生
+`--smoke` 退出码 1，报告提前确认，正式版本为 0。因此保留编辑后的文本载荷、修订级
+历史去重及原生组词保护。无按钮气泡是用户明确要求的外观调整，采用直接原生绘制；
+没有额外渲染层或依赖可删。对照命令和日志保存在 cache 中，不提交版本控制。

@@ -13,6 +13,8 @@ orchestration. The entry points connect these modules directly.
 | `src/ui.rs` | Desktop interaction module declarations |
 | `src/ui/listener.rs` | Listener service assembly and platform-action mapping |
 | `src/ui/listener/event_loop.rs` | Winit events, session effects, and background finalization |
+| `src/ui/listener/preview.rs` | Confirmation state, worker command loop, history deduplication and guarded delivery |
+| `src/ui/preview_demo.rs` | Feature-gated native preview demo and held-Enter smoke fixture |
 | `src/ui/setup.rs` | Setup wizard, native dialogs, and test-recording workflow |
 | `src/ui/setup/hotkey.rs` | Short-lived hotkey helper processes and their protocol |
 
@@ -21,7 +23,18 @@ orchestration. The entry points connect these modules directly.
 `ui::listener` accepts the existing `core::listener::RecordingConfig` or `ListenerConfig`.
 It creates the native platform, recorder, orchestrator, and delivery or dataset-capture output.
 The event-loop handler owns these resources and executes the existing state machine's effects.
-`AppEvent` carries platform events, audio readiness, history updates, and session completion.
+`AppEvent` carries platform events, audio readiness, candidate readiness, native preview actions,
+delivery failures, history updates, and session completion.
+
+Finalization prepares text and captures the destination on its worker before displaying the
+main-thread native preview. Only text, destination labels, session IDs and commands cross the
+thread boundary. The worker waits for confirmation or cancellation and retains the native target.
+The recording machine stays `Stopping` until that worker returns; the microphone and tray already
+show stopped. Pending recording requests focus the current preview. Confirmation accepts one
+transaction at a time, carries the current edited text, saves each confirmed revision once,
+restores the target and validates it after the platform
+focus delay. Failures preserve the candidate; partial SendInput acceptance disables automatic retry.
+Cancel drops the candidate without saving history; exit cancels the gate and disconnects the worker.
 
 The UI directly uses the existing business interfaces. Recorder rollback, ordered tail-chunk
 submission, background finalization, and cancellation remain in the same call chain. The state

@@ -186,14 +186,18 @@ clipboard for manual recovery because event posting cannot confirm target consum
 
 ```rust
 pub trait TextTyper: Send + Sync {
-    fn type_text(&self, text: &str) -> Result<(), Box<dyn std::error::Error>>;
+    fn type_text(&self, text: &str) -> anyhow::Result<()>;
+    fn type_text_checked(&self, text: &str, validate: &dyn Fn() -> anyhow::Result<()>) -> anyhow::Result<()>;
 }
 ```
 
 Platform implementations are in `src/platform/`. `NativePlatform::text_typer` returns the selected
 thread-safe handle without exposing its concrete type. See [platform.md](platform.md).
 The thread-safety contract allows final transcription delivery to run outside the native event-loop
-thread.
+thread. The checked method validates the captured destination immediately before injection;
+native implementations place this callback after their focus-settling delay. The callback also
+rechecks shutdown cancellation. Windows reports partial acceptance with a typed error so the
+confirmation UI can prevent a duplicate full-text retry.
 
 ### `MockTyper`
 

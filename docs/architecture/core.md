@@ -162,7 +162,7 @@ the listener integration then maps those actions into source-free `StartRequeste
 - `Idle`
 - `Starting`: the composite recorder/orchestrator startup is in progress
 - `Recording`: one session is accepting audio chunks
-- `Stopping`: the composite recorder stop, tail-chunk submission, and orchestrator convergence is in progress
+- `Stopping`: recorder stop, tail-chunk submission, convergence and selected output finalization are in progress; desktop delivery includes awaiting confirmation
 - `ShuttingDown`: new controls are ignored while cleanup effects run
 
 The active states carry only a monotonically increasing `SessionId`; input source, interaction mode, and lower-layer phases are not lifecycle state. The shared identity type is defined in `src/session.rs`, while this state machine remains responsible for allocating IDs. The ID is propagated through recorder operations, ready chunks, orchestrator routing, effects, and completion events. Stale chunks and stale Session results cannot mutate the current session.
@@ -182,11 +182,12 @@ The machine consumes source-free requests plus `SessionStarted`, `SessionStartFa
 `ui::listener` executes `StartSession` as an all-or-nothing recorder/orchestrator
 acquisition with rollback. `StopSession` stops the recorder and submits tail chunks in order, then
 starts a session-scoped background task for orchestrator convergence and the selected application
-output. Normal delivery performs post-processing and text history persistence followed by
-injection. Prompt-lab capture instead finalizes its archived WAV and stores the raw merged STT
+output. Normal delivery performs post-processing, shows a confirmation preview, and waits for
+user confirmation before text history persistence and injection. Prompt-lab capture instead finalizes its archived WAV and stores the raw merged STT
 result plus credential-free request metadata in the matching sample sidecar; it constructs no
-post-processor or history typer. `HistoryTyper` emits one `HistorySaved` event after a successful
-normal append, and the main-thread tray prepends that text to its five-entry cache. The machine
+post-processor or preview. The confirmation worker emits one `HistorySaved` event after a successful
+append and reuses that save when the same edited text is retried; another confirmed edit saves
+its own revision. The main-thread tray prepends that text to its five-entry cache. The machine
 remains in `Stopping` until the separate finalization event returns.
 
 Exit is represented as `ShutdownRequested`. It cancels recorder/orchestrator work, resets tray state, suppresses final text injection, and exits only after `ReadyToExit` is emitted.
@@ -206,14 +207,15 @@ CLI workflows in `core` and desktop setup in `ui` load a `ConfigDocument`; confi
 through `ConfigDocument::select`, and the workflow passes each narrow value to its runtime consumer. Listener mode then creates one main-thread winit
 `EventLoop<AppEvent>` in `ControlFlow::Wait` mode. Opaque platform input, audio-readiness, and
 background completion producers use `EventLoopProxy` to wake that loop; winit owns AppKit/Win32
-dispatch and no window is created. CLI-only workflows do not construct the event loop.
+dispatch, including the lazily created native confirmation window. CLI-only workflows do not construct the event loop.
 
 `src/ui/listener/event_loop.rs` passes opaque native payloads back through
 `NativePlatform::handle_event`, normalizes returned semantic actions, executes state-machine
 effects, drains ready chunks, coordinates background finalization, and handles history-copy actions
 without routing them through the recording state machine. Winit types remain in `ui`.
 The existing business interfaces expose only domain values or narrow callbacks; platform-specific
-values remain behind `NativePlatform`.
+values remain behind the platform facade. Candidate destinations are retained on the finalization
+worker, while native preview windows stay on the main thread.
 Finalization uses an atomic cancellation flag checked before post-processing, history persistence,
 and final text injection. History persistence appends one timestamped record to `history.jsonl`;
 before loading or appending, the store validates only the trailing record and truncates that record

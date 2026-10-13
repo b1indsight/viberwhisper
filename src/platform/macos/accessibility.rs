@@ -32,7 +32,7 @@ fn is_unsupported(error: AXError) -> bool {
 
 /// Copies one AX attribute while preserving the Core Foundation create-rule ownership returned by
 /// `AXUIElementCopyAttributeValue`.
-fn copy_attribute(
+pub(super) fn copy_attribute(
     element: &AXUIElement,
     attribute: &CFString,
     operation: &'static str,
@@ -108,7 +108,7 @@ fn reject_secure_control(element: &AXUIElement) -> Result<(), AccessibilityError
     }
 }
 
-fn validated_focused_element() -> Result<CFRetained<AXUIElement>, AccessibilityError> {
+pub(super) fn validated_focused_element() -> Result<CFRetained<AXUIElement>, AccessibilityError> {
     let focused = focused_element()?;
     reject_secure_control(&focused)?;
     Ok(focused)

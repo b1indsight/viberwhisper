@@ -5,14 +5,15 @@ use tracing::{info, warn};
 
 use crate::core::listener::{ListenerConfig, RecordingConfig};
 use crate::core::recording_session::{RecordingState, SessionEvent};
-use crate::history::{HistoryStore, HistoryTyper};
+use crate::history::HistoryStore;
 use crate::platform::PlatformAction;
 use crate::postprocess::PostProcessConfig;
 use crate::prompt_lab::{DatasetStore, PromptLabCapture, SttSnapshot};
 use crate::{audio, postprocess};
 
-mod event_loop;
+pub(super) mod event_loop;
 mod permission;
+pub(super) mod preview;
 
 fn platform_session_event(action: PlatformAction, state: &RecordingState) -> Option<SessionEvent> {
     match action {
@@ -102,20 +103,11 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
                 })
                 .unwrap_or_default();
             platform.set_history(recent_history);
-            let typer = match history_store {
-                Some(store) => {
-                    let history_proxy = proxy.clone();
-                    Arc::new(HistoryTyper::new(
-                        store,
-                        platform.text_typer(),
-                        move |text| {
-                            let _ = history_proxy.send_event(AppEvent::HistorySaved(text));
-                        },
-                    )) as Arc<dyn crate::input::typer::TextTyper>
-                }
-                None => platform.text_typer(),
-            };
-            ListenerOutput::delivery(typer, PostProcessor::new(post_process))
+            ListenerOutput::delivery(
+                platform.text_typer(),
+                PostProcessor::new(post_process),
+                history_store,
+            )
         }
         ListenerMode::Capture(store) => ListenerOutput::capture(
             PromptLabCapture::new(store),

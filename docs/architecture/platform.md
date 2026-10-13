@@ -205,7 +205,7 @@ on the main thread when trust is missing. Typed permission errors from full or p
 also enqueue an application event, covering permission revoked after startup. One per-launch
 flag suppresses repeated alerts, and the main thread rechecks trust before showing a queued
 message. Canceled finalization does not request guidance. Capture, config, and offline conversion
-flows do not show this text-delivery alert. The alert offers settings instructions, history-copy
+flows do not show this text-delivery alert. The alert offers settings instructions, preview-copy
 recovery, and an explicit Open Settings button; it does not change permission or retry delivery.
 
 ### History clipboard copy
@@ -223,6 +223,10 @@ It does not inspect Accessibility, post keyboard events, or enter hotkey suppres
 4. calls Win32 `SendInput`; and
 5. verifies that every event was accepted.
 
+`type_text_checked` validates the saved destination after the focus delay. A partially accepted
+SendInput batch returns `PartialTextDelivery`; the UI retains the candidate for copying and
+disables confirmation retry, because replaying the full text could duplicate an accepted prefix.
+
 Surrogate pairs therefore produce one down/up pair for each UTF-16 code unit. The private FFI
 module owns the C layouts, flags, `SendInput`, and `GetDoubleClickTime` declarations linked from
 `user32.dll`.
@@ -230,3 +234,27 @@ module owns the C layouts, flags, `SendInput`, and `GetDoubleClickTime` declarat
 `windows/clipboard.rs` writes `CF_UNICODETEXT` through Win32 using an invisible message-only owner
 window and movable global memory. Small RAII guards close the clipboard, destroy the window, and
 free memory that has not transferred to Windows. This path emits no `SendInput` events.
+
+## Confirmation Preview
+
+`platform/preview.rs` selects `NativePreview` and `NativeTarget` at compile time. AppKit windows
+and Win32 borderless rounded bubbles with editable native text controls run on the winit thread. They consume
+Enter/Esc key-down and repeat events and emit an action on matching key-up; losing focus disarms
+the pending key. Native composition keeps Enter/Esc until candidate selection finishes;
+Shift+Enter adds a newline. Confirmation reads the editor's current text into the session-scoped
+event. Normal bubbles contain only the editor; operational errors reveal a compact inline message.
+Closing clears visible text.
+
+The finalization worker captures a target before the preview requests focus and retains it on
+that same worker. macOS saves the running application, AX window and available focused AX element;
+Windows saves the top-level HWND, process/thread identity and focused HWND. Restoring a target
+does not bypass system foreground restrictions. Validation rechecks window and available control
+identity before history and again immediately before injection. Missing/closed targets and
+failed restoration preserve the candidate for copying. Browsers without exposed editor identity
+only provide window-level verification; the code does not claim DOM-level destination identity.
+
+With the existing `integration` feature, `viberwhisper-preview` opens sample text without API or
+microphone access. It captures a destination after a three-second focus window and uses the same
+confirmation worker and native typer as dictation, without persistent demo history. Its `--smoke`
+mode edits the native control, sends held-Enter events and verifies zero callbacks before release,
+one confirmation with edited text after release, and successful delivery to the selected target.
