@@ -67,7 +67,7 @@ windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["libc", "NSAlert", "NSApplication", "NSBezierPath", "NSButton", "NSColor", "NSControl", "NSEvent", "NSFont", "NSGraphics", "NSLayoutManager", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen", "NSScrollView", "NSText", "NSTextContainer", "NSTextField", "NSTextInputClient", "NSTextView", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["libc", "NSAlert", "NSApplication", "NSBezierPath", "NSButton", "NSColor", "NSControl", "NSEvent", "NSFont", "NSGraphics", "NSLayoutManager", "NSMenu", "NSMenuItem", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen", "NSScrollView", "NSText", "NSTextContainer", "NSTextField", "NSTextInputClient", "NSTextView", "NSView", "NSWindow", "NSWorkspace"] }
 objc2-application-services = { version = "0.3", default-features = false, features = ["libc", "AXError", "AXUIElement", "HIServices"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFNumber", "CFString"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGEvent", "CGEventSource", "CGEventTypes", "CGRemoteOperation"] }

@@ -1,6 +1,6 @@
 # 57 - 悬浮预览与回车确认 — Feature record
 
-**Stage:** Implementation validated locally; hosted checks pending
+**Stage:** Preview review fixes validated locally; follow-up review and hosted checks pending
 **PR:** https://github.com/b1indsight/viberwhisper/pull/148
 
 ## 1. Initial plan
@@ -245,3 +245,42 @@ package。本机新建 TextEdit 空白文档，运行 `target/debug/viberwhisper
 `--smoke` 退出码 1，报告提前确认，正式版本为 0。因此保留编辑后的文本载荷、修订级
 历史去重及原生组词保护。无按钮气泡是用户明确要求的外观调整，采用直接原生绘制；
 没有额外渲染层或依赖可删。对照命令和日志保存在 cache 中，不提交版本控制。
+
+### [004] — 2026-10-15 — 修复四项预览审查问题
+
+**状态：已实现并通过本地验证；本次修复的独立审查和 CI 待运行。**
+
+用户要求先修复 [003] 实现的独立审查所报告的四项问题。本次继续使用相同 bookmark
+及 PR，修改限于确认按键、原生编辑快捷键、目标激活等待和权限错误恢复。
+
+- 确认状态仅由新的 KeyDown 建立。macOS 读取 `isARepeat`，Windows 读取 LPARAM
+  的 previous-key-state 位；获得/恢复焦点后收到的重复事件不再建立确认。Windows
+  同时消费未建立确认的普通回车 WM_CHAR，避免向候选文字中插入换行；Shift+Enter
+  和组词事件继续交给原生编辑器。
+- macOS 在现有应用菜单上注册标准 Edit responder-chain 命令，支持 Cmd+A/C/X/V。
+  原生检查通过 NSApplication 派发真实按键，验证选区、复制、剪切清空及粘贴恢复。
+  气泡没有增加按钮；Cargo.toml 只打开现有绑定的 NSMenu / NSMenuItem feature，
+  Cargo.lock 不变，没有新增依赖包。
+- Windows 在前台激活请求成功后等待目标及焦点稳定，再继续确认。与 macOS 共用
+  500 ms 上限、10 ms 间隔的工作线程校验等待；超时保留最后的错误，不做输入队列
+  绑定。Microsoft 说明跨输入队列的激活通知是异步处理，不能紧接请求便假定已完成：
+  [SetForegroundWindow 的异步激活](https://devblogs.microsoft.com/oldnewthing/20161118-00/?p=94745)。
+- 权限检测同时识别原始和已有包装的 AX PermissionDenied，并保留恢复窗口及输入
+  元素时的原始 AX 错误。复用 accessibility 的 native_error 分类，避免把 API 禁用
+  转成无法识别的普通字符串。生产确认工作线程的回归覆盖捕获、恢复、验证三个阶段
+  失去权限，确认都会请求既有授权提示，而且没有写历史或投递文字。
+
+**验证：** 默认与 integration 测试均为 256 passed / 2 ignored；格式、
+`cargo clippy --locked --all-targets --features integration -- -D warnings` 通过。
+Win32 源文件在隔离 MSVC 目标包通过 check 和 Clippy；Windows 桌面操作仍未实测。
+macOS 原生 --smoke 验证继承的重复回车不确认、组词/Shift+Enter 不提前提交，
+Cmd+A/C/X/V 正常，最后一次释放确认投递成功；读取 TextEdit 测试文档得到完整的
+“已编辑的文字：中文、English 和 emoji 🎙️。”。真实输入法候选界面及 Chromium /
+终端仍需后续手工验收。
+
+**消融比较：** `.cache/2026-10-14/preview-fixes-ablation.py` 使用独立 package identity
+的副本逐项移除机制。允许重复事件建立确认、去掉激活等待、只识别包装权限错误，分别
+使确认回归、异步激活/超时回归及生产工作线程权限回归失败（退出码 101）。移除 Edit
+菜单注册的原生 --smoke 报告“Cmd+A did not select the text”（退出码 1）；正式版本
+退出码 0。三个回归和原生检查使用相同输入，保留这些机制。日志及 results.json
+保存在该 cache 目录下，不提交版本控制。

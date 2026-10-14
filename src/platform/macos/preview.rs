@@ -1,27 +1,30 @@
 use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
-use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, ensure};
 use objc2::rc::Retained;
 #[cfg(feature = "integration")]
 use objc2::runtime::AnyObject;
 use objc2::runtime::ProtocolObject;
-use objc2::{DeclaredClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{DeclaredClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSBackingStoreType, NSBezierPath, NSColor,
     NSEvent, NSEventModifierFlags, NSEventType, NSFont, NSRunningApplication, NSScreen,
     NSScrollView, NSTextField, NSTextInputClient, NSTextView, NSView, NSWindow, NSWindowDelegate,
     NSWindowStyleMask, NSWorkspace,
 };
+use objc2_app_kit::{NSMenu, NSMenuItem};
+#[cfg(feature = "integration")]
+use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
 use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFRetained, CFString, kCFBooleanTrue};
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString};
 
 use super::AccessibilityError;
-use super::accessibility::{copy_attribute, validated_focused_element};
+use super::accessibility::{copy_attribute, native_error, validated_focused_element};
 use crate::platform::preview::{
     ConfirmationKey, DeliveryTarget, PreviewAction, PreviewEvent, PreviewKey, PreviewNotify,
+    wait_for_activation,
 };
 use crate::session::SessionId;
 
@@ -45,6 +48,11 @@ fn focused_window(pid: i32) -> Result<CFRetained<AXUIElement>> {
 }
 
 impl NativeTarget {
+    #[cfg(test)]
+    pub(crate) fn permission_denied_error_for_test() -> anyhow::Error {
+        native_error("preview target", AXError::APIDisabled).into()
+    }
+
     pub(crate) fn capture() -> Result<Self> {
         objc2::rc::autoreleasepool(|_| {
             let application = NSWorkspace::sharedWorkspace()
@@ -92,10 +100,12 @@ impl DeliveryTarget for NativeTarget {
                 self.window
                     .perform_action(&CFString::from_static_str("AXRaise"))
             };
-            ensure!(
-                raised == AXError::Success,
-                "原输入窗口无法恢复，请复制文字后手动输入"
-            );
+            if raised != AXError::Success {
+                return Err(
+                    anyhow::Error::new(native_error("focused window activation", raised))
+                        .context("原输入窗口无法恢复，请复制文字后手动输入"),
+                );
+            }
             if let Some(element) = &self.element {
                 let attribute = CFString::from_static_str("AXFocused");
                 let mut settable = 0;
@@ -108,21 +118,17 @@ impl DeliveryTarget for NativeTarget {
                     let value =
                         unsafe { kCFBooleanTrue }.ok_or_else(|| anyhow!("无法恢复输入框焦点"))?;
                     let error = unsafe { element.set_attribute_value(&attribute, value) };
-                    ensure!(
-                        error == AXError::Success,
-                        "无法恢复原输入框，请复制文字后手动输入"
-                    );
+                    if error != AXError::Success {
+                        return Err(anyhow::Error::new(native_error(
+                            "focused element restoration",
+                            error,
+                        ))
+                        .context("无法恢复原输入框，请复制文字后手动输入"));
+                    }
                 }
             }
             // Activation is asynchronous. Wait on the worker, never on the AppKit thread.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            loop {
-                let result = self.validate();
-                if result.is_ok() || Instant::now() >= deadline {
-                    return result;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            wait_for_activation(|| self.validate())
         })
     }
 
@@ -231,7 +237,7 @@ define_class!(
                         && !event.modifierFlags().intersects(modifiers)
                         && !self.ivars().text.hasMarkedText()
                     {
-                        self.ivars().keys.borrow_mut().press(action);
+                        self.ivars().keys.borrow_mut().press(action, event.isARepeat());
                         return;
                     }
                     // Enter/Esc while composing belongs to the user's input method.
@@ -285,6 +291,36 @@ pub(crate) struct NativePreview {
     scroll: Option<Retained<NSScrollView>>,
 }
 
+/// AppKit routes Cmd editing through menu key equivalents to the first responder.
+/// Register standard actions once when the lazily created preview first needs them.
+fn install_edit_menu(mtm: MainThreadMarker) {
+    let app = NSApplication::sharedApplication(mtm);
+    let main = app.mainMenu().unwrap_or_else(|| NSMenu::new(mtm));
+    let edit = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("编辑"));
+    for (title, action, key) in [
+        ("剪切", sel!(cut:), "x"),
+        ("复制", sel!(copy:), "c"),
+        ("粘贴", sel!(paste:), "v"),
+        ("全选", sel!(selectAll:), "a"),
+    ] {
+        // SAFETY: These are standard NSText responder actions; nil targets use the
+        // active responder chain, so editing stays in the focused native text view.
+        let item = unsafe {
+            edit.addItemWithTitle_action_keyEquivalent(
+                &NSString::from_str(title),
+                Some(action),
+                &NSString::from_str(key),
+            )
+        };
+        item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+    }
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str("编辑"));
+    item.setSubmenu(Some(&edit));
+    main.addItem(&item);
+    app.setMainMenu(Some(&main));
+}
+
 impl NativePreview {
     pub(crate) fn new(notify: PreviewNotify) -> Self {
         Self {
@@ -298,6 +334,7 @@ impl NativePreview {
 
     fn create(&mut self) -> Result<()> {
         let mtm = MainThreadMarker::new().ok_or_else(|| anyhow!("预览窗口需要在主线程创建"))?;
+        install_edit_menu(mtm);
         let available = NSScreen::mainScreen(mtm)
             .map(|s| s.visibleFrame().size)
             .unwrap_or(NSSize::new(800.0, 600.0));
@@ -496,8 +533,9 @@ impl NativePreview {
             return Ok(false);
         }
         let text = self.text.as_ref().expect("created text view");
-        let characters = NSString::from_str("\r");
-        let send = |kind, modifiers, repeat| -> Result<()> {
+        let app = NSApplication::sharedApplication(window.mtm());
+        let send = |kind, modifiers, repeat, key_code, characters: &str| -> Result<()> {
+            let characters = NSString::from_str(characters);
             // SAFETY: Correct NSEvent factory signature; context is documented to be nil.
             let event: Option<Retained<NSEvent>> = unsafe {
                 msg_send![NSEvent::class(),
@@ -510,13 +548,31 @@ impl NativePreview {
                     characters: &*characters,
                     charactersIgnoringModifiers: &*characters,
                     isARepeat: repeat,
-                    keyCode: 36_u16
+                    keyCode: key_code
                 ]
             };
             let event = event.ok_or_else(|| anyhow!("Could not create native key event"))?;
-            window.sendEvent(&event);
+            app.sendEvent(&event);
             Ok(())
         };
+        // Enter held in another window must not be adopted after focus acquisition.
+        for _ in 0..5 {
+            send(
+                NSEventType::KeyDown,
+                NSEventModifierFlags::empty(),
+                true,
+                36_u16,
+                "\r",
+            )?;
+        }
+        send(
+            NSEventType::KeyUp,
+            NSEventModifierFlags::empty(),
+            false,
+            36_u16,
+            "\r",
+        )?;
+        verify_pending()?;
         // Exercise actual marked text: selecting a Chinese candidate must not submit
         // the bubble. Modified Return must remain available for multiline edits.
         unsafe {
@@ -530,12 +586,36 @@ impl NativePreview {
             text.hasMarkedText(),
             "Native editor did not enter composition"
         );
-        send(NSEventType::KeyDown, NSEventModifierFlags::empty(), false)?;
-        send(NSEventType::KeyUp, NSEventModifierFlags::empty(), false)?;
+        send(
+            NSEventType::KeyDown,
+            NSEventModifierFlags::empty(),
+            false,
+            36_u16,
+            "\r",
+        )?;
+        send(
+            NSEventType::KeyUp,
+            NSEventModifierFlags::empty(),
+            false,
+            36_u16,
+            "\r",
+        )?;
         verify_pending()?;
         text.unmarkText();
-        send(NSEventType::KeyDown, NSEventModifierFlags::Shift, false)?;
-        send(NSEventType::KeyUp, NSEventModifierFlags::Shift, false)?;
+        send(
+            NSEventType::KeyDown,
+            NSEventModifierFlags::Shift,
+            false,
+            36_u16,
+            "\r",
+        )?;
+        send(
+            NSEventType::KeyUp,
+            NSEventModifierFlags::Shift,
+            false,
+            36_u16,
+            "\r",
+        )?;
         verify_pending()?;
         // Replace through the editor's input-client API, as a user correction would.
         unsafe {
@@ -544,15 +624,69 @@ impl NativePreview {
                 NSRange::new(0, text.string().len_utf16()),
             );
         }
+        // Use application event dispatch: directly invoking text actions would
+        // miss the absent Edit-menu bindings that caused the shortcut regression.
+        send(
+            NSEventType::KeyDown,
+            NSEventModifierFlags::Command,
+            false,
+            0_u16,
+            "a",
+        )?;
+        ensure!(
+            text.selectedRange().length == text.string().len_utf16(),
+            "Cmd+A did not select the text"
+        );
+        send(
+            NSEventType::KeyDown,
+            NSEventModifierFlags::Command,
+            false,
+            8_u16,
+            "c",
+        )?;
+        let pasteboard = NSPasteboard::generalPasteboard();
+        let copied = pasteboard.stringForType(unsafe { NSPasteboardTypeString });
+        ensure!(
+            copied.is_some_and(|value| value.to_string() == edited_text),
+            "Cmd+C did not copy the text"
+        );
+        send(
+            NSEventType::KeyDown,
+            NSEventModifierFlags::Command,
+            false,
+            7_u16,
+            "x",
+        )?;
+        ensure!(text.string().is_empty(), "Cmd+X did not cut the selection");
+        send(
+            NSEventType::KeyDown,
+            NSEventModifierFlags::Command,
+            false,
+            9_u16,
+            "v",
+        )?;
+        ensure!(
+            text.string().to_string() == edited_text,
+            "Cmd+V did not restore the text"
+        );
+        verify_pending()?;
         for index in 0..5 {
             send(
                 NSEventType::KeyDown,
                 NSEventModifierFlags::empty(),
                 index > 0,
+                36_u16,
+                "\r",
             )?;
         }
         verify_pending()?;
-        send(NSEventType::KeyUp, NSEventModifierFlags::empty(), false)?;
+        send(
+            NSEventType::KeyUp,
+            NSEventModifierFlags::empty(),
+            false,
+            36_u16,
+            "\r",
+        )?;
         Ok(true)
     }
 }

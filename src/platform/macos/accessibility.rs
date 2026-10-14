@@ -12,7 +12,7 @@ const SECURE_TEXT_FIELD_SUBROLE: &str = "AXSecureTextField";
 
 pub(super) struct NativeAccessibility;
 
-fn native_error(operation: &'static str, error: AXError) -> AccessibilityError {
+pub(super) fn native_error(operation: &'static str, error: AXError) -> AccessibilityError {
     if error == AXError::APIDisabled {
         AccessibilityError::PermissionDenied
     } else {

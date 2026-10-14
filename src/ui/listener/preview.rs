@@ -461,6 +461,79 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn permission_revocation_in_target_operations_requests_guidance() {
+        use crate::platform::NativeTarget;
+        struct RevokedTarget {
+            during_restore: bool,
+        }
+        impl DeliveryTarget for RevokedTarget {
+            fn name(&self) -> String {
+                "Test editor".into()
+            }
+            fn restore(&self) -> Result<()> {
+                if self.during_restore {
+                    return Err(NativeTarget::permission_denied_error_for_test()
+                        .context("target restoration"));
+                }
+                Ok(())
+            }
+            fn validate(&self) -> Result<()> {
+                Err(NativeTarget::permission_denied_error_for_test().context("target validation"))
+            }
+        }
+        struct MustNotType;
+        impl TextTyper for MustNotType {
+            fn type_text(&self, _: &str) -> Result<()> {
+                panic!("permission denial must prevent injection");
+            }
+        }
+        // AX permission may disappear before preview capture or while the user edits
+        // the bubble. Exercise the production worker with the native typed denial.
+        for (during_capture, during_restore) in [(true, false), (false, true), (false, false)] {
+            let directory = tempdir().unwrap();
+            let history = HistoryStore::at(directory.path().join("history.jsonl"), 4096);
+            let guidance = Cell::new(0);
+            let failures = Cell::new(0);
+            wait_for_confirmation(
+                SessionId(9),
+                ("candidate".into(), None),
+                &MustNotType,
+                Some(&history),
+                &FinalizationGate::new(),
+                || {
+                    if during_capture {
+                        Err(NativeTarget::permission_denied_error_for_test())
+                    } else {
+                        Ok(RevokedTarget { during_restore })
+                    }
+                },
+                &|event| {
+                    match event {
+                        AppEvent::PreviewReady { commands, .. } => {
+                            commands
+                                .send(PreviewCommand::Confirm("candidate".into()))
+                                .unwrap();
+                        }
+                        AppEvent::TextDeliveryPermissionRequired => {
+                            guidance.set(guidance.get() + 1)
+                        }
+                        AppEvent::PreviewDeliveryFailed { .. } => {
+                            failures.set(failures.get() + 1);
+                            return false;
+                        }
+                        _ => panic!("unexpected event"),
+                    }
+                    true
+                },
+            );
+            assert_eq!(guidance.get(), 1);
+            assert_eq!(failures.get(), 1);
+            assert!(history.load_recent().unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn focus_changed_during_platform_delay_prevents_injection() {
         // Switching applications during the writer's focus delay must be caught
         // by its final validation, even if the destination was valid when confirmed.

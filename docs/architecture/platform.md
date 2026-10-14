@@ -239,19 +239,27 @@ free memory that has not transferred to Windows. This path emits no `SendInput` 
 
 `platform/preview.rs` selects `NativePreview` and `NativeTarget` at compile time. AppKit windows
 and Win32 borderless rounded bubbles with editable native text controls run on the winit thread. They consume
-Enter/Esc key-down and repeat events and emit an action on matching key-up; losing focus disarms
-the pending key. Native composition keeps Enter/Esc until candidate selection finishes;
+Enter/Esc key-down and repeat events and emit an action on matching key-up. Only a fresh key-down
+arms that action; losing focus disarms it, and inherited repeats cannot re-arm it. Native
+composition keeps Enter/Esc until candidate selection finishes;
 Shift+Enter adds a newline. Confirmation reads the editor's current text into the session-scoped
 event. Normal bubbles contain only the editor; operational errors reveal a compact inline message.
 Closing clears visible text.
 
+macOS registers standard Edit-menu key equivalents against the responder chain for Cmd+A/C/X/V.
+Windows consumes ordinary Return/Escape character messages even when a repeat did not arm an
+action, while composition and modified Return remain with the native editor.
+
 The finalization worker captures a target before the preview requests focus and retains it on
 that same worker. macOS saves the running application, AX window and available focused AX element;
 Windows saves the top-level HWND, process/thread identity and focused HWND. Restoring a target
-does not bypass system foreground restrictions. Validation rechecks window and available control
+does not bypass system foreground restrictions. Both backends wait on the worker for activation
+to settle, retrying validation at 10 ms intervals for up to 500 ms. Validation rechecks window and available control
 identity before history and again immediately before injection. Missing/closed targets and
 failed restoration preserve the candidate for copying. Browsers without exposed editor identity
 only provide window-level verification; the code does not claim DOM-level destination identity.
+macOS target operations preserve the canonical typed AX permission denial, and the shared permission
+policy recognizes both raw target errors and wrapped typer errors before requesting recovery guidance.
 
 With the existing `integration` feature, `viberwhisper-preview` opens sample text without API or
 microphone access. It captures a destination after a three-second focus window and uses the same

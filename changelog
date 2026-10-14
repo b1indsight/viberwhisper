@@ -90,3 +90,4 @@
 2026-10-12: Add opt-in Realtime prompt-lab scenarios with isolated seeded memory, simulated clocks, production request traces, replay-validated context/memory assertions and a dedicated report gate; preserve ordinary schema-1 reports and record seed changes in comparisons
 2026-10-14: Preview desktop dictation in native macOS and Windows windows before Enter confirmation; cancel with Esc, restore and validate the destination, save confirmed history once across retries, and add a feature-gated preview demo
 2026-10-15: Replace confirmation windows with editable borderless bubbles and no buttons; deliver the edited text on Enter, preserve input-method composition and Shift+Enter, and make the preview demo use real target delivery
+2026-10-15: Require a fresh confirmation key press after preview focus changes, connect macOS editing shortcuts, wait for asynchronous target activation, and preserve permission-recovery guidance from preview target errors

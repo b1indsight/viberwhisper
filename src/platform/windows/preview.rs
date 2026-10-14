@@ -19,6 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::platform::preview::{
     ConfirmationKey, DeliveryTarget, PreviewAction, PreviewEvent, PreviewKey, PreviewNotify,
+    wait_for_activation,
 };
 use crate::session::SessionId;
 
@@ -118,7 +119,7 @@ impl DeliveryTarget for NativeTarget {
                 "无法恢复原窗口，请重试或复制文字后手动输入"
             );
         }
-        self.validate()
+        wait_for_activation(|| self.validate())
     }
 
     fn validate(&self) -> Result<()> {
@@ -153,7 +154,7 @@ impl WindowState {
         }
     }
 
-    fn key(&self, key: WPARAM, pressed: bool) -> bool {
+    fn key(&self, key: WPARAM, pressed: bool, is_repeat: bool) -> bool {
         let action = match key as u16 {
             VK_RETURN => PreviewKey::Confirm,
             VK_ESCAPE => PreviewKey::Cancel,
@@ -190,16 +191,19 @@ impl WindowState {
             }
             return false;
         }
-        if self.composing.get()
-            || [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
-                .iter()
-                .any(|key| unsafe { GetKeyState(*key as i32) } < 0)
-        {
+        if self.modified_or_composing() {
             self.keys.borrow_mut().reset();
             return false;
         }
-        self.keys.borrow_mut().press(action);
+        self.keys.borrow_mut().press(action, is_repeat);
         true
+    }
+
+    fn modified_or_composing(&self) -> bool {
+        self.composing.get()
+            || [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
+                .iter()
+                .any(|key| unsafe { GetKeyState(*key as i32) } < 0)
     }
 }
 
@@ -218,16 +222,19 @@ unsafe extern "system" fn control_proc(
         state.composing.set(message == WM_IME_STARTCOMPOSITION);
         state.keys.borrow_mut().reset();
     }
-    if matches!(message, WM_KEYDOWN | WM_KEYUP) && state.key(wparam, message == WM_KEYDOWN) {
+    if matches!(message, WM_KEYDOWN | WM_KEYUP)
+        && state.key(
+            wparam,
+            message == WM_KEYDOWN,
+            lparam as usize & (1 << 30) != 0,
+        )
+    {
         return 0;
     }
     if message == WM_CHAR {
-        let key = match wparam as u16 {
-            VK_RETURN => Some(PreviewKey::Confirm),
-            VK_ESCAPE => Some(PreviewKey::Cancel),
-            _ => None,
-        };
-        if key.is_some_and(|key| state.keys.borrow().is_pressed(key)) {
+        // TranslateMessage also posts WM_CHAR for repeats we consumed without
+        // arming. Those must not silently insert a newline into the candidate.
+        if matches!(wparam as u16, VK_RETURN | VK_ESCAPE) && !state.modified_or_composing() {
             return 0;
         }
     }
@@ -264,7 +271,15 @@ unsafe extern "system" fn window_proc(
                 return 0;
             }
             WM_ACTIVATE if wparam as u16 == WA_INACTIVE as u16 => state.keys.borrow_mut().reset(),
-            WM_KEYDOWN | WM_KEYUP if state.key(wparam, message == WM_KEYDOWN) => return 0,
+            WM_KEYDOWN | WM_KEYUP
+                if state.key(
+                    wparam,
+                    message == WM_KEYDOWN,
+                    lparam as usize & (1 << 30) != 0,
+                ) =>
+            {
+                return 0;
+            }
             WM_NCDESTROY => unsafe {
                 SetWindowLongPtrW(window, GWLP_USERDATA, 0);
             },
@@ -546,6 +561,27 @@ impl NativePreview {
         }
         // Exercise the real subclass chain, including key repeats and WM_CHAR.
         unsafe {
+            let before = GetWindowTextLengthW(self.state.text.get());
+            for _ in 0..5 {
+                SendMessageW(
+                    self.state.text.get(),
+                    WM_KEYDOWN,
+                    VK_RETURN as usize,
+                    1 << 30,
+                );
+                SendMessageW(self.state.text.get(), WM_CHAR, VK_RETURN as usize, 1 << 30);
+            }
+            SendMessageW(
+                self.state.text.get(),
+                WM_KEYUP,
+                VK_RETURN as usize,
+                (1 << 30) | (1 << 31),
+            );
+            verify_pending()?;
+            ensure!(
+                GetWindowTextLengthW(self.state.text.get()) == before,
+                "Inherited Enter repeat changed the editable text"
+            );
             let edited_text = super::nul_terminated_utf16(edited_text);
             SendMessageW(self.state.text.get(), EM_SETSEL, 0, -1);
             SendMessageW(
@@ -554,9 +590,15 @@ impl NativePreview {
                 1,
                 edited_text.as_ptr() as isize,
             );
-            for _ in 0..5 {
-                SendMessageW(self.state.text.get(), WM_KEYDOWN, VK_RETURN as usize, 0);
-                SendMessageW(self.state.text.get(), WM_CHAR, VK_RETURN as usize, 0);
+            for index in 0..5 {
+                let repeat = if index == 0 { 0 } else { 1 << 30 };
+                SendMessageW(
+                    self.state.text.get(),
+                    WM_KEYDOWN,
+                    VK_RETURN as usize,
+                    repeat,
+                );
+                SendMessageW(self.state.text.get(), WM_CHAR, VK_RETURN as usize, repeat);
             }
             verify_pending()?;
             SendMessageW(self.state.text.get(), WM_KEYUP, VK_RETURN as usize, 0);
