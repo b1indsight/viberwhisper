@@ -3,15 +3,15 @@ use std::ptr::NonNull;
 
 use anyhow::{Result, anyhow, ensure};
 use objc2::rc::Retained;
-#[cfg(feature = "integration")]
 use objc2::runtime::AnyObject;
 use objc2::runtime::ProtocolObject;
 use objc2::{DeclaredClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationOptions, NSBackingStoreType, NSBezierPath, NSColor,
-    NSEvent, NSEventModifierFlags, NSEventType, NSFont, NSRunningApplication, NSScreen,
-    NSScrollView, NSTextDelegate, NSTextField, NSTextInputClient, NSTextView, NSTextViewDelegate,
-    NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
+    NSApplication, NSApplicationActivationOptions, NSAutoresizingMaskOptions, NSBackingStoreType,
+    NSBezierPath, NSColor, NSEvent, NSEventModifierFlags, NSEventType, NSFont, NSFontAttributeName,
+    NSRunningApplication, NSScreen, NSScrollView, NSStringDrawing, NSTextDelegate, NSTextField,
+    NSTextInputClient, NSTextView, NSTextViewDelegate, NSView, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask, NSWorkspace,
 };
 use objc2_app_kit::{NSMenu, NSMenuItem};
 #[cfg(feature = "integration")]
@@ -19,7 +19,7 @@ use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
 use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFRetained, CFString, kCFBooleanTrue};
 use objc2_foundation::{
-    NSNotification, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
+    NSDictionary, NSNotification, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
 };
 
 use super::AccessibilityError;
@@ -167,6 +167,7 @@ struct WindowState {
     text: Retained<NSTextView>,
     status: Retained<NSTextField>,
     scroll: Retained<NSScrollView>,
+    max_width: f64,
     retry_allowed: Cell<bool>,
 }
 
@@ -286,10 +287,33 @@ impl PreviewWindow {
         self.resize_to_text();
     }
 
-    /// Keep the bubble's width and top edge while its editable text wraps.
+    /// Fit short candidates, then wrap at the width limit, retaining the top/center anchor.
     fn resize_to_text(&self) {
         let state = self.ivars();
-        let width = self.frame().size.width;
+        let font = state.text.font().expect("preview font is configured");
+        let attributes: Retained<NSDictionary<NSString, AnyObject>> =
+            NSDictionary::from_slices(&[unsafe { NSFontAttributeName }], &[&font]);
+        // Measure unwrapped lines with the editor's font so narrow Latin letters,
+        // wide glyphs, Chinese and emoji determine the actual compact width.
+        let natural_width = state
+            .text
+            .string()
+            .to_string()
+            .lines()
+            .map(|line| unsafe {
+                NSString::from_str(line)
+                    .sizeWithAttributes(Some(&attributes))
+                    .width
+            })
+            .fold(0.0_f64, f64::max);
+        let width = if state.status.isHidden() {
+            (natural_width + 34.0).ceil().clamp(96.0, state.max_width)
+        } else {
+            state.max_width
+        };
+        state
+            .scroll
+            .setFrameSize(NSSize::new(width - 32.0, state.scroll.frame().size.height));
         let used_height = unsafe {
             state
                 .text
@@ -306,7 +330,9 @@ impl PreviewWindow {
         let footer = if state.status.isHidden() { 0.0 } else { 44.0 };
         let height = editor_height + 24.0 + footer;
         let mut frame = self.frame();
+        frame.origin.x += (frame.size.width - width) / 2.0;
         frame.origin.y += frame.size.height - height;
+        frame.size.width = width;
         frame.size.height = height;
         self.setFrame_display(frame, true);
         state.scroll.setFrame(NSRect::new(
@@ -314,6 +340,10 @@ impl PreviewWindow {
             NSSize::new(width - 32.0, editor_height),
         ));
         state.text.setMinSize(NSSize::new(0.0, editor_height));
+        state.text.setTextContainerInset(NSSize::new(
+            0.0,
+            ((editor_height - used_height) / 2.0).max(0.0),
+        ));
         state.status.setFrame(NSRect::new(
             NSPoint::new(20.0, 10.0),
             NSSize::new(width - 40.0, 38.0),
@@ -403,10 +433,12 @@ impl NativePreview {
         text.setMaxSize(NSSize::new(width - 32.0, f64::MAX));
         text.setVerticallyResizable(true);
         text.setHorizontallyResizable(false);
+        text.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         text.setTextContainerInset(NSSize::new(0.0, 0.0));
         if let Some(container) = unsafe { text.textContainer() } {
             container.setContainerSize(NSSize::new(width - 32.0, f64::MAX));
             container.setWidthTracksTextView(true);
+            container.setLineFragmentPadding(0.0);
         }
         let content: Retained<BubbleView> = unsafe {
             msg_send![super(BubbleView::alloc(mtm).set_ivars(())), initWithFrame: frame(0.0, 0.0, width, height)]
@@ -432,6 +464,7 @@ impl NativePreview {
             text: text.clone(),
             status,
             scroll,
+            max_width: width,
             retry_allowed: Cell::new(true),
         });
         // SAFETY: Correct NSWindow initializer. Rust retains the window; closing must not release it.
@@ -540,8 +573,8 @@ impl NativePreview {
                 NSRange::new(0, text.string().len_utf16()),
             );
         };
-        // Editing must resize the visible bubble, including wrapping and the
-        // empty caret line after Shift+Enter, without changing its anchor/width.
+        // Short candidates fit their text; longer candidates reach the width
+        // limit before wrapping, and the insertion line stays vertically centered.
         replace("短句");
         let short = window.frame();
         replace(&"中文 English 🎙️ 自动换行。".repeat(20));
@@ -551,8 +584,8 @@ impl NativePreview {
             "Bubble did not grow after editing"
         );
         ensure!(
-            grown.size.width == short.size.width,
-            "Bubble width changed while editing"
+            grown.size.width > short.size.width && grown.size.width <= 420.0,
+            "Short candidate did not shrink below the wrapping width"
         );
         ensure!(
             (grown.origin.y + grown.size.height - short.origin.y - short.size.height).abs() < 0.1,
@@ -573,6 +606,34 @@ impl NativePreview {
             window.frame().size == short.size,
             "Bubble did not shrink after deletion"
         );
+        let caret = unsafe {
+            text.firstRectForCharacterRange_actualRange(NSRange::new(0, 0), std::ptr::null_mut())
+        };
+        ensure!(
+            (caret.origin.y + caret.size.height / 2.0 - short.origin.y - short.size.height / 2.0)
+                .abs()
+                <= 1.0,
+            "Short candidate is not vertically centered"
+        );
+        replace("");
+        let empty = window.frame();
+        let caret = unsafe {
+            text.firstRectForCharacterRange_actualRange(NSRange::new(0, 0), std::ptr::null_mut())
+        };
+        ensure!(
+            (caret.origin.y + caret.size.height / 2.0 - empty.origin.y - empty.size.height / 2.0)
+                .abs()
+                <= 1.0,
+            "Empty candidate caret is not vertically centered"
+        );
+        replace("iiiiiiiiiiiiiiii");
+        let narrow = window.frame().size.width;
+        replace("WWWWWWWWWWWWWWWW");
+        ensure!(
+            window.frame().size.width > narrow,
+            "Bubble width ignored native glyph widths"
+        );
+        replace("短句");
         ensure!(
             text.frame().size.height <= window.ivars().scroll.contentSize().height + 1.0,
             "Deleting long text left a scrollable empty document"

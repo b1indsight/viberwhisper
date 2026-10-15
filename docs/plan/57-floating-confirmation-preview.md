@@ -1,6 +1,6 @@
 # 57 - 悬浮预览与回车确认 — Feature record
 
-**Stage:** Editable, adaptive-height bubbles validated locally; draft pending remaining desktop acceptance
+**Stage:** Content-fitting, vertically centered bubbles validated locally; draft pending remaining desktop acceptance
 **PR:** https://github.com/b1indsight/viberwhisper/pull/148
 
 ## 1. Initial plan
@@ -325,3 +325,46 @@ TextEdit 测试文档读取结果与确认的中英混合、emoji 样本完整�
 本机原生检查覆盖 macOS，尚未操作真实中文输入法候选界面、Chromium 或终端。
 此前 [004] 的独立审查无新发现，提交 d63f3a41 的
 [双平台 CI 已通过](https://github.com/b1indsight/viberwhisper/actions/runs/38703725115)。
+
+### [006] — 2026-10-15 — 短句收窄与输入区垂直居中
+
+**状态：已实现并通过本地验证；本次独立审查与托管检查随后运行。**
+
+用户试用后希望短文字不再占据整段宽度，并要求输入位置在气泡内居中；经用户选择，
+采用“输入区垂直居中，文字保持左对齐”。此要求替代 [005] 的固定宽度约束，保留最大
+宽度后换行、最大高度后滚动的行为。
+
+- 两端按照原生字体测量文字的实际宽度；短句最小宽度为 96 原生单位，最大宽度沿用
+  屏幕范围内的 420 上限。达到最大宽度后才换行增高；增删文字时保留顶部和水平中心。
+  错误提示存在时使用最大宽度，确保底部消息可读。
+- macOS 使用现有 AppKit 的 NSString 绘制测量接口测量最长显式行，再用原生文本布局
+  确定换行后的高度。宽度跟随滚动容器变化，短句使用文本容器的垂直内边距居中。
+  Cargo.toml 只启用现有绑定的 NSAttributedString / NSStringDrawing feature；没有
+  新增依赖包，Cargo.lock 不变。
+- Windows 以当前编辑器字体测量自然宽度，在最终宽度下重新计算原生换行行数；通过
+  编辑框的 formatting rectangle 居中短句。依照
+  [EM_SETRECTNP](https://learn.microsoft.com/en-us/windows/win32/controls/em-setrectnp)
+  保留编辑器原生行为，重排后保持光标可见，不增加按钮或新的输入组件。
+
+**验证：** 扩展现有原生 fixture，先复现“Short candidate did not shrink below the
+wrapping width”。实现后检查短句与长句宽度不同、长文宽度受限、删除后恢复紧凑大小，
+并通过真实插入位置矩形检查短句和空输入的垂直居中。等字数的 `i` / `W` 样本得到不同
+宽度，确认没有用字符数估算。原有高度限制、快捷键、组词、回车释放确认仍通过；专用
+TextEdit 文档的读回文字与确认的中英混合、emoji 样本一致。UI 脚本明确把新建的测试
+文档窗口放到最前再激活，核对该文档，不依赖可能已有的其他 TextEdit 窗口。
+默认与 integration 测试均为 256 passed / 2 ignored；格式、diff 空白检查、完整构建及
+`cargo clippy --locked --all-targets --features integration -- -D warnings` 均通过。
+
+**消融比较：** `.cache/2026-10-14/preview-fit-ablation.py` 构建独立 package identity
+的副本，`run-preview-fit-ablation.py` 使用相同原生输入检查。固定最大宽度、取消垂直
+内边距、按每字符 8 单位估宽，分别失败于短句收窄、真实光标居中、等字数不同字形宽度
+检查（退出 1）。额外取字体空行高度的分支移除后，包含空输入在内的检查及投递仍全部
+通过（退出 0），因此删去该分支。命令、results.json、构建和原生日志保存在
+`.cache/2026-10-14/preview-fit-ablation-148/`。正式版本原生日志为
+`.cache/2026-10-14/viberwhisper-preview-autosize-smoke.log`，均不提交。
+
+**验收限制：** Windows 实际源文件及 native fixture 通过 MSVC 目标 check / Clippy，
+桌面居中、字体回退、滚动和焦点恢复仍未实机验收。此前报告的 Windows 换行自检断言
+可能在最小高度内误报（LOW），本次未调整该断言；真实中文输入法候选界面及 Chromium /
+终端验收也继续保留。此前 [005] 的
+[双平台 CI 已通过](https://github.com/b1indsight/viberwhisper/actions/runs/38709538673)。

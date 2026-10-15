@@ -5,13 +5,17 @@ use std::sync::OnceLock;
 use anyhow::{Result, anyhow, ensure};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, CreateRoundRectRgn, DEFAULT_GUI_FONT, DeleteObject, GetDC, GetStockObject,
-    GetTextMetricsW, ReleaseDC, SelectObject, SetWindowRgn, TEXTMETRICW,
+    COLOR_WINDOW, CreateRoundRectRgn, DEFAULT_GUI_FONT, DT_CALCRECT, DT_EDITCONTROL, DT_EXPANDTABS,
+    DT_NOPREFIX, DeleteObject, DrawTextW, GetDC, GetStockObject, GetTextMetricsW, InvalidateRect,
+    ReleaseDC, SelectObject, SetWindowRgn, TEXTMETRICW,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(feature = "integration")]
 use windows_sys::Win32::UI::Controls::EM_REPLACESEL;
-use windows_sys::Win32::UI::Controls::{EM_GETLINECOUNT, EM_SETLIMITTEXT, EM_SETSEL};
+use windows_sys::Win32::UI::Controls::{
+    EM_GETLINECOUNT, EM_GETMARGINS, EM_GETRECT, EM_SCROLLCARET, EM_SETLIMITTEXT, EM_SETRECTNP,
+    EM_SETSEL,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT,
 };
@@ -148,6 +152,7 @@ struct WindowState {
     retry_allowed: Cell<bool>,
     message_visible: Cell<bool>,
     laying_out: Cell<bool>,
+    max_width: Cell<i32>,
 }
 
 impl WindowState {
@@ -164,7 +169,12 @@ impl WindowState {
         self.layout()
     }
 
-    fn text_height(&self) -> Result<i32> {
+    fn text_metrics(&self) -> Result<(i32, i32)> {
+        let length = unsafe { GetWindowTextLengthW(self.text.get()) };
+        let mut text = vec![0u16; length as usize + 1];
+        let count =
+            unsafe { GetWindowTextW(self.text.get(), text.as_mut_ptr(), text.len() as i32) };
+        ensure!(length == 0 || count > 0, "无法测量预览文字");
         // Match the edit control's actual font; the screen DC's default font can differ.
         let font = unsafe { SendMessageW(self.text.get(), WM_GETFONT, 0, 0) } as _;
         let dc = unsafe { GetDC(self.text.get()) };
@@ -172,19 +182,34 @@ impl WindowState {
         let previous = unsafe { SelectObject(dc, font) };
         let mut metrics = TEXTMETRICW::default();
         let measured = !previous.is_null() && unsafe { GetTextMetricsW(dc, &mut metrics) } != 0;
+        let mut bounds = RECT::default();
+        let drawn = if measured && count > 0 {
+            unsafe {
+                DrawTextW(
+                    dc,
+                    text.as_ptr(),
+                    count,
+                    &mut bounds,
+                    DT_CALCRECT | DT_NOPREFIX | DT_EXPANDTABS | DT_EDITCONTROL,
+                )
+            }
+        } else {
+            0
+        };
         unsafe {
             if !previous.is_null() {
                 SelectObject(dc, previous);
             }
             ReleaseDC(self.text.get(), dc);
         }
-        ensure!(measured && metrics.tmHeight > 0, "无法测量预览字体");
-        let lines = unsafe { SendMessageW(self.text.get(), EM_GETLINECOUNT, 0, 0) } as i32;
-        // Match the macOS preview's viewport bounds; taller text stays scrollable.
-        Ok(lines.max(1).saturating_mul(metrics.tmHeight).clamp(28, 196))
+        ensure!(
+            measured && metrics.tmHeight > 0 && (count == 0 || drawn > 0),
+            "无法测量预览字体"
+        );
+        Ok((bounds.right, metrics.tmHeight))
     }
 
-    /// Grow downwards without moving focus or changing the fixed wrapping width.
+    /// Fit short candidates and center their input line, wrapping at the width limit.
     fn layout(&self) -> Result<()> {
         // Resizing a native edit control can synchronously send more notifications.
         if self.laying_out.replace(true) {
@@ -197,19 +222,56 @@ impl WindowState {
                 unsafe { GetWindowRect(window, &mut bounds) } != 0,
                 "无法获取预览尺寸"
             );
-            let width = bounds.right - bounds.left;
-            let editor_height = self.text_height()?;
+            let (natural_width, line_height) = self.text_metrics()?;
+            let margins = unsafe { SendMessageW(self.text.get(), EM_GETMARGINS, 0, 0) } as u32;
+            let padding = 34 + (margins & 0xffff) as i32 + (margins >> 16) as i32;
+            let width = if self.message_visible.get() {
+                self.max_width.get()
+            } else {
+                natural_width
+                    .saturating_add(padding)
+                    .clamp(96, self.max_width.get())
+            };
+            let mut viewport = RECT::default();
+            ensure!(
+                unsafe { GetClientRect(self.text.get(), &mut viewport) } != 0,
+                "无法获取输入框尺寸"
+            );
+            // Reflow at the new width before counting native wrapped lines.
+            if viewport.right != width - 32 {
+                ensure!(
+                    unsafe {
+                        SetWindowPos(
+                            self.text.get(),
+                            null_mut(),
+                            16,
+                            12,
+                            width - 32,
+                            viewport.bottom,
+                            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                        )
+                    } != 0,
+                    "无法调整预览输入框"
+                );
+            }
+            unsafe {
+                SendMessageW(self.text.get(), EM_SETRECTNP, 0, 0);
+            }
+            let lines = unsafe { SendMessageW(self.text.get(), EM_GETLINECOUNT, 0, 0) } as i32;
+            let content_height = lines.max(1).saturating_mul(line_height);
+            // Match the macOS viewport bounds; taller text stays scrollable.
+            let editor_height = content_height.clamp(28, 196);
             let height = editor_height + 24 + if self.message_visible.get() { 48 } else { 0 };
             unsafe {
                 ensure!(
                     SetWindowPos(
                         window,
                         null_mut(),
-                        0,
-                        0,
+                        bounds.left + (bounds.right - bounds.left) / 2 - width / 2,
+                        bounds.top,
                         width,
                         height,
-                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
+                        SWP_NOZORDER | SWP_NOACTIVATE
                     ) != 0,
                     "无法调整预览尺寸"
                 );
@@ -225,6 +287,20 @@ impl WindowState {
                     ) != 0,
                     "无法调整预览输入框"
                 );
+                SendMessageW(self.text.get(), EM_SETRECTNP, 0, 0);
+                let mut format = RECT::default();
+                SendMessageW(self.text.get(), EM_GETRECT, 0, (&raw mut format) as isize);
+                let inset = ((format.bottom - format.top - content_height) / 2).max(0);
+                format.top += inset;
+                format.bottom -= inset;
+                SendMessageW(
+                    self.text.get(),
+                    EM_SETRECTNP,
+                    0,
+                    (&raw const format) as isize,
+                );
+                SendMessageW(self.text.get(), EM_SCROLLCARET, 0, 0);
+                InvalidateRect(self.text.get(), null(), 1);
                 ensure!(
                     SetWindowPos(
                         self.status.get(),
@@ -418,6 +494,7 @@ impl NativePreview {
                 retry_allowed: Cell::new(true),
                 message_visible: Cell::new(false),
                 laying_out: Cell::new(false),
+                max_width: Cell::new(420),
             }),
         }
     }
@@ -456,6 +533,7 @@ impl NativePreview {
             SystemParametersInfoW(SPI_GETWORKAREA, 0, (&raw mut work).cast(), 0);
         }
         let width = 420.min((work.right - work.left - 20).max(240));
+        self.state.max_width.set(width);
         let height = 104;
         let x = work.left + (work.right - work.left - width) / 2;
         let y = work.top + (work.bottom - work.top - height) / 2;
@@ -663,8 +741,8 @@ impl NativePreview {
             "Bubble did not grow after editing"
         );
         ensure!(
-            grown.right - grown.left == short.right - short.left,
-            "Bubble width changed while editing"
+            grown.right - grown.left > short.right - short.left && grown.right - grown.left <= 420,
+            "Short candidate did not shrink below the wrapping width"
         );
         ensure!(
             grown.top == short.top,
@@ -688,6 +766,28 @@ impl NativePreview {
             shrunk.bottom - shrunk.top == short.bottom - short.top,
             "Bubble did not shrink after deletion"
         );
+        let mut info = GUITHREADINFO {
+            cbSize: size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        ensure!(
+            unsafe { GetGUIThreadInfo(0, &mut info) } != 0
+                && info.hwndCaret == self.state.text.get(),
+            "Could not read the native caret"
+        );
+        ensure!(
+            (info.rcCaret.top + info.rcCaret.bottom - (short.bottom - short.top - 24)).abs() <= 2,
+            "Short candidate is not vertically centered"
+        );
+        replace("iiiiiiiiiiiiiiii");
+        let narrow = bounds()?;
+        replace("WWWWWWWWWWWWWWWW");
+        let wide = bounds()?;
+        ensure!(
+            wide.right - wide.left > narrow.right - narrow.left,
+            "Bubble width ignored native glyph widths"
+        );
+        replace("短句");
         self.state.set_message(Some("测试提示"))?;
         replace(&"自动换行保留提示。".repeat(20));
         ensure!(
