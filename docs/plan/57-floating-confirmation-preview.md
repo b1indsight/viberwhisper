@@ -1,6 +1,6 @@
 # 57 - 悬浮预览与回车确认 — Feature record
 
-**Stage:** Caret-relative bubbles implemented; draft pending review, CI, and remaining desktop acceptance
+**Stage:** Caret-relative bubbles and Windows DPI normalization implemented; draft pending remaining desktop acceptance
 **PR:** https://github.com/b1indsight/viberwhisper/pull/148
 
 ## 1. Initial plan
@@ -408,3 +408,35 @@ TextEdit 文档的读回文字与确认的中英混合、emoji 样本一致。UI
 Windows 实际源文件通过 MSVC 目标 check / Clippy，原生桌面光标、DPI 与多屏移动仍需
 Windows 实机验收；macOS 多屏只覆盖坐标计算，真实中文候选界面、Chromium 与终端
 也尚未完成验收。此 PR 保持 draft。
+
+### [008] — 2026-10-15 — 修复 Windows 跨 DPI 模式的光标矩形
+
+**状态：已实现并通过本地回归与交叉编译；本次独立审查及 Windows 原生测试随后运行。**
+
+[007] 的审查发现 Windows 将目标窗口的逻辑光标坐标与本应用的屏幕像素混用，
+还直接沿用了未缩放的宽高。用户了解触发条件与转换方案后明确要求“可以，修复”。
+本次修复该项 MEDIUM；[006] 的布局发现与此前 Windows 换行自检断言仍未调整。
+
+`windows/preview/position.rs` 先获取光标窗口的 DPI 上下文，并仅在捕获线程上临时采用
+该模式。光标矩形的两个角各自经过 ClientToScreen 与
+LogicalToPhysicalPointForPerMonitorDPI，统一成物理屏幕像素后相减求宽高。
+ThreadDpiContext guard 在正常返回及任一角转换失败时恢复原线程模式；读取失败继续
+沿用输入控件边界或居中回退。此方式使用窗口自己的转换规则，避免用全局比例乘坐标
+而忽略窗口原点或不同屏幕。Cargo.toml 仅为现有 windows-sys 开启 Win32_UI_HiDpi，
+没有新增依赖包或修改锁文件。架构说明与 changelog 同步更新。
+
+**验证：** 先新增回归测试，再实现矩形转换与上下文 guard。矩形测试覆盖 96 DPI 目标
+在 192 DPI 副屏上的位置与尺寸，以及气泡顶部必须处于转换后的光标底部下方；另一个
+测试在第二个角转换失败时检查拒绝矩形并恢复线程 DPI 上下文。Windows 实际源文件和
+新增测试通过 MSVC 目标 all-targets check / Clippy；macOS 现有测试为 260 passed /
+2 ignored。格式、diff 空白检查和本机 all-targets / integration Clippy 均通过。
+
+**消融比较：** `.cache/2026-10-14/preview-dpi-ablation.py` 在本机以可控 Win32 API
+替身编译实际 position.rs 与提交的测试，并覆盖完整 capture_anchor 调用链。输入为
+96/192 DPI 模式差异、副屏负原点及第二次原生转换失败；正式版本 7 项通过（退出 0）。
+单角转换、取消物理像素转换、取消目标 DPI 模式、取消上下文恢复的四个副本分别因尺寸、
+位置或线程模式断言失败（退出 101）。日志和 results.json 保存在
+`.cache/2026-10-14/preview-dpi-ablation-148/`，不提交。这些替身验证转换顺序和错误路径，
+不代表 Windows 高 DPI 实机验收；真实 API 的上下文恢复测试由 Windows CI 执行，
+实际 200% 缩放和多屏桌面效果仍保留人工验收。此前 [007] 的
+[双平台 CI 已通过](https://github.com/b1indsight/viberwhisper/actions/runs/38719186278)。

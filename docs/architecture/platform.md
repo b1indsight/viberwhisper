@@ -258,6 +258,10 @@ messages use the maximum bubble width to remain readable.
 
 The worker captures plain caret geometry before publishing the preview. macOS queries the selected
 range's AX bounds; Windows reads GUITHREADINFO's native caret and converts its client coordinates.
+Win32 capture temporarily adopts the caret window's DPI context, maps both rectangle corners to
+logical screen coordinates, then converts each corner to physical pixels. Width and height come
+from the converted corners. A thread-local guard restores the original DPI context on success
+and failure before the worker proceeds to fallback bounds or delivery.
 Unsupported caret queries fall back to recognized text-control bounds, then a centered preview.
 `preview/placement.rs` prefers the caret's lower edge, flips above when necessary and clamps the
 bubble to the nearest monitor work area. AX/Win32 coordinates share a top-left convention;
