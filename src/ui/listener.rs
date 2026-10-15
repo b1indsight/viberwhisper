@@ -11,9 +11,8 @@ use crate::postprocess::PostProcessConfig;
 use crate::prompt_lab::{DatasetStore, PromptLabCapture, SttSnapshot};
 use crate::{audio, postprocess};
 
-pub(super) mod event_loop;
+mod event_loop;
 mod permission;
-pub(super) mod preview;
 
 fn platform_session_event(action: PlatformAction, state: &RecordingState) -> Option<SessionEvent> {
     match action {

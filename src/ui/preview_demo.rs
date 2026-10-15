@@ -4,7 +4,6 @@
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
-    mpsc,
 };
 use std::time::{Duration, Instant};
 
@@ -12,19 +11,26 @@ use anyhow::{Result, anyhow};
 use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 
-use super::listener::event_loop::{AppEvent, FinalizationGate, PreviewCommand};
-use super::listener::preview::wait_for_confirmation;
-use crate::platform::{NativePreview, NativeTarget, PreviewAction};
+use super::preview::{
+    FinalizationGate, PendingPreview, PreviewCommand, PreviewUpdate, wait_for_confirmation,
+};
+use crate::platform::{NativePreview, NativeTarget, PreviewAction, PreviewEvent};
 use crate::session::SessionId;
 
 const SAMPLE_TEXT: &str = "明天下午三点开会，请提前准备演示材料。";
 const SMOKE_TEXT: &str = "已编辑的文字：中文、English 和 emoji 🎙️。";
 
+enum DemoEvent {
+    Update(PreviewUpdate),
+    Input(PreviewEvent),
+    Finished,
+}
+
 /// Gives the user three seconds to focus a destination, then opens the editable
 /// bubble. Enter really delivers the edited text. `smoke` uses the already focused
 /// destination and tests native editing, held Enter and production delivery.
 pub fn run_preview_demo(smoke: bool) -> Result<()> {
-    let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
+    let event_loop = EventLoop::<DemoEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let notifications = Arc::new(AtomicUsize::new(0));
     let notified = Arc::clone(&notifications);
@@ -44,21 +50,18 @@ pub fn run_preview_demo(smoke: bool) -> Result<()> {
             None,
             &worker_gate,
             NativeTarget::capture,
-            &|event| proxy.send_event(event).is_ok(),
+            &|update| proxy.send_event(DemoEvent::Update(update)).is_ok(),
         );
-        let _ = proxy.send_event(AppEvent::FinalizationFinished {
-            session_id: SessionId(1),
-        });
+        let _ = proxy.send_event(DemoEvent::Finished);
     });
     let mut demo = Demo {
         preview: NativePreview::new(Box::new(move |event| {
             notified.fetch_add(1, Ordering::Relaxed);
-            let _ = ui_proxy.send_event(AppEvent::Preview(event));
+            let _ = ui_proxy.send_event(DemoEvent::Input(event));
         })),
         smoke,
         sent: false,
-        busy: false,
-        commands: None,
+        pending: None,
         deadline: Instant::now() + Duration::from_secs(10),
         error: None,
         notifications,
@@ -66,7 +69,7 @@ pub fn run_preview_demo(smoke: bool) -> Result<()> {
     };
     let result = event_loop.run_app(&mut demo);
     demo.gate.cancel();
-    demo.commands.take();
+    demo.pending.take();
     worker
         .join()
         .map_err(|_| anyhow!("Preview delivery worker panicked"))?;
@@ -81,28 +84,27 @@ struct Demo {
     preview: NativePreview,
     smoke: bool,
     sent: bool,
-    busy: bool,
-    commands: Option<mpsc::Sender<PreviewCommand>>,
+    pending: Option<PendingPreview>,
     deadline: Instant,
     error: Option<String>,
     notifications: Arc<AtomicUsize>,
     gate: Arc<FinalizationGate>,
 }
 
-impl ApplicationHandler<AppEvent> for Demo {
+impl ApplicationHandler<DemoEvent> for Demo {
     fn resumed(&mut self, _: &ActiveEventLoop) {}
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: DemoEvent) {
         match event {
-            AppEvent::PreviewReady {
+            DemoEvent::Update(PreviewUpdate::Ready {
                 session_id,
                 text,
                 destination,
                 anchor,
                 warning,
                 commands,
-            } => {
-                self.commands = Some(commands);
+            }) => {
+                self.pending = Some(PendingPreview::new(session_id, commands));
                 if self.smoke {
                     println!("Preview destination: {destination}; captured anchor: {anchor:?}");
                     if let Some(warning) = warning.as_deref() {
@@ -117,9 +119,12 @@ impl ApplicationHandler<AppEvent> for Demo {
                     event_loop.exit();
                 }
             }
-            AppEvent::Preview(event) if !self.busy => {
+            DemoEvent::Input(event) => {
+                let Some(pending) = &mut self.pending else {
+                    return;
+                };
                 let command = match event.action {
-                    PreviewAction::Confirm(text) => {
+                    PreviewAction::Confirm(text) if pending.begin(event.session_id) => {
                         if self.smoke && text != SMOKE_TEXT {
                             self.error = Some(format!("Preview returned unedited text: {text}"));
                             event_loop.exit();
@@ -128,41 +133,47 @@ impl ApplicationHandler<AppEvent> for Demo {
                         println!("Preview confirmed: {text}");
                         PreviewCommand::Confirm(text)
                     }
-                    PreviewAction::Cancel => PreviewCommand::Cancel,
+                    PreviewAction::Cancel if pending.begin_cancel(event.session_id) => {
+                        PreviewCommand::Cancel
+                    }
+                    _ => return,
                 };
-                self.busy = true;
                 self.preview.hide();
-                if self
-                    .commands
-                    .as_ref()
-                    .is_none_or(|sender| sender.send(command).is_err())
-                {
+                if pending.commands.send(command).is_err() {
                     self.error = Some("Preview delivery worker disconnected".into());
                     event_loop.exit();
                 }
             }
-            AppEvent::PreviewDeliveryFailed {
+            DemoEvent::Update(PreviewUpdate::DeliveryFailed {
+                session_id,
                 error,
                 retry_allowed,
-                ..
-            } => {
+            }) => {
+                if !self
+                    .pending
+                    .as_mut()
+                    .is_some_and(|pending| pending.failed(session_id, retry_allowed))
+                {
+                    return;
+                }
                 eprintln!("Preview delivery failed: {error}");
                 if self.smoke {
                     self.error = Some(error);
                     event_loop.exit();
                 } else {
-                    self.busy = false;
                     self.preview.show_error(&error, retry_allowed);
                 }
             }
-            AppEvent::FinalizationFinished { .. } => {
+            DemoEvent::Finished => {
                 if self.smoke && self.notifications.load(Ordering::Relaxed) != 1 {
                     self.error = Some("Expected exactly one native confirmation".into());
                 }
                 self.preview.close();
                 event_loop.exit();
             }
-            _ => {}
+            DemoEvent::Update(
+                PreviewUpdate::HistorySaved(_) | PreviewUpdate::PermissionRequired,
+            ) => {}
         }
     }
 
@@ -176,7 +187,7 @@ impl ApplicationHandler<AppEvent> for Demo {
             event_loop.exit();
             return;
         }
-        if self.commands.is_some() && !self.sent {
+        if self.pending.is_some() && !self.sent {
             match self.preview.smoke_confirmation(SMOKE_TEXT, &|| {
                 anyhow::ensure!(
                     self.notifications.load(Ordering::Relaxed) == 0,

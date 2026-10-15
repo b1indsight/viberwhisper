@@ -13,7 +13,7 @@ orchestration. The entry points connect these modules directly.
 | `src/ui.rs` | Desktop interaction module declarations |
 | `src/ui/listener.rs` | Listener service assembly and platform-action mapping |
 | `src/ui/listener/event_loop.rs` | Winit events, session effects, and background finalization |
-| `src/ui/listener/preview.rs` | Confirmation state, worker command loop, history deduplication and guarded delivery |
+| `src/ui/preview.rs` | Shared preview protocol, confirmation state, cancellation, history deduplication and guarded delivery |
 | `src/ui/preview_demo.rs` | Feature-gated native preview demo and held-Enter smoke fixture |
 | `src/ui/setup.rs` | Setup wizard, native dialogs, and test-recording workflow |
 | `src/ui/setup/hotkey.rs` | Short-lived hotkey helper processes and their protocol |
@@ -23,8 +23,13 @@ orchestration. The entry points connect these modules directly.
 `ui::listener` accepts the existing `core::listener::RecordingConfig` or `ListenerConfig`.
 It creates the native platform, recorder, orchestrator, and delivery or dataset-capture output.
 The event-loop handler owns these resources and executes the existing state machine's effects.
-`AppEvent` carries platform events, audio readiness, candidate readiness, native preview actions,
-delivery failures, history updates, and session completion.
+The listener's private `AppEvent` carries platform events, audio readiness, native preview actions,
+shared preview updates, and session completion. `ui::preview` owns `PreviewUpdate`, worker commands,
+the cancellation gate and confirmation state; it does not depend on the listener or winit.
+The demo uses its own event envelope and shares the same preview worker and pending state.
+Each pending candidate stores one session ID and a single confirmation phase: ready, processing,
+or retry blocked. Matching-session cancellation remains available after retries are blocked,
+and queued callbacks are rejected while an accepted command is in progress.
 
 Finalization prepares text and captures the destination on its worker before displaying the
 main-thread native preview. Only text, destination labels, session IDs and commands cross the

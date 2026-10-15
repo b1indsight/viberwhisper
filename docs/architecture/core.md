@@ -216,6 +216,9 @@ without routing them through the recording state machine. Winit types remain in 
 The existing business interfaces expose only domain values or narrow callbacks; platform-specific
 values remain behind the platform facade. Candidate destinations are retained on the finalization
 worker, while native preview windows stay on the main thread.
+The shared confirmation protocol and cancellation gate belong to `ui::preview`; the listener's
+event loop only adapts those updates to its application events. The integration demo uses the
+same worker without depending on listener implementation types.
 Finalization uses an atomic cancellation flag checked before post-processing, history persistence,
 and final text injection. History persistence appends one timestamped record to `history.jsonl`;
 before loading or appending, the store validates only the trailing record and truncates that record

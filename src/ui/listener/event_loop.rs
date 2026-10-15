@@ -1,10 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::thread;
 
-use anyhow::Result as AnyhowResult;
 use tracing::{debug, error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -13,7 +10,6 @@ use winit::window::WindowId;
 
 use super::permission::PermissionGuidance;
 use super::platform_session_event;
-use super::preview::{ConfirmationState, wait_for_confirmation};
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
 use crate::core::orchestrator::{SessionError, SessionOrchestrator};
 use crate::core::recording_session::{
@@ -28,81 +24,22 @@ use crate::platform::{
 use crate::postprocess::{PostProcessor, PostProcessorSession};
 use crate::prompt_lab::{CaptureTranscription, PromptLabCapture, SttSnapshot};
 use crate::session::SessionId;
+use crate::ui::preview::{
+    FinalizationGate, PendingPreview, PreviewCommand, PreviewUpdate, wait_for_confirmation,
+};
 
 #[derive(Debug, Clone)]
-pub(in crate::ui) enum AppEvent {
+pub(super) enum AppEvent {
     Platform(PlatformEvent),
-    AudioChunkAvailable {
-        session_id: SessionId,
-    },
-    HistorySaved(String),
-    FinalizationFinished {
-        session_id: SessionId,
-    },
-    TextDeliveryPermissionRequired,
-    PreviewReady {
-        session_id: SessionId,
-        text: String,
-        destination: String,
-        anchor: Option<crate::platform::PreviewRect>,
-        warning: Option<String>,
-        commands: mpsc::Sender<PreviewCommand>,
-    },
+    AudioChunkAvailable { session_id: SessionId },
+    FinalizationFinished { session_id: SessionId },
     Preview(PreviewEvent),
-    PreviewDeliveryFailed {
-        session_id: SessionId,
-        error: String,
-        retry_allowed: bool,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub(in crate::ui) enum PreviewCommand {
-    Confirm(String),
-    Cancel,
-}
-
-struct PendingPreview {
-    session_id: SessionId,
-    commands: mpsc::Sender<PreviewCommand>,
-    confirmation: ConfirmationState,
+    PreviewUpdate(PreviewUpdate),
 }
 
 struct FinalizationTask {
     session_id: SessionId,
     gate: Arc<FinalizationGate>,
-}
-
-pub(in crate::ui) struct FinalizationGate(AtomicBool);
-
-impl FinalizationGate {
-    pub(in crate::ui) fn new() -> Self {
-        Self(AtomicBool::new(false))
-    }
-
-    pub(in crate::ui) fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-
-    pub(super) fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-
-    pub(super) fn type_text_if_active(
-        &self,
-        typer: &dyn TextTyper,
-        text: &str,
-        validate: &dyn Fn() -> AnyhowResult<()>,
-    ) -> AnyhowResult<bool> {
-        if self.is_cancelled() {
-            return Ok(false);
-        }
-        typer.type_text_checked(text, &|| {
-            anyhow::ensure!(!self.is_cancelled(), "Text delivery cancelled");
-            validate()
-        })?;
-        Ok(true)
-    }
 }
 
 fn finalization_completion_event(
@@ -236,7 +173,7 @@ impl ListenerApplication {
                         if !self
                             .pending_preview
                             .as_ref()
-                            .is_some_and(|pending| pending.confirmation.is_busy())
+                            .is_some_and(|pending| pending.is_busy())
                         {
                             self.preview.focus();
                         }
@@ -250,8 +187,6 @@ impl ListenerApplication {
             AppEvent::AudioChunkAvailable { session_id } => {
                 self.drain_audio_chunks(event_loop, session_id);
             }
-            AppEvent::HistorySaved(text) => self.platform.push_history(text),
-            AppEvent::TextDeliveryPermissionRequired => self.show_permission_guidance_if_needed(),
             AppEvent::FinalizationFinished { session_id } => {
                 if self
                     .pending_preview
@@ -264,7 +199,16 @@ impl ListenerApplication {
                 let event = finalization_completion_event(&mut self.finalization, session_id);
                 self.drive_session(event_loop, event);
             }
-            AppEvent::PreviewReady {
+            AppEvent::Preview(event) => self.handle_preview_event(event),
+            AppEvent::PreviewUpdate(update) => self.handle_preview_update(update),
+        }
+    }
+
+    fn handle_preview_update(&mut self, update: PreviewUpdate) {
+        match update {
+            PreviewUpdate::HistorySaved(text) => self.platform.push_history(text),
+            PreviewUpdate::PermissionRequired => self.show_permission_guidance_if_needed(),
+            PreviewUpdate::Ready {
                 session_id,
                 text,
                 destination,
@@ -287,22 +231,16 @@ impl ListenerApplication {
                     let _ = commands.send(PreviewCommand::Cancel);
                     return;
                 }
-                self.pending_preview = Some(PendingPreview {
-                    session_id,
-                    commands,
-                    confirmation: ConfirmationState::new(session_id),
-                });
+                self.pending_preview = Some(PendingPreview::new(session_id, commands));
             }
-            AppEvent::Preview(event) => self.handle_preview_event(event),
-            AppEvent::PreviewDeliveryFailed {
+            PreviewUpdate::DeliveryFailed {
                 session_id,
                 error,
                 retry_allowed,
             } => {
                 if let Some(pending) = &mut self.pending_preview
-                    && pending.session_id == session_id
+                    && pending.failed(session_id, retry_allowed)
                 {
-                    pending.confirmation.failed(session_id, retry_allowed);
                     self.preview.show_error(&error, retry_allowed);
                 }
             }
@@ -313,33 +251,26 @@ impl ListenerApplication {
         let Some(pending) = &mut self.pending_preview else {
             return;
         };
-        if pending.session_id != event.session_id {
-            return;
-        }
         // Queued callbacks cannot undo or race an already confirmed transaction.
-        if pending.confirmation.is_busy() {
-            return;
-        }
         match event.action {
-            PreviewAction::Confirm(text) => {
-                if pending.confirmation.begin(event.session_id) {
-                    self.preview.hide();
-                    if pending
-                        .commands
-                        .send(PreviewCommand::Confirm(text))
-                        .is_err()
-                    {
-                        pending.confirmation.failed(event.session_id, false);
-                        self.preview
-                            .show_error("处理线程已退出，可复制文字后取消。", false);
-                    }
+            PreviewAction::Confirm(text) if pending.begin(event.session_id) => {
+                self.preview.hide();
+                if pending
+                    .commands
+                    .send(PreviewCommand::Confirm(text))
+                    .is_err()
+                {
+                    pending.failed(event.session_id, false);
+                    self.preview
+                        .show_error("处理线程已退出，可复制文字后取消。", false);
                 }
             }
-            PreviewAction::Cancel => {
+            PreviewAction::Cancel if pending.begin_cancel(event.session_id) => {
                 let _ = pending.commands.send(PreviewCommand::Cancel);
                 self.preview.close();
                 self.pending_preview = None;
             }
+            _ => {}
         }
     }
 
@@ -579,7 +510,11 @@ impl ListenerApplication {
                                 history.as_ref(),
                                 &gate,
                                 NativeTarget::capture,
-                                &|event| preview_proxy.send_event(event).is_ok(),
+                                &|update| {
+                                    preview_proxy
+                                        .send_event(AppEvent::PreviewUpdate(update))
+                                        .is_ok()
+                                },
                             );
                         }
                     },
@@ -761,8 +696,7 @@ fn capture_transcription(
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::mpsc;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, mpsc};
     use std::thread;
     use std::time::Duration;
 

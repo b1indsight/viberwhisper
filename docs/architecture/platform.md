@@ -289,3 +289,5 @@ microphone access. It captures a destination after a three-second focus window a
 confirmation worker and native typer as dictation, without persistent demo history. Its `--smoke`
 mode edits the native control, sends held-Enter events and verifies zero callbacks before release,
 one confirmation with edited text after release, and successful delivery to the selected target.
+The native editing checks live in each platform's `preview/smoke.rs`, behind the same feature.
+They extend the private preview implementation without exposing native UI state to the demo.

@@ -1,46 +1,129 @@
-use anyhow::Result;
+//! Shared preview protocol, confirmation state and worker-owned text delivery.
 
-use super::event_loop::{AppEvent, FinalizationGate, PreviewCommand};
-use crate::history::HistoryStore;
-use crate::input::typer::TextTyper;
-use crate::platform::DeliveryTarget;
-use crate::session::SessionId;
-use std::sync::mpsc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
+
+use anyhow::Result;
 use tracing::{debug, error};
 
-/// A candidate accepts one confirmation at a time, including queued native callbacks.
-pub(super) struct ConfirmationState {
-    session_id: SessionId,
-    busy: bool,
-    retry_allowed: bool,
+use crate::history::HistoryStore;
+use crate::input::typer::TextTyper;
+use crate::platform::{DeliveryTarget, PreviewRect};
+use crate::session::SessionId;
+
+#[derive(Debug, Clone)]
+pub(super) enum PreviewUpdate {
+    Ready {
+        session_id: SessionId,
+        text: String,
+        destination: String,
+        anchor: Option<PreviewRect>,
+        warning: Option<String>,
+        commands: mpsc::Sender<PreviewCommand>,
+    },
+    HistorySaved(String),
+    PermissionRequired,
+    DeliveryFailed {
+        session_id: SessionId,
+        error: String,
+        retry_allowed: bool,
+    },
 }
 
-impl ConfirmationState {
-    pub(super) fn new(session_id: SessionId) -> Self {
+#[derive(Debug, Clone)]
+pub(super) enum PreviewCommand {
+    Confirm(String),
+    Cancel,
+}
+
+enum ConfirmationPhase {
+    Ready,
+    Processing,
+    RetryBlocked,
+}
+
+/// A candidate accepts one confirmation at a time, including queued native callbacks.
+pub(super) struct PendingPreview {
+    pub(super) session_id: SessionId,
+    pub(super) commands: mpsc::Sender<PreviewCommand>,
+    phase: ConfirmationPhase,
+}
+
+impl PendingPreview {
+    pub(super) fn new(session_id: SessionId, commands: mpsc::Sender<PreviewCommand>) -> Self {
         Self {
             session_id,
-            busy: false,
-            retry_allowed: true,
+            commands,
+            phase: ConfirmationPhase::Ready,
         }
     }
 
     pub(super) fn begin(&mut self, session_id: SessionId) -> bool {
-        if self.session_id != session_id || self.busy || !self.retry_allowed {
+        if self.session_id != session_id || !matches!(self.phase, ConfirmationPhase::Ready) {
             return false;
         }
-        self.busy = true;
+        self.phase = ConfirmationPhase::Processing;
+        true
+    }
+
+    /// A blocked retry can still be cancelled; an accepted command must finish first.
+    pub(super) fn begin_cancel(&mut self, session_id: SessionId) -> bool {
+        if self.session_id != session_id || self.is_busy() {
+            return false;
+        }
+        self.phase = ConfirmationPhase::Processing;
         true
     }
 
     pub(super) fn is_busy(&self) -> bool {
-        self.busy
+        matches!(self.phase, ConfirmationPhase::Processing)
     }
 
-    pub(super) fn failed(&mut self, session_id: SessionId, retry_allowed: bool) {
-        if self.session_id == session_id {
-            self.busy = false;
-            self.retry_allowed = retry_allowed;
+    pub(super) fn failed(&mut self, session_id: SessionId, retry_allowed: bool) -> bool {
+        if self.session_id != session_id {
+            return false;
         }
+        self.phase = if retry_allowed {
+            ConfirmationPhase::Ready
+        } else {
+            ConfirmationPhase::RetryBlocked
+        };
+        true
+    }
+}
+
+/// Cancellation is also checked by the typer after its platform focus delay.
+pub(super) struct FinalizationGate(AtomicBool);
+
+impl FinalizationGate {
+    pub(super) fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    pub(super) fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub(super) fn type_text_if_active(
+        &self,
+        typer: &dyn TextTyper,
+        text: &str,
+        validate: &dyn Fn() -> Result<()>,
+    ) -> Result<bool> {
+        if self.is_cancelled() {
+            return Ok(false);
+        }
+        typer.type_text_checked(text, &|| {
+            anyhow::ensure!(!self.is_cancelled(), "Text delivery cancelled");
+            validate()
+        })?;
+        Ok(true)
     }
 }
 
@@ -81,14 +164,14 @@ pub(super) fn confirm_delivery(
 /// Keeps native destination objects on this worker until confirmation or cancellation.
 /// Capture and event publishing are injected so the real command loop can be tested
 /// without a desktop, network, or native target crossing a thread boundary.
-pub(in crate::ui) fn wait_for_confirmation<T: DeliveryTarget>(
+pub(super) fn wait_for_confirmation<T: DeliveryTarget>(
     session_id: SessionId,
     transcription: (String, Option<String>),
     typer: &dyn TextTyper,
     history: Option<&HistoryStore>,
     gate: &FinalizationGate,
     capture: impl FnOnce() -> Result<T>,
-    notify: &impl Fn(AppEvent) -> bool,
+    notify: &impl Fn(PreviewUpdate) -> bool,
 ) {
     if gate.is_cancelled() {
         return;
@@ -117,9 +200,9 @@ pub(in crate::ui) fn wait_for_confirmation<T: DeliveryTarget>(
     };
     let (commands, receiver) = mpsc::channel();
     if gate.is_cancelled()
-        || !notify(AppEvent::PreviewReady {
+        || !notify(PreviewUpdate::Ready {
             session_id,
-            text: text.clone(),
+            text,
             destination,
             anchor,
             warning,
@@ -154,7 +237,7 @@ pub(in crate::ui) fn wait_for_confirmation<T: DeliveryTarget>(
                 let result = match &target {
                     Ok(target) => {
                         confirm_delivery(typer, target, &text, history, &mut saved, gate, |text| {
-                            notify(AppEvent::HistorySaved(text));
+                            notify(PreviewUpdate::HistorySaved(text));
                         })
                     }
                     Err(error) => Err(anyhow::anyhow!("无法恢复输入目标：{error}")),
@@ -169,10 +252,10 @@ pub(in crate::ui) fn wait_for_confirmation<T: DeliveryTarget>(
                         if capture_permission_denied
                             || crate::platform::is_text_delivery_permission_error(&error)
                         {
-                            notify(AppEvent::TextDeliveryPermissionRequired);
+                            notify(PreviewUpdate::PermissionRequired);
                         }
                         let retry_allowed = !error.is::<crate::input::typer::PartialTextDelivery>();
-                        if !notify(AppEvent::PreviewDeliveryFailed {
+                        if !notify(PreviewUpdate::DeliveryFailed {
                             session_id,
                             error: error.to_string(),
                             retry_allowed,
@@ -253,7 +336,7 @@ mod tests {
             &FinalizationGate::new(),
             || Ok(Positioned(&restored, anchor)),
             &|event| {
-                if let AppEvent::PreviewReady {
+                if let PreviewUpdate::Ready {
                     anchor: captured,
                     commands,
                     ..
@@ -406,17 +489,28 @@ mod tests {
 
     #[test]
     fn duplicate_and_stale_confirmation_events_are_rejected() {
-        // Native button and keyboard callbacks can queue before the worker replies.
-        let mut pending = ConfirmationState::new(SessionId(7));
+        // Native keyboard and close callbacks can queue before the worker replies.
+        let (commands, _) = mpsc::channel();
+        let mut cancelled = PendingPreview::new(SessionId(7), commands.clone());
+        assert!(cancelled.begin_cancel(SessionId(7)));
+        assert!(cancelled.is_busy());
+        assert!(!cancelled.begin(SessionId(7)));
+        let mut pending = PendingPreview::new(SessionId(7), commands);
         assert!(!pending.begin(SessionId(6)));
+        assert!(!pending.begin_cancel(SessionId(6)));
         assert!(pending.begin(SessionId(7)));
         assert!(!pending.begin(SessionId(7)));
+        assert!(!pending.begin_cancel(SessionId(7)));
         pending.failed(SessionId(6), true);
         assert!(!pending.begin(SessionId(7)));
         pending.failed(SessionId(7), true);
         assert!(pending.begin(SessionId(7)));
         pending.failed(SessionId(7), false);
         assert!(!pending.begin(SessionId(7)));
+        assert!(!pending.begin_cancel(SessionId(6)));
+        assert!(pending.begin_cancel(SessionId(7)));
+        assert!(pending.is_busy());
+        assert!(!pending.begin_cancel(SessionId(7)));
     }
 
     #[test]
@@ -499,7 +593,7 @@ mod tests {
                     &|event| notify.send(event).is_ok(),
                 );
             });
-            let AppEvent::PreviewReady { commands, .. } = events
+            let PreviewUpdate::Ready { commands, .. } = events
                 .recv_timeout(std::time::Duration::from_secs(1))
                 .unwrap()
             else {
@@ -568,15 +662,13 @@ mod tests {
                 },
                 &|event| {
                     match event {
-                        AppEvent::PreviewReady { commands, .. } => {
+                        PreviewUpdate::Ready { commands, .. } => {
                             commands
                                 .send(PreviewCommand::Confirm("candidate".into()))
                                 .unwrap();
                         }
-                        AppEvent::TextDeliveryPermissionRequired => {
-                            guidance.set(guidance.get() + 1)
-                        }
-                        AppEvent::PreviewDeliveryFailed { .. } => {
+                        PreviewUpdate::PermissionRequired => guidance.set(guidance.get() + 1),
+                        PreviewUpdate::DeliveryFailed { .. } => {
                             failures.set(failures.get() + 1);
                             return false;
                         }

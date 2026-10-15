@@ -1,15 +1,16 @@
 //! Native confirmation windows live on the UI thread. Destinations are captured and
 //! retained by the finalization worker; only commands and display data cross threads.
 
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
+
+use crate::session::SessionId;
 
 #[path = "preview/placement.rs"]
 mod placement;
 pub(crate) use placement::PreviewRect;
 pub(super) use placement::preview_origin;
-use std::time::{Duration, Instant};
-
-use crate::session::SessionId;
 
 #[cfg(target_os = "macos")]
 pub(crate) use super::macos::preview::{NativePreview, NativeTarget};

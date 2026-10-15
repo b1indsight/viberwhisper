@@ -1,6 +1,6 @@
 # 57 - 悬浮预览与回车确认 — Feature record
 
-**Stage:** Caret-relative bubbles and Windows DPI normalization implemented; draft pending remaining desktop acceptance
+**Stage:** Shared preview flow and native modules simplified; draft pending remaining desktop acceptance
 **PR:** https://github.com/b1indsight/viberwhisper/pull/148
 
 ## 1. Initial plan
@@ -440,3 +440,46 @@ ThreadDpiContext guard 在正常返回及任一角转换失败时恢复原线程
 不代表 Windows 高 DPI 实机验收；真实 API 的上下文恢复测试由 Windows CI 执行，
 实际 200% 缩放和多屏桌面效果仍保留人工验收。此前 [007] 的
 [双平台 CI 已通过](https://github.com/b1indsight/viberwhisper/actions/runs/38719186278)。
+
+### [009] — 2026-10-16 — 预览协议、确认状态与原生模块整理
+
+**状态：四项结构与风格优化已实现；本次独立审查和托管检查随后运行。**
+
+用户要求检查 PR 风格和架构后，明确要求“都优化”，授权落实四项建议：解除监听器
+循环依赖、拆出原生自检、收敛确认状态，以及统一宏内格式。本次继续使用同一 PR，
+此前明确暂缓的 RTL 定位和完整 Windows DPI 调用链测试覆盖保持暂缓。
+
+- 将 `ui/listener/preview.rs` 移为 `ui/preview.rs`，由它拥有 PreviewUpdate、工作线程
+  命令、取消 gate、候选状态和确认投递。监听器只把更新适配为自己的私有 AppEvent；
+  demo 使用自己的 DemoEvent。共享预览模块不再反向依赖监听器，demo 也不再导入其
+  事件循环类型，`listener::event_loop` 恢复私有可见性。
+- 用 PendingPreview 保存唯一的会话 ID、命令通道与 ConfirmationPhase，阶段为
+  Ready / Processing / RetryBlocked；移除 ConfirmationState 中重复的 ID 与两个
+  布尔状态。监听器和 demo 共用该状态，处理中拒绝重复或过期回调，禁止重试时仍允许
+  当前会话取消。候选与原生对象的线程归属、历史去重和注入前目标校验保持原有流程。
+- 两端 smoke_confirmation 移到各自 `preview/smoke.rs`，继续由 integration feature
+  控制；原生状态通过子模块私有访问共享，没有扩大 FFI 对象的可见性。AppKit 回调中
+  的单行函数、分支、unsafe 块和修饰键表达式展开为统一格式，并整理 import。
+- 同步架构文档、项目结构与 changelog；本次没有新增依赖或修改 Cargo.lock。
+
+**验证：** 扩展现有队列确认测试，覆盖首次取消、重复/过期确认和取消、处理中拒绝操作，
+以及禁止重试后允许取消。默认与 integration 测试均为 260 passed / 2 ignored。
+Windows 实际原生模块与测试在 MSVC 目标上通过默认及 integration 的 all-targets
+Clippy；本机完整构建通过。TextEdit 原生检查验证位置、编辑、快捷键、组词、回车释放
+与实际投递，专用文档读回内容与确认样本一致。
+本机 all-targets / integration Clippy、格式与 diff 空白检查也均通过。
+
+**结构对照：** `.cache/2026-10-14/check-preview-refactor.py` 对比父提交
+`6a95b5f4acd69131b548a4b1a3425b368c554b15`：两个原生自检函数在忽略排版和等价 UTF-16
+helper 引用后完全一致；两端 position.rs 未改动；候选状态的 ID 由两份收敛为一份，
+共享预览与监听器的循环依赖及 demo 对监听器的依赖均已移除。结果保存在
+`.cache/2026-10-14/preview-refactor-structure.json`。本次移除重复状态和不当模块依赖，
+没有新增运行时机制，因此采用结构对照与既有行为回归，不再增加机制移除实验。
+
+**原生验证前提与限制：** 重启后首次 GUI 检查捕获到 Amp，因目标恢复失败而未完成
+TextEdit 写回；此结果没有计为通过。随后脚本显式确认 TextEdit 的 frontmost 属性，
+再次运行原生检查并成功读回专用文档。复现命令为
+`python3 .cache/2026-10-14/preview-refactor-smoke.py target/debug/viberwhisper-preview`，
+成功日志为 `.cache/2026-10-14/viberwhisper-preview-refactor-smoke.log`，均不提交。
+Windows 桌面和真实高 DPI/多屏效果仍需实机验收；此前布局审查发现继续保留。
+父提交的 [双平台 CI 已通过](https://github.com/b1indsight/viberwhisper/actions/runs/38722039830)。

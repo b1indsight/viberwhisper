@@ -95,7 +95,7 @@ src/
     listener.rs              — Platform-action loop, session effects, transcription delivery
     listener/
       event_loop.rs          — Winit application handler driving platform and session events
-      preview.rs             — Confirmation state, worker commands, history deduplication, guarded delivery
+    preview.rs               — Shared preview protocol, confirmation state, cancellation and guarded delivery
     setup.rs                 — First-run and on-demand setup orchestration
     setup/
       hotkey.rs              — Isolated hotkey capture and binding verification helper
@@ -146,6 +146,7 @@ src/
       preview.rs             — AppKit confirmation window and worker-owned AX destination
       preview/
         position.rs          — AX caret/input bounds and AppKit screen-coordinate mapping
+        smoke.rs             — Integration-feature native editing and delivery checks
       accessibility.rs      — Focused AX selected-text insertion and secure-control rejection
       application.rs        — Frontmost Chromium-family browser classification
       hotkey.rs             — rdev modifier normalization for the listener callback
@@ -155,6 +156,7 @@ src/
       preview.rs             — Win32 confirmation window and worker-owned destination
       preview/
         position.rs          — Native caret/input bounds and monitor work areas
+        smoke.rs             — Integration-feature native editing and delivery checks
       clipboard.rs           — Windows Unicode clipboard adapter
   transcriber.rs             — Transcriber traits, errors, and exports
   transcriber/
