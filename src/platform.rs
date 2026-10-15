@@ -22,7 +22,7 @@ use windows::WindowsBackend as SelectedBackend;
 
 use backend::PlatformBackend;
 pub(crate) use preview::{
-    DeliveryTarget, NativePreview, NativeTarget, PreviewAction, PreviewEvent,
+    DeliveryTarget, NativePreview, NativeTarget, PreviewAction, PreviewEvent, PreviewRect,
 };
 pub(crate) use runtime::{PlatformAction, PlatformEvent};
 

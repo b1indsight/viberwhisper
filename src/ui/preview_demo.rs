@@ -98,13 +98,20 @@ impl ApplicationHandler<AppEvent> for Demo {
                 session_id,
                 text,
                 destination,
+                anchor,
                 warning,
                 commands,
             } => {
                 self.commands = Some(commands);
+                if self.smoke {
+                    println!("Preview destination: {destination}; captured anchor: {anchor:?}");
+                    if let Some(warning) = warning.as_deref() {
+                        println!("Preview warning: {warning}");
+                    }
+                }
                 if let Err(error) =
                     self.preview
-                        .show(session_id, &text, &destination, warning.as_deref())
+                        .show(session_id, &text, &destination, anchor, warning.as_deref())
                 {
                     self.error = Some(error.to_string());
                     event_loop.exit();

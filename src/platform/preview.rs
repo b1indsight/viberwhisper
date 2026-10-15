@@ -2,6 +2,11 @@
 //! retained by the finalization worker; only commands and display data cross threads.
 
 use anyhow::Result;
+
+#[path = "preview/placement.rs"]
+mod placement;
+pub(crate) use placement::PreviewRect;
+pub(super) use placement::preview_origin;
 use std::time::{Duration, Instant};
 
 use crate::session::SessionId;
@@ -29,6 +34,9 @@ pub(crate) type PreviewNotify = Box<dyn Fn(PreviewEvent)>;
 /// run immediately before injection, after any platform focus-settling delay.
 pub(crate) trait DeliveryTarget {
     fn name(&self) -> String;
+    fn preview_anchor(&self) -> Option<PreviewRect> {
+        None
+    }
     fn restore(&self) -> Result<()>;
     fn validate(&self) -> Result<()>;
 }
@@ -113,6 +121,7 @@ mod fallback {
             _: SessionId,
             _: &str,
             _: &str,
+            _: Option<PreviewRect>,
             _: Option<&str>,
         ) -> Result<()> {
             anyhow::bail!("Desktop preview is unsupported on this platform")

@@ -26,15 +26,18 @@ use super::AccessibilityError;
 use super::accessibility::{copy_attribute, native_error, validated_focused_element};
 use crate::platform::preview::{
     ConfirmationKey, DeliveryTarget, PreviewAction, PreviewEvent, PreviewKey, PreviewNotify,
-    wait_for_activation,
+    PreviewRect, wait_for_activation,
 };
 use crate::session::SessionId;
 
-/// AX proxies remain on the worker which captured them; the UI receives only the app name.
+mod position;
+
+/// AX proxies remain on their capture worker; the UI receives only plain destination metadata.
 pub(crate) struct NativeTarget {
     application: Retained<NSRunningApplication>,
     window: CFRetained<AXUIElement>,
     element: Option<CFRetained<AXUIElement>>,
+    anchor: Option<PreviewRect>,
 }
 
 fn focused_window(pid: i32) -> Result<CFRetained<AXUIElement>> {
@@ -70,16 +73,21 @@ impl NativeTarget {
                 Err(error) => return Err(error.into()),
             };
             let window = focused_window(application.processIdentifier())?;
+            let anchor = position::capture_anchor(element.as_deref());
             Ok(Self {
                 application,
                 window,
                 element,
+                anchor,
             })
         })
     }
 }
 
 impl DeliveryTarget for NativeTarget {
+    fn preview_anchor(&self) -> Option<PreviewRect> {
+        self.anchor
+    }
     fn name(&self) -> String {
         self.application
             .localizedName()
@@ -168,6 +176,8 @@ struct WindowState {
     status: Retained<NSTextField>,
     scroll: Retained<NSScrollView>,
     max_width: f64,
+    anchor: Cell<Option<PreviewRect>>,
+    last_origin: Cell<Option<NSPoint>>,
     retry_allowed: Cell<bool>,
 }
 
@@ -287,9 +297,26 @@ impl PreviewWindow {
         self.resize_to_text();
     }
 
-    /// Fit short candidates, then wrap at the width limit, retaining the top/center anchor.
+    /// Fit short candidates near the captured caret or a manually chosen position.
     fn resize_to_text(&self) {
         let state = self.ivars();
+        let current = self.frame().origin;
+        if state.last_origin.get().is_some_and(|last| {
+            (last.x - current.x).abs() > 0.5 || (last.y - current.y).abs() > 0.5
+        }) {
+            // A manual/system move takes precedence over the captured caret anchor.
+            state.anchor.set(None);
+        }
+        let geometry = state
+            .anchor
+            .get()
+            .and_then(|anchor| position::screen_geometry(anchor, self.mtm()));
+        let max_width = geometry.map_or(state.max_width, |(work, _)| {
+            420.0_f64.min((work.width - 16.0).max(96.0))
+        });
+        state
+            .text
+            .setMaxSize(NSSize::new(max_width - 32.0, f64::MAX));
         let font = state.text.font().expect("preview font is configured");
         let attributes: Retained<NSDictionary<NSString, AnyObject>> =
             NSDictionary::from_slices(&[unsafe { NSFontAttributeName }], &[&font]);
@@ -307,9 +334,9 @@ impl PreviewWindow {
             })
             .fold(0.0_f64, f64::max);
         let width = if state.status.isHidden() {
-            (natural_width + 34.0).ceil().clamp(96.0, state.max_width)
+            (natural_width + 34.0).ceil().clamp(96.0, max_width)
         } else {
-            state.max_width
+            max_width
         };
         state
             .scroll
@@ -334,7 +361,11 @@ impl PreviewWindow {
         frame.origin.y += frame.size.height - height;
         frame.size.width = width;
         frame.size.height = height;
+        if let Some((anchor, (work, top))) = state.anchor.get().zip(geometry) {
+            frame.origin = position::origin(anchor, frame.size, work, top);
+        }
         self.setFrame_display(frame, true);
+        state.last_origin.set(Some(self.frame().origin));
         state.scroll.setFrame(NSRect::new(
             NSPoint::new(16.0, 12.0 + footer),
             NSSize::new(width - 32.0, editor_height),
@@ -465,6 +496,8 @@ impl NativePreview {
             status,
             scroll,
             max_width: width,
+            anchor: Cell::new(None),
+            last_origin: Cell::new(None),
             retry_allowed: Cell::new(true),
         });
         // SAFETY: Correct NSWindow initializer. Rust retains the window; closing must not release it.
@@ -499,6 +532,7 @@ impl NativePreview {
         session_id: SessionId,
         text: &str,
         destination: &str,
+        anchor: Option<PreviewRect>,
         warning: Option<&str>,
     ) -> Result<()> {
         if self.window.is_none() {
@@ -506,6 +540,8 @@ impl NativePreview {
         }
         let window = self.window.as_ref().expect("created window");
         window.ivars().session_id.set(Some(session_id));
+        window.ivars().anchor.set(anchor);
+        window.ivars().last_origin.set(None);
         window.ivars().keys.borrow_mut().reset();
         window.ivars().text.setString(&NSString::from_str(text));
         window.setTitle(&NSString::from_str(&format!(
@@ -513,6 +549,10 @@ impl NativePreview {
         )));
         window.ivars().retry_allowed.set(true);
         window.set_message(warning);
+        if anchor.is_none() {
+            window.center();
+            window.ivars().last_origin.set(Some(window.frame().origin));
+        }
         window
             .ivars()
             .text
@@ -545,6 +585,8 @@ impl NativePreview {
     pub(crate) fn close(&mut self) {
         if let Some(window) = &self.window {
             window.ivars().session_id.set(None);
+            window.ivars().anchor.set(None);
+            window.ivars().last_origin.set(None);
             window.ivars().keys.borrow_mut().reset();
             window.orderOut(None);
             window.ivars().text.setString(&NSString::from_str(""));
@@ -566,6 +608,29 @@ impl NativePreview {
         if !window.isKeyWindow() || !NSApplication::sharedApplication(window.mtm()).isActive() {
             return Ok(false);
         }
+        let anchor = window
+            .ivars()
+            .anchor
+            .get()
+            .ok_or_else(|| anyhow!("Smoke target did not expose caret bounds"))?;
+        ensure!(
+            anchor.width <= 16.0 && anchor.height <= 128.0,
+            "Smoke target exposed input bounds, not precise caret bounds"
+        );
+        let (work, top) = position::screen_geometry(anchor, window.mtm())
+            .ok_or_else(|| anyhow!("Could not locate the caret's display"))?;
+        let actual = window.frame();
+        let (expected_x, expected_y) = crate::platform::preview::preview_origin(
+            anchor,
+            (actual.size.width, actual.size.height),
+            work,
+        );
+        ensure!(
+            (actual.origin.x - expected_x).abs() <= 1.0
+                && (top - actual.origin.y - actual.size.height - expected_y).abs() <= 1.0,
+            "Native preview was not placed by the captured caret"
+        );
+        println!("Captured caret bounds: {anchor:?}");
         let text = &window.ivars().text;
         let replace = |value: &str| unsafe {
             text.insertText_replacementRange(
@@ -573,6 +638,25 @@ impl NativePreview {
                 NSRange::new(0, text.string().len_utf16()),
             );
         };
+        // Native moves outside layout represent user/system positioning. Editing
+        // after a drag must preserve that location instead of jumping to the caret.
+        let placed = window.frame();
+        window.setFrameOrigin(NSPoint::new(placed.origin.x + 20.0, placed.origin.y + 20.0));
+        let moved = window.frame();
+        replace("短句");
+        let edited = window.frame();
+        ensure!(
+            window.ivars().anchor.get().is_none()
+                && (edited.origin.x + edited.size.width / 2.0
+                    - moved.origin.x
+                    - moved.size.width / 2.0)
+                    .abs()
+                    <= 1.0
+                && (edited.origin.y + edited.size.height - moved.origin.y - moved.size.height)
+                    .abs()
+                    <= 1.0,
+            "Editing after a manual move jumped back to the caret"
+        );
         // Short candidates fit their text; longer candidates reach the width
         // limit before wrapping, and the insertion line stays vertically centered.
         replace("短句");

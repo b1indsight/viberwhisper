@@ -44,6 +44,7 @@ pub(in crate::ui) enum AppEvent {
         session_id: SessionId,
         text: String,
         destination: String,
+        anchor: Option<crate::platform::PreviewRect>,
         warning: Option<String>,
         commands: mpsc::Sender<PreviewCommand>,
     },
@@ -267,6 +268,7 @@ impl ListenerApplication {
                 session_id,
                 text,
                 destination,
+                anchor,
                 warning,
                 commands,
             } => {
@@ -279,7 +281,7 @@ impl ListenerApplication {
                 }
                 if let Err(error) =
                     self.preview
-                        .show(session_id, &text, &destination, warning.as_deref())
+                        .show(session_id, &text, &destination, anchor, warning.as_deref())
                 {
                     error!(%error, "Could not open confirmation preview");
                     let _ = commands.send(PreviewCommand::Cancel);

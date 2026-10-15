@@ -137,11 +137,15 @@ src/
   platform/
     backend.rs               — Private platform backend contract
     preview.rs               — Compile-time native preview/target selection and confirmation key-release policy
+    preview/
+      placement.rs           — Shared caret-relative positioning and monitor-edge policy
     runtime.rs               — Opaque actions plus tray/text runtime ownership
     fallback.rs              — Unsupported-target development/test adapter
     macos.rs                 — macOS backend policies and serialized native text delivery
     macos/
       preview.rs             — AppKit confirmation window and worker-owned AX destination
+      preview/
+        position.rs          — AX caret/input bounds and AppKit screen-coordinate mapping
       accessibility.rs      — Focused AX selected-text insertion and secure-control rejection
       application.rs        — Frontmost Chromium-family browser classification
       hotkey.rs             — rdev modifier normalization for the listener callback
@@ -149,6 +153,8 @@ src/
     windows.rs               — Windows backend policies and SendInput text delivery
     windows/
       preview.rs             — Win32 confirmation window and worker-owned destination
+      preview/
+        position.rs          — Native caret/input bounds and monitor work areas
       clipboard.rs           — Windows Unicode clipboard adapter
   transcriber.rs             — Transcriber traits, errors, and exports
   transcriber/

@@ -247,8 +247,7 @@ event. Normal bubbles contain only the editor; operational errors reveal a compa
 Closing clears visible text.
 
 Both bubbles fit short candidates to their native glyph widths, then wrap at the width limit.
-They preserve the top edge and horizontal center as edits change their size. Text stays left
-aligned, with short insertion lines centered vertically inside the editor viewport.
+Text stays left aligned, with short insertion lines centered vertically inside the editor viewport.
 macOS listens to the text delegate, measures unwrapped lines using the editor font, and lays
 out the wrapped native text at the resulting width. Windows handles the edit control's
 `EN_CHANGE` notification, measures native glyph widths and wrapped lines with the actual font,
@@ -256,6 +255,15 @@ and centers short text using the edit control's formatting rectangle.
 The editor viewport ranges from 28 to 196 native units; longer content scrolls inside it.
 Message visibility survives edits and contributes a separate footer to the bubble height;
 messages use the maximum bubble width to remain readable.
+
+The worker captures plain caret geometry before publishing the preview. macOS queries the selected
+range's AX bounds; Windows reads GUITHREADINFO's native caret and converts its client coordinates.
+Unsupported caret queries fall back to recognized text-control bounds, then a centered preview.
+`preview/placement.rs` prefers the caret's lower edge, flips above when necessary and clamps the
+bubble to the nearest monitor work area. AX/Win32 coordinates share a top-left convention;
+AppKit placement converts using the primary screen's height. Resizing reuses the captured anchor.
+On macOS, a manual/system move detaches that anchor and preserves the chosen top/center position.
+Native target objects stay on the worker; only checked numeric rectangles enter UI events.
 
 macOS registers standard Edit-menu key equivalents against the responder chain for Cmd+A/C/X/V.
 Windows consumes ordinary Return/Escape character messages even when a repeat did not arm an

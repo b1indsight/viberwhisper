@@ -1,6 +1,6 @@
 # 57 - 悬浮预览与回车确认 — Feature record
 
-**Stage:** Content-fitting, vertically centered bubbles validated locally; draft pending remaining desktop acceptance
+**Stage:** Caret-relative bubbles implemented; draft pending review, CI, and remaining desktop acceptance
 **PR:** https://github.com/b1indsight/viberwhisper/pull/148
 
 ## 1. Initial plan
@@ -368,3 +368,43 @@ TextEdit 文档的读回文字与确认的中英混合、emoji 样本一致。UI
 可能在最小高度内误报（LOW），本次未调整该断言；真实中文输入法候选界面及 Chromium /
 终端验收也继续保留。此前 [005] 的
 [双平台 CI 已通过](https://github.com/b1indsight/viberwhisper/actions/runs/38709538673)。
+
+### [007] — 2026-10-15 — 气泡出现在目标光标下方
+
+**状态：已实现并通过本地定位验证；本次独立审查与托管检查随后运行。**
+
+用户接受 [006] 的尺寸效果后，要求气泡出现在光标下方。目标快照在预览取得焦点前
+读取原输入位置，向 UI 发送普通坐标；原生目标对象仍留在原工作线程，没有增加跨线程
+句柄或新的依赖包。Cargo.toml 仅启用已有 macOS 绑定的 AXValue feature，锁文件不变。
+
+- macOS 读取 AXSelectedTextRange 的末端，再通过 AXBoundsForRange 获取零长度光标
+  矩形；不能取得精确位置时，只对已识别的文本控件读取其边界。Windows 使用目标线程
+  的 GUITHREADINFO 与 ClientToScreen，失败后仅对原生 Edit / RichEdit 采用控件边界。
+  定位读取失败不会阻止后续确认投递；两端均可退回居中显示。
+- 共享 placement 模块使用屏幕左上角坐标，优先放在光标下方，留出 6 单位间距；下方
+  不足时移到上方，并在目标屏幕工作区内留出 8 单位边距。AppKit 根据主屏幕原点转换
+  Y 轴；每次重排重新读取屏幕工作区，支持副屏负坐标。短句宽度上限使用目标屏幕。
+- 编辑时保持光标锚点。macOS 用户拖动气泡或系统移动窗口后，后续编辑保留移动后的
+  顶部与水平中心，不再跳回原光标。原有回车释放确认与目标恢复检查保持不变。
+
+**验证：** 新增光标下方、屏幕底部翻转、右边缘避让、副屏负坐标及非法原生矩形检查；
+工作线程测试确认 UI 在目标恢复前收到已捕获的坐标。默认和 integration 测试均为
+260 passed / 2 ignored。原生 macOS fixture 在专用 TextEdit 文档取得零宽、14 高的
+精确光标矩形，核对实际窗口位置；同一流程保留尺寸、编辑、组词和回车释放检查，
+回车后读回的文字与中英混合及 emoji 样本一致。
+
+**消融比较：** `.cache/2026-10-14/preview-placement-ablation.py` 分别移除底部翻转、
+工作区限制、原生矩形校验和目标坐标传递，对应检查均失败（退出 101）。独立 package
+副本移除 AppKit 坐标转换、移除移动后解除光标锚点，分别在实际原生窗口的位置检查、
+移动后再编辑的检查失败（退出 1）；两者都先确认取得了 TextEdit 光标坐标，避免把
+目标捕获失败当成定位回归。命令、结果和日志保存在
+`.cache/2026-10-14/preview-placement-ablation-148/`，不提交。
+
+**前版审查与验收限制：** [006] 已通过
+[双平台 CI](https://github.com/b1indsight/viberwhisper/actions/runs/38714830309)，其独立
+审查发现 macOS 单行转两行可能因文档高度残留裁切首行（MEDIUM）、Windows 宽度测量
+遗漏滚动条占位（LOW）、macOS 部分中英混排测宽偏小（LOW），均已向用户报告。
+这些布局发现与 [005] 的 Windows 自检最小高度断言误报继续保留，没有借定位修改修复。
+Windows 实际源文件通过 MSVC 目标 check / Clippy，原生桌面光标、DPI 与多屏移动仍需
+Windows 实机验收；macOS 多屏只覆盖坐标计算，真实中文候选界面、Chromium 与终端
+也尚未完成验收。此 PR 保持 draft。

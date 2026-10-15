@@ -95,6 +95,10 @@ pub(in crate::ui) fn wait_for_confirmation<T: DeliveryTarget>(
     }
     let (text, warning) = transcription;
     let target = capture();
+    let anchor = target
+        .as_ref()
+        .ok()
+        .and_then(DeliveryTarget::preview_anchor);
     let destination = target
         .as_ref()
         .map_or_else(|_| "无法确定输入目标".into(), DeliveryTarget::name);
@@ -117,6 +121,7 @@ pub(in crate::ui) fn wait_for_confirmation<T: DeliveryTarget>(
             session_id,
             text: text.clone(),
             destination,
+            anchor,
             warning,
             commands,
         })
@@ -210,6 +215,59 @@ mod tests {
     }
 
     struct RetryingTyper(std::sync::Mutex<usize>, HistoryStore);
+
+    #[test]
+    fn preview_receives_captured_coordinates_before_focus_restoration() {
+        use crate::platform::PreviewRect;
+        struct Positioned<'a>(&'a Cell<bool>, PreviewRect);
+        impl DeliveryTarget for Positioned<'_> {
+            fn name(&self) -> String {
+                "Test editor".into()
+            }
+            fn preview_anchor(&self) -> Option<PreviewRect> {
+                Some(self.1)
+            }
+            fn restore(&self) -> Result<()> {
+                self.0.set(true);
+                Ok(())
+            }
+            fn validate(&self) -> Result<()> {
+                Ok(())
+            }
+        }
+        struct UnusedTyper;
+        impl TextTyper for UnusedTyper {
+            fn type_text(&self, _: &str) -> Result<()> {
+                panic!("cancel must not type")
+            }
+        }
+        // The UI must receive coordinates while the original caret still owns
+        // focus; only plain geometry crosses the worker/UI boundary.
+        let restored = Cell::new(false);
+        let anchor = PreviewRect::new(100.0, 200.0, 0.0, 18.0).unwrap();
+        wait_for_confirmation(
+            SessionId(23),
+            ("candidate".into(), None),
+            &UnusedTyper,
+            None,
+            &FinalizationGate::new(),
+            || Ok(Positioned(&restored, anchor)),
+            &|event| {
+                if let AppEvent::PreviewReady {
+                    anchor: captured,
+                    commands,
+                    ..
+                } = event
+                {
+                    assert_eq!(captured, Some(anchor));
+                    assert!(!restored.get());
+                    commands.send(PreviewCommand::Cancel).unwrap();
+                }
+                true
+            },
+        );
+        assert!(restored.get());
+    }
 
     impl TextTyper for RetryingTyper {
         fn type_text(&self, _: &str) -> Result<()> {

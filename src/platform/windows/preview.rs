@@ -24,9 +24,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::platform::preview::{
     ConfirmationKey, DeliveryTarget, PreviewAction, PreviewEvent, PreviewKey, PreviewNotify,
-    wait_for_activation,
+    PreviewRect, preview_origin, wait_for_activation,
 };
 use crate::session::SessionId;
+
+#[path = "preview/position.rs"]
+mod position;
 
 pub(crate) struct NativeTarget {
     window: HWND,
@@ -34,6 +37,7 @@ pub(crate) struct NativeTarget {
     thread: u32,
     process: u32,
     title: String,
+    anchor: Option<PreviewRect>,
 }
 
 fn thread_focus(thread: u32) -> Result<HWND> {
@@ -77,6 +81,7 @@ impl NativeTarget {
         );
         let focus = thread_focus(thread)?;
         reject_password(focus)?;
+        let anchor = position::capture_anchor(thread, focus);
         let mut title = [0u16; 512];
         let count = unsafe { GetWindowTextW(window, title.as_mut_ptr(), title.len() as i32) };
         Ok(Self {
@@ -85,6 +90,7 @@ impl NativeTarget {
             thread,
             process,
             title: String::from_utf16_lossy(&title[..count.max(0) as usize]),
+            anchor,
         })
     }
 
@@ -103,6 +109,9 @@ impl NativeTarget {
 }
 
 impl DeliveryTarget for NativeTarget {
+    fn preview_anchor(&self) -> Option<PreviewRect> {
+        self.anchor
+    }
     fn name(&self) -> String {
         if self.title.is_empty() {
             "原窗口".into()
@@ -153,6 +162,7 @@ struct WindowState {
     message_visible: Cell<bool>,
     laying_out: Cell<bool>,
     max_width: Cell<i32>,
+    anchor: Cell<Option<PreviewRect>>,
 }
 
 impl WindowState {
@@ -222,15 +232,17 @@ impl WindowState {
                 unsafe { GetWindowRect(window, &mut bounds) } != 0,
                 "无法获取预览尺寸"
             );
+            let work = self.anchor.get().and_then(position::work_area);
+            let max_width = work.map_or(self.max_width.get(), |work| {
+                420.min((work.width as i32 - 16).max(96))
+            });
             let (natural_width, line_height) = self.text_metrics()?;
             let margins = unsafe { SendMessageW(self.text.get(), EM_GETMARGINS, 0, 0) } as u32;
             let padding = 34 + (margins & 0xffff) as i32 + (margins >> 16) as i32;
             let width = if self.message_visible.get() {
-                self.max_width.get()
+                max_width
             } else {
-                natural_width
-                    .saturating_add(padding)
-                    .clamp(96, self.max_width.get())
+                natural_width.saturating_add(padding).clamp(96, max_width)
             };
             let mut viewport = RECT::default();
             ensure!(
@@ -262,13 +274,20 @@ impl WindowState {
             // Match the macOS viewport bounds; taller text stays scrollable.
             let editor_height = content_height.clamp(28, 196);
             let height = editor_height + 24 + if self.message_visible.get() { 48 } else { 0 };
+            let origin =
+                self.anchor.get().zip(work).map(|(anchor, work)| {
+                    preview_origin(anchor, (width as f64, height as f64), work)
+                });
             unsafe {
                 ensure!(
                     SetWindowPos(
                         window,
                         null_mut(),
-                        bounds.left + (bounds.right - bounds.left) / 2 - width / 2,
-                        bounds.top,
+                        origin.map_or(
+                            bounds.left + (bounds.right - bounds.left) / 2 - width / 2,
+                            |(x, _)| x.round() as i32
+                        ),
+                        origin.map_or(bounds.top, |(_, y)| y.round() as i32),
                         width,
                         height,
                         SWP_NOZORDER | SWP_NOACTIVATE
@@ -495,6 +514,7 @@ impl NativePreview {
                 message_visible: Cell::new(false),
                 laying_out: Cell::new(false),
                 max_width: Cell::new(420),
+                anchor: Cell::new(None),
             }),
         }
     }
@@ -634,12 +654,14 @@ impl NativePreview {
         session_id: SessionId,
         text: &str,
         destination: &str,
+        anchor: Option<PreviewRect>,
         warning: Option<&str>,
     ) -> Result<()> {
         if self.state.window.get().is_null() {
             self.create()?;
         }
         self.state.session_id.set(Some(session_id));
+        self.state.anchor.set(anchor);
         self.state.keys.borrow_mut().reset();
         self.state.retry_allowed.set(true);
         self.state.composing.set(false);
@@ -659,6 +681,9 @@ impl NativePreview {
             );
         }
         self.state.set_message(warning)?;
+        if anchor.is_none() {
+            position::center(self.state.window.get());
+        }
         self.focus();
         Ok(())
     }
@@ -692,6 +717,7 @@ impl NativePreview {
     }
     pub(crate) fn close(&mut self) {
         self.state.session_id.set(None);
+        self.state.anchor.set(None);
         self.state.keys.borrow_mut().reset();
         self.hide();
         if !self.state.text.get().is_null() {
