@@ -246,6 +246,13 @@ Shift+Enter adds a newline. Confirmation reads the editor's current text into th
 event. Normal bubbles contain only the editor; operational errors reveal a compact inline message.
 Closing clears visible text.
 
+Both bubbles keep a fixed wrapping width and top edge while editing changes their height.
+macOS listens to the text delegate and measures the native text layout. Windows handles the
+edit control's `EN_CHANGE` notification, measures its wrapped line count with its actual font,
+and resizes the editor and inline message together.
+The editor viewport ranges from 28 to 196 native units; longer content scrolls inside it.
+Message visibility survives edits and contributes a separate footer to the bubble height.
+
 macOS registers standard Edit-menu key equivalents against the responder chain for Cmd+A/C/X/V.
 Windows consumes ordinary Return/Escape character messages even when a repeat did not arm an
 action, while composition and modified Return remain with the native editor.

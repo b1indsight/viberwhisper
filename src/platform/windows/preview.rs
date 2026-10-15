@@ -5,12 +5,13 @@ use std::sync::OnceLock;
 use anyhow::{Result, anyhow, ensure};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, CreateRoundRectRgn, DEFAULT_GUI_FONT, DeleteObject, GetStockObject, SetWindowRgn,
+    COLOR_WINDOW, CreateRoundRectRgn, DEFAULT_GUI_FONT, DeleteObject, GetDC, GetStockObject,
+    GetTextMetricsW, ReleaseDC, SelectObject, SetWindowRgn, TEXTMETRICW,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(feature = "integration")]
 use windows_sys::Win32::UI::Controls::EM_REPLACESEL;
-use windows_sys::Win32::UI::Controls::{EM_SETLIMITTEXT, EM_SETSEL};
+use windows_sys::Win32::UI::Controls::{EM_GETLINECOUNT, EM_SETLIMITTEXT, EM_SETSEL};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT,
 };
@@ -145,9 +146,111 @@ struct WindowState {
     keys: RefCell<ConfirmationKey>,
     composing: Cell<bool>,
     retry_allowed: Cell<bool>,
+    message_visible: Cell<bool>,
+    laying_out: Cell<bool>,
 }
 
 impl WindowState {
+    fn set_message(&self, message: Option<&str>) -> Result<()> {
+        let text = super::nul_terminated_utf16(message.unwrap_or(""));
+        self.message_visible.set(message.is_some());
+        unsafe {
+            SetWindowTextW(self.status.get(), text.as_ptr());
+            ShowWindow(
+                self.status.get(),
+                if message.is_some() { SW_SHOW } else { SW_HIDE },
+            );
+        }
+        self.layout()
+    }
+
+    fn text_height(&self) -> Result<i32> {
+        // Match the edit control's actual font; the screen DC's default font can differ.
+        let font = unsafe { SendMessageW(self.text.get(), WM_GETFONT, 0, 0) } as _;
+        let dc = unsafe { GetDC(self.text.get()) };
+        ensure!(!dc.is_null(), "无法测量预览文字");
+        let previous = unsafe { SelectObject(dc, font) };
+        let mut metrics = TEXTMETRICW::default();
+        let measured = !previous.is_null() && unsafe { GetTextMetricsW(dc, &mut metrics) } != 0;
+        unsafe {
+            if !previous.is_null() {
+                SelectObject(dc, previous);
+            }
+            ReleaseDC(self.text.get(), dc);
+        }
+        ensure!(measured && metrics.tmHeight > 0, "无法测量预览字体");
+        let lines = unsafe { SendMessageW(self.text.get(), EM_GETLINECOUNT, 0, 0) } as i32;
+        // Match the macOS preview's viewport bounds; taller text stays scrollable.
+        Ok(lines.max(1).saturating_mul(metrics.tmHeight).clamp(28, 196))
+    }
+
+    /// Grow downwards without moving focus or changing the fixed wrapping width.
+    fn layout(&self) -> Result<()> {
+        // Resizing a native edit control can synchronously send more notifications.
+        if self.laying_out.replace(true) {
+            return Ok(());
+        }
+        let result = (|| {
+            let mut bounds = RECT::default();
+            let window = self.window.get();
+            ensure!(
+                unsafe { GetWindowRect(window, &mut bounds) } != 0,
+                "无法获取预览尺寸"
+            );
+            let width = bounds.right - bounds.left;
+            let editor_height = self.text_height()?;
+            let height = editor_height + 24 + if self.message_visible.get() { 48 } else { 0 };
+            unsafe {
+                ensure!(
+                    SetWindowPos(
+                        window,
+                        null_mut(),
+                        0,
+                        0,
+                        width,
+                        height,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
+                    ) != 0,
+                    "无法调整预览尺寸"
+                );
+                ensure!(
+                    SetWindowPos(
+                        self.text.get(),
+                        null_mut(),
+                        16,
+                        12,
+                        width - 32,
+                        editor_height,
+                        SWP_NOZORDER | SWP_NOACTIVATE
+                    ) != 0,
+                    "无法调整预览输入框"
+                );
+                ensure!(
+                    SetWindowPos(
+                        self.status.get(),
+                        null_mut(),
+                        16,
+                        editor_height + 24,
+                        width - 32,
+                        36,
+                        SWP_NOZORDER | SWP_NOACTIVATE
+                    ) != 0,
+                    "无法调整预览提示"
+                );
+                let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 28, 28);
+                ensure!(!region.is_null(), "无法创建气泡边缘");
+                if SetWindowRgn(window, region, 1) == 0 {
+                    DeleteObject(region);
+                    anyhow::bail!("无法设置气泡边缘");
+                }
+                // Windows owns the region after successful SetWindowRgn.
+            }
+            Ok(())
+        })();
+        self.laying_out.set(false);
+        result
+    }
+
     fn notify(&self, action: PreviewAction) {
         if let Some(session_id) = self.session_id.get() {
             (self.notify)(PreviewEvent { session_id, action });
@@ -171,11 +274,10 @@ impl WindowState {
                             GetWindowTextW(self.text.get(), text.as_mut_ptr(), text.len() as i32)
                         };
                         if length > 0 && count == 0 {
-                            let message =
-                                super::nul_terminated_utf16("无法读取编辑后的文字，请重试。");
-                            unsafe {
-                                SetWindowTextW(self.status.get(), message.as_ptr());
-                                ShowWindow(self.status.get(), SW_SHOW);
+                            if let Err(error) =
+                                self.set_message(Some("无法读取编辑后的文字，请重试。"))
+                            {
+                                tracing::error!(%error, "Could not display preview error");
                             }
                         } else {
                             self.notify(PreviewAction::Confirm(
@@ -266,6 +368,15 @@ unsafe extern "system" fn window_proc(
     if !state.is_null() {
         let state = unsafe { &*state };
         match message {
+            WM_COMMAND
+                if (wparam >> 16) as u16 == EN_CHANGE as u16
+                    && lparam as HWND == state.text.get() =>
+            {
+                if let Err(error) = state.layout() {
+                    tracing::error!(%error, "Could not resize edited preview");
+                }
+                return 0;
+            }
             WM_CLOSE => {
                 state.notify(PreviewAction::Cancel);
                 return 0;
@@ -305,6 +416,8 @@ impl NativePreview {
                 keys: RefCell::new(ConfirmationKey::default()),
                 composing: Cell::new(false),
                 retry_allowed: Cell::new(true),
+                message_visible: Cell::new(false),
+                laying_out: Cell::new(false),
             }),
         }
     }
@@ -426,7 +539,7 @@ impl NativePreview {
                 SendMessageW(self.state.text.get(), EM_SETLIMITTEXT, 0x7ffffffe, 0);
                 ShowWindow(self.state.status.get(), SW_HIDE);
             }
-            self.layout(None)?;
+            self.state.set_message(None)?;
             Ok(())
         })();
         if setup.is_err() {
@@ -467,55 +580,17 @@ impl NativePreview {
                 (text.len() - 1) as isize,
             );
         }
-        self.layout(warning)?;
+        self.state.set_message(warning)?;
         self.focus();
         Ok(())
     }
 
     pub(crate) fn show_error(&mut self, error: &str, retry_allowed: bool) {
         self.state.retry_allowed.set(retry_allowed);
-        if let Err(layout_error) = self.layout(Some(error)) {
+        if let Err(layout_error) = self.state.set_message(Some(error)) {
             tracing::error!(%layout_error, "Could not display preview error");
         }
         self.focus();
-    }
-
-    fn layout(&self, message: Option<&str>) -> Result<()> {
-        let mut bounds = RECT::default();
-        let window = self.state.window.get();
-        unsafe {
-            ensure!(GetWindowRect(window, &mut bounds) != 0, "无法获取预览尺寸");
-        }
-        let width = bounds.right - bounds.left;
-        let height = 104 + if message.is_some() { 48 } else { 0 };
-        let text = super::nul_terminated_utf16(message.unwrap_or(""));
-        unsafe {
-            ensure!(
-                SetWindowPos(
-                    window,
-                    null_mut(),
-                    0,
-                    0,
-                    width,
-                    height,
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
-                ) != 0,
-                "无法调整预览尺寸"
-            );
-            let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 28, 28);
-            ensure!(!region.is_null(), "无法创建气泡边缘");
-            if SetWindowRgn(window, region, 1) == 0 {
-                DeleteObject(region);
-                anyhow::bail!("无法设置气泡边缘");
-            }
-            // Windows owns the region after successful SetWindowRgn.
-            SetWindowTextW(self.state.status.get(), text.as_ptr());
-            ShowWindow(
-                self.state.status.get(),
-                if message.is_some() { SW_SHOW } else { SW_HIDE },
-            );
-        }
-        Ok(())
     }
 
     pub(crate) fn focus(&self) {
@@ -559,6 +634,84 @@ impl NativePreview {
         if unsafe { GetForegroundWindow() } != self.state.window.get() {
             return Ok(false);
         }
+        let replace = |value: &str| unsafe {
+            let value = super::nul_terminated_utf16(value);
+            SendMessageW(self.state.text.get(), EM_SETSEL, 0, -1);
+            SendMessageW(
+                self.state.text.get(),
+                EM_REPLACESEL,
+                1,
+                value.as_ptr() as isize,
+            );
+        };
+        let bounds = || -> Result<RECT> {
+            let mut bounds = RECT::default();
+            ensure!(
+                unsafe { GetWindowRect(self.state.window.get(), &mut bounds) } != 0,
+                "Could not read bubble bounds"
+            );
+            Ok(bounds)
+        };
+        // Use actual edit notifications and wrapped lines, rather than calling
+        // the layout helper directly, so a missing EN_CHANGE handler is caught.
+        replace("短句");
+        let short = bounds()?;
+        replace(&"中文 English 🎙️ 自动换行。".repeat(20));
+        let grown = bounds()?;
+        ensure!(
+            grown.bottom - grown.top > short.bottom - short.top,
+            "Bubble did not grow after editing"
+        );
+        ensure!(
+            grown.right - grown.left == short.right - short.left,
+            "Bubble width changed while editing"
+        );
+        ensure!(
+            grown.top == short.top,
+            "Bubble top edge moved while growing"
+        );
+        replace(&"中文 English 🎙️ 自动换行。".repeat(200));
+        let capped = bounds()?;
+        ensure!(
+            capped.bottom - capped.top <= 220,
+            "Long text exceeded the bubble height limit"
+        );
+        replace("短句\r\n");
+        let newline = bounds()?;
+        ensure!(
+            newline.bottom - newline.top > short.bottom - short.top,
+            "Trailing newline did not leave room for the caret"
+        );
+        replace("短句");
+        let shrunk = bounds()?;
+        ensure!(
+            shrunk.bottom - shrunk.top == short.bottom - short.top,
+            "Bubble did not shrink after deletion"
+        );
+        self.state.set_message(Some("测试提示"))?;
+        replace(&"自动换行保留提示。".repeat(20));
+        ensure!(
+            self.state.message_visible.get()
+                && unsafe { IsWindowVisible(self.state.status.get()) } != 0,
+            "Editing lost the delivery message"
+        );
+        replace("短句");
+        let footer = bounds()?;
+        ensure!(
+            footer.bottom - footer.top == short.bottom - short.top + 48,
+            "Message footer overlapped the resized editor"
+        );
+        let mut viewport = RECT::default();
+        ensure!(
+            unsafe { GetClientRect(self.state.text.get(), &mut viewport) } != 0,
+            "Could not read editor bounds"
+        );
+        ensure!(
+            viewport.bottom == short.bottom - short.top - 24,
+            "Editor did not shrink with its bubble"
+        );
+        self.state.set_message(None)?;
+        verify_pending()?;
         // Exercise the real subclass chain, including key repeats and WM_CHAR.
         unsafe {
             let before = GetWindowTextLengthW(self.state.text.get());

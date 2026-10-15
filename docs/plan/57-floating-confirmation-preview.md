@@ -1,6 +1,6 @@
 # 57 - 悬浮预览与回车确认 — Feature record
 
-**Stage:** Preview review fixes validated locally; follow-up review and hosted checks pending
+**Stage:** Editable, adaptive-height bubbles validated locally; draft pending remaining desktop acceptance
 **PR:** https://github.com/b1indsight/viberwhisper/pull/148
 
 ## 1. Initial plan
@@ -284,3 +284,44 @@ Cmd+A/C/X/V 正常，最后一次释放确认投递成功；读取 TextEdit 测�
 菜单注册的原生 --smoke 报告“Cmd+A did not select the text”（退出码 1）；正式版本
 退出码 0。三个回归和原生检查使用相同输入，保留这些机制。日志及 results.json
 保存在该 cache 目录下，不提交版本控制。
+
+### [005] — 2026-10-15 — 固定宽度、随编辑内容增减高度
+
+**状态：已实现并通过本地验证；本次代码审查和托管检查随后运行。**
+
+用户希望气泡保持固定宽度，高度随着文字长度变化。此前 macOS 仅在显示或报错时
+测量文字，Windows 始终使用固定高度。本次在同一 PR 中补齐两端的实时伸缩。
+
+- macOS 由文本 delegate 的 `textDidChange` 重新测量原生布局；窗口、编辑器、
+  滚动容器和提示标签由窗口状态统一持有，避免编辑回调访问另一份 UI 状态。
+- Windows 使用编辑框的 `EN_CHANGE` 更新尺寸，读取原生换行行数及当前字体度量，
+  同步调整编辑区和提示区。首次设置全文仍显式布局，因为多行控件的 `WM_SETTEXT`
+  不发送该通知；见 [Microsoft EN_CHANGE](https://learn.microsoft.com/en-us/windows/win32/controls/en-change)
+  与 [EM_GETLINECOUNT](https://learn.microsoft.com/en-us/windows/win32/controls/em-getlinecount)。
+- 两端保持当前宽度和顶部位置；编辑区高度限定在 28–196 原生单位，加上下内边距后，
+  普通气泡为 52–220。超过上限后保留原生滚动。新增换行也能获得光标所在行的空间，
+  删除长文字会缩回短句高度。错误提示单独占据底部区域，编辑文字不会清掉提示。
+- 继续使用现有 AppKit / Win32 绑定；Cargo.toml 与 Cargo.lock 均未修改。
+
+**验证：** `cargo test --locked -q` 为 256 passed / 2 ignored；integration 测试同样通过。
+`cargo fmt --check`、`git diff --check`、
+`cargo clippy --locked --all-targets --features integration -- -D warnings` 通过。
+Win32 实际源文件在隔离 MSVC 目标包通过 check 和 Clippy，包含新增原生检查的编译。
+macOS 原生 `--smoke` 先通过真实编辑 API 验证自动换行增高、固定宽度和顶部、最大高度、
+末尾空行、删除收缩、滚动文档收缩及提示保留，再继续原有快捷键、组词和确认投递检查。
+TextEdit 测试文档读取结果与确认的中英混合、emoji 样本完整一致。
+
+**消融比较：** `.cache/2026-10-14/preview-autosize-ablation.py` 构建独立命名的副本，
+`run-preview-autosize-ablation.py` 对各副本运行相同原生检查。移除编辑通知失败于
+“Bubble did not grow after editing”，移除高度上限失败于
+“Long text exceeded the bubble height limit”（均退出 1）。
+额外计算空光标行的原型分支去掉后全部检查仍通过（退出 0），因此正式实现使用更简单的
+原生布局测量。简化后的正式版本重新通过相同原生检查和实际 TextEdit 投递（退出 0）。
+副本、命令、results.json 与原生日志位于
+`.cache/2026-10-14/preview-autosize-ablation-148/`；正式日志为
+`.cache/2026-10-14/viberwhisper-preview-autosize-smoke.log`，均不提交。
+
+**验收限制：** Windows 桌面上的伸缩、字体回退、滚动及焦点恢复仍需实机验收；
+本机原生检查覆盖 macOS，尚未操作真实中文输入法候选界面、Chromium 或终端。
+此前 [004] 的独立审查无新发现，提交 d63f3a41 的
+[双平台 CI 已通过](https://github.com/b1indsight/viberwhisper/actions/runs/38703725115)。

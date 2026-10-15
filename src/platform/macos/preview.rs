@@ -10,15 +10,17 @@ use objc2::{DeclaredClass, MainThreadMarker, MainThreadOnly, define_class, msg_s
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSBackingStoreType, NSBezierPath, NSColor,
     NSEvent, NSEventModifierFlags, NSEventType, NSFont, NSRunningApplication, NSScreen,
-    NSScrollView, NSTextField, NSTextInputClient, NSTextView, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask, NSWorkspace,
+    NSScrollView, NSTextDelegate, NSTextField, NSTextInputClient, NSTextView, NSTextViewDelegate,
+    NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_app_kit::{NSMenu, NSMenuItem};
 #[cfg(feature = "integration")]
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
 use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFRetained, CFString, kCFBooleanTrue};
-use objc2_foundation::{NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSNotification, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
+};
 
 use super::AccessibilityError;
 use super::accessibility::{copy_attribute, native_error, validated_focused_element};
@@ -163,6 +165,8 @@ struct WindowState {
     session_id: Cell<Option<SessionId>>,
     keys: RefCell<ConfirmationKey>,
     text: Retained<NSTextView>,
+    status: Retained<NSTextField>,
+    scroll: Retained<NSScrollView>,
     retry_allowed: Cell<bool>,
 }
 
@@ -199,6 +203,15 @@ define_class!(
     struct PreviewWindow;
 
     unsafe impl NSObjectProtocol for PreviewWindow {}
+
+    unsafe impl NSTextDelegate for PreviewWindow {
+        #[unsafe(method(textDidChange:))]
+        fn text_did_change(&self, _: &NSNotification) {
+            self.resize_to_text();
+        }
+    }
+
+    unsafe impl NSTextViewDelegate for PreviewWindow {}
 
     unsafe impl NSWindowDelegate for PreviewWindow {
         #[unsafe(method(windowShouldClose:))]
@@ -266,6 +279,47 @@ define_class!(
 );
 
 impl PreviewWindow {
+    fn set_message(&self, message: Option<&str>) {
+        let status = &self.ivars().status;
+        status.setStringValue(&NSString::from_str(message.unwrap_or("")));
+        status.setHidden(message.is_none());
+        self.resize_to_text();
+    }
+
+    /// Keep the bubble's width and top edge while its editable text wraps.
+    fn resize_to_text(&self) {
+        let state = self.ivars();
+        let width = self.frame().size.width;
+        let used_height = unsafe {
+            state
+                .text
+                .layoutManager()
+                .zip(state.text.textContainer())
+                .map(|(layout, container)| {
+                    layout.ensureLayoutForTextContainer(&container);
+                    let used = layout.usedRectForTextContainer(&container);
+                    used.origin.y + used.size.height
+                })
+                .unwrap_or(28.0)
+        };
+        let editor_height = used_height.clamp(28.0, 196.0);
+        let footer = if state.status.isHidden() { 0.0 } else { 44.0 };
+        let height = editor_height + 24.0 + footer;
+        let mut frame = self.frame();
+        frame.origin.y += frame.size.height - height;
+        frame.size.height = height;
+        self.setFrame_display(frame, true);
+        state.scroll.setFrame(NSRect::new(
+            NSPoint::new(16.0, 12.0 + footer),
+            NSSize::new(width - 32.0, editor_height),
+        ));
+        state.text.setMinSize(NSSize::new(0.0, editor_height));
+        state.status.setFrame(NSRect::new(
+            NSPoint::new(20.0, 10.0),
+            NSSize::new(width - 40.0, 38.0),
+        ));
+    }
+
     fn notify_key(&self, key: PreviewKey) {
         let action = match key {
             PreviewKey::Confirm if self.ivars().retry_allowed.get() => {
@@ -286,9 +340,6 @@ impl PreviewWindow {
 pub(crate) struct NativePreview {
     notify: Option<PreviewNotify>,
     window: Option<Retained<PreviewWindow>>,
-    text: Option<Retained<NSTextView>>,
-    status: Option<Retained<NSTextField>>,
-    scroll: Option<Retained<NSScrollView>>,
 }
 
 /// AppKit routes Cmd editing through menu key equivalents to the first responder.
@@ -326,9 +377,6 @@ impl NativePreview {
         Self {
             notify: Some(notify),
             window: None,
-            text: None,
-            status: None,
-            scroll: None,
         }
     }
 
@@ -360,11 +408,30 @@ impl NativePreview {
             container.setContainerSize(NSSize::new(width - 32.0, f64::MAX));
             container.setWidthTracksTextView(true);
         }
+        let content: Retained<BubbleView> = unsafe {
+            msg_send![super(BubbleView::alloc(mtm).set_ivars(())), initWithFrame: frame(0.0, 0.0, width, height)]
+        };
+        let status = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        status.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        status.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        status.setHidden(true);
+        content.addSubview(&status);
+        let scroll = NSScrollView::initWithFrame(
+            NSScrollView::alloc(mtm),
+            frame(16.0, 12.0, width - 32.0, height - 24.0),
+        );
+        scroll.setHasVerticalScroller(true);
+        scroll.setAutohidesScrollers(true);
+        scroll.setDrawsBackground(false);
+        scroll.setDocumentView(Some(&text));
+        content.addSubview(&scroll);
         let this = PreviewWindow::alloc(mtm).set_ivars(WindowState {
             notify: self.notify.take().expect("preview is created once"),
             session_id: Cell::new(None),
             keys: RefCell::new(ConfirmationKey::default()),
             text: text.clone(),
+            status,
+            scroll,
             retry_allowed: Cell::new(true),
         });
         // SAFETY: Correct NSWindow initializer. Rust retains the window; closing must not release it.
@@ -387,28 +454,9 @@ impl NativePreview {
         window.setLevel(3);
         window.setHidesOnDeactivate(false);
         window.setDelegate(Some(ProtocolObject::from_ref(&*window)));
-        let content: Retained<BubbleView> = unsafe {
-            msg_send![super(BubbleView::alloc(mtm).set_ivars(())), initWithFrame: frame(0.0, 0.0, width, height)]
-        };
-        let status = NSTextField::labelWithString(&NSString::from_str(""), mtm);
-        status.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-        status.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        status.setHidden(true);
-        content.addSubview(&status);
-        let scroll = NSScrollView::initWithFrame(
-            NSScrollView::alloc(mtm),
-            frame(16.0, 12.0, width - 32.0, height - 24.0),
-        );
-        scroll.setHasVerticalScroller(true);
-        scroll.setAutohidesScrollers(true);
-        scroll.setDrawsBackground(false);
-        scroll.setDocumentView(Some(&text));
-        content.addSubview(&scroll);
+        text.setDelegate(Some(ProtocolObject::from_ref(&*window)));
         window.setContentView(Some(&content));
         window.center();
-        self.text = Some(text);
-        self.status = Some(status);
-        self.scroll = Some(scroll);
         self.window = Some(window);
         Ok(())
     }
@@ -426,18 +474,15 @@ impl NativePreview {
         let window = self.window.as_ref().expect("created window");
         window.ivars().session_id.set(Some(session_id));
         window.ivars().keys.borrow_mut().reset();
-        self.text
-            .as_ref()
-            .expect("created text view")
-            .setString(&NSString::from_str(text));
+        window.ivars().text.setString(&NSString::from_str(text));
         window.setTitle(&NSString::from_str(&format!(
             "ViberWhisper · {destination}"
         )));
         window.ivars().retry_allowed.set(true);
-        self.layout(warning);
-        self.text
-            .as_ref()
-            .expect("created text view")
+        window.set_message(warning);
+        window
+            .ivars()
+            .text
             .setSelectedRange(NSRange::new(text.encode_utf16().count(), 0));
         self.focus();
         Ok(())
@@ -446,47 +491,9 @@ impl NativePreview {
     pub(crate) fn show_error(&mut self, error: &str, retry_allowed: bool) {
         if let Some(window) = &self.window {
             window.ivars().retry_allowed.set(retry_allowed);
+            window.set_message(Some(error));
         }
-        self.layout(Some(error));
         self.focus();
-    }
-
-    fn layout(&self, message: Option<&str>) {
-        let Some(window) = &self.window else {
-            return;
-        };
-        let text = self.text.as_ref().expect("created text view");
-        let width = window.frame().size.width;
-        let used_height = unsafe {
-            text.layoutManager()
-                .zip(text.textContainer())
-                .map(|(layout, container)| {
-                    layout.glyphRangeForTextContainer(&container);
-                    layout.usedRectForTextContainer(&container).size.height
-                })
-                .unwrap_or(60.0)
-        };
-        let footer = if message.is_some() { 44.0 } else { 0.0 };
-        let height = used_height.clamp(28.0, 196.0) + 24.0 + footer;
-        let mut frame = window.frame();
-        frame.origin.y += frame.size.height - height;
-        frame.size.height = height;
-        window.setFrame_display(frame, true);
-        self.scroll
-            .as_ref()
-            .expect("created scroll view")
-            .setFrame(NSRect::new(
-                NSPoint::new(16.0, 12.0 + footer),
-                NSSize::new(width - 32.0, height - 24.0 - footer),
-            ));
-        text.setMinSize(NSSize::new(0.0, height - 24.0 - footer));
-        let status = self.status.as_ref().expect("created status");
-        status.setStringValue(&NSString::from_str(message.unwrap_or("")));
-        status.setFrame(NSRect::new(
-            NSPoint::new(20.0, 10.0),
-            NSSize::new(width - 40.0, 38.0),
-        ));
-        status.setHidden(message.is_none());
     }
 
     #[allow(deprecated)]
@@ -494,9 +501,7 @@ impl NativePreview {
         if let Some(window) = &self.window {
             NSApplication::sharedApplication(window.mtm()).activateIgnoringOtherApps(true);
             window.makeKeyAndOrderFront(None);
-            if let Some(text) = &self.text {
-                window.makeFirstResponder(Some(text));
-            }
+            window.makeFirstResponder(Some(&window.ivars().text));
         }
     }
     pub(crate) fn hide(&self) {
@@ -509,12 +514,8 @@ impl NativePreview {
             window.ivars().session_id.set(None);
             window.ivars().keys.borrow_mut().reset();
             window.orderOut(None);
-        }
-        if let Some(text) = &self.text {
-            text.setString(&NSString::from_str(""));
-        }
-        if let Some(status) = &self.status {
-            status.setStringValue(&NSString::from_str(""));
+            window.ivars().text.setString(&NSString::from_str(""));
+            window.set_message(None);
         }
     }
 
@@ -532,7 +533,64 @@ impl NativePreview {
         if !window.isKeyWindow() || !NSApplication::sharedApplication(window.mtm()).isActive() {
             return Ok(false);
         }
-        let text = self.text.as_ref().expect("created text view");
+        let text = &window.ivars().text;
+        let replace = |value: &str| unsafe {
+            text.insertText_replacementRange(
+                &NSString::from_str(value),
+                NSRange::new(0, text.string().len_utf16()),
+            );
+        };
+        // Editing must resize the visible bubble, including wrapping and the
+        // empty caret line after Shift+Enter, without changing its anchor/width.
+        replace("短句");
+        let short = window.frame();
+        replace(&"中文 English 🎙️ 自动换行。".repeat(20));
+        let grown = window.frame();
+        ensure!(
+            grown.size.height > short.size.height,
+            "Bubble did not grow after editing"
+        );
+        ensure!(
+            grown.size.width == short.size.width,
+            "Bubble width changed while editing"
+        );
+        ensure!(
+            (grown.origin.y + grown.size.height - short.origin.y - short.size.height).abs() < 0.1,
+            "Bubble top edge moved while growing"
+        );
+        replace(&"中文 English 🎙️ 自动换行。".repeat(200));
+        ensure!(
+            window.frame().size.height <= 220.0,
+            "Long text exceeded the bubble height limit"
+        );
+        replace("短句\n");
+        ensure!(
+            window.frame().size.height > short.size.height,
+            "Trailing newline did not leave room for the caret"
+        );
+        replace("短句");
+        ensure!(
+            window.frame().size == short.size,
+            "Bubble did not shrink after deletion"
+        );
+        ensure!(
+            text.frame().size.height <= window.ivars().scroll.contentSize().height + 1.0,
+            "Deleting long text left a scrollable empty document"
+        );
+        window.set_message(Some("测试提示"));
+        replace(&"自动换行保留提示。".repeat(20));
+        ensure!(
+            !window.ivars().status.isHidden()
+                && window.ivars().status.stringValue().to_string() == "测试提示",
+            "Editing lost the delivery message"
+        );
+        replace("短句");
+        ensure!(
+            window.frame().size.height == short.size.height + 44.0,
+            "Message footer overlapped the resized editor"
+        );
+        window.set_message(None);
+        verify_pending()?;
         let app = NSApplication::sharedApplication(window.mtm());
         let send = |kind, modifiers, repeat, key_code, characters: &str| -> Result<()> {
             let characters = NSString::from_str(characters);
