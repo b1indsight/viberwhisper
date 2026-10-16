@@ -384,3 +384,125 @@ fn different_final_spellings_revoke_a_rule_instead_of_choosing_one_occurrence() 
         "联系张山，再联系张山。"
     );
 }
+
+#[test]
+fn unchanged_occurrences_prevent_learning_a_conflicting_spelling() {
+    // The two mentions may name different colleagues. Keeping one spelling is
+    // conflicting evidence even when it appears in a separate, repeated segment.
+    for unchanged in ["张山正在开会。", "张山和张山正在开会。"] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let sources = vec![
+            result("请找张山。", "张山", "同事"),
+            result(unchanged, "张山", "同事"),
+        ];
+        let prepared = memory.prepare(sources.clone(), Some("zh".into()));
+        memory.confirm("mixed", &prepared, &format!("请找张珊。{unchanged}"), 100);
+        assert!(memory.snapshot(100).contexts[0].corrections.is_empty());
+        assert_eq!(
+            memory.prepare(sources, Some("zh".into())).text,
+            format!("请找张山。{unchanged}")
+        );
+    }
+}
+
+#[test]
+fn deleting_an_automatic_name_keeps_its_saved_correction() {
+    // Removing a mention edits the sentence, not the spelling of the name.
+    // Cover both removing the only mention and leaving another corrected one.
+    for (text, final_text) in [
+        ("请找张山。", "请找。"),
+        ("请找张山，张山在开会。", "请找，张珊在开会。"),
+    ] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let raw = result("请找张山。", "张山", "同事");
+        let prepared = memory.prepare(vec![raw.clone()], None);
+        memory.confirm("first", &prepared, "请找张珊。", 100);
+        let prepared = memory.prepare(vec![result(text, "张山", "同事")], None);
+        memory.confirm("deleted", &prepared, final_text, 101);
+        assert_eq!(memory.prepare(vec![raw], None).text, "请找张珊。");
+    }
+}
+
+#[test]
+fn punctuation_only_edits_do_not_retrain_automatic_names() {
+    // Adding a full stop to a one-word preview must neither change the name nor
+    // refresh its manual evidence; punctuation on one of two mentions must agree.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("memory.json");
+    let mut memory = Memory::load(Some(path.clone()), Default::default(), 100).unwrap();
+    let raw = result("Cody", "Cody", "项目");
+    let prepared = memory.prepare(vec![raw.clone()], None);
+    memory.confirm("first", &prepared, "Codex", 100);
+    memory.save().unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for (index, (text, final_text)) in [
+        ("Cody", "Codex."),
+        ("Cody", "Codex！"),
+        ("Cody; Cody", "Codex.; Codex"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let prepared = memory.prepare(vec![result(text, "Cody", "项目")], None);
+        memory.confirm(&format!("punctuation-{index}"), &prepared, final_text, 101);
+        memory.save().unwrap();
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(after["corrections"], saved["corrections"]);
+        assert_eq!(memory.prepare(vec![raw.clone()], None).text, "Codex");
+    }
+}
+
+#[test]
+fn spelling_edits_do_not_include_added_sentence_punctuation() {
+    // Correcting a name and ending the sentence together must teach the name
+    // alone, including when changing a previously automatic spelling.
+    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    let raw = result("Cody", "Cody", "项目");
+    let prepared = memory.prepare(vec![raw.clone()], None);
+    memory.confirm("first", &prepared, "Codex.", 100);
+    assert_eq!(memory.prepare(vec![raw.clone()], None).text, "Codex");
+    let prepared = memory.prepare(vec![raw.clone()], None);
+    memory.confirm("third-spelling", &prepared, "Codez。", 101);
+    assert_eq!(memory.prepare(vec![raw], None).text, "Codez");
+}
+
+#[test]
+fn automatic_preview_ranges_keep_their_original_names() {
+    // Alpha becomes Beta while the original Beta becomes Gamma. Re-aligning raw
+    // and displayed text by their shared Beta can assign feedback to the wrong name.
+    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    for (index, (from, to)) in [("Alpha", "Beta"), ("Beta", "Gamma")]
+        .into_iter()
+        .enumerate()
+    {
+        let prepared = memory.prepare(vec![result(from, from, "项目")], None);
+        memory.confirm(&format!("first-{index}"), &prepared, to, 100);
+    }
+    let mut raw = result("Alpha Beta", "Alpha", "项目");
+    raw.memory_candidates.push(Candidate {
+        kind: TermKind::ProperNoun,
+        text: "Beta".into(),
+    });
+    let prepared = memory.prepare(vec![raw.clone()], None);
+    assert_eq!(prepared.text, "Beta Gamma");
+    memory.confirm("edited", &prepared, "Delta Gamma", 101);
+    assert_eq!(memory.prepare(vec![raw], None).text, "Delta Gamma");
+}
+
+#[test]
+fn spelling_feedback_preserves_name_symbols_and_existing_punctuation() {
+    // Language names use symbols, and punctuation explicitly included by the
+    // model belongs to its complete candidate rather than a new sentence ending.
+    for (from, to) in [
+        ("C plus plus", "C++"),
+        ("DotNet", ".NET"),
+        ("Acme Co.", "Example Co."),
+    ] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let raw = result(from, from, "项目");
+        let prepared = memory.prepare(vec![raw.clone()], None);
+        memory.confirm("first", &prepared, to, 100);
+        assert_eq!(memory.prepare(vec![raw], None).text, to);
+    }
+}

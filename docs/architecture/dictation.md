@@ -119,9 +119,16 @@ Learning and application share the same candidate spans: a containing name owns 
 crossing overlaps without one enclosing candidate are skipped. Rules match the entire candidate,
 so a rule for a shorter name cannot edit part of a longer extracted name. Configured vocabulary
 protects its full occurrences in that topic, including against intersecting candidate replacements;
-the same rule can still apply outside those occurrences. Ambiguous or cyclic rules are skipped. Reverting a
-displayed correction removes its rule, and editing it to another spelling updates its original
-source mapping. Unedited automatic replacements do not refresh manual evidence. Disabling memory
+the same rule can still apply outside those occurrences. Ambiguous or cyclic rules are skipped.
+Rendering retains exact raw and displayed ranges for every eligible noun, including unchanged
+occurrences. Feedback compares displayed text with the confirmed revision; it never treats the
+program's earlier replacement as a manual edit. All surviving occurrences participate in spelling
+conflict detection across segments, and conflicting final spellings revoke the source mapping.
+Deleting a mention supplies no spelling evidence and preserves its rule. Reverting a displayed
+correction removes its rule, and changing it to another spelling updates its original source
+mapping. Newly added sentence endings are excluded from learned names; existing candidate
+punctuation and name symbols remain. Unedited or punctuation-only confirmations do not refresh
+manual evidence. Refreshed candidates are deduplicated and bounded to eight per segment. Disabling memory
 also disables correction loading, learning and application. Offline and seeded evaluation retain
 their existing isolation and never load the personal correction table.
 

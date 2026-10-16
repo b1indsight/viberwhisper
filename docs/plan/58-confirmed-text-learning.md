@@ -1,6 +1,6 @@
 # 58 - 确认文本历史与纠错学习 — Feature record
 
-**Stage:** Implemented; local validation complete, platform CI pending.
+**Stage:** Implemented; validation and review status tracked in PR #151.
 **PR:** [#151](https://github.com/b1indsight/viberwhisper/pull/151)（草稿）。
 
 ## 1. Initial plan
@@ -261,3 +261,51 @@ integration 检查，再进入独立代码审阅。
 **结果与待办：** 本次候选范围修正已完成并通过本地验证，待独立审阅与平台 CI。
 上一轮 review 的“删除已自动纠正的词会撤销规则”仍待后续处理。未进行真实语音质量
 对照；本次验证针对客户端替换与学习边界。
+
+### [004] — 2026-10-16 — 统一显示候选的人工反馈与冲突证据
+
+**触发与决定：** 用户要求修复本轮 review 报告的三项问题：遗漏未修改词的拼写冲突、
+删除词语误撤销规则，以及只为自动结果添加句号却学出带句号的永久替换。
+本次完成 [003] 中尚未处理的删除问题，并收紧 [001] 的人工修改证据。
+选择统一按显示候选处理反馈，替代分别遍历自动替换和模型候选、各自判断人工修改的
+路径；继续遵循 [003] 的本次模型完整专有词边界。
+
+**实际修改：** `correction` 在生成预览时，为每个可用专有词保留实际原文范围和显示
+范围，包含没有自动替换的词。确认时只对显示文本与最终文本做人工修改判断，避免用
+原文到最终文本的差异把程序自己的修改算作新证据。每个仍存在的出现位置都参与按
+语境与误词分组的拼写检查；包含未修改的词和同一候选的重复出现，不再只收集新规则。
+不同拼写会过滤本轮新规则并撤销旧规则，映射与集合避免逐项两两比较。
+
+删除后没有有效词语的范围不贡献拼写或撤销证据。只有显示名字被明确改写或改回原词
+才更新或撤销对应关系。新增句末标点排除在学习目标之外；显示候选已包含的尾随标点、
+`C++` 等符号和 `.NET` 的前导句点保留。反馈后的候选去重，每段仍最多 8 项；短语只
+刷新短期记忆。最终输入和 history 完整保留用户文本，不受词表学习清理影响。
+README、架构说明和 changelog 同步更新；配置和持久化 schema 保持不变。
+
+**权衡：** 渲染时保存范围可直接区分两个同名显示片段的来源，避免重新对齐原文与
+预览文字时把 `Alpha→Beta` 生成的 `Beta` 认成原先的另一个 `Beta`。确认后的对齐仍有
+固定预算，无法安全投影的范围不学习。新增句末标点仅影响学习目标的边界；模型已经
+提取的候选尾随标点按名称内容保留。
+
+**验证：** 新增 6 个回归，覆盖三项错误及相互组合、持久规则证据未被标点确认刷新、
+同词的多段与重复出现、真实预览位置、名称符号与已有标点。旧实现出现 4 个对应断言
+失败；修复后纠错模块 19 项通过。`cargo test --locked -q` 为 281 通过、2 忽略；
+`cargo build --locked`、`cargo fmt --check`、`git diff --check` 和
+`cargo clippy --locked --all-targets --features integration -- -D warnings` 通过。
+
+在正式实现上逐项进行消融，基线 19 项通过，以下简化版本均实际触发断言失败，退出
+101，且每次比较后恢复源文件。没有将编译失败计入效果。
+
+| 简化版本 | 回归 | 实际结果与保留理由 |
+| --- | --- | --- |
+| 只收集修改过的词 | `unchanged_occurrences_prevent_learning_a_conflicting_spelling` | 未修改的同名对象被遗漏，学出冲突规则；保留全部存续位置的证据 |
+| 删除出现位置也撤销规则 | `deleting_an_automatic_name_keeps_its_saved_correction` | 后续再次输出误词“张山”；保留删除与改词的区分 |
+| 以原文到最终文本认定人工改动 | `punctuation_only_edits_do_not_retrain_automatic_names` | 仅加句号也把人工记录和时间改为本次录音；保留显示文本的修改证据 |
+| 句末标点直接进入目标 | `spelling_edits_do_not_include_added_sentence_punctuation` | 后续输出 `Codex.`；保留学习目标的句读边界 |
+| 用对齐重新估计预览位置 | `automatic_preview_ranges_keep_their_original_names` | 得到 `Delta Delta Gamma`，预期 `Delta Gamma`；保留渲染时的实际范围 |
+
+复现命令为 `python3 .cache/2026-10-16/explicit-spelling-feedback-ablation.py`，运行器
+和完整结果位于本地忽略目录中的同名 `.py`、`.json`；检查输出保存在
+`.cache/2026-10-16/explicit-spelling-feedback-checks.json`。本次修正位于已审阅提交
+`5fbb6908a7ac3f5bfef384e22997177835b71b24` 的子变更，独立审阅只覆盖本轮修正。
+平台 CI 和审阅状态在同一 PR 更新。未进行真实语音质量或桌面 GUI 人工评测。

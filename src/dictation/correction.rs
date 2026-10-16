@@ -7,7 +7,10 @@ use super::{
 };
 use alignment::Alignment;
 use serde::{Deserialize, Serialize};
-use std::ops::Range;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,17 +29,16 @@ pub(super) struct Correction {
     pub at: u64,
 }
 
-struct Applied {
-    rule: Replacement,
+struct Noun {
+    raw: Range<usize>,
     shown: Range<usize>,
 }
 
 struct Segment {
     source: DictationResult,
-    proper_nouns: Vec<Range<usize>>,
+    proper_nouns: Vec<Noun>,
     shown: String,
     span: Range<usize>,
-    applied: Vec<Applied>,
 }
 
 /// Owns the source and displayed revisions until a successful delivery supplies feedback.
@@ -52,6 +54,7 @@ pub(super) struct Confirmed {
 }
 
 impl Prepared {
+    /// Render model candidates while retaining their exact source and preview positions.
     pub fn new(
         results: Vec<DictationResult>,
         rules: &[Correction],
@@ -62,8 +65,8 @@ impl Prepared {
         let mut text = String::new();
         let separator = crate::text::segment_separator(language.as_deref());
         for source in results {
-            let proper_nouns = proper_noun_spans(&source);
-            let (shown, applied) = apply(&source, &proper_nouns, rules, long_term);
+            let (shown, proper_nouns) =
+                apply(&source, &proper_noun_spans(&source), rules, long_term);
             if !text.is_empty() && !shown.is_empty() {
                 text.push_str(separator);
             }
@@ -74,13 +77,12 @@ impl Prepared {
                 proper_nouns,
                 shown,
                 span: start..text.len(),
-                applied,
             });
         }
         Self { text, segments }
     }
 
-    /// Learn only uniquely aligned whole candidates, and distinguish edits from program output.
+    /// Learn from displayed noun spans; unchanged occurrences also detect spelling conflicts.
     pub fn feedback(&self, final_text: &str) -> Option<Confirmed> {
         if final_text.len() > 64 * 1024 || final_text.contains('\0') || final_text.trim().is_empty()
         {
@@ -92,7 +94,8 @@ impl Prepared {
             changes: vec![],
             revoked: vec![],
         };
-        let mut spellings = Vec::new();
+        let mut spellings = BTreeMap::new();
+        let mut conflicts = BTreeSet::new();
         for (index, segment) in self.segments.iter().enumerate() {
             let Some(label) = context(&segment.source) else {
                 continue;
@@ -111,78 +114,70 @@ impl Prepared {
             let Some(shown_to_final) = Alignment::new(&segment.shown, edited) else {
                 continue;
             };
-            for applied in &segment.applied {
-                let Some(span) = shown_to_final.project(applied.shown.clone()) else {
+            let mut terms = Vec::new();
+            let mut remember = |kind, value: &str| {
+                if valid_term(value) && terms.len() < 8 {
+                    let term = Candidate {
+                        kind,
+                        text: value.into(),
+                    };
+                    if !terms.contains(&term) {
+                        terms.push(term);
+                    }
+                }
+            };
+            for noun in &segment.proper_nouns {
+                let Some(span) = shown_to_final.project(noun.shown.clone()) else {
                     continue;
                 };
-                let value = &edited[span];
-                spellings.push((
-                    label.to_owned(),
-                    Replacement {
-                        from: applied.rule.from.clone(),
-                        to: value.into(),
-                    },
-                ));
-                if value != applied.rule.to {
-                    confirmed
-                        .revoked
-                        .push((label.into(), applied.rule.from.clone()));
-                    if valid_replacement(&applied.rule.from, value)
-                        && shown_to_final.replaces(&applied.shown)
-                    {
+                let original = &segment.source.text[noun.raw.clone()];
+                let shown = &segment.shown[noun.shown.clone()];
+                let value = name_without_added_sentence_end(shown, &edited[span]);
+                if !valid_term(value) {
+                    // Deleting a mention supplies no spelling evidence.
+                    continue;
+                }
+                remember(TermKind::ProperNoun, value);
+                let spelling_changed = valid_replacement(shown, value);
+                let spelling = if spelling_changed { value } else { shown };
+                let key = (label.to_owned(), original.to_owned());
+                if spellings
+                    .insert(key.clone(), spelling.to_owned())
+                    .is_some_and(|previous| previous != spelling)
+                {
+                    conflicts.insert(key);
+                }
+                if spelling_changed && shown_to_final.replaces(&noun.shown) {
+                    if original != shown {
+                        confirmed.revoked.push((label.into(), original.into()));
+                    }
+                    if valid_replacement(original, value) {
                         confirmed.changes.push((
                             label.into(),
                             Replacement {
-                                from: applied.rule.from.clone(),
+                                from: original.into(),
                                 to: value.into(),
                             },
                         ));
                     }
                 }
             }
-            let Some(raw_to_final) = Alignment::new(&segment.source.text, edited) else {
-                continue;
-            };
-            let raw_to_shown = Alignment::new(&segment.source.text, &segment.shown);
-            let mut terms = Vec::new();
-            for term in &segment.source.memory_candidates {
-                let Some(raw_span) = unique_term(&segment.source.text, &term.text) else {
-                    if contains_term(edited, &term.text) {
-                        terms.push(term.clone());
-                    }
-                    continue;
-                };
-                if term.kind == TermKind::ProperNoun && !segment.proper_nouns.contains(&raw_span) {
-                    continue;
-                }
-                let Some(final_span) = raw_to_final.project(raw_span.clone()) else {
-                    continue;
-                };
-                let value = &edited[final_span];
-                if !valid_term(value) {
-                    continue;
-                }
-                terms.push(Candidate {
-                    kind: term.kind.clone(),
-                    text: value.into(),
-                });
-                let shown_value = raw_to_shown
-                    .as_ref()
-                    .and_then(|a| a.project(raw_span.clone()))
-                    .map(|span| &segment.shown[span]);
-                let original = &segment.source.text[raw_span.clone()];
-                if term.kind == TermKind::ProperNoun
-                    && shown_value.is_some_and(|shown| shown != value)
-                    && raw_to_final.replaces(&raw_span)
-                    && valid_replacement(original, value)
+            if let Some(raw_to_final) = Alignment::new(&segment.source.text, edited) {
+                for term in segment
+                    .source
+                    .memory_candidates
+                    .iter()
+                    .filter(|term| term.kind == TermKind::Phrase)
                 {
-                    confirmed.changes.push((
-                        label.into(),
-                        Replacement {
-                            from: original.into(),
-                            to: value.into(),
-                        },
-                    ));
+                    let Some(raw_span) = unique_term(&segment.source.text, &term.text) else {
+                        if contains_term(edited, &term.text) {
+                            remember(TermKind::Phrase, &term.text);
+                        }
+                        continue;
+                    };
+                    if let Some(span) = raw_to_final.project(raw_span) {
+                        remember(TermKind::Phrase, &edited[span]);
+                    }
                 }
             }
             let mut result = segment.source.clone();
@@ -192,21 +187,39 @@ impl Prepared {
         }
         // Conflicting final spellings of one source in a single recording are
         // evidence to stop applying a rule, not evidence for an arbitrary winner.
-        spellings.extend(confirmed.changes.iter().cloned());
-        let conflicts: Vec<_> = spellings
-            .iter()
-            .filter(|(label, rule)| {
-                spellings.iter().any(|(other_label, other)| {
-                    label == other_label && rule.from == other.from && rule.to != other.to
-                })
-            })
-            .map(|(label, rule)| (label.clone(), rule.from.clone()))
-            .collect();
         confirmed
             .changes
             .retain(|(label, rule)| !conflicts.contains(&(label.clone(), rule.from.clone())));
         confirmed.revoked.extend(conflicts);
         Some(confirmed)
+    }
+}
+
+/// Newly added sentence endings stay in delivered text, outside the learned name.
+/// Punctuation already owned by the model candidate and symbols such as C++ stay intact.
+fn name_without_added_sentence_end<'a>(shown: &str, value: &'a str) -> &'a str {
+    let sentence_end = |c| {
+        matches!(
+            c,
+            '.' | ','
+                | '!'
+                | '?'
+                | ';'
+                | ':'
+                | '。'
+                | '，'
+                | '！'
+                | '？'
+                | '；'
+                | '：'
+                | '、'
+                | '…'
+        )
+    };
+    if shown.ends_with(sentence_end) {
+        value
+    } else {
+        value.trim_end_matches(|c: char| c.is_whitespace() || sentence_end(c))
     }
 }
 
@@ -324,12 +337,13 @@ fn cyclic(rule: &Correction, rules: &[Correction]) -> bool {
     true
 }
 
+/// Render each complete noun once and record its actual output range for feedback.
 fn apply(
     source: &DictationResult,
     proper_nouns: &[Range<usize>],
     rules: &[Correction],
     long_term: &[LongTerm],
-) -> (String, Vec<Applied>) {
+) -> (String, Vec<Noun>) {
     let text = &source.text;
     let context = context(source);
     let rules: Vec<_> = rules
@@ -337,14 +351,23 @@ fn apply(
         .filter(|r| Some(r.context.as_str()) == context && !cyclic(r, rules))
         .collect();
     if proper_nouns.is_empty() || rules.is_empty() {
-        return (text.clone(), Vec::new());
+        return (
+            text.clone(),
+            proper_nouns
+                .iter()
+                .map(|span| Noun {
+                    raw: span.clone(),
+                    shown: span.clone(),
+                })
+                .collect(),
+        );
     }
     let protected: Vec<_> = long_term
         .iter()
         .filter(|term| Some(term.context.as_str()) == context)
         .flat_map(|term| term_spans(text, &term.text))
         .collect();
-    let (mut output, mut applied) = (String::new(), Vec::new());
+    let (mut output, mut nouns) = (String::new(), Vec::new());
     let mut at = 0;
     for span in proper_nouns {
         output.push_str(&text[at..span.start]);
@@ -357,20 +380,20 @@ fn apply(
                     .iter()
                     .any(|other| other.rule.from == r.rule.from && other.rule.to != r.rule.to)
         });
+        let start = output.len();
         if let Some(rule) = rule {
-            let start = output.len();
             output.push_str(&rule.rule.to);
-            applied.push(Applied {
-                rule: rule.rule.clone(),
-                shown: start..output.len(),
-            });
         } else {
             output.push_str(&text[span.clone()]);
         }
+        nouns.push(Noun {
+            raw: span.clone(),
+            shown: start..output.len(),
+        });
         at = span.end;
     }
     output.push_str(&text[at..]);
-    (output, applied)
+    (output, nouns)
 }
 
 #[cfg(test)]
