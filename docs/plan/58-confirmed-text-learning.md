@@ -1,6 +1,6 @@
 # 58 - 确认文本历史与纠错学习 — Feature record
 
-**Stage:** Planning
+**Stage:** Implemented; local validation complete, platform CI pending.
 **PR:** [#151](https://github.com/b1indsight/viberwhisper/pull/151)（草稿）。
 
 ## 1. Initial plan
@@ -158,4 +158,106 @@ history、托盘最近五条和自动记忆继续承担各自职责：托盘展�
 
 ## 2. PR change timeline
 
-<!-- 当前仅初始方案；后续追加实质需求、设计或实现变更，保留此方案作为基线。 -->
+<!-- 按时间追加实质需求、设计或实现变更，保留初始方案作为基线。 -->
+
+### [001] — 2026-10-16 — 接通最终确认文本、持久纠错与记忆提交
+
+- **背景与实际变更：** history 已使用编辑后的确认文本，本次保留其投递前保存、修订级
+  重试去重策略，并让同一份文字在成功投递后返回 Realtime worker。`Transcript` 携带
+  单次 `Confirmation`；普通字符串入口丢弃反馈，HTTP 和失败结果没有学习句柄。
+  预览取消、清空和退出通过丢弃句柄放弃学习；失败重试保留句柄，仅成功的最后修订反馈。
+- **实现：** `engine` 保留录音内临时学习，但不在识别完成时提交跨录音状态。等待确认时
+  处理连接控制消息，收到反馈后更新并保存，再处理下一录音；确认工作线程最多等两秒
+  取得写入应答。学习失败只报告错误，不重发已注入的文字。
+- **纠错设计：** 新增内聚的 `correction` 与 grapheme 对齐子模块，剪除共同前后缀后
+  最多分配 262144 个 LCS 单元。区分同一替换内部插入/删除顺序与存在不同匹配锚点的
+  歧义；后者跳过学习。按候选完整词语提取修改，用 Unicode 词边界限制匹配，避免
+  汉字单字泛化和拉丁词内替换。初始预览与最终文本用于区分人工修改和自动结果。
+  修改自动结果为第三个名字会更新原误词，改回原文会撤销规则；同次录音出现不同目标
+  拼写时撤销而不任选一项。仅 proper_noun 产生永久规则，phrase 保持短期观察。
+- **存储与兼容：** schema 2 增加最多 512 项人工纠错与来源时间，兼容加载 v1 观察；
+  纠错不因 24 小时期限或系统时钟回退消失。保留配置长期词的优先级、四语境/6000 字符
+  快照预算、原子写入、禁用开关及损坏文件不覆盖策略。默认 prompt 与配置示例说明
+  `corrections` 的含义；用户已有 prompt 不自动改写。
+- **模块边界：** core 只路由反馈能力，UI 不解释候选；dictation 负责来源、对齐和记忆。
+  复用 result 的规范化以及 text 的分段分隔符。离线转换和显式种子评测仍隔离个人数据，
+  不新增网络推理、前台配置项或管理 UI。README、架构文档与 changelog 同步说明。
+- **验证：** `cargo build --locked`、`cargo fmt --check`、`git diff --check`、
+  `cargo test --locked -q`、`cargo test --locked --features integration -q`、
+  `cargo clippy --locked --all-targets --features integration -- -D warnings` 均通过。
+  测试共 271 通过、2 忽略。定向覆盖 worker 下一请求快照、取消不学习、确认后纠错、
+  原生注入接口的最终文本载荷、编辑后重试、重启、迁移、禁用、冲突、预算与系统时钟回退。
+  依赖中的两条既有 rdev 编译警告保持原状，不修改 vendor。
+- **待完成与限制：** 推送前执行独立代码审阅；Windows 原生构建和平台 CI 待远端运行。
+  未运行真实服务或桌面 GUI 人工测试，服务桩和确定性回放不代表识别率提升。
+
+### [002] — 2026-10-16 — 纠错机制的消融比较
+
+**设置：** 在同一正式实现上逐项临时移除机制，以相同固定识别输出与人工编辑运行以下
+回归，再恢复源文件。基线 `cargo test --locked --lib dictation::correction::tests -q`
+为 9 项通过；表中每个简化版本均实际运行并在对应行为断言处失败（退出码 101），
+未将编译失败计入结果。
+
+| 简化版本 | 运行的回归 | 实际失败与保留理由 |
+| --- | --- | --- |
+| 不提交用户反馈 | `confirmed_name_correction_survives_restart_without_reinforcing_automatic_edits` | 后续仍为误词；需要确认后的学习 |
+| 只保留词表提示，去掉本地替换 | 同上 | 固定服务仍返回误词时无法自动修正；保留本地替换 |
+| 去掉语境限制 | `unrelated_contexts_word_substrings_and_editorial_changes_do_not_become_rules` | 闲聊语境被项目规则改写；保留语境隔离 |
+| 去掉词边界 | 同上 | `Codybase` 中的片段被替换；保留整词边界 |
+| 只学习变化的末字 | `corrections_use_whole_names_and_revoke_a_reverted_automatic_replacement` | “山→珊”同时改变“登山”；保留候选整词 |
+| 去掉录音反馈去重 | 第一项回归 | 同一录音再次反馈覆盖了已确认规则；保留去重 |
+
+**复现：** 在 `src/dictation/memory.rs` 的 `confirm` 中分别停用反馈或录音身份检查，
+或在 `src/dictation/correction.rs` 分别停用 `apply`、语境谓词、`word_boundary`、
+将新规则缩为末个字符，然后运行
+`cargo test --locked --lib dictation::correction::tests::<表中回归名> -- --exact`。
+每次只改变一项，测试后恢复正式实现；完整输出保存在本地忽略目录
+`.cache/2026-10-16/confirmed-text-learning-ablation.json`，全量检查输出在
+`.cache/2026-10-16/confirmed-text-learning-checks.json`。
+
+**决定与结果：** 保留上述机制。消融检验客户端反馈、替换和隔离行为；未对真实 WAV 做
+模型质量对照，不据此声称 WER 或未知专有词识别率改善。正式实现恢复后通过全量与
+integration 检查，再进入独立代码审阅。
+
+### [003] — 2026-10-16 — 本地纠错只处理本次模型提取的完整专有词
+
+**触发与决定：** 用户补充“修改应该只针对模型提取结果”。上一轮 review 指出重叠候选
+可能同时学到完整姓名与单字规则，以及手工词表仅按规则源字符串完全相等保护的问题。
+本次收紧 [001] 的本地替换边界：保留按语境纠错，但只遍历当前响应明确提取的完整
+`proper_noun` 范围。规则源词须与该完整范围一致；没有候选、仅有短语候选或只在正文
+其他位置出现误词时，保持正文。相关短语仍用于短期记忆。
+
+**实际修改：** `correction` 为学习和应用复用同一组完整专有词范围。候选先排序去重，
+包含其他候选的完整词条拥有重叠范围，例如“张山”和“山”同时出现时只处理“张山”；
+交叉重叠且没有一个候选覆盖整个重叠组时跳过。学习继续要求唯一对齐与人工修改证据。
+`memory` 将配置词表传入预览准备，按当前语境查找手工词条的完整文本范围，拒绝与其
+相交的替换；同一规则仍可用于范围外的独立候选，例如 `New York; York` 中仅将末尾
+`York` 改为 `Yolk`。继续单次处理原始模型文本，保持冲突、循环及语境隔离规则。
+
+**权衡：** 本地自动纠正依赖当前模型再次提取该专有词，候选缺失时需用户确认修改。
+这比扫描全文应用历史规则更保守，符合本次补充要求。候选范围仅从模型返回的词条匹配
+取得，不从 diff 合成新词条，也不增加一次模型调用。更新 README、架构说明及 changelog。
+
+**验证与消融：** 新增 4 个回归，分别覆盖完整候选限制、包含候选、交叉候选和配置长词
+保护；旧实现先出现 4 个对应断言失败，修正后纠错模块 13 项全通过。更新单次替换测试，
+验证 `Alpha Beta` 只提取 `Alpha` 时得到 `Beta Beta`，同时提取两个词时得到 `Beta Gamma`。
+全量 `cargo test --locked -q` 为 275 通过、2 忽略；`cargo build --locked`、
+`cargo fmt --check`、`git diff --check` 和
+`cargo clippy --locked --all-targets --features integration -- -D warnings` 通过。
+
+同一固定输入下逐项移除机制，实际运行结果如下；每次比较后恢复正式源文件。
+
+| 简化版本 | 回归 | 实际结果与决定 |
+| --- | --- | --- |
+| 应用范围改为历史规则在全文的匹配位置 | `automatic_corrections_require_a_complete_model_proper_noun` | 无候选时仍将 `Cody` 改为 `Codex`，断言失败；保留本次模型候选范围 |
+| 候选只排序去重，不消解重叠 | `overlapping_model_names_do_not_learn_fragment_corrections` | 同时学到 `山→珊` 和 `张山→张珊`，断言失败；保留完整词条选择 |
+| 去掉手工词条范围保护 | `configured_phrases_protect_their_full_span_from_candidate_corrections` | 得到 `New Yolk; Yolk`，断言失败；保留完整范围保护 |
+
+可复现命令为 `python3 .cache/2026-10-16/candidate-only-corrections-ablation.py`，运行器
+与完整记录分别保存在本地忽略目录的同名 `.py`、`.json` 文件；全量检查记录在
+`.cache/2026-10-16/candidate-only-corrections-checks.json`。三个简化版本均以断言失败
+退出 101，未将编译失败计入结果。比较后源文件已恢复。
+
+**结果与待办：** 本次候选范围修正已完成并通过本地验证，待独立审阅与平台 CI。
+上一轮 review 的“删除已自动纠正的词会撤销规则”仍待后续处理。未进行真实语音质量
+对照；本次验证针对客户端替换与学习边界。

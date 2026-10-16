@@ -70,6 +70,6 @@ impl DictationResult {
 }
 
 /// Match metadata against delivered text without treating casing or compatibility glyphs as omissions.
-fn normalized(text: &str) -> String {
+pub(super) fn normalized(text: &str) -> String {
     text.nfkc().flat_map(char::to_lowercase).collect()
 }

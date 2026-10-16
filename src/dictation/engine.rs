@@ -7,7 +7,12 @@ use std::{
 use tokio::sync::mpsc as async_mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{config::DictationConfig, memory::Memory, transport::Connection};
+use super::{
+    config::DictationConfig,
+    feedback::{Confirmation, Transcript},
+    memory::Memory,
+    transport::Connection,
+};
 use crate::{
     audio::{PcmResampler, WavChunk},
     core::{config::SecretValue, orchestrator::SessionError},
@@ -21,14 +26,14 @@ const SEGMENT_SAMPLES: usize = 30 * 24_000;
 /// Per-recording I/O owned by the shared session orchestrator.
 pub(crate) struct RealtimeSession {
     sender: async_mpsc::Sender<WavChunk>,
-    result: mpsc::Receiver<Result<String, SessionError>>,
+    result: mpsc::Receiver<Result<Transcript, SessionError>>,
     cancelled: CancellationToken,
     failure: Arc<Mutex<Option<String>>>,
 }
 
 struct Job {
     frames: async_mpsc::Receiver<WavChunk>,
-    result: mpsc::SyncSender<Result<String, SessionError>>,
+    result: mpsc::SyncSender<Result<Transcript, SessionError>>,
     cancelled: CancellationToken,
     failure: Arc<Mutex<Option<String>>>,
 }
@@ -106,7 +111,7 @@ impl RealtimeSession {
         self.cancelled.cancel();
     }
 
-    pub fn finish(self) -> Result<String, SessionError> {
+    pub fn finish(self) -> Result<Transcript, SessionError> {
         drop(self.sender); // EOF follows all accepted frames, including the recorder tail.
         let outcome = self
             .result
@@ -157,6 +162,7 @@ async fn worker(
         };
         let mut working_memory = memory.clone();
         let mut recording = Recording::new();
+        let mut pending = None;
         let result = tokio::select! {
             biased;
             _ = job.cancelled.cancelled() => Err(anyhow::anyhow!("dictation cancelled")),
@@ -176,11 +182,15 @@ async fn worker(
         };
         let result = match result {
             Ok(()) if !job.cancelled.is_cancelled() => {
-                memory = working_memory;
-                if let Err(e) = memory.save() {
-                    tracing::warn!(error=%e, "Could not save dictation memory");
-                }
-                Ok(recording.text(language.clone()))
+                let prepared =
+                    memory.prepare(std::mem::take(&mut recording.results), language.clone());
+                let (confirmation, receiver) = Confirmation::channel();
+                let text = prepared.text.clone();
+                pending = Some((prepared, receiver));
+                Ok(Transcript {
+                    text,
+                    confirmation: Some(confirmation),
+                })
             }
             other => {
                 if job.cancelled.is_cancelled()
@@ -214,6 +224,28 @@ async fn worker(
             }
         };
         let _ = job.result.send(result);
+        if let Some((prepared, mut receiver)) = pending {
+            // Keep answering control traffic while the user edits, without accepting
+            // another recording until this result has been confirmed or discarded.
+            let feedback = loop {
+                if let Some(socket) = &mut connection {
+                    tokio::select! {
+                        feedback = &mut receiver => break feedback,
+                        _ = socket.idle() => { connection = None; }
+                    }
+                } else {
+                    break receiver.await;
+                }
+            };
+            if let Ok(feedback) = feedback {
+                memory.confirm(&recording.id, &prepared, &feedback.text, now());
+                let saved = memory.save();
+                if let Err(error) = &saved {
+                    tracing::warn!(%error, "Could not save confirmed dictation memory");
+                }
+                let _ = feedback.acknowledged.send(saved);
+            }
+        }
     }
 }
 

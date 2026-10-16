@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     config::{LongTerm, MemoryConfig},
+    correction::{Correction, Prepared, Replacement},
     result::{ContextChoice, DictationResult},
 };
 
@@ -26,6 +27,8 @@ pub(crate) struct Observation {
 struct MemoryFile {
     schema_version: u32,
     observations: Vec<Observation>,
+    #[serde(default)]
+    corrections: Vec<Correction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,6 +52,8 @@ pub(crate) struct Context {
     pub label: String,
     pub long_term: Vec<LongTerm>,
     pub candidates: Vec<SupportedTerm>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corrections: Vec<Replacement>,
     pub history: Vec<String>,
 }
 
@@ -68,6 +73,7 @@ pub(super) struct Memory {
     path: Option<PathBuf>,
     settings: MemoryConfig,
     observations: Vec<Observation>,
+    corrections: Vec<Correction>,
     frozen: bool,
 }
 
@@ -75,16 +81,20 @@ impl Memory {
     pub fn load(path: Option<PathBuf>, settings: MemoryConfig, now: u64) -> Result<Self> {
         let path = path.filter(|_| settings.enabled);
         let mut observations = Vec::new();
+        let mut corrections = Vec::new();
         if let Some(path) = &path {
             match fs::metadata(path) {
                 Ok(meta) => {
                     ensure!(meta.len() <= 4 * 1024 * 1024, "memory file exceeds limit");
                     let stored: MemoryFile = serde_json::from_slice(&fs::read(path)?)?;
                     ensure!(
-                        stored.schema_version == 1,
+                        matches!(stored.schema_version, 1 | 2),
                         "unsupported dictation memory schema"
                     );
                     observations = stored.observations;
+                    if stored.schema_version == 2 {
+                        corrections = stored.corrections;
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
@@ -94,6 +104,7 @@ impl Memory {
             path,
             settings,
             observations,
+            corrections,
             frozen: false,
         };
         memory.prune(now);
@@ -105,6 +116,7 @@ impl Memory {
             path: None,
             settings,
             observations: Vec::new(),
+            corrections: Vec::new(),
             frozen: true,
         }
     }
@@ -115,6 +127,7 @@ impl Memory {
             path: None,
             settings,
             observations,
+            corrections: Vec::new(),
             frozen: false,
         };
         memory.prune(at);
@@ -122,6 +135,18 @@ impl Memory {
     }
 
     fn prune(&mut self, now: u64) {
+        self.corrections.retain(|c| {
+            super::config::valid_label(&c.context)
+                && super::correction::valid_replacement(&c.rule.from, &c.rule.to)
+                && c.recording.len() <= 256
+        });
+        self.corrections.sort_by_key(|c| c.at);
+        let mut keys = std::collections::HashSet::new();
+        self.corrections.reverse();
+        self.corrections
+            .retain(|c| keys.insert((c.context.clone(), c.rule.from.clone())));
+        self.corrections.truncate(512);
+        self.corrections.reverse();
         self.observations.retain(|o| {
             now >= o.at
                 && now - o.at < DAY
@@ -166,6 +191,16 @@ impl Memory {
         snapshot
     }
 
+    fn usable_corrections(&self) -> impl DoubleEndedIterator<Item = &Correction> {
+        self.corrections.iter().filter(|c| {
+            !self
+                .settings
+                .long_term
+                .iter()
+                .any(|term| term.context == c.context && term.text == c.rule.from)
+        })
+    }
+
     pub(super) fn untrimmed_snapshot(&self, now: u64) -> Snapshot {
         if !self.settings.enabled {
             return Snapshot {
@@ -177,6 +212,11 @@ impl Memory {
         for term in &self.settings.long_term {
             if !labels.contains(&term.context) {
                 labels.push(term.context.clone());
+            }
+        }
+        for correction in self.usable_corrections().rev() {
+            if !labels.contains(&correction.context) {
+                labels.push(correction.context.clone());
             }
         }
         for o in self
@@ -235,6 +275,13 @@ impl Memory {
                     .cloned()
                     .collect(),
                 candidates,
+                corrections: self
+                    .usable_corrections()
+                    .rev()
+                    .filter(|c| c.context == label)
+                    .take(16)
+                    .map(|c| c.rule.clone())
+                    .collect(),
                 history: recent
                     .iter()
                     .take(3)
@@ -265,6 +312,11 @@ impl Memory {
                     .iter_mut()
                     .rev()
                     .any(|c| c.candidates.pop().is_some())
+                || snapshot
+                    .contexts
+                    .iter_mut()
+                    .rev()
+                    .any(|c| c.corrections.pop().is_some())
                 || snapshot
                     .contexts
                     .iter_mut()
@@ -313,6 +365,48 @@ impl Memory {
         self.prune(now);
     }
 
+    /// Prepare a reversible preview without changing persistent or cross-recording memory.
+    pub fn prepare(&self, results: Vec<DictationResult>, language: Option<String>) -> Prepared {
+        let rules: Vec<_> = self
+            .usable_corrections()
+            .filter(|_| self.settings.enabled)
+            .cloned()
+            .collect();
+        Prepared::new(results, &rules, &self.settings.long_term, language)
+    }
+
+    /// Commit one successful delivery. Repeated recording feedback is idempotent.
+    pub fn confirm(&mut self, recording: &str, prepared: &Prepared, text: &str, now: u64) {
+        if self.frozen
+            || !self.settings.enabled
+            || self.observations.iter().any(|o| o.recording == recording)
+            || self.corrections.iter().any(|c| c.recording == recording)
+        {
+            return;
+        }
+        let Some(confirmed) = prepared.feedback(text) else {
+            return;
+        };
+        for (context, from) in confirmed.revoked {
+            self.corrections
+                .retain(|c| c.context != context || c.rule.from != from);
+        }
+        for (context, rule) in confirmed.changes {
+            self.corrections
+                .retain(|c| c.context != context || c.rule.from != rule.from);
+            self.corrections.push(Correction {
+                context,
+                rule,
+                recording: recording.into(),
+                at: now,
+            });
+        }
+        for (index, result) in confirmed.results {
+            self.learn(recording, index, &result, now);
+        }
+        self.prune(now);
+    }
+
     pub fn save(&self) -> Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
@@ -325,8 +419,9 @@ impl Memory {
         serde_json::to_writer(
             &mut file,
             &MemoryFile {
-                schema_version: 1,
+                schema_version: 2,
                 observations: self.observations.clone(),
+                corrections: self.corrections.clone(),
             },
         )?;
         file.flush()?;

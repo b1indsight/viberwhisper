@@ -306,7 +306,13 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
                     );
                 }
             }
-            engine.finish_session(id).unwrap()
+            let transcript = engine.finish_for_delivery(id).unwrap();
+            transcript
+                .confirmation
+                .unwrap()
+                .confirm(transcript.text.clone())
+                .unwrap();
+            transcript.text
         })
         .await
         .unwrap();
@@ -314,6 +320,6 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
     }
     server.await.unwrap();
     let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!(stored["schema_version"], 1);
+    assert_eq!(stored["schema_version"], 2);
     assert_eq!(stored["observations"].as_array().unwrap().len(), 4);
 }

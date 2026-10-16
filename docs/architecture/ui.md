@@ -41,6 +41,12 @@ restores the target and validates it after the platform
 focus delay. Failures preserve the candidate; partial SendInput acceptance disables automatic retry.
 Cancel drops the candidate without saving history; exit cancels the gate and disconnects the worker.
 
+The prepared preview also retains an optional opaque Realtime confirmation capability. History,
+native injection and feedback use the same edited text. Only successful injection consumes the
+capability; failed attempts retain it for the next edit/retry, and cancellation drops it. The UI
+does not interpret model candidates or write recognition memory. Learning/persistence failures
+are logged after delivery and never trigger another injection.
+
 The UI directly uses the existing business interfaces. Recorder rollback, ordered tail-chunk
 submission, background finalization, and cancellation remain in the same call chain. The state
 machine and orchestrator do not depend on UI or winit types. `input` and `platform` continue to

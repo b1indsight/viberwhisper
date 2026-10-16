@@ -1,11 +1,14 @@
 //! Realtime audio dictation with locally owned context and memory.
 
 pub(crate) mod config;
+mod correction;
 mod engine;
+mod feedback;
 mod memory;
 mod result;
 mod transport;
 pub(crate) use engine::{DictationWorker, RealtimeSession};
+pub(crate) use feedback::{Confirmation, Transcript};
 mod offline;
 pub(crate) use offline::OfflineDictation;
 mod evaluation;

@@ -1,6 +1,6 @@
 use super::*;
 use crate::dictation::test_support::{
-    accept_session, commit_audio, delete_audio, expect_event, listen, send_json,
+    accept_session, commit_audio, complete_response, delete_audio, expect_event, listen, send_json,
 };
 use crate::{
     core::orchestrator::{SessionOrchestrator, SessionRoutingError},
@@ -8,6 +8,86 @@ use crate::{
 };
 use serde_json::json;
 use tokio::time::{Duration, timeout};
+
+#[tokio::test]
+async fn feedback_commits_only_confirmed_text_before_the_next_recording() {
+    // Closing a preview discards its model observations. An edited confirmation
+    // must be visible in the next actual request, with no race against worker jobs.
+    let (listener, settings) = listen().await;
+    let server = tokio::spawn(async move {
+        let mut socket = accept_session(&listener).await;
+        for turn in 0..3 {
+            let audio = format!("audio-{turn}");
+            commit_audio(&mut socket, &audio).await;
+            let event = expect_event(&mut socket, "response.create").await;
+            let snapshot: serde_json::Value = serde_json::from_str(
+                event["response"]["input"][0]["content"][0]["text"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            if turn < 2 {
+                assert_eq!(snapshot["contexts"], json!([]));
+            } else {
+                assert_eq!(snapshot["contexts"][0]["history"][0], "用ViberWhisper。");
+                assert_eq!(
+                    snapshot["contexts"][0]["corrections"][0]["to"],
+                    "ViberWhisper"
+                );
+            }
+            let text = json!({"text":"用维伯耳语。", "context":{"kind":"new", "label":"项目"},
+                "memory_candidates":[{"kind":"proper_noun", "text":"维伯耳语"}]})
+            .to_string();
+            complete_response(&mut socket, &event, &format!("r-{turn}"), &text).await;
+            delete_audio(&mut socket, &audio).await;
+        }
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("memory.json");
+    let engine =
+        SessionOrchestrator::new_realtime(settings, None, Some(path.clone()), Some("zh".into()))
+            .unwrap();
+    timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            for turn in 0..3 {
+                let id = SessionId(turn);
+                engine.start_session(id).unwrap();
+                engine.on_chunk_ready(
+                    id,
+                    WavChunk::from_encoded_bytes(
+                        include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
+                    ),
+                );
+                let transcript = engine.finish_for_delivery(id).unwrap();
+                if turn == 0 {
+                    assert!(!path.exists(), "unconfirmed memory must not be saved");
+                    drop(transcript);
+                } else if turn == 1 {
+                    assert!(
+                        !path.exists(),
+                        "cancelled preview must not train the next recording"
+                    );
+                    transcript
+                        .confirmation
+                        .unwrap()
+                        .confirm("用ViberWhisper。".into())
+                        .unwrap();
+                    let file: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    assert_eq!(file["observations"][0]["text"], "用ViberWhisper。");
+                } else {
+                    assert_eq!(transcript.text, "用ViberWhisper。");
+                    drop(transcript);
+                }
+            }
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    server.await.unwrap();
+}
 
 #[tokio::test]
 async fn disconnect_after_completed_response_preserves_only_validated_text() {
@@ -22,13 +102,7 @@ async fn disconnect_after_completed_response_preserves_only_validated_text() {
             } else {
                 "not JSON".into()
             };
-            for reply in [
-                json!({"type":"response.created","response":{"id":"r","metadata":event["response"]["metadata"]}}),
-                json!({"type":"response.output_text.done","response_id":"r","output_index":0,"content_index":0,"text":text}),
-                json!({"type":"response.done","response":{"id":"r","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]}}),
-            ] {
-                send_json(&mut socket, reply).await;
-            }
+            complete_response(&mut socket, &event, "r", &text).await;
             // The service disconnects after completing transcription, before cleanup.
             socket.close(None).await.unwrap();
         });
@@ -79,13 +153,7 @@ async fn completed_segment_survives_faults_but_not_user_cancellation() {
             commit_audio(&mut socket, "audio-1").await;
             let event = expect_event(&mut socket, "response.create").await;
             let text = json!({"text":"保留这一段。", "context":{"kind":"new","label":"工作"}, "memory_candidates":[{"kind":"phrase","text":"保留这一段"}]}).to_string();
-            for reply in [
-                json!({"type":"response.created","response":{"id":"r1","metadata":event["response"]["metadata"]}}),
-                json!({"type":"response.output_text.done","response_id":"r1","output_index":0,"content_index":0,"text":text}),
-                json!({"type":"response.done","response":{"id":"r1","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]}}),
-            ] {
-                send_json(&mut socket, reply).await;
-            }
+            complete_response(&mut socket, &event, "r1", &text).await;
             delete_audio(&mut socket, "audio-1").await;
             expect_event(&mut socket, "input_audio_buffer.commit").await;
             // Hold the second commit after the first segment has been learned locally.

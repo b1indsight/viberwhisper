@@ -8,10 +8,28 @@ use std::sync::{
 use anyhow::Result;
 use tracing::{debug, error};
 
+use crate::dictation::Confirmation;
 use crate::history::HistoryStore;
 use crate::input::typer::TextTyper;
 use crate::platform::{DeliveryTarget, PreviewRect};
 use crate::session::SessionId;
+
+/// Preview content and the optional capability to learn after successful delivery.
+pub(super) struct PreviewTranscription {
+    pub text: String,
+    pub warning: Option<String>,
+    pub confirmation: Option<Confirmation>,
+}
+
+impl From<(String, Option<String>)> for PreviewTranscription {
+    fn from((text, warning): (String, Option<String>)) -> Self {
+        Self {
+            text,
+            warning,
+            confirmation: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) enum PreviewUpdate {
@@ -166,7 +184,7 @@ pub(super) fn confirm_delivery(
 /// without a desktop, network, or native target crossing a thread boundary.
 pub(super) fn wait_for_confirmation<T: DeliveryTarget>(
     session_id: SessionId,
-    transcription: (String, Option<String>),
+    transcription: PreviewTranscription,
     typer: &dyn TextTyper,
     history: Option<&HistoryStore>,
     gate: &FinalizationGate,
@@ -176,7 +194,11 @@ pub(super) fn wait_for_confirmation<T: DeliveryTarget>(
     if gate.is_cancelled() {
         return;
     }
-    let (text, warning) = transcription;
+    let PreviewTranscription {
+        text,
+        warning,
+        mut confirmation,
+    } = transcription;
     let target = capture();
     let anchor = target
         .as_ref()
@@ -243,7 +265,15 @@ pub(super) fn wait_for_confirmation<T: DeliveryTarget>(
                     Err(error) => Err(anyhow::anyhow!("无法恢复输入目标：{error}")),
                 };
                 match result {
-                    Ok(_) => return,
+                    Ok(delivered) => {
+                        if delivered
+                            && let Some(confirmation) = confirmation.take()
+                            && let Err(error) = confirmation.confirm(text)
+                        {
+                            error!(%error, "Confirmed text was delivered but dictation learning failed");
+                        }
+                        return;
+                    }
                     Err(error) => {
                         if gate.is_cancelled() {
                             return;
@@ -330,7 +360,7 @@ mod tests {
         let anchor = PreviewRect::new(100.0, 200.0, 0.0, 18.0).unwrap();
         wait_for_confirmation(
             SessionId(23),
-            ("candidate".into(), None),
+            ("candidate".into(), None).into(),
             &UnusedTyper,
             None,
             &FinalizationGate::new(),
@@ -407,6 +437,65 @@ mod tests {
         assert_eq!(saves.get(), 1);
         assert_eq!(history.load_recent().unwrap(), ["待确认文字"]);
         assert_eq!(*typer.0.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn failed_delivery_learns_only_the_successful_final_revision() {
+        // A user edits again after a failed paste. Only the revision accepted by
+        // the destination may train recognition, although both confirmations are recoverable.
+        let directory = tempdir().unwrap();
+        let history = HistoryStore::at(directory.path().join("history.jsonl"), 4096);
+        let worker_history = history.clone();
+        let (confirmation, mut feedback) = Confirmation::channel();
+        let (notify, events) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            wait_for_confirmation(
+                SessionId(8),
+                PreviewTranscription {
+                    text: "识别原稿".into(),
+                    warning: None,
+                    confirmation: Some(confirmation),
+                },
+                &RetryingTyper(std::sync::Mutex::new(0), worker_history.clone()),
+                Some(&worker_history),
+                &FinalizationGate::new(),
+                || Ok(Target(Cell::new(true))),
+                &|event| notify.send(event).is_ok(),
+            );
+        });
+        let PreviewUpdate::Ready { commands, .. } = events
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+        else {
+            panic!("expected preview");
+        };
+        commands
+            .send(PreviewCommand::Confirm("首次修改".into()))
+            .unwrap();
+        while !matches!(
+            events
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            PreviewUpdate::DeliveryFailed { .. }
+        ) {}
+        assert!(matches!(
+            feedback.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        commands
+            .send(PreviewCommand::Confirm("最终修改 🎙️\nViberWhisper".into()))
+            .unwrap();
+        let feedback = tokio::time::timeout(std::time::Duration::from_secs(1), &mut feedback)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(feedback.text, "最终修改 🎙️\nViberWhisper");
+        feedback.acknowledged.send(Ok(())).unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            history.load_recent().unwrap(),
+            ["最终修改 🎙️\nViberWhisper", "首次修改"]
+        );
     }
 
     #[test]
@@ -582,10 +671,15 @@ mod tests {
             let typer = Arc::new(CountingTyper(Mutex::new(Vec::new())));
             let worker_typer = Arc::clone(&typer);
             let (notify, events) = mpsc::channel();
+            let (confirmation, feedback) = Confirmation::channel();
             let worker = std::thread::spawn(move || {
                 wait_for_confirmation(
                     SessionId(8),
-                    ("candidate".into(), None),
+                    PreviewTranscription {
+                        text: "candidate".into(),
+                        warning: None,
+                        confirmation: Some(confirmation),
+                    },
                     worker_typer.as_ref(),
                     Some(&worker_history),
                     &FinalizationGate::new(),
@@ -606,9 +700,18 @@ mod tests {
                 _ => Vec::new(),
             };
             commands.send(command).unwrap();
+            let learned = feedback.blocking_recv().ok().map(|feedback| {
+                assert_eq!(
+                    typer.0.lock().unwrap().as_slice(),
+                    std::slice::from_ref(&feedback.text)
+                );
+                feedback.acknowledged.send(Ok(())).unwrap();
+                feedback.text
+            });
             worker.join().unwrap();
             assert_eq!(*typer.0.lock().unwrap(), expected);
             assert_eq!(history.load_recent().unwrap(), expected);
+            assert_eq!(learned.into_iter().collect::<Vec<_>>(), expected);
         }
     }
 
@@ -649,7 +752,7 @@ mod tests {
             let failures = Cell::new(0);
             wait_for_confirmation(
                 SessionId(9),
-                ("candidate".into(), None),
+                ("candidate".into(), None).into(),
                 &MustNotType,
                 Some(&history),
                 &FinalizationGate::new(),

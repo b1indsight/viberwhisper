@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 
 use super::config::SecretValue;
 use crate::audio::WavChunk;
-use crate::dictation::{DictationWorker, RealtimeSession, config::DictationConfig};
+use crate::dictation::{DictationWorker, RealtimeSession, Transcript, config::DictationConfig};
 use crate::session::SessionId;
 use crate::text::merge_texts;
 use crate::transcriber::Transcriber;
@@ -286,11 +286,20 @@ impl SessionOrchestrator {
 
     /// Close input and collect the selected worker's completed or partial result.
     pub fn finish_session(&self, session_id: SessionId) -> Result<String, SessionError> {
+        self.finish_for_delivery(session_id)
+            .map(|transcript| transcript.text)
+    }
+
+    /// Desktop finalization retains the optional, single-use confirmation capability.
+    pub(crate) fn finish_for_delivery(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Transcript, SessionError> {
         match self
             .take_session(session_id)
             .map_err(SessionError::Routing)?
         {
-            SessionWorker::Http(session) => session.finish(),
+            SessionWorker::Http(session) => session.finish().map(Transcript::from),
             SessionWorker::Realtime(session) => session.finish(),
         }
     }

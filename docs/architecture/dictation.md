@@ -17,8 +17,13 @@ Raw prompt-lab capture deliberately retains the HTTP transcriber.
   out-of-band responses, correlation, delta/final consistency, completion status and item deletion.
 - `result`: strict complete JSON boundary and independently validated optional context/term metadata.
   Delivery uses the returned final text; no separate verbatim transcript is requested.
+- `feedback`: a single-use confirmation capability; dropping it discards learning, successful
+  delivery returns edited text and waits briefly for the worker's persistence acknowledgement.
+- `correction`: bounded grapheme alignment, whole-candidate feedback, reversible context-scoped
+  single-pass replacement and word boundaries. Source, shown and confirmed text remain distinct.
 - `memory`: 24-hour observations with provenance and independent-recording support counts; bounded
-  per-topic recent history, candidate retrieval and user-configured persistent terms; atomic storage.
+  per-topic recent history, candidate retrieval, persistent user corrections and user-configured
+  terms; one writer and atomic storage.
 - `offline`: conversion and regression with frozen context and no live-memory persistence.
 
 ## Prompt configuration
@@ -74,18 +79,22 @@ match the final text before delivery/learning. Validated text is retained before
 finished audio item. Cleanup errors/timeouts retire the connection and return completed text as
 a partial failure, without learning from the recording. Cancellation reuses the same item cleanup.
 Each recording
-works on a copy of memory; cancellation/failure discards its updates. Successful recordings save
-memory atomically. The connection persists across successful recordings and topics; interrupted
+works on a copy of memory; cancellation/failure discards its updates. Successful desktop recordings
+retain source metadata with a single-use feedback handle. Only successful preview delivery commits
+observations rebuilt from the final edited text and saves memory atomically. Dropping the handle,
+clearing or cancelling the preview discards the recording. The worker answers connection control
+traffic while awaiting feedback and processes the next recording only after feedback or discard.
+The connection persists across successful recordings and topics; interrupted
 or failed connections are retired without ambiguous audio replay.
 
 Short-term observations are separate from config and ordinary history.jsonl. Repeated segments
 from one recording do not count as independent support. A corrupt memory file falls back to
 ephemeral state without overwriting it. A disabled memory configuration does not load the file.
 Reference context is bounded to four topics and 6000 serialized characters, prioritizing manual
-long-term terms over short-term candidates. Configured contexts are selected first in config order
+long-term terms, user corrections, model candidates, then history. Configured contexts are selected first in config order
 (at most 16 configured terms per context). Budget trimming removes history across all contexts,
-then candidates, before touching configured vocabulary. There is no separate current-topic cache:
-only unexpired observations and configured terms supply labels, including in long-running processes.
+then candidates, then corrections, before touching configured vocabulary. There is no separate current-topic cache:
+unexpired observations, persistent corrections and configured terms supply labels, including in long-running processes.
 Model-returned observations of already
 known terms refresh their short-term lifetime; merely including a term in the prompt does not.
 Uncertain/new topics are model decisions, not proof
@@ -94,6 +103,27 @@ no evidence field is required. Candidates must occur as a substring of the deliv
 NFKC normalization and lowercasing. Unsupported candidates are discarded without losing text;
 the original JSON remains available for prompt-lab metadata validation. This checks textual
 support, not acoustic accuracy or whether a phrase is suitable for future memory.
+
+The schema-2 memory file adds at most 512 persistent corrections with context, source spelling,
+target spelling, recording provenance and last manual-edit time; v1 model observations retain their
+original expiration. Confirmed proper-noun edits create whole-word rules only when alignment and
+topic assignment are unambiguous. Model candidates are re-aligned to the final text; removed or
+unassignable candidates are dropped. Phrase candidates remain short-term observations. Expensive
+rewrites exceed a fixed alignment-cell budget and skip learning. Live text is always delivered
+unchanged by feedback validation.
+
+Snapshots expose correction pairs without provenance. A matching response topic enables local,
+single-pass replacements before preview only within complete proper-noun candidates extracted by
+that response. Missing candidates and phrase candidates never authorize local text replacement.
+Learning and application share the same candidate spans: a containing name owns nested fragments;
+crossing overlaps without one enclosing candidate are skipped. Rules match the entire candidate,
+so a rule for a shorter name cannot edit part of a longer extracted name. Configured vocabulary
+protects its full occurrences in that topic, including against intersecting candidate replacements;
+the same rule can still apply outside those occurrences. Ambiguous or cyclic rules are skipped. Reverting a
+displayed correction removes its rule, and editing it to another spelling updates its original
+source mapping. Unedited automatic replacements do not refresh manual evidence. Disabling memory
+also disables correction loading, learning and application. Offline and seeded evaluation retain
+their existing isolation and never load the personal correction table.
 
 While awaiting microphone frames, the existing worker also polls the connection for incoming
 control traffic. Ping receives Pong and server errors fail the recording before stop. Other
