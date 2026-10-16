@@ -3,6 +3,7 @@ mod backend;
 mod fallback;
 #[cfg(target_os = "macos")]
 mod macos;
+mod preview;
 mod runtime;
 #[cfg(target_os = "windows")]
 mod windows;
@@ -20,7 +21,15 @@ use macos::MacBackend as SelectedBackend;
 use windows::WindowsBackend as SelectedBackend;
 
 use backend::PlatformBackend;
+pub(crate) use preview::{
+    DeliveryTarget, NativePreview, NativeTarget, PreviewAction, PreviewEvent, PreviewRect,
+};
 pub(crate) use runtime::{PlatformAction, PlatformEvent};
+
+#[cfg(feature = "integration")]
+pub(crate) fn preview_typer() -> std::sync::Arc<dyn crate::input::typer::TextTyper> {
+    SelectedBackend::text_typer_and_hotkey_filter().0
+}
 
 pub(crate) type NativePlatform = runtime::PlatformRuntime<SelectedBackend>;
 

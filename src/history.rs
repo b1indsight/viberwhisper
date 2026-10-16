@@ -1,12 +1,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-
-use crate::input::typer::TextTyper;
 
 pub(crate) const MAX_HISTORY_BYTES: usize = 5 * 1024 * 1024;
 pub(crate) const RECENT_HISTORY_LIMIT: usize = 5;
@@ -225,39 +222,8 @@ fn encode_record(record: &HistoryRecord) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(crate) struct HistoryTyper {
-    store: HistoryStore,
-    inner: Arc<dyn TextTyper>,
-    saved: Box<dyn Fn(String) + Send + Sync>,
-}
-
-impl HistoryTyper {
-    pub(crate) fn new(
-        store: HistoryStore,
-        inner: Arc<dyn TextTyper>,
-        saved: impl Fn(String) + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            store,
-            inner,
-            saved: Box::new(saved),
-        }
-    }
-}
-
-impl TextTyper for HistoryTyper {
-    fn type_text(&self, text: &str) -> anyhow::Result<()> {
-        match self.store.append(text) {
-            Ok(()) => (self.saved)(text.to_string()),
-            Err(error) => tracing::error!(%error, "Failed to persist transcription history"),
-        }
-        self.inner.type_text(text)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
 
     use tempfile::tempdir;
 
@@ -343,33 +309,5 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fs::read(path).unwrap(), before);
-    }
-
-    struct RecordingTyper(Mutex<Vec<String>>);
-
-    impl TextTyper for RecordingTyper {
-        fn type_text(&self, text: &str) -> anyhow::Result<()> {
-            self.0.lock().unwrap().push(text.to_string());
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn history_typer_saves_before_delivery() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("history.jsonl");
-        let inner = Arc::new(RecordingTyper(Mutex::new(Vec::new())));
-        let saved = Arc::new(Mutex::new(Vec::new()));
-        let captured = Arc::clone(&saved);
-        let delivered = Arc::clone(&inner);
-        let typer = HistoryTyper::new(HistoryStore::at(path, 1024), inner.clone(), move |text| {
-            assert!(delivered.0.lock().unwrap().is_empty());
-            captured.lock().unwrap().push(text);
-        });
-
-        typer.type_text("saved").unwrap();
-
-        assert_eq!(*saved.lock().unwrap(), ["saved"]);
-        assert_eq!(*inner.0.lock().unwrap(), ["saved"]);
     }
 }

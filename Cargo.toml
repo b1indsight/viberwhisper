@@ -18,6 +18,12 @@ path = "src/bin/viberwhisper-app.rs"
 required-features = ["windows-app"]
 test = false
 
+[[bin]]
+name = "viberwhisper-preview"
+path = "src/bin/viberwhisper-preview.rs"
+required-features = ["integration"]
+test = false
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy", "integration", "windows-app"))'] }
 
@@ -54,16 +60,16 @@ tempfile = "3"
 tinyfiledialogs = "3.9.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAlert", "NSApplication", "NSButton", "NSControl", "NSEvent", "NSPasteboard", "NSRunningApplication", "NSWorkspace"] }
-objc2-application-services = { version = "0.3", default-features = false, features = ["AXError", "AXUIElement", "HIServices"] }
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["libc", "NSAlert", "NSApplication", "NSAttributedString", "NSBezierPath", "NSButton", "NSColor", "NSControl", "NSEvent", "NSFont", "NSGraphics", "NSLayoutManager", "NSMenu", "NSMenuItem", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen", "NSScrollView", "NSStringDrawing", "NSText", "NSTextContainer", "NSTextField", "NSTextInputClient", "NSTextView", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-application-services = { version = "0.3", default-features = false, features = ["libc", "AXError", "AXUIElement", "AXValue", "HIServices"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFNumber", "CFString"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGEvent", "CGEventSource", "CGEventTypes", "CGRemoteOperation"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSURL"] }
 

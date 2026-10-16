@@ -1,9 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use anyhow::Result as AnyhowResult;
 use tracing::{debug, error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -17,48 +15,31 @@ use crate::core::orchestrator::{SessionError, SessionOrchestrator};
 use crate::core::recording_session::{
     RecordingSessionMachine, RecordingState, SessionEffect, SessionEvent,
 };
+use crate::history::HistoryStore;
 use crate::input::typer::TextTyper;
-use crate::platform::{NativePlatform, PlatformEvent};
+use crate::platform::{
+    NativePlatform, NativePreview, NativeTarget, PlatformAction, PlatformEvent, PreviewAction,
+    PreviewEvent,
+};
 use crate::postprocess::{PostProcessor, PostProcessorSession};
 use crate::prompt_lab::{CaptureTranscription, PromptLabCapture, SttSnapshot};
 use crate::session::SessionId;
+use crate::ui::preview::{
+    FinalizationGate, PendingPreview, PreviewCommand, PreviewUpdate, wait_for_confirmation,
+};
 
 #[derive(Debug, Clone)]
 pub(super) enum AppEvent {
     Platform(PlatformEvent),
     AudioChunkAvailable { session_id: SessionId },
-    HistorySaved(String),
     FinalizationFinished { session_id: SessionId },
-    TextDeliveryPermissionRequired,
+    Preview(PreviewEvent),
+    PreviewUpdate(PreviewUpdate),
 }
 
 struct FinalizationTask {
     session_id: SessionId,
     gate: Arc<FinalizationGate>,
-}
-
-struct FinalizationGate(AtomicBool);
-
-impl FinalizationGate {
-    fn new() -> Self {
-        Self(AtomicBool::new(false))
-    }
-
-    fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-
-    fn type_text_if_active(&self, typer: &dyn TextTyper, text: &str) -> AnyhowResult<bool> {
-        if self.is_cancelled() {
-            return Ok(false);
-        }
-        typer.type_text(text)?;
-        Ok(true)
-    }
 }
 
 fn finalization_completion_event(
@@ -94,12 +75,15 @@ pub(super) struct ListenerApplication {
     proxy: EventLoopProxy<AppEvent>,
     finalization: Option<FinalizationTask>,
     permission_guidance: PermissionGuidance,
+    preview: NativePreview,
+    pending_preview: Option<PendingPreview>,
 }
 
 pub(super) enum ListenerOutput {
     Delivery {
         typer: Arc<dyn TextTyper>,
         post_processor: PostProcessor,
+        history: Option<HistoryStore>,
     },
     Capture {
         capture: Box<PromptLabCapture>,
@@ -108,10 +92,15 @@ pub(super) enum ListenerOutput {
 }
 
 impl ListenerOutput {
-    pub(super) fn delivery(typer: Arc<dyn TextTyper>, post_processor: PostProcessor) -> Self {
+    pub(super) fn delivery(
+        typer: Arc<dyn TextTyper>,
+        post_processor: PostProcessor,
+        history: Option<HistoryStore>,
+    ) -> Self {
         Self::Delivery {
             typer,
             post_processor,
+            history,
         }
     }
 
@@ -154,6 +143,7 @@ impl ListenerApplication {
         output: ListenerOutput,
         proxy: EventLoopProxy<AppEvent>,
     ) -> Self {
+        let preview_proxy = proxy.clone();
         Self {
             machine: RecordingSessionMachine::new(),
             recorder,
@@ -163,27 +153,124 @@ impl ListenerApplication {
             proxy,
             finalization: None,
             permission_guidance: PermissionGuidance::default(),
+            preview: NativePreview::new(Box::new(move |event| {
+                let _ = preview_proxy.send_event(AppEvent::Preview(event));
+            })),
+            pending_preview: None,
         }
     }
 
     fn handle_app_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::Platform(event) => {
-                if let Some(action) = self.platform.handle_event(event)
-                    && let Some(event) = platform_session_event(action, self.machine.state())
-                {
-                    self.drive_session(event_loop, event);
+                if let Some(action) = self.platform.handle_event(event) {
+                    if self.pending_preview.is_some()
+                        && matches!(
+                            action,
+                            PlatformAction::HoldPressed | PlatformAction::ToggleRecording
+                        )
+                    {
+                        if !self
+                            .pending_preview
+                            .as_ref()
+                            .is_some_and(|pending| pending.is_busy())
+                        {
+                            self.preview.focus();
+                        }
+                        return;
+                    }
+                    if let Some(event) = platform_session_event(action, self.machine.state()) {
+                        self.drive_session(event_loop, event);
+                    }
                 }
             }
             AppEvent::AudioChunkAvailable { session_id } => {
                 self.drain_audio_chunks(event_loop, session_id);
             }
-            AppEvent::HistorySaved(text) => self.platform.push_history(text),
-            AppEvent::TextDeliveryPermissionRequired => self.show_permission_guidance_if_needed(),
             AppEvent::FinalizationFinished { session_id } => {
+                if self
+                    .pending_preview
+                    .as_ref()
+                    .is_some_and(|p| p.session_id == session_id)
+                {
+                    self.preview.close();
+                    self.pending_preview = None;
+                }
                 let event = finalization_completion_event(&mut self.finalization, session_id);
                 self.drive_session(event_loop, event);
             }
+            AppEvent::Preview(event) => self.handle_preview_event(event),
+            AppEvent::PreviewUpdate(update) => self.handle_preview_update(update),
+        }
+    }
+
+    fn handle_preview_update(&mut self, update: PreviewUpdate) {
+        match update {
+            PreviewUpdate::HistorySaved(text) => self.platform.push_history(text),
+            PreviewUpdate::PermissionRequired => self.show_permission_guidance_if_needed(),
+            PreviewUpdate::Ready {
+                session_id,
+                text,
+                destination,
+                anchor,
+                warning,
+                commands,
+            } => {
+                if !self
+                    .finalization
+                    .as_ref()
+                    .is_some_and(|task| task.session_id == session_id && !task.gate.is_cancelled())
+                {
+                    return;
+                }
+                if let Err(error) =
+                    self.preview
+                        .show(session_id, &text, &destination, anchor, warning.as_deref())
+                {
+                    error!(%error, "Could not open confirmation preview");
+                    let _ = commands.send(PreviewCommand::Cancel);
+                    return;
+                }
+                self.pending_preview = Some(PendingPreview::new(session_id, commands));
+            }
+            PreviewUpdate::DeliveryFailed {
+                session_id,
+                error,
+                retry_allowed,
+            } => {
+                if let Some(pending) = &mut self.pending_preview
+                    && pending.failed(session_id, retry_allowed)
+                {
+                    self.preview.show_error(&error, retry_allowed);
+                }
+            }
+        }
+    }
+
+    fn handle_preview_event(&mut self, event: PreviewEvent) {
+        let Some(pending) = &mut self.pending_preview else {
+            return;
+        };
+        // Queued callbacks cannot undo or race an already confirmed transaction.
+        match event.action {
+            PreviewAction::Confirm(text) if pending.begin(event.session_id) => {
+                self.preview.hide();
+                if pending
+                    .commands
+                    .send(PreviewCommand::Confirm(text))
+                    .is_err()
+                {
+                    pending.failed(event.session_id, false);
+                    self.preview
+                        .show_error("处理线程已退出，可复制文字后取消。", false);
+                }
+            }
+            PreviewAction::Cancel if pending.begin_cancel(event.session_id) => {
+                let _ = pending.commands.send(PreviewCommand::Cancel);
+                self.preview.close();
+                self.pending_preview = None;
+            }
+            _ => {}
         }
     }
 
@@ -399,25 +486,37 @@ impl ListenerApplication {
             ListenerOutput::Delivery {
                 typer,
                 post_processor,
+                history,
             } => {
                 let orchestrator = Arc::clone(&self.orchestrator);
                 let mut post_processor = post_processor.create_session();
                 let typer = Arc::clone(typer);
+                let history = history.clone();
                 let proxy = self.proxy.clone();
-                let permission_proxy = self.proxy.clone();
+                let preview_proxy = self.proxy.clone();
                 spawn_finalization_worker(
                     session_id,
                     move || {
-                        finish_transcription(
-                            orchestrator.finish_session(session_id),
-                            &mut post_processor,
-                            typer.as_ref(),
-                            gate.as_ref(),
-                            || {
-                                let _ = permission_proxy
-                                    .send_event(AppEvent::TextDeliveryPermissionRequired);
-                            },
-                        );
+                        if !gate.is_cancelled()
+                            && let Some(transcription) = finish_transcription(
+                                orchestrator.finish_session(session_id),
+                                &mut post_processor,
+                            )
+                        {
+                            wait_for_confirmation(
+                                session_id,
+                                transcription,
+                                typer.as_ref(),
+                                history.as_ref(),
+                                &gate,
+                                NativeTarget::capture,
+                                &|update| {
+                                    preview_proxy
+                                        .send_event(AppEvent::PreviewUpdate(update))
+                                        .is_ok()
+                                },
+                            );
+                        }
                     },
                     move |session_id| {
                         let _ = proxy.send_event(AppEvent::FinalizationFinished { session_id });
@@ -464,6 +563,8 @@ impl ListenerApplication {
     }
 
     fn cancel_finalization(&mut self) {
+        self.preview.close();
+        self.pending_preview = None; // Disconnects the waiting worker on shutdown.
         if let Some(task) = &self.finalization {
             task.gate.cancel();
         }
@@ -495,19 +596,12 @@ impl ApplicationHandler<AppEvent> for ListenerApplication {
 fn finish_transcription(
     result: Result<String, SessionError>,
     post_processor: &mut PostProcessorSession,
-    typer: &dyn TextTyper,
-    gate: &FinalizationGate,
-    notify_permission_required: impl Fn(),
-) {
-    if gate.is_cancelled() {
-        return;
-    }
-
-    match result {
+) -> Option<(String, Option<String>)> {
+    let prepared = match result {
         Ok(stt_text) => {
             if stt_text.is_empty() {
                 info!("Transcription returned empty text");
-                return;
+                return None;
             }
             post_processor.push_stable_chunk(&stt_text);
             let text = match post_processor.finish() {
@@ -521,12 +615,15 @@ fn finish_transcription(
                     stt_text
                 }
             };
-            info!(text = %text, "Typing transcribed text");
-            deliver_text(typer, gate, &text, &notify_permission_required);
+            Some((text, None))
         }
-        Err(SessionError::NoChunks) => warn!("No audio chunks to transcribe"),
+        Err(SessionError::NoChunks) => {
+            warn!("No audio chunks to transcribe");
+            None
+        }
         Err(SessionError::Routing(error)) => {
-            error!(error = %error, "Session routing failed while finalizing")
+            error!(error = %error, "Session routing failed while finalizing");
+            None
         }
         Err(SessionError::PartialFailure {
             errors,
@@ -536,29 +633,33 @@ fn finish_transcription(
                 failed_chunks = errors.len(),
                 "Partial transcription failure"
             );
-            if !partial_text.is_empty() {
-                deliver_text(typer, gate, &partial_text, &notify_permission_required);
-            }
+            Some((
+                partial_text,
+                Some("部分识别失败，请核对结果后输入。".into()),
+            ))
         }
         Err(SessionError::ConvergenceTimeout {
             pending_count,
             partial_text,
         }) => {
             warn!(pending_count, "Convergence timeout");
-            if !partial_text.is_empty() {
-                deliver_text(typer, gate, &partial_text, &notify_permission_required);
-            }
+            Some((
+                partial_text,
+                Some("识别等待超时，结果可能不完整，请核对后输入。".into()),
+            ))
         }
-    }
+    };
+    prepared.filter(|(text, _)| !text.trim().is_empty())
 }
 
+#[cfg(test)]
 fn deliver_text(
     typer: &dyn TextTyper,
     gate: &FinalizationGate,
     text: &str,
     notify_permission_required: &impl Fn(),
 ) {
-    if let Err(error) = gate.type_text_if_active(typer, text) {
+    if let Err(error) = gate.type_text_if_active(typer, text, &|| Ok(())) {
         error!(%error, "Failed to type text");
         if !gate.is_cancelled() && crate::platform::is_text_delivery_permission_error(&error) {
             notify_permission_required();
@@ -595,8 +696,7 @@ fn capture_transcription(
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::mpsc;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, mpsc};
     use std::thread;
     use std::time::Duration;
 
@@ -697,7 +797,9 @@ mod tests {
         gate.cancel();
         let typer = CountingTyper(AtomicUsize::new(0));
 
-        let delivered = gate.type_text_if_active(&typer, "late result").unwrap();
+        let delivered = gate
+            .type_text_if_active(&typer, "late result", &|| Ok(()))
+            .unwrap();
 
         assert!(!delivered);
         assert_eq!(typer.0.load(Ordering::Relaxed), 0);
@@ -708,7 +810,9 @@ mod tests {
         let gate = FinalizationGate::new();
         let typer = CountingTyper(AtomicUsize::new(0));
 
-        let delivered = gate.type_text_if_active(&typer, "ready result").unwrap();
+        let delivered = gate
+            .type_text_if_active(&typer, "ready result", &|| Ok(()))
+            .unwrap();
 
         assert!(delivered);
         assert_eq!(typer.0.load(Ordering::Relaxed), 1);
@@ -742,7 +846,7 @@ mod tests {
         let delivery_gate = Arc::clone(&gate);
         let delivery = thread::spawn(move || {
             delivery_gate
-                .type_text_if_active(typer.as_ref(), "ready result")
+                .type_text_if_active(typer.as_ref(), "ready result", &|| Ok(()))
                 .unwrap()
         });
         entered.wait();
@@ -763,7 +867,7 @@ mod tests {
         let late_typer = CountingTyper(AtomicUsize::new(0));
         assert!(
             !gate
-                .type_text_if_active(&late_typer, "late result")
+                .type_text_if_active(&late_typer, "late result", &|| Ok(()))
                 .unwrap()
         );
         assert_eq!(late_typer.0.load(Ordering::Relaxed), 0);

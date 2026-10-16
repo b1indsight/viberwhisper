@@ -11,6 +11,7 @@ use crate::input::typer::TextTyper;
 use tracing::info;
 
 mod clipboard;
+pub(super) mod preview;
 
 pub(crate) struct WindowsBackend;
 pub(crate) struct WindowsHotkeys;
@@ -132,8 +133,13 @@ fn unicode_events(text: &str) -> Vec<(u16, bool)> {
 
 impl TextTyper for WindowsTyper {
     fn type_text(&self, text: &str) -> Result<()> {
+        self.type_text_checked(text, &|| Ok(()))
+    }
+
+    fn type_text_checked(&self, text: &str, validate: &dyn Fn() -> Result<()>) -> Result<()> {
         // Give the target window time to regain focus
         std::thread::sleep(std::time::Duration::from_millis(100));
+        validate()?;
 
         let events = unicode_events(text);
         if events.is_empty() {
@@ -154,6 +160,9 @@ impl TextTyper for WindowsTyper {
         };
 
         if sent as usize != inputs.len() {
+            if sent > 0 {
+                return Err(crate::input::typer::PartialTextDelivery.into());
+            }
             bail!("SendInput only sent {}/{} events", sent, inputs.len());
         }
 

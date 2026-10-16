@@ -16,11 +16,15 @@ mod application;
 pub(super) mod hotkey;
 mod pasteboard;
 mod permission;
+pub(super) mod preview;
 
 pub(super) use permission::{show_guidance, text_delivery_available};
 
 pub(super) fn is_text_delivery_permission_error(error: &anyhow::Error) -> bool {
     matches!(
+        error.downcast_ref::<AccessibilityError>(),
+        Some(AccessibilityError::PermissionDenied)
+    ) || matches!(
         error.downcast_ref::<MacInjectionError>(),
         Some(MacInjectionError::Accessibility(
             AccessibilityError::PermissionDenied
@@ -291,6 +295,14 @@ impl MacTyper {
 
 impl TextTyper for MacTyper {
     fn type_text(&self, text: &str) -> AnyhowResult<()> {
+        self.type_text_checked(text, &|| Ok(()))
+    }
+
+    fn type_text_checked(
+        &self,
+        text: &str,
+        validate: &dyn Fn() -> AnyhowResult<()>,
+    ) -> AnyhowResult<()> {
         if text.is_empty() {
             return Ok(());
         }
@@ -301,6 +313,7 @@ impl TextTyper for MacTyper {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::thread::sleep(Duration::from_millis(100));
+        validate()?;
 
         let outcome = objc2::rc::autoreleasepool(|_| {
             route_injection(
@@ -336,6 +349,10 @@ mod tests {
 
     #[test]
     fn permission_denial_is_recognized_through_context_without_matching_messages() {
+        // Native preview targets propagate the raw AX error before the typer runs.
+        let target_denial = anyhow::Error::new(AccessibilityError::PermissionDenied)
+            .context("native preview destination validation");
+        assert!(is_text_delivery_permission_error(&target_denial));
         let denial = anyhow::Error::new(MacInjectionError::Accessibility(
             AccessibilityError::PermissionDenied,
         ))

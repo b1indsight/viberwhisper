@@ -12,3 +12,6 @@ mod transcriber;
 mod ui;
 
 pub use core::{run, run_desktop};
+
+#[cfg(feature = "integration")]
+pub use ui::preview_demo::run_preview_demo;

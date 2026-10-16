@@ -205,7 +205,7 @@ on the main thread when trust is missing. Typed permission errors from full or p
 also enqueue an application event, covering permission revoked after startup. One per-launch
 flag suppresses repeated alerts, and the main thread rechecks trust before showing a queued
 message. Canceled finalization does not request guidance. Capture, config, and offline conversion
-flows do not show this text-delivery alert. The alert offers settings instructions, history-copy
+flows do not show this text-delivery alert. The alert offers settings instructions, preview-copy
 recovery, and an explicit Open Settings button; it does not change permission or retry delivery.
 
 ### History clipboard copy
@@ -223,6 +223,10 @@ It does not inspect Accessibility, post keyboard events, or enter hotkey suppres
 4. calls Win32 `SendInput`; and
 5. verifies that every event was accepted.
 
+`type_text_checked` validates the saved destination after the focus delay. A partially accepted
+SendInput batch returns `PartialTextDelivery`; the UI retains the candidate for copying and
+disables confirmation retry, because replaying the full text could duplicate an accepted prefix.
+
 Surrogate pairs therefore produce one down/up pair for each UTF-16 code unit. The private FFI
 module owns the C layouts, flags, `SendInput`, and `GetDoubleClickTime` declarations linked from
 `user32.dll`.
@@ -230,3 +234,60 @@ module owns the C layouts, flags, `SendInput`, and `GetDoubleClickTime` declarat
 `windows/clipboard.rs` writes `CF_UNICODETEXT` through Win32 using an invisible message-only owner
 window and movable global memory. Small RAII guards close the clipboard, destroy the window, and
 free memory that has not transferred to Windows. This path emits no `SendInput` events.
+
+## Confirmation Preview
+
+`platform/preview.rs` selects `NativePreview` and `NativeTarget` at compile time. AppKit windows
+and Win32 borderless rounded bubbles with editable native text controls run on the winit thread. They consume
+Enter/Esc key-down and repeat events and emit an action on matching key-up. Only a fresh key-down
+arms that action; losing focus disarms it, and inherited repeats cannot re-arm it. Native
+composition keeps Enter/Esc until candidate selection finishes;
+Shift+Enter adds a newline. Confirmation reads the editor's current text into the session-scoped
+event. Normal bubbles contain only the editor; operational errors reveal a compact inline message.
+Closing clears visible text.
+
+Both bubbles fit short candidates to their native glyph widths, then wrap at the width limit.
+Text stays left aligned, with short insertion lines centered vertically inside the editor viewport.
+macOS listens to the text delegate, measures unwrapped lines using the editor font, and lays
+out the wrapped native text at the resulting width. Windows handles the edit control's
+`EN_CHANGE` notification, measures native glyph widths and wrapped lines with the actual font,
+and centers short text using the edit control's formatting rectangle.
+The editor viewport ranges from 28 to 196 native units; longer content scrolls inside it.
+Message visibility survives edits and contributes a separate footer to the bubble height;
+messages use the maximum bubble width to remain readable.
+
+The worker captures plain caret geometry before publishing the preview. macOS queries the selected
+range's AX bounds; Windows reads GUITHREADINFO's native caret and converts its client coordinates.
+Win32 capture temporarily adopts the caret window's DPI context, maps both rectangle corners to
+logical screen coordinates, then converts each corner to physical pixels. Width and height come
+from the converted corners. A thread-local guard restores the original DPI context on success
+and failure before the worker proceeds to fallback bounds or delivery.
+Unsupported caret queries fall back to recognized text-control bounds, then a centered preview.
+`preview/placement.rs` prefers the caret's lower edge, flips above when necessary and clamps the
+bubble to the nearest monitor work area. AX/Win32 coordinates share a top-left convention;
+AppKit placement converts using the primary screen's height. Resizing reuses the captured anchor.
+On macOS, a manual/system move detaches that anchor and preserves the chosen top/center position.
+Native target objects stay on the worker; only checked numeric rectangles enter UI events.
+
+macOS registers standard Edit-menu key equivalents against the responder chain for Cmd+A/C/X/V.
+Windows consumes ordinary Return/Escape character messages even when a repeat did not arm an
+action, while composition and modified Return remain with the native editor.
+
+The finalization worker captures a target before the preview requests focus and retains it on
+that same worker. macOS saves the running application, AX window and available focused AX element;
+Windows saves the top-level HWND, process/thread identity and focused HWND. Restoring a target
+does not bypass system foreground restrictions. Both backends wait on the worker for activation
+to settle, retrying validation at 10 ms intervals for up to 500 ms. Validation rechecks window and available control
+identity before history and again immediately before injection. Missing/closed targets and
+failed restoration preserve the candidate for copying. Browsers without exposed editor identity
+only provide window-level verification; the code does not claim DOM-level destination identity.
+macOS target operations preserve the canonical typed AX permission denial, and the shared permission
+policy recognizes both raw target errors and wrapped typer errors before requesting recovery guidance.
+
+With the existing `integration` feature, `viberwhisper-preview` opens sample text without API or
+microphone access. It captures a destination after a three-second focus window and uses the same
+confirmation worker and native typer as dictation, without persistent demo history. Its `--smoke`
+mode edits the native control, sends held-Enter events and verifies zero callbacks before release,
+one confirmation with edited text after release, and successful delivery to the selected target.
+The native editing checks live in each platform's `preview/smoke.rs`, behind the same feature.
+They extend the private preview implementation without exposing native UI state to the demo.

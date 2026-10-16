@@ -39,8 +39,9 @@ This is a **cross-platform (macOS + Windows)** project:
 3. **Hold mode**: Hold F8 to record, release to stop
 4. **Toggle mode**: Press F9 to start, press again to stop
 5. The app records audio and processes it in the background
-6. The finalized text is saved to local history and injected into the active input field
-7. The five newest entries are available from the right-click tray menu and copy their full text to the clipboard
+6. The finalized text appears in an editable native bubble without a title bar or buttons; Enter confirms the edit, Esc cancels, and Shift+Enter adds a newline
+7. Confirmation restores and validates the saved destination, saves each confirmed revision once, and injects the edited text; pending results block another recording
+8. The five newest confirmed entries are available from the right-click tray menu and copy their full text to the clipboard
 
 ## Common Commands
 
@@ -87,12 +88,14 @@ src/
   main.rs                    — Thin process entry point delegating to viberwhisper::run
   bin/
     viberwhisper-app.rs      — Feature-gated Windows GUI-subsystem desktop entry point
+    viberwhisper-preview.rs  — Integration-feature native preview demo and held-Enter smoke fixture
   lib.rs                     — Crate module root and public CLI/desktop application entry exports
   ui.rs                      — Desktop interaction module declarations
   ui/
     listener.rs              — Platform-action loop, session effects, transcription delivery
     listener/
       event_loop.rs          — Winit application handler driving platform and session events
+    preview.rs               — Shared preview protocol, confirmation state, cancellation and guarded delivery
     setup.rs                 — First-run and on-demand setup orchestration
     setup/
       hotkey.rs              — Isolated hotkey capture and binding verification helper
@@ -133,16 +136,27 @@ src/
   platform.rs                — Compile-time backend selection and common platform facade
   platform/
     backend.rs               — Private platform backend contract
+    preview.rs               — Compile-time native preview/target selection and confirmation key-release policy
+    preview/
+      placement.rs           — Shared caret-relative positioning and monitor-edge policy
     runtime.rs               — Opaque actions plus tray/text runtime ownership
     fallback.rs              — Unsupported-target development/test adapter
     macos.rs                 — macOS backend policies and serialized native text delivery
     macos/
+      preview.rs             — AppKit confirmation window and worker-owned AX destination
+      preview/
+        position.rs          — AX caret/input bounds and AppKit screen-coordinate mapping
+        smoke.rs             — Integration-feature native editing and delivery checks
       accessibility.rs      — Focused AX selected-text insertion and secure-control rejection
       application.rs        — Frontmost Chromium-family browser classification
       hotkey.rs             — rdev modifier normalization for the listener callback
       pasteboard.rs         — Clipboard replacement, CoreGraphics Cmd+V, and hotkey suppression
     windows.rs               — Windows backend policies and SendInput text delivery
     windows/
+      preview.rs             — Win32 confirmation window and worker-owned destination
+      preview/
+        position.rs          — Native caret/input bounds and monitor work areas
+        smoke.rs             — Integration-feature native editing and delivery checks
       clipboard.rs           — Windows Unicode clipboard adapter
   transcriber.rs             — Transcriber traits, errors, and exports
   transcriber/
