@@ -145,8 +145,8 @@ fn ungrounded_candidates_fail_metadata_checks_even_when_text_is_valid() {
         input: empty.clone(),
         output: json!({
             "text":"使用Redis缓存。","context":{"kind":"new","label":"开发"},
-            "memory_candidates":[{"kind":"proper_noun","text":"Redis"},
-                {"kind":"phrase","text":"3核38都是无统的"}]
+            "memory_candidates":[{"kind":"proper_noun","text":"Redis","quote":"使用Redis缓存。"},
+                {"kind":"phrase","text":"3核38都是无统的","quote":"使用Redis缓存。"}]
         }),
     }];
     let learned = Replay::new(&MemorySeed::default(), 100)

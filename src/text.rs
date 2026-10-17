@@ -3,17 +3,20 @@
 /// Chinese languages are joined without a separator. All other languages use
 /// a single space. Empty segments are ignored.
 pub(crate) fn merge_texts(texts: &[String], language: Option<String>) -> String {
-    let separator = match language {
-        Some(lang) if lang.starts_with("zh") => "",
-        _ => " ",
-    };
-
     texts
         .iter()
         .filter(|text| !text.is_empty())
         .cloned()
         .collect::<Vec<_>>()
-        .join(separator)
+        .join(segment_separator(language.as_deref()))
+}
+
+/// Separator used when joining or locating ordered recognition segments.
+pub(crate) fn segment_separator(language: Option<&str>) -> &'static str {
+    match language {
+        Some(lang) if lang.starts_with("zh") => "",
+        _ => " ",
+    }
 }
 
 #[cfg(test)]

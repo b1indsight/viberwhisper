@@ -67,3 +67,19 @@ pub(super) async fn delete_audio(socket: &mut WebSocketStream<TcpStream>, id: &s
     )
     .await;
 }
+
+/// Complete one response with correlated, consistent final-text events.
+pub(super) async fn complete_response(
+    socket: &mut WebSocketStream<TcpStream>,
+    request: &Value,
+    id: &str,
+    text: &str,
+) {
+    for reply in [
+        json!({"type":"response.created","response":{"id":id,"metadata":request["response"]["metadata"]}}),
+        json!({"type":"response.output_text.done","response_id":id,"output_index":0,"content_index":0,"text":text}),
+        json!({"type":"response.done","response":{"id":id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]}}),
+    ] {
+        send_json(socket, reply).await;
+    }
+}

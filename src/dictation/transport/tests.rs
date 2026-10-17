@@ -248,7 +248,7 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
                     assert_eq!(event["response"]["input"][1]["id"], format!("audio-{round}"));
                     assert_eq!(event["response"]["input"][0]["content"][0]["type"], "input_text");
                     let id = format!("response-{round}");
-                    let text = json!({"text":"重复。", "context":{"kind":"new","label":"测试语境"}, "memory_candidates":[{"kind":"phrase","text":"重复"}]}).to_string();
+                    let text = json!({"text":"重复。", "context":{"kind":"new","label":"测试语境"}, "memory_candidates":[{"kind":"phrase","text":"重复","quote":"重复。"}]}).to_string();
                     replies.push(json!({"type":"response.created", "response":{"id":id, "metadata":event["response"]["metadata"]}}));
                     let delta = json!({"type":"response.output_text.delta", "event_id":format!("delta-{round}"), "response_id":id, "item_id":"out", "output_index":0,"content_index":0,"delta":text});
                     replies.push(delta.clone());
@@ -281,11 +281,8 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
         ),
         ..settings
     };
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("dictation-memory.json");
-    let engine = std::sync::Arc::new(
-        SessionOrchestrator::new_realtime(settings, None, Some(path.clone()), None).unwrap(),
-    );
+    let engine =
+        std::sync::Arc::new(SessionOrchestrator::new_realtime(settings, None, None, None).unwrap());
     let mut reader = hound::WavReader::new(std::io::Cursor::new(include_bytes!(
         "../../../tests/fixtures/audio/speech.wav"
     )))
@@ -306,14 +303,17 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
                     );
                 }
             }
-            engine.finish_session(id).unwrap()
+            let transcript = engine.finish_for_delivery(id).unwrap();
+            transcript
+                .confirmation
+                .unwrap()
+                .confirm(transcript.text.clone())
+                .unwrap();
+            transcript.text
         })
         .await
         .unwrap();
         assert_eq!(text, "重复。 重复。");
     }
     server.await.unwrap();
-    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!(stored["schema_version"], 1);
-    assert_eq!(stored["observations"].as_array().unwrap().len(), 4);
 }

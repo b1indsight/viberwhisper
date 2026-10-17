@@ -45,7 +45,7 @@ pub fn run_preview_demo(smoke: bool) -> Result<()> {
         }
         wait_for_confirmation(
             SessionId(1),
-            (SAMPLE_TEXT.into(), None),
+            (SAMPLE_TEXT.into(), None).into(),
             typer.as_ref(),
             None,
             &worker_gate,
