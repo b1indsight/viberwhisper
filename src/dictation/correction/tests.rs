@@ -20,6 +20,11 @@ fn quoted_result(text: &str, term: &str, context: &str, quotes: &[&str]) -> Dict
     .unwrap()
 }
 
+fn add_name(raw: &mut DictationResult, name: &str) {
+    let other = result(&raw.text, name, raw.context_label().unwrap());
+    raw.memory_candidates.extend(other.memory_candidates);
+}
+
 #[test]
 fn candidate_quotes_limit_replacements_to_the_extracted_occurrence() {
     // The same spelling in another sentence is ordinary prose unless the model
@@ -43,6 +48,32 @@ fn candidate_quotes_limit_replacements_to_the_extracted_occurrence() {
         memory.prepare(vec![raw], Some("zh".into())).text,
         "张山负责开发。张珊负责联络。"
     );
+}
+
+#[test]
+fn valid_candidates_still_apply_and_learn_beside_malformed_metadata() {
+    // A partially malformed model response must keep the valid candidate's
+    // automatic correction and allow an in-range third spelling to update it.
+    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    let prepared = memory.prepare(vec![result("Cody", "Cody", "项目")], None);
+    memory.confirm("first", &prepared, "Codex", 100);
+    let raw = DictationResult::parse(
+        &json!({
+            "text":"用Cody和Redis。", "context":{"kind":"new","label":"项目"},
+            "memory_candidates":[
+                {"kind":"proper_noun","text":"Cody","quote":"用Cody和Redis。"},
+                {"kind":"proper_noun","text":"Redis"}
+            ]
+        })
+        .to_string(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(raw.memory_candidates.len(), 1);
+    let prepared = memory.prepare(vec![raw.clone()], None);
+    assert_eq!(prepared.text, "用Codex和Redis。");
+    memory.confirm("third", &prepared, "用Codix和Redis。", 101);
+    assert_eq!(memory.prepare(vec![raw], None).text, "用Codix和Redis。");
 }
 
 #[test]
@@ -74,23 +105,6 @@ fn learning_accepts_only_edits_contained_in_the_displayed_candidate() {
 }
 
 #[test]
-fn ordinary_prose_cannot_supply_a_restored_candidate_suffix() {
-    // Only C++ Studio is extracted. Punctuation on the following, unextracted
-    // Studio must not make that prose look like an undo of C++ Studio -> C++.
-    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
-    let seed = result("C++ Studio", "C++ Studio", "项目");
-    let prepared = memory.prepare(vec![seed], None);
-    memory.confirm("first", &prepared, "C++", 100);
-    let raw = result("C++ Studio Studio", "C++ Studio", "项目");
-    let prepared = memory.prepare(vec![raw.clone()], None);
-    assert_eq!(prepared.text, "C++ Studio");
-    let before = memory.snapshot(100).contexts[0].corrections.clone();
-    memory.confirm("punctuation", &prepared, "C++ Studio!", 101);
-    assert_eq!(memory.snapshot(101).contexts[0].corrections, before);
-    assert_eq!(memory.prepare(vec![raw], None).text, "C++ Studio");
-}
-
-#[test]
 fn phrase_memory_does_not_expand_beyond_its_candidate_edges() {
     // Short-term phrases must not absorb neighboring prose either. Interior
     // changes remain observations; all edited text still supplies confirmed context.
@@ -117,6 +131,40 @@ fn phrase_memory_does_not_expand_beyond_its_candidate_edges() {
         );
         assert!(snapshot.contexts[0].corrections.is_empty());
     }
+}
+
+#[test]
+fn phrases_and_names_use_the_same_rendered_positions() {
+    // Automatic name expansion changes UTF-8 offsets inside an overlapping phrase.
+    // A later in-name correction must update both from the displayed coordinates.
+    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    let prepared = memory.prepare(vec![result("张山", "张山", "同事")], None);
+    memory.confirm("first", &prepared, "Alexandra", 100);
+    let raw = DictationResult::parse(
+        &json!({
+            "text":"🎙️ 请找张山确认。", "context":{"kind":"new","label":"同事"},
+            "memory_candidates":[
+                {"kind":"proper_noun","text":"张山","quote":"请找张山确认。"},
+                {"kind":"phrase","text":"找张山确认","quote":"请找张山确认。"}
+            ]
+        })
+        .to_string(),
+        &[],
+    )
+    .unwrap();
+    let prepared = memory.prepare(vec![raw.clone()], Some("zh".into()));
+    assert_eq!(prepared.text, "🎙️ 请找Alexandra确认。");
+    memory.confirm("third", &prepared, "🎙️ 请找Alexandria确认。", 101);
+    assert_eq!(
+        memory.prepare(vec![raw], None).text,
+        "🎙️ 请找Alexandria确认。"
+    );
+    assert!(
+        memory.snapshot(101).contexts[0]
+            .candidates
+            .iter()
+            .any(|c| { c.term.kind == TermKind::Phrase && c.term.text == "找Alexandria确认" })
+    );
 }
 
 #[test]
@@ -286,11 +334,7 @@ fn overlapping_model_names_do_not_learn_fragment_corrections() {
     // nested fragment would later alter unrelated names or ordinary words.
     let mut memory = Memory::load(None, Default::default(), 100).unwrap();
     let mut raw = result("请找张山。", "张山", "同事");
-    raw.memory_candidates.push(Candidate {
-        kind: TermKind::ProperNoun,
-        text: "山".into(),
-        quote: raw.text.clone(),
-    });
+    add_name(&mut raw, "山");
     let prepared = memory.prepare(vec![raw.clone()], None);
     memory.confirm("first", &prepared, "请找张珊。", 100);
     assert_eq!(
@@ -315,11 +359,7 @@ fn crossing_model_names_cannot_choose_a_correction_span() {
     // must not teach two incompatible guesses about the intended full name.
     let mut memory = Memory::load(None, Default::default(), 100).unwrap();
     let mut raw = result("New York City", "New York", "地点");
-    raw.memory_candidates.push(Candidate {
-        kind: TermKind::ProperNoun,
-        text: "York City".into(),
-        quote: raw.text.clone(),
-    });
+    add_name(&mut raw, "York City");
     let prepared = memory.prepare(vec![raw], None);
     memory.confirm("first", &prepared, "New Yolk City", 100);
     assert!(memory.snapshot(100).contexts[0].corrections.is_empty());
@@ -446,6 +486,22 @@ fn multiple_segments_keep_their_topics_and_final_unicode_text() {
 }
 
 #[test]
+fn repeated_segments_do_not_guess_the_topic_of_a_surviving_name() {
+    // Deleting one of two identical segments cannot tell a snapshot diff which
+    // topic survived. Neither context should receive the remaining name.
+    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    let prepared = memory.prepare(
+        vec![
+            result("张山", "张山", "同事"),
+            result("张山", "张山", "朋友"),
+        ],
+        Some("zh".into()),
+    );
+    memory.confirm("ambiguous-topic", &prepared, "张山", 100);
+    assert!(memory.snapshot(100).contexts.is_empty());
+}
+
+#[test]
 fn disabled_memory_and_discarded_previews_do_not_learn() {
     let mut memory = Memory::load(None, Default::default(), 100).unwrap();
     let raw = result("用维伯耳语。", "维伯耳语", "项目");
@@ -488,11 +544,7 @@ fn replacement_is_single_pass_and_cycles_are_suppressed() {
         Prepared::new(vec![raw.clone()], &rules, &[], None).text,
         "Beta Beta"
     );
-    raw.memory_candidates.push(Candidate {
-        kind: TermKind::ProperNoun,
-        text: "Beta".into(),
-        quote: raw.text.clone(),
-    });
+    add_name(&mut raw, "Beta");
     assert_eq!(
         Prepared::new(vec![raw.clone()], &rules, &[], None).text,
         "Beta Gamma"
@@ -724,11 +776,7 @@ fn automatic_preview_ranges_keep_their_original_names() {
         memory.confirm(&format!("first-{index}"), &prepared, to, 100);
     }
     let mut raw = result("Alpha Beta", "Alpha", "项目");
-    raw.memory_candidates.push(Candidate {
-        kind: TermKind::ProperNoun,
-        text: "Beta".into(),
-        quote: raw.text.clone(),
-    });
+    add_name(&mut raw, "Beta");
     let prepared = memory.prepare(vec![raw.clone()], None);
     assert_eq!(prepared.text, "Beta Gamma");
     memory.confirm("edited", &prepared, "Delta Gamma", 101);
@@ -881,11 +929,7 @@ fn an_insertion_between_adjacent_names_has_no_unique_owner() {
     // With no separator, the inserted character could extend either name.
     // Neither candidate may claim it and train a guessed spelling.
     let mut raw = result("张山李四", "张山", "同事");
-    raw.memory_candidates.push(Candidate {
-        kind: TermKind::ProperNoun,
-        text: "李四".into(),
-        quote: raw.text.clone(),
-    });
+    add_name(&mut raw, "李四");
     for sources in [
         vec![raw],
         vec![
@@ -923,11 +967,7 @@ fn unprojectable_neighbors_still_block_shared_edge_insertions() {
         ),
     ] {
         let mut raw = result(text, "张山", "同事");
-        raw.memory_candidates.push(Candidate {
-            kind: TermKind::ProperNoun,
-            text: "李四".into(),
-            quote: raw.text.clone(),
-        });
+        add_name(&mut raw, "李四");
         let segments = pieces
             .into_iter()
             .map(|(text, term)| result(text, term, "同事"))

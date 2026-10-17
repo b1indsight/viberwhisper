@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     config::{LongTerm, MemoryConfig},
-    correction::{Correction, Prepared, Replacement},
-    result::{ContextChoice, DictationResult},
+    correction::{Correction, Decision, Prepared, Replacement},
+    result::DictationResult,
 };
 
 const DAY: u64 = 86_400;
@@ -20,6 +20,27 @@ pub(crate) struct Observation {
     pub context: String,
     pub text: String,
     pub terms: Vec<LongTerm>,
+}
+
+impl Observation {
+    /// Build bounded memory content without inventing model-response metadata.
+    pub fn new(
+        recording: &str,
+        segment: usize,
+        at: u64,
+        context: &str,
+        text: &str,
+        terms: Vec<LongTerm>,
+    ) -> Self {
+        Self {
+            recording: recording.into(),
+            segment,
+            at,
+            context: context.into(),
+            text: text.chars().take(1024).collect(),
+            terms,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -341,27 +362,25 @@ impl Memory {
         {
             return;
         }
-        let label = match &result.context {
-            Some(ContextChoice::Existing { id }) => id.clone(),
-            Some(ContextChoice::New { label }) => label.clone(),
-            _ => return,
+        let Some(label) = result.context_label() else {
+            return;
         };
-        self.observations.push(Observation {
-            recording: recording.into(),
+        self.observations.push(Observation::new(
+            recording,
             segment,
-            at: now,
-            context: label.clone(),
-            text: result.text.chars().take(1024).collect(),
-            terms: result
+            now,
+            label,
+            &result.text,
+            result
                 .memory_candidates
                 .iter()
                 .map(|c| LongTerm {
-                    context: label.clone(),
+                    context: label.into(),
                     kind: c.kind.clone(),
                     text: c.text.clone(),
                 })
                 .collect(),
-        });
+        ));
         self.prune(now);
     }
 
@@ -384,26 +403,25 @@ impl Memory {
         {
             return;
         }
-        let Some(confirmed) = prepared.feedback(text) else {
+        let Some(confirmed) = prepared.feedback(text, recording, now) else {
             return;
         };
-        for (context, from) in confirmed.revoked {
+        for ((context, from), decision) in confirmed.decisions {
+            if matches!(decision, Decision::Keep(_)) {
+                continue;
+            }
             self.corrections
                 .retain(|c| c.context != context || c.rule.from != from);
+            if let Decision::Set(to) = decision {
+                self.corrections.push(Correction {
+                    context,
+                    rule: Replacement { from, to },
+                    recording: recording.into(),
+                    at: now,
+                });
+            }
         }
-        for (context, rule) in confirmed.changes {
-            self.corrections
-                .retain(|c| c.context != context || c.rule.from != rule.from);
-            self.corrections.push(Correction {
-                context,
-                rule,
-                recording: recording.into(),
-                at: now,
-            });
-        }
-        for (index, result) in confirmed.results {
-            self.learn(recording, index, &result, now);
-        }
+        self.observations.extend(confirmed.observations);
         self.prune(now);
     }
 

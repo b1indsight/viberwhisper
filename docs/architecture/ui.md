@@ -46,6 +46,8 @@ native injection and feedback use the same edited text. Only successful injectio
 capability; failed attempts retain it for the next edit/retry, and cancellation drops it. The UI
 does not interpret model candidates or write recognition memory. Learning/persistence failures
 are logged after delivery and never trigger another injection.
+Feedback submission does not wait for a persistence acknowledgement; the recognition worker
+commits each feedback message before processing the next recording.
 
 The UI directly uses the existing business interfaces. Recorder rollback, ordered tail-chunk
 submission, background finalization, and cancellation remain in the same call chain. The state

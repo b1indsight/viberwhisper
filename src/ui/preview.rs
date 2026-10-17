@@ -489,8 +489,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(feedback.text, "最终修改 🎙️\nViberWhisper");
-        feedback.acknowledged.send(Ok(())).unwrap();
+        assert_eq!(feedback, "最终修改 🎙️\nViberWhisper");
         worker.join().unwrap();
         assert_eq!(
             history.load_recent().unwrap(),
@@ -700,13 +699,11 @@ mod tests {
                 _ => Vec::new(),
             };
             commands.send(command).unwrap();
-            let learned = feedback.blocking_recv().ok().map(|feedback| {
+            let learned = feedback.blocking_recv().ok().inspect(|feedback| {
                 assert_eq!(
                     typer.0.lock().unwrap().as_slice(),
-                    std::slice::from_ref(&feedback.text)
+                    std::slice::from_ref(feedback)
                 );
-                feedback.acknowledged.send(Ok(())).unwrap();
-                feedback.text
             });
             worker.join().unwrap();
             assert_eq!(*typer.0.lock().unwrap(), expected);

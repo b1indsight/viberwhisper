@@ -3,8 +3,8 @@ use super::dataset::sha256_bytes;
 use crate::{
     core::config::SecretValue,
     dictation::{
-        Candidate, ContextChoice, DictationResult, MemorySeed, RealtimeEvaluator, Replay,
-        SegmentTrace, Snapshot,
+        ContextChoice, DictationResult, MemorySeed, RealtimeEvaluator, Replay, SegmentTrace,
+        Snapshot,
         config::{DictationConfig, TermKind, valid_label, valid_term},
     },
 };
@@ -268,17 +268,16 @@ impl Expectations {
             let parsed = DictationResult::parse(&trace.output.to_string(), &trace.input.ids());
             let raw_context =
                 serde_json::from_value::<ContextChoice>(trace.output["context"].clone());
-            let raw_candidates =
-                serde_json::from_value::<Vec<Candidate>>(trace.output["memory_candidates"].clone());
+            let raw_candidates = trace.output["memory_candidates"].as_array();
             let valid = parsed.as_ref().is_ok_and(|p| {
                 raw_context.as_ref().is_ok_and(|context| match context {
-                    ContextChoice::Uncertain => raw_candidates.as_ref().is_ok_and(Vec::is_empty),
+                    ContextChoice::Uncertain => raw_candidates.is_some_and(Vec::is_empty),
                     _ => {
                         p.context.as_ref() == Some(context)
                             && !matches!(context, ContextChoice::New { label } if trace.input.ids().contains(label))
-                            && raw_candidates
-                                .as_ref()
-                                .is_ok_and(|c| *c == p.memory_candidates)
+                            // Parsing only discards invalid entries, so equal counts
+                            // prove that every supplied candidate passed grounding.
+                            && raw_candidates.is_some_and(|c| c.len() == p.memory_candidates.len())
                     }
                 })
             });

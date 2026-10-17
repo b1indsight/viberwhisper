@@ -1,6 +1,5 @@
 //! Single-use feedback keeps UI delivery independent of recognition metadata.
-use anyhow::{Context, Result};
-use std::{sync::mpsc, time::Duration};
+use anyhow::Result;
 use tokio::sync::oneshot;
 
 #[derive(Debug)]
@@ -19,29 +18,33 @@ impl From<String> for Transcript {
 }
 
 #[derive(Debug)]
-pub(crate) struct Confirmation(oneshot::Sender<Feedback>);
-
-#[derive(Debug)]
-pub(crate) struct Feedback {
-    pub text: String,
-    pub acknowledged: mpsc::SyncSender<Result<()>>,
-}
+pub(crate) struct Confirmation(oneshot::Sender<String>);
 
 impl Confirmation {
-    pub(crate) fn channel() -> (Self, oneshot::Receiver<Feedback>) {
+    pub(crate) fn channel() -> (Self, oneshot::Receiver<String>) {
         let (sender, receiver) = oneshot::channel();
         (Self(sender), receiver)
     }
 
     /// Called once, after delivery succeeds, on the finalization worker. Dropping
-    /// this handle cancels learning. An acknowledgement orders the next recording.
+    /// this handle cancels learning. The serial worker commits before its next job.
     pub fn confirm(self, text: String) -> Result<()> {
-        let (acknowledged, response) = mpsc::sync_channel(1);
         self.0
-            .send(Feedback { text, acknowledged })
-            .map_err(|_| anyhow::anyhow!("dictation feedback worker stopped"))?;
-        response
-            .recv_timeout(Duration::from_secs(2))
-            .context("dictation feedback acknowledgement unavailable")?
+            .send(text)
+            .map_err(|_| anyhow::anyhow!("dictation feedback worker stopped"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmation_does_not_wait_for_memory_io() {
+        // The serial recognition worker orders memory before its next job. The
+        // delivery worker only submits feedback and need not wait for a second ACK.
+        let (confirmation, mut receiver) = Confirmation::channel();
+        assert!(confirmation.confirm("最终输入".into()).is_ok());
+        assert!(receiver.try_recv().is_ok());
     }
 }

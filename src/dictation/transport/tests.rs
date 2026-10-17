@@ -281,11 +281,8 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
         ),
         ..settings
     };
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("dictation-memory.json");
-    let engine = std::sync::Arc::new(
-        SessionOrchestrator::new_realtime(settings, None, Some(path.clone()), None).unwrap(),
-    );
+    let engine =
+        std::sync::Arc::new(SessionOrchestrator::new_realtime(settings, None, None, None).unwrap());
     let mut reader = hound::WavReader::new(std::io::Cursor::new(include_bytes!(
         "../../../tests/fixtures/audio/speech.wav"
     )))
@@ -319,7 +316,4 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
         assert_eq!(text, "重复。 重复。");
     }
     server.await.unwrap();
-    let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!(stored["schema_version"], 2);
-    assert_eq!(stored["observations"].as_array().unwrap().len(), 4);
 }

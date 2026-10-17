@@ -133,14 +133,8 @@ impl<'a> Alignment<'a> {
 
     /// Accept spelling edits only within the displayed candidate. Unchanged
     /// complete names may refresh memory, but pure edge insertions cannot rename them.
-    pub fn project_noun(
-        &self,
-        spans: &[Range<usize>],
-        index: usize,
-        after: &str,
-    ) -> Option<Range<usize>> {
-        let range = spans.get(index)?;
-        let projected = self.project_segment(spans, index)?;
+    pub fn project_noun(&self, range: Range<usize>, after: &str) -> Option<Range<usize>> {
+        let projected = self.project_range(range.clone())?;
         let unchanged = after[projected.clone()]
             .match_indices(&self.before[range.clone()])
             .map(|(at, name)| projected.start + at..projected.start + at + name.len())
@@ -155,19 +149,17 @@ impl<'a> Alignment<'a> {
         // A local edit can merge a spelling change with adjoining prose. Only
         // replacing the entire candidate gives such added words an explicit scope.
         if self.edits.iter().any(|edit| {
-            (edit.before.is_empty()
-                && (edit.before.start == range.start || edit.before.start == range.end))
-                || (edit.before != *range
-                    && range.start <= edit.before.start
-                    && edit.before.end <= range.end
-                    && after[edit.after.clone()].chars().any(char::is_whitespace)
-                    && !self.before[edit.before.clone()]
-                        .chars()
-                        .any(char::is_whitespace))
+            edit.before != range
+                && range.start <= edit.before.start
+                && edit.before.end <= range.end
+                && after[edit.after.clone()].chars().any(char::is_whitespace)
+                && !self.before[edit.before.clone()]
+                    .chars()
+                    .any(char::is_whitespace)
         }) {
             return None;
         }
-        Some(projected)
+        self.project(range)
     }
 
     fn boundary(&self, at: usize, end: bool) -> Option<usize> {

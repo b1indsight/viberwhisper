@@ -73,11 +73,12 @@ async fn feedback_commits_only_confirmed_text_before_the_next_recording() {
                         .unwrap()
                         .confirm("用ViberWhisper。".into())
                         .unwrap();
+                } else {
+                    assert_eq!(transcript.text, "用ViberWhisper。");
+                    // The next job starts only after the prior feedback is committed.
                     let file: serde_json::Value =
                         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
                     assert_eq!(file["observations"][0]["text"], "用ViberWhisper。");
-                } else {
-                    assert_eq!(transcript.text, "用ViberWhisper。");
                     drop(transcript);
                 }
             }

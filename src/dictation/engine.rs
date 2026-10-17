@@ -238,12 +238,10 @@ async fn worker(
                 }
             };
             if let Ok(feedback) = feedback {
-                memory.confirm(&recording.id, &prepared, &feedback.text, now());
-                let saved = memory.save();
-                if let Err(error) = &saved {
+                memory.confirm(&recording.id, &prepared, &feedback, now());
+                if let Err(error) = memory.save() {
                     tracing::warn!(%error, "Could not save confirmed dictation memory");
                 }
-                let _ = feedback.acknowledged.send(saved);
             }
         }
     }

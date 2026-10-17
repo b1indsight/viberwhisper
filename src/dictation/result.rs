@@ -15,18 +15,26 @@ pub(crate) enum ContextChoice {
     Uncertain,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A model candidate whose source range was validated once at the JSON boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Candidate {
     pub kind: TermKind,
     pub text: String,
-    pub quote: String,
+    pub span: Range<usize>,
 }
 
-impl Candidate {
-    /// Locate one model-selected occurrence using a verbatim, unique source quote.
-    pub fn span(&self, text: &str) -> Option<Range<usize>> {
-        if self.quote.is_empty() || self.quote.chars().count() > 320 {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateWire {
+    kind: TermKind,
+    text: String,
+    quote: String,
+}
+
+impl CandidateWire {
+    /// Resolve one occurrence; the wire quote is not carried into memory or feedback.
+    fn locate(self, text: &str) -> Option<Candidate> {
+        if !valid_term(&self.text) || self.quote.is_empty() || self.quote.chars().count() > 320 {
             return None;
         }
         let mut quotes = text
@@ -42,7 +50,11 @@ impl Candidate {
             return None;
         }
         let span = start + spans[0].start..start + spans[0].end;
-        word_boundary(text, &span).then_some(span)
+        word_boundary(text, &span).then_some(Candidate {
+            kind: self.kind,
+            text: self.text,
+            span,
+        })
     }
 }
 
@@ -55,6 +67,14 @@ pub(crate) struct DictationResult {
 }
 
 impl DictationResult {
+    pub fn context_label(&self) -> Option<&str> {
+        match &self.context {
+            Some(ContextChoice::Existing { id }) => Some(id),
+            Some(ContextChoice::New { label }) => Some(label),
+            _ => None,
+        }
+    }
+
     /// Text survives malformed optional metadata; invalid JSON never reaches the input field.
     pub fn parse(text: &str, context_ids: &[String]) -> Result<Self> {
         ensure!(text.len() <= 64 * 1024, "dictation response is too large");
@@ -78,13 +98,15 @@ impl DictationResult {
                 ContextChoice::New { label } => valid_label(label),
                 ContextChoice::Uncertain => false,
             });
-        let mut candidates =
-            serde_json::from_value::<Vec<Candidate>>(wire.memory_candidates).unwrap_or_default();
-        if context.is_none() || candidates.len() > 8 {
-            candidates.clear();
-        } else {
-            candidates.retain(|c| valid_term(&c.text) && c.span(&wire.text).is_some());
-        }
+        let candidates = wire
+            .memory_candidates
+            .as_array()
+            .filter(|items| context.is_some() && items.len() <= 8)
+            .into_iter()
+            .flatten()
+            .filter_map(|value| serde_json::from_value::<CandidateWire>(value.clone()).ok())
+            .filter_map(|candidate| candidate.locate(&wire.text))
+            .collect();
         Ok(Self {
             text: wire.text,
             context,

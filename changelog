@@ -1,3 +1,4 @@
+2026-10-18: Simplify confirmed learning to one displayed-text alignment, validated candidate ranges, direct memory observations and one decision per source term; remove blocking feedback acknowledgements and preserve valid candidates beside malformed metadata
 2026-10-18: Anchor model candidates with unique verbatim source quotes; restrict correction learning to edits inside displayed candidates, skip edge insertions and cross-boundary restorations, remove raw-text undo inference, and version Realtime grounding policy as v3
 2026-10-17: Prioritize explicit returns to model spellings over name-boundary heuristics; retain model and displayed segment ranges so multiword correction reversions work across segments and with added sentence endings
 2026-10-17: Anchor intact names before interpreting grapheme edits, preserve Chinese name extensions, skip ambiguous inserted words, and retain original shared-edge ownership when neighboring name or segment projections fail
