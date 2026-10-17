@@ -129,9 +129,16 @@ conflict detection across segments, and conflicting final spellings revoke the s
 Deleting a mention supplies no spelling evidence and preserves its rule. Reverting a displayed
 correction removes its rule, and changing it to another spelling updates its original source
 mapping. Nonempty spelling edits include inserted and deleted letters. Segment projection accepts
-edge insertions, and name projection includes only adjacent alphanumeric additions, excluding
-separators and surrounding words. Overlapping projected names or segments have no unique owner
-and are skipped. Newly added sentence endings are excluded from learned names; existing candidate
+edge insertions. Before interpreting a name's grapheme edits, a retained complete name inside its
+projected range anchors the unchanged spelling. Added surrounding text must be separated from
+that occurrence; Unicode word boundaries between Han characters alone cannot hide real name
+extensions. Without an intact anchor, local edits that introduce new whitespace have ambiguous
+scope and skip learning; an explicit whole-candidate rewrite can still name multiple words.
+Other edge additions include only adjacent alphanumeric
+characters, excluding separators and surrounding words. Shared-edge ownership uses all original
+sorted spans, including neighbors that cannot be projected after deletion. An insertion at a
+shared name or segment edge therefore skips both owners. Newly added sentence endings are
+excluded from learned names; existing candidate
 punctuation and name symbols remain. Unedited or punctuation-only confirmations do not refresh
 manual evidence. Refreshed candidates are deduplicated and bounded to eight per segment. Disabling memory
 also disables correction loading, learning and application. Offline and seeded evaluation retain

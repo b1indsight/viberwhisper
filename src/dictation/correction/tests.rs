@@ -585,7 +585,7 @@ fn inserted_and_deleted_letters_update_automatic_names() {
 fn surrounding_inserted_text_does_not_extend_a_name() {
     // Permitting letter insertion must not teach a neighboring word or sentence
     // as part of the name merely because the name occupied the original segment.
-    for edited in ["Our Codex", "Codex team", "Codex.", "Codex！"] {
+    for edited in ["Our Codex", "Call Codex", "Codex team", "Codex.", "Codex！"] {
         let mut memory = Memory::load(None, Default::default(), 100).unwrap();
         let raw = result("Cody", "Cody", "项目");
         let prepared = memory.prepare(vec![raw.clone()], None);
@@ -594,6 +594,68 @@ fn surrounding_inserted_text_does_not_extend_a_name() {
         memory.confirm("surrounding-text", &prepared, edited, 101);
         assert_eq!(memory.prepare(vec![raw], None).text, "Codex");
     }
+}
+
+#[test]
+fn complete_unchanged_names_anchor_their_final_spans() {
+    // A neighboring word can share the name's first letters, making a grapheme
+    // diff split the unchanged name and misinterpret the added word as a rename.
+    for (name, edited) in [
+        ("Codex", "Call Codex"),
+        ("New York", "New New York"),
+        ("C++", "Call C++"),
+    ] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let raw = result(name, name, "项目");
+        let prepared = memory.prepare(vec![raw.clone()], None);
+        memory.confirm("surrounding-text", &prepared, edited, 100);
+        let snapshot = memory.snapshot(100);
+        assert!(snapshot.contexts[0].corrections.is_empty(), "name: {name}");
+        assert!(
+            snapshot.contexts[0]
+                .candidates
+                .iter()
+                .any(|c| c.term.text == name)
+        );
+        assert_eq!(memory.prepare(vec![raw], None).text, name);
+    }
+}
+
+#[test]
+fn unseparated_chinese_letters_still_update_the_whole_name() {
+    // Unicode word boundaries exist between Han characters. An old-name substring
+    // without a separator must not hide a genuine prefix/suffix letter insertion.
+    for name in ["张珊珊", "小张珊", "张小珊"] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let raw = result("张山", "张山", "同事");
+        let prepared = memory.prepare(vec![raw.clone()], Some("zh".into()));
+        memory.confirm("first", &prepared, "张珊", 100);
+        let prepared = memory.prepare(vec![raw.clone()], Some("zh".into()));
+        assert_eq!(prepared.text, "张珊");
+        memory.confirm("edited", &prepared, name, 101);
+        assert_eq!(memory.prepare(vec![raw], Some("zh".into())).text, name);
+    }
+}
+
+#[test]
+fn inserted_neighboring_words_cannot_rename_a_changed_name() {
+    // Adding a neighboring word while editing the name leaves no intact anchor.
+    // A word separator introduced by a local edit has ambiguous scope, including
+    // when deleting a letter merges the following word into the same edit.
+    for edited in ["Call Code", "Call Codexx", "Code Call"] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let raw = result("Codex", "Codex", "项目");
+        let prepared = memory.prepare(vec![raw.clone()], None);
+        memory.confirm("neighbor-and-edit", &prepared, edited, 100);
+        assert!(memory.snapshot(100).contexts[0].corrections.is_empty());
+        assert_eq!(memory.prepare(vec![raw], None).text, "Codex");
+    }
+    // An explicit whole-name rewrite can still introduce a multiword name.
+    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    let raw = result("维伯耳语", "维伯耳语", "项目");
+    let prepared = memory.prepare(vec![raw.clone()], None);
+    memory.confirm("whole-name", &prepared, "Viber Whisper", 100);
+    assert_eq!(memory.prepare(vec![raw], None).text, "Viber Whisper");
 }
 
 #[test]
@@ -622,5 +684,46 @@ fn an_insertion_between_adjacent_names_has_no_unique_owner() {
                 .iter()
                 .all(|c| c.corrections.is_empty())
         );
+    }
+}
+
+#[test]
+fn unprojectable_neighbors_still_block_shared_edge_insertions() {
+    // Deleting through a neighbor's boundary makes its projection fail. It still
+    // owns its source edge, so the surviving name must not absorb the inserted 小.
+    for (text, edited, pieces) in [
+        (
+            "张山李四。",
+            "张山小李",
+            [("张山", "张山"), ("李四", "李四"), ("。", "")],
+        ),
+        (
+            "。张山李四",
+            "山小李四",
+            [("。", ""), ("张山", "张山"), ("李四", "李四")],
+        ),
+    ] {
+        let mut raw = result(text, "张山", "同事");
+        raw.memory_candidates.push(Candidate {
+            kind: TermKind::ProperNoun,
+            text: "李四".into(),
+        });
+        let segments = pieces
+            .into_iter()
+            .map(|(text, term)| result(text, term, "同事"))
+            .collect();
+        for sources in [vec![raw], segments] {
+            let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+            let prepared = memory.prepare(sources, Some("zh".into()));
+            memory.confirm("shared-edge", &prepared, edited, 100);
+            assert!(
+                memory
+                    .snapshot(100)
+                    .contexts
+                    .iter()
+                    .all(|c| c.corrections.is_empty()),
+                "edited: {edited}"
+            );
+        }
     }
 }

@@ -97,32 +97,30 @@ impl Prepared {
         };
         let mut spellings = BTreeMap::new();
         let mut conflicts = BTreeSet::new();
-        let projected_segments: Vec<_> = self
+        // Original ranges retain ownership even if a neighboring projection fails.
+        let segment_spans: Vec<_> = self
             .segments
             .iter()
-            .enumerate()
-            .filter_map(|(index, segment)| {
-                if segment.shown.is_empty() {
-                    return None;
-                }
-                let span = alignment.project_segment(segment.span.clone())?;
-                (!span.is_empty()).then_some(((index, segment), span))
-            })
+            .map(|segment| segment.span.clone())
             .collect();
-        for (position, ((index, segment), span)) in projected_segments.iter().enumerate() {
-            if !uniquely_owned(&projected_segments, position) {
-                continue;
-            }
+        for (index, segment) in self.segments.iter().enumerate() {
             let Some(label) = context(&segment.source) else {
                 continue;
             };
-            if self.text != final_text
-                && self.segments.len() > 1
-                && self.text.match_indices(&segment.shown).count() != 1
+            if segment.shown.is_empty()
+                || (self.text != final_text
+                    && self.segments.len() > 1
+                    && self.text.match_indices(&segment.shown).count() != 1)
             {
                 continue;
             }
-            let edited = &final_text[span.clone()];
+            let Some(span) = alignment.project_segment(&segment_spans, index) else {
+                continue;
+            };
+            if span.is_empty() {
+                continue;
+            }
+            let edited = &final_text[span];
             let Some(shown_to_final) = Alignment::new(&segment.shown, edited) else {
                 continue;
             };
@@ -138,21 +136,21 @@ impl Prepared {
                     }
                 }
             };
-            let projected: Vec<_> = segment
+            let noun_spans: Vec<_> = segment
                 .proper_nouns
                 .iter()
-                .filter_map(|noun| {
-                    let span = shown_to_final.project_noun(noun.shown.clone(), edited)?;
-                    (!span.is_empty()).then_some((noun, span))
-                })
+                .map(|noun| noun.shown.clone())
                 .collect();
-            for (index, (noun, span)) in projected.iter().enumerate() {
-                if !uniquely_owned(&projected, index) {
+            for (index, noun) in segment.proper_nouns.iter().enumerate() {
+                let Some(span) = shown_to_final.project_noun(&noun_spans, index, edited) else {
+                    continue;
+                };
+                if span.is_empty() {
                     continue;
                 }
                 let original = &segment.source.text[noun.raw.clone()];
                 let shown = &segment.shown[noun.shown.clone()];
-                let value = name_without_added_sentence_end(shown, &edited[span.clone()]);
+                let value = name_without_added_sentence_end(shown, &edited[span]);
                 if !valid_term(value) {
                     // Deleting a mention supplies no spelling evidence.
                     continue;
@@ -206,7 +204,7 @@ impl Prepared {
             let mut result = segment.source.clone();
             result.text = edited.into();
             result.memory_candidates = terms;
-            confirmed.results.push((*index, result));
+            confirmed.results.push((index, result));
         }
         // Conflicting final spellings of one source in a single recording are
         // evidence to stop applying a rule, not evidence for an arbitrary winner.
@@ -216,15 +214,6 @@ impl Prepared {
         confirmed.revoked.extend(conflicts);
         Some(confirmed)
     }
-}
-
-/// Alignment is monotone: overlapping neighboring projections have no unique owner.
-fn uniquely_owned<T>(projected: &[(T, Range<usize>)], at: usize) -> bool {
-    let span = &projected[at].1;
-    (at == 0 || projected[at - 1].1.end <= span.start)
-        && projected
-            .get(at + 1)
-            .is_none_or(|(_, next)| span.end <= next.start)
 }
 
 /// Newly added sentence endings stay in delivered text, outside the learned name.
