@@ -39,12 +39,14 @@ struct Segment {
     source: DictationResult,
     proper_nouns: Vec<Noun>,
     shown: String,
-    span: Range<usize>,
+    raw_span: Range<usize>,
+    shown_span: Range<usize>,
 }
 
 /// Owns the source and displayed revisions until a successful delivery supplies feedback.
 pub(super) struct Prepared {
     pub text: String,
+    original: String,
     segments: Vec<Segment>,
 }
 
@@ -64,23 +66,32 @@ impl Prepared {
     ) -> Self {
         let mut segments = Vec::new();
         let mut text = String::new();
+        let mut original = String::new();
         let separator = crate::text::segment_separator(language.as_deref());
         for source in results {
             let (shown, proper_nouns) =
                 apply(&source, &proper_noun_spans(&source), rules, long_term);
             if !text.is_empty() && !shown.is_empty() {
                 text.push_str(separator);
+                original.push_str(separator);
             }
             let start = text.len();
+            let raw_start = original.len();
+            original.push_str(&source.text);
             text.push_str(&shown);
             segments.push(Segment {
                 source,
                 proper_nouns,
                 shown,
-                span: start..text.len(),
+                raw_span: raw_start..original.len(),
+                shown_span: start..text.len(),
             });
         }
-        Self { text, segments }
+        Self {
+            text,
+            original,
+            segments,
+        }
     }
 
     /// Learn from displayed noun spans; unchanged occurrences also detect spelling conflicts.
@@ -89,7 +100,15 @@ impl Prepared {
         {
             return None;
         }
-        let alignment = Alignment::new(&self.text, final_text)?;
+        let alignment = Alignment::new(&self.text, final_text);
+        let raw_alignment = if self.text == final_text {
+            None
+        } else {
+            Alignment::new(&self.original, final_text)
+        };
+        if alignment.is_none() && raw_alignment.is_none() {
+            return None;
+        }
         let mut confirmed = Confirmed {
             results: vec![],
             changes: vec![],
@@ -98,32 +117,45 @@ impl Prepared {
         let mut spellings = BTreeMap::new();
         let mut conflicts = BTreeSet::new();
         // Original ranges retain ownership even if a neighboring projection fails.
-        let segment_spans: Vec<_> = self
+        let (raw_segment_spans, segment_spans): (Vec<_>, Vec<_>) = self
             .segments
             .iter()
-            .map(|segment| segment.span.clone())
-            .collect();
+            .map(|segment| (segment.raw_span.clone(), segment.shown_span.clone()))
+            .unzip();
+        // Choose one coordinate system for all segments. Mixing raw and shown
+        // projections can assign a neighbor's word to a restored segment.
+        let restored_segments = known_projection(
+            raw_alignment.as_ref(),
+            &raw_segment_spans,
+            final_text,
+            |index, value| {
+                value == self.segments[index].source.text || value == self.segments[index].shown
+            },
+        );
         for (index, segment) in self.segments.iter().enumerate() {
             let Some(label) = context(&segment.source) else {
                 continue;
             };
             if segment.shown.is_empty()
                 || (self.text != final_text
+                    && self.original != final_text
                     && self.segments.len() > 1
                     && self.text.match_indices(&segment.shown).count() != 1)
             {
                 continue;
             }
-            let Some(span) = alignment.project_segment(&segment_spans, index) else {
+            let restored = restored_segments.as_ref().map(|spans| spans[index].clone());
+            let Some(span) =
+                restored.or_else(|| alignment.as_ref()?.project_segment(&segment_spans, index))
+            else {
                 continue;
             };
             if span.is_empty() {
                 continue;
             }
             let edited = &final_text[span];
-            let Some(shown_to_final) = Alignment::new(&segment.shown, edited) else {
-                continue;
-            };
+            let shown_to_final = Alignment::new(&segment.shown, edited);
+            let raw_to_final = Alignment::new(&segment.source.text, edited);
             let mut terms = Vec::new();
             let mut remember = |kind, value: &str| {
                 if valid_term(value) && terms.len() < 8 {
@@ -136,21 +168,42 @@ impl Prepared {
                     }
                 }
             };
-            let noun_spans: Vec<_> = segment
+            let (raw_noun_spans, noun_spans): (Vec<_>, Vec<_>) = segment
                 .proper_nouns
                 .iter()
-                .map(|noun| noun.shown.clone())
-                .collect();
+                .map(|noun| (noun.raw.clone(), noun.shown.clone()))
+                .unzip();
+            let restored_nouns = known_projection(
+                raw_to_final.as_ref(),
+                &raw_noun_spans,
+                edited,
+                |index, value| {
+                    let noun = &segment.proper_nouns[index];
+                    matches_spelling(&segment.source.text[noun.raw.clone()], value)
+                        || matches_spelling(&segment.shown[noun.shown.clone()], value)
+                },
+            );
             for (index, noun) in segment.proper_nouns.iter().enumerate() {
-                let Some(span) = shown_to_final.project_noun(&noun_spans, index, edited) else {
-                    continue;
-                };
-                if span.is_empty() {
-                    continue;
-                }
                 let original = &segment.source.text[noun.raw.clone()];
                 let shown = &segment.shown[noun.shown.clone()];
-                let value = name_without_added_sentence_end(shown, &edited[span]);
+                // The original spelling is known, so an exact undo takes priority
+                // over heuristics that infer a name's boundary from edited prose.
+                let reverted = edited != segment.shown
+                    && original != shown
+                    && restored_nouns.as_ref().is_some_and(|spans| {
+                        matches_spelling(original, &edited[spans[index].clone()])
+                    });
+                let value = if reverted {
+                    original
+                } else {
+                    let Some(span) = shown_to_final
+                        .as_ref()
+                        .and_then(|a| a.project_noun(&noun_spans, index, edited))
+                    else {
+                        continue;
+                    };
+                    name_without_added_sentence_end(shown, &edited[span])
+                };
                 if !valid_term(value) {
                     // Deleting a mention supplies no spelling evidence.
                     continue;
@@ -183,7 +236,7 @@ impl Prepared {
                     }
                 }
             }
-            if let Some(raw_to_final) = Alignment::new(&segment.source.text, edited) {
+            if let Some(raw_to_final) = raw_to_final {
                 for term in segment
                     .source
                     .memory_candidates
@@ -216,27 +269,39 @@ impl Prepared {
     }
 }
 
+/// Raw coordinates are usable only when every member projects to a known version.
+/// An unassigned or changed neighbor must not donate its text to an apparent undo.
+fn known_projection(
+    alignment: Option<&Alignment<'_>>,
+    spans: &[Range<usize>],
+    after: &str,
+    known: impl Fn(usize, &str) -> bool,
+) -> Option<Vec<Range<usize>>> {
+    let alignment = alignment?;
+    (0..spans.len())
+        .map(|index| {
+            let span = alignment.project_segment(spans, index)?;
+            known(index, &after[span.clone()]).then_some(span)
+        })
+        .collect()
+}
+
+fn matches_spelling(known: &str, value: &str) -> bool {
+    value
+        .strip_prefix(known)
+        .is_some_and(|tail| tail.chars().all(|c| c.is_whitespace() || sentence_end(c)))
+}
+
+fn sentence_end(c: char) -> bool {
+    matches!(
+        c,
+        '.' | ',' | '!' | '?' | ';' | ':' | '。' | '，' | '！' | '？' | '；' | '：' | '、' | '…'
+    )
+}
+
 /// Newly added sentence endings stay in delivered text, outside the learned name.
 /// Punctuation already owned by the model candidate and symbols such as C++ stay intact.
 fn name_without_added_sentence_end<'a>(shown: &str, value: &'a str) -> &'a str {
-    let sentence_end = |c| {
-        matches!(
-            c,
-            '.' | ','
-                | '!'
-                | '?'
-                | ';'
-                | ':'
-                | '。'
-                | '，'
-                | '！'
-                | '？'
-                | '；'
-                | '：'
-                | '、'
-                | '…'
-        )
-    };
     if shown.ends_with(sentence_end) {
         value
     } else {

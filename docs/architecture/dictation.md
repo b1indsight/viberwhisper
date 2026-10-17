@@ -126,9 +126,16 @@ Rendering retains exact raw and displayed ranges for every eligible noun, includ
 occurrences. Feedback compares displayed text with the confirmed revision; it never treats the
 program's earlier replacement as a manual edit. All surviving unprotected occurrences participate in spelling
 conflict detection across segments, and conflicting final spellings revoke the source mapping.
-Deleting a mention supplies no spelling evidence and preserves its rule. Reverting a displayed
-correction removes its rule, and changing it to another spelling updates its original source
-mapping. Nonempty spelling edits include inserted and deleted letters. Segment projection accepts
+Deleting a mention supplies no spelling evidence and preserves its rule. Prepared feedback retains
+both the joined model transcript and displayed text, with separate segment and noun ranges.
+Model coordinates are selected for the complete segment group only when every projected segment
+matches a known model or displayed version; otherwise the displayed coordinates are retained.
+This keeps restored suffix words inside their original segments without mixing two coordinate
+systems. Candidate reversions likewise require the complete candidate group to match known
+spellings through model-to-final alignment, before name-boundary heuristics. Returning the known
+original spelling, optionally followed by sentence endings, revokes its rule without learning an
+inverse mapping. Changing it to another spelling updates its original source mapping.
+Nonempty spelling edits include inserted and deleted letters. Segment projection accepts
 edge insertions. Before interpreting a name's grapheme edits, a retained complete name inside its
 projected range anchors the unchanged spelling. Added surrounding text must be separated from
 that occurrence; Unicode word boundaries between Han characters alone cannot hide real name

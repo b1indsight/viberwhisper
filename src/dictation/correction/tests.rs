@@ -69,6 +69,99 @@ fn corrections_use_whole_names_and_revoke_a_reverted_automatic_replacement() {
 }
 
 #[test]
+fn explicit_reversions_precede_name_boundary_heuristics() {
+    // Returning to a known raw spelling is an undo, even when it adds a word or
+    // contains the automatic name. Punctuation must not hide that explicit undo.
+    for (original, corrected) in [
+        ("Open Eye", "OpenAI"),
+        ("Call Codex", "Codex"),
+        ("Acme Co.", "ACME"),
+        ("C++ Studio", "C++"),
+    ] {
+        for (prefix, suffix) in [("", ""), ("Use ", " today.")] {
+            for punctuation in ["", "!"] {
+                let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+                let raw = result(&format!("{prefix}{original}{suffix}"), original, "项目");
+                let prepared = memory.prepare(vec![result(original, original, "项目")], None);
+                memory.confirm("initial", &prepared, corrected, 100);
+                let prepared = memory.prepare(vec![raw.clone()], None);
+                assert_eq!(prepared.text, format!("{prefix}{corrected}{suffix}"));
+                let evidence = memory.snapshot(100).contexts[0].corrections.clone();
+                memory.confirm("unchanged", &prepared, &prepared.text, 101);
+                assert_eq!(memory.snapshot(101).contexts[0].corrections, evidence);
+                let edited = format!("{prefix}{original}{punctuation}{suffix}");
+                memory.confirm("undo", &prepared, &edited, 102);
+                assert!(
+                    memory.snapshot(102).contexts[0].corrections.is_empty(),
+                    "undo: {edited}"
+                );
+                assert_eq!(memory.prepare(vec![raw.clone()], None).text, raw.text);
+            }
+        }
+    }
+}
+
+#[test]
+fn explicit_reversions_restore_original_segment_boundaries() {
+    // A restored suffix word can land beyond the displayed segment's end. Raw
+    // source ranges retain its owner even if another segment stays auto-corrected.
+    for revert_second in [false, true] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        for (id, original, corrected) in
+            [("first", "C++ Studio", "C++"), ("second", "Ready", "Done")]
+        {
+            let prepared = memory.prepare(vec![result(original, original, "项目")], None);
+            memory.confirm(id, &prepared, corrected, 100);
+        }
+        let raw = vec![
+            result("C++ Studio", "C++ Studio", "项目"),
+            result("Ready", "Ready", "项目"),
+        ];
+        let prepared = memory.prepare(raw.clone(), None);
+        assert_eq!(prepared.text, "C++ Done");
+        let edited = if revert_second {
+            "C++ Studio Ready"
+        } else {
+            "C++ Studio Done"
+        };
+        memory.confirm("undo", &prepared, edited, 101);
+        assert_eq!(memory.prepare(raw, None).text, edited);
+        assert_eq!(
+            memory.snapshot(101).contexts[0].corrections.len(),
+            usize::from(!revert_second)
+        );
+    }
+}
+
+#[test]
+fn neighboring_names_cannot_be_mistaken_for_restored_words() {
+    // Raw C++ Studio contains its neighbor's displayed Studio. Adding punctuation
+    // to that neighbor must not undo C++ Studio -> C++, in one or two segments.
+    let mut combined = result("C++ Studio Studio", "C++ Studio", "项目");
+    combined.memory_candidates.push(Candidate {
+        kind: TermKind::ProperNoun,
+        text: "Studio".into(),
+    });
+    for raw in [
+        vec![combined],
+        vec![
+            result("C++ Studio", "C++ Studio", "项目"),
+            result("Studio", "Studio", "项目"),
+        ],
+    ] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let prepared = memory.prepare(vec![result("C++ Studio", "C++ Studio", "项目")], None);
+        memory.confirm("initial", &prepared, "C++", 100);
+        let prepared = memory.prepare(raw.clone(), None);
+        assert_eq!(prepared.text, "C++ Studio");
+        let evidence = memory.snapshot(100).contexts[0].corrections.clone();
+        memory.confirm("punctuation", &prepared, "C++ Studio!", 101);
+        assert_eq!(memory.snapshot(101).contexts[0].corrections, evidence);
+        assert_eq!(memory.prepare(raw, None).text, "C++ Studio");
+    }
+}
+
+#[test]
 fn automatic_corrections_require_a_complete_model_proper_noun() {
     // A known error elsewhere in the transcript is not permission to edit it:
     // each response must identify that whole name as a proper-noun candidate.
