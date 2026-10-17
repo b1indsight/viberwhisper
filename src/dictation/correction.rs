@@ -32,6 +32,7 @@ pub(super) struct Correction {
 struct Noun {
     raw: Range<usize>,
     shown: Range<usize>,
+    protected: bool,
 }
 
 struct Segment {
@@ -96,21 +97,32 @@ impl Prepared {
         };
         let mut spellings = BTreeMap::new();
         let mut conflicts = BTreeSet::new();
-        for (index, segment) in self.segments.iter().enumerate() {
+        let projected_segments: Vec<_> = self
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| {
+                if segment.shown.is_empty() {
+                    return None;
+                }
+                let span = alignment.project_segment(segment.span.clone())?;
+                (!span.is_empty()).then_some(((index, segment), span))
+            })
+            .collect();
+        for (position, ((index, segment), span)) in projected_segments.iter().enumerate() {
+            if !uniquely_owned(&projected_segments, position) {
+                continue;
+            }
             let Some(label) = context(&segment.source) else {
                 continue;
             };
-            if segment.shown.is_empty()
-                || (self.text != final_text
-                    && self.segments.len() > 1
-                    && self.text.match_indices(&segment.shown).count() != 1)
+            if self.text != final_text
+                && self.segments.len() > 1
+                && self.text.match_indices(&segment.shown).count() != 1
             {
                 continue;
             }
-            let Some(span) = alignment.project(segment.span.clone()) else {
-                continue;
-            };
-            let edited = &final_text[span];
+            let edited = &final_text[span.clone()];
             let Some(shown_to_final) = Alignment::new(&segment.shown, edited) else {
                 continue;
             };
@@ -126,18 +138,29 @@ impl Prepared {
                     }
                 }
             };
-            for noun in &segment.proper_nouns {
-                let Some(span) = shown_to_final.project(noun.shown.clone()) else {
+            let projected: Vec<_> = segment
+                .proper_nouns
+                .iter()
+                .filter_map(|noun| {
+                    let span = shown_to_final.project_noun(noun.shown.clone(), edited)?;
+                    (!span.is_empty()).then_some((noun, span))
+                })
+                .collect();
+            for (index, (noun, span)) in projected.iter().enumerate() {
+                if !uniquely_owned(&projected, index) {
                     continue;
-                };
+                }
                 let original = &segment.source.text[noun.raw.clone()];
                 let shown = &segment.shown[noun.shown.clone()];
-                let value = name_without_added_sentence_end(shown, &edited[span]);
+                let value = name_without_added_sentence_end(shown, &edited[span.clone()]);
                 if !valid_term(value) {
                     // Deleting a mention supplies no spelling evidence.
                     continue;
                 }
                 remember(TermKind::ProperNoun, value);
+                if noun.protected {
+                    continue;
+                }
                 let spelling_changed = valid_replacement(shown, value);
                 let spelling = if spelling_changed { value } else { shown };
                 let key = (label.to_owned(), original.to_owned());
@@ -147,7 +170,7 @@ impl Prepared {
                 {
                     conflicts.insert(key);
                 }
-                if spelling_changed && shown_to_final.replaces(&noun.shown) {
+                if spelling_changed {
                     if original != shown {
                         confirmed.revoked.push((label.into(), original.into()));
                     }
@@ -183,7 +206,7 @@ impl Prepared {
             let mut result = segment.source.clone();
             result.text = edited.into();
             result.memory_candidates = terms;
-            confirmed.results.push((index, result));
+            confirmed.results.push((*index, result));
         }
         // Conflicting final spellings of one source in a single recording are
         // evidence to stop applying a rule, not evidence for an arbitrary winner.
@@ -193,6 +216,15 @@ impl Prepared {
         confirmed.revoked.extend(conflicts);
         Some(confirmed)
     }
+}
+
+/// Alignment is monotone: overlapping neighboring projections have no unique owner.
+fn uniquely_owned<T>(projected: &[(T, Range<usize>)], at: usize) -> bool {
+    let span = &projected[at].1;
+    (at == 0 || projected[at - 1].1.end <= span.start)
+        && projected
+            .get(at + 1)
+            .is_none_or(|(_, next)| span.end <= next.start)
 }
 
 /// Newly added sentence endings stay in delivered text, outside the learned name.
@@ -350,19 +382,10 @@ fn apply(
         .iter()
         .filter(|r| Some(r.context.as_str()) == context && !cyclic(r, rules))
         .collect();
-    if proper_nouns.is_empty() || rules.is_empty() {
-        return (
-            text.clone(),
-            proper_nouns
-                .iter()
-                .map(|span| Noun {
-                    raw: span.clone(),
-                    shown: span.clone(),
-                })
-                .collect(),
-        );
+    if proper_nouns.is_empty() {
+        return (text.clone(), Vec::new());
     }
-    let protected: Vec<_> = long_term
+    let protected_spans: Vec<_> = long_term
         .iter()
         .filter(|term| Some(term.context.as_str()) == context)
         .flat_map(|term| term_spans(text, &term.text))
@@ -371,11 +394,12 @@ fn apply(
     let mut at = 0;
     for span in proper_nouns {
         output.push_str(&text[at..span.start]);
+        let protected = protected_spans
+            .iter()
+            .any(|p| p.start < span.end && span.start < p.end);
         let rule = rules.iter().copied().find(|r| {
-            text[span.clone()] == r.rule.from
-                && !protected
-                    .iter()
-                    .any(|p| p.start < span.end && span.start < p.end)
+            !protected
+                && text[span.clone()] == r.rule.from
                 && !rules
                     .iter()
                     .any(|other| other.rule.from == r.rule.from && other.rule.to != r.rule.to)
@@ -389,6 +413,7 @@ fn apply(
         nouns.push(Noun {
             raw: span.clone(),
             shown: start..output.len(),
+            protected,
         });
         at = span.end;
     }

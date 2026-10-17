@@ -151,11 +151,41 @@ fn configured_phrases_protect_their_full_span_from_candidate_corrections() {
     let mut memory = Memory::load(None, settings, 100).unwrap();
     let prepared = memory.prepare(vec![result("York", "York", "地点")], None);
     memory.confirm("first", &prepared, "Yolk", 100);
+    let raw = result("New York; York", "York", "地点");
+    let prepared = memory.prepare(vec![raw.clone()], None);
+    assert_eq!(prepared.text, "New York; Yolk");
+    // Confirming a protected occurrence must not revoke the independently usable rule.
+    memory.confirm("unchanged", &prepared, &prepared.text, 101);
+    assert_eq!(memory.prepare(vec![raw], None).text, "New York; Yolk");
     assert_eq!(
         memory
-            .prepare(vec![result("New York; York", "York", "地点")], None)
+            .prepare(vec![result("York", "York", "地点")], None)
             .text,
-        "New York; Yolk"
+        "Yolk"
+    );
+}
+
+#[test]
+fn configured_mentions_do_not_train_fragment_rules() {
+    // Protection also applies before any rules exist: editing a configured place
+    // name must not train a generic correction for its separately extracted part.
+    let settings = MemoryConfig {
+        enabled: true,
+        long_term: vec![super::super::config::LongTerm {
+            context: "地点".into(),
+            kind: TermKind::ProperNoun,
+            text: "New York".into(),
+        }],
+    };
+    let mut memory = Memory::load(None, settings, 100).unwrap();
+    let prepared = memory.prepare(vec![result("New York", "York", "地点")], None);
+    memory.confirm("edited", &prepared, "New Yolk", 100);
+    assert!(memory.snapshot(100).contexts[0].corrections.is_empty());
+    assert_eq!(
+        memory
+            .prepare(vec![result("York", "York", "地点")], None)
+            .text,
+        "York"
     );
 }
 
@@ -504,5 +534,93 @@ fn spelling_feedback_preserves_name_symbols_and_existing_punctuation() {
         let prepared = memory.prepare(vec![raw.clone()], None);
         memory.confirm("first", &prepared, to, 100);
         assert_eq!(memory.prepare(vec![raw], None).text, to);
+    }
+}
+
+#[test]
+fn inserted_and_deleted_letters_update_automatic_names() {
+    // A third spelling can differ only by adding/removing letters. Name-edge
+    // edits must work inside sentences and at the end of a multi-segment result.
+    for name in ["Code", "Codexx", "XCodex", "Codx", "CoXdex"] {
+        for (sources, shown, edited) in [
+            (
+                vec![result("Cody", "Cody", "项目")],
+                "Codex",
+                name.to_owned(),
+            ),
+            (
+                vec![result("Use Cody.", "Cody", "项目")],
+                "Use Codex.",
+                format!("Use {name}."),
+            ),
+            (
+                vec![
+                    result("Ready.", "Ready", "项目"),
+                    result("Use Cody", "Cody", "项目"),
+                ],
+                "Ready. Use Codex",
+                format!("Ready. Use {name}"),
+            ),
+            (
+                vec![
+                    result("Use Cody", "Cody", "项目"),
+                    result("Ready.", "Ready", "项目"),
+                ],
+                "Use Codex Ready.",
+                format!("Use {name} Ready."),
+            ),
+        ] {
+            let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+            let prepared = memory.prepare(vec![result("Cody", "Cody", "项目")], None);
+            memory.confirm("first", &prepared, "Codex", 100);
+            let prepared = memory.prepare(sources.clone(), None);
+            assert_eq!(prepared.text, shown);
+            memory.confirm("edited", &prepared, &edited, 101);
+            assert_eq!(memory.prepare(sources, None).text, edited, "name: {name}");
+        }
+    }
+}
+
+#[test]
+fn surrounding_inserted_text_does_not_extend_a_name() {
+    // Permitting letter insertion must not teach a neighboring word or sentence
+    // as part of the name merely because the name occupied the original segment.
+    for edited in ["Our Codex", "Codex team", "Codex.", "Codex！"] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let raw = result("Cody", "Cody", "项目");
+        let prepared = memory.prepare(vec![raw.clone()], None);
+        memory.confirm("first", &prepared, "Codex", 100);
+        let prepared = memory.prepare(vec![raw.clone()], None);
+        memory.confirm("surrounding-text", &prepared, edited, 101);
+        assert_eq!(memory.prepare(vec![raw], None).text, "Codex");
+    }
+}
+
+#[test]
+fn an_insertion_between_adjacent_names_has_no_unique_owner() {
+    // With no separator, the inserted character could extend either name.
+    // Neither candidate may claim it and train a guessed spelling.
+    let mut raw = result("张山李四", "张山", "同事");
+    raw.memory_candidates.push(Candidate {
+        kind: TermKind::ProperNoun,
+        text: "李四".into(),
+    });
+    for sources in [
+        vec![raw],
+        vec![
+            result("张山", "张山", "同事"),
+            result("李四", "李四", "朋友"),
+        ],
+    ] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let prepared = memory.prepare(sources, Some("zh".into()));
+        memory.confirm("ambiguous", &prepared, "张山小李四", 100);
+        assert!(
+            memory
+                .snapshot(100)
+                .contexts
+                .iter()
+                .all(|c| c.corrections.is_empty())
+        );
     }
 }

@@ -1,3 +1,4 @@
+2026-10-17: Preserve configured-word protection through confirmation; learn nonempty name spelling edits that insert or delete letters, exclude neighboring words, and skip ambiguous shared name or segment boundaries
 2026-10-16: Use displayed candidate ranges for spelling feedback; include unchanged occurrences in conflict checks, preserve corrections when mentions are deleted, and keep added sentence punctuation out of learned names
 2026-10-16: Learn persistent context-scoped proper-name corrections from successfully delivered preview edits; apply only to complete model-extracted names, resolve candidate overlaps, protect full configured phrases, preserve final edited history, defer Realtime memory until confirmation, and support revoking automatic replacements and schema-1 memory migration
 2026-10-12: Persist missing Realtime configuration defaults after successful desktop startup validation while preserving explicit settings and read-only config inspection

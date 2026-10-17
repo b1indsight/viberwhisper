@@ -112,16 +112,31 @@ impl Alignment {
         {
             return None;
         }
+        self.project_segment(range)
+    }
+
+    /// Project a known segment including edge insertions. The caller rejects
+    /// overlapping projections when an insertion has no unique segment owner.
+    pub fn project_segment(&self, range: Range<usize>) -> Option<Range<usize>> {
         Some(self.boundary(range.start, false)?..self.boundary(range.end, true)?)
     }
 
-    pub fn replaces(&self, range: &Range<usize>) -> bool {
-        self.edits.iter().any(|e| {
-            !e.before.is_empty()
-                && !e.after.is_empty()
-                && e.before.start < range.end
-                && range.start < e.before.end
-        })
+    /// Include adjacent inserted letters/digits in a name, leaving separators and
+    /// surrounding words outside it. The caller rejects overlapping projected names.
+    pub fn project_noun(&self, range: Range<usize>, after: &str) -> Option<Range<usize>> {
+        let mut projected = self.project_segment(range.clone())?;
+        for edit in self.edits.iter().filter(|edit| edit.before.is_empty()) {
+            let inserted = &after[edit.after.clone()];
+            if edit.before.start == range.start {
+                projected.start =
+                    edit.after.start + inserted.trim_end_matches(char::is_alphanumeric).len();
+            }
+            if edit.before.start == range.end {
+                projected.end =
+                    edit.after.end - inserted.trim_start_matches(char::is_alphanumeric).len();
+            }
+        }
+        Some(projected)
     }
 
     fn boundary(&self, at: usize, end: bool) -> Option<usize> {
