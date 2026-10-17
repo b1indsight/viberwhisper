@@ -98,10 +98,15 @@ unexpired observations, persistent corrections and configured terms supply label
 Model-returned observations of already
 known terms refresh their short-term lifetime; merely including a term in the prompt does not.
 Uncertain/new topics are model decisions, not proof
-of accurate classification; unknown existing IDs are rejected. Candidates contain only kind and text;
-no evidence field is required. Candidates must occur as a substring of the delivered text after
-NFKC normalization and lowercasing. Unsupported candidates are discarded without losing text;
-the original JSON remains available for prompt-lab metadata validation. This checks textual
+of accurate classification; unknown existing IDs are rejected. Candidates contain kind, text and
+a verbatim source `quote` of at most 320 Unicode characters. The quote must occur exactly once
+in the response text, including overlapping matches, and contain exactly one complete occurrence
+of the candidate under NFKC normalization and lowercasing. The resulting range must also respect
+word boundaries in the full response. Only that extracted occurrence authorizes correction;
+identical prose elsewhere is not implicitly extracted. Missing or ambiguous quotes are discarded
+without losing text; custom prompts must return the same quote metadata. Term-only prompt-lab
+expectations retain their existing format; per-occurrence grounding is checked by the metadata gate.
+The original JSON remains available for prompt-lab metadata validation. This checks textual
 support, not acoustic accuracy or whether a phrase is suitable for future memory.
 
 The schema-2 memory file adds at most 512 persistent corrections with context, source spelling,
@@ -126,23 +131,22 @@ Rendering retains exact raw and displayed ranges for every eligible noun, includ
 occurrences. Feedback compares displayed text with the confirmed revision; it never treats the
 program's earlier replacement as a manual edit. All surviving unprotected occurrences participate in spelling
 conflict detection across segments, and conflicting final spellings revoke the source mapping.
-Deleting a mention supplies no spelling evidence and preserves its rule. Prepared feedback retains
-both the joined model transcript and displayed text, with separate segment and noun ranges.
-Model coordinates are selected for the complete segment group only when every projected segment
-matches a known model or displayed version; otherwise the displayed coordinates are retained.
-This keeps restored suffix words inside their original segments without mixing two coordinate
-systems. Candidate reversions likewise require the complete candidate group to match known
-spellings through model-to-final alignment, before name-boundary heuristics. Returning the known
-original spelling, optionally followed by sentence endings, revokes its rule without learning an
-inverse mapping. Changing it to another spelling updates its original source mapping.
-Nonempty spelling edits include inserted and deleted letters. Segment projection accepts
-edge insertions. Before interpreting a name's grapheme edits, a retained complete name inside its
+Deleting a mention supplies no spelling evidence and preserves its rule. Feedback uses only the
+displayed coordinate system. Returning the original spelling revokes its rule without learning an
+inverse mapping only when that edit satisfies the same candidate ownership checks as any other
+spelling change. There is no model-to-final restoration path to borrow neighboring prose.
+Changing to a third spelling updates the original source mapping.
+The initial ownership policy accepts replacements and deletions contained in a displayed candidate,
+and pure insertions strictly inside it. Insertions at either candidate edge cannot rename it;
+prefix/suffix extensions and multiword restorations outside the displayed candidate are deferred.
+An edit crossing a candidate or segment boundary skips the affected learning. Segment projection
+still accepts unshared edge insertions for confirmed context text. Before interpreting a name's
+grapheme edits, a retained complete name inside its
 projected range anchors the unchanged spelling. Added surrounding text must be separated from
-that occurrence; Unicode word boundaries between Han characters alone cannot hide real name
-extensions. Without an intact anchor, local edits that introduce new whitespace have ambiguous
+that occurrence; Unicode word boundaries between Han characters alone do not make an appended
+character an unchanged name. Without an intact anchor, local edits that introduce new whitespace have ambiguous
 scope and skip learning; an explicit whole-candidate rewrite can still name multiple words.
-Other edge additions include only adjacent alphanumeric
-characters, excluding separators and surrounding words. Shared-edge ownership uses all original
+Shared-edge ownership uses all original
 sorted spans, including neighbors that cannot be projected after deletion. An insertion at a
 shared name or segment edge therefore skips both owners. Newly added sentence endings are
 excluded from learned names; existing candidate

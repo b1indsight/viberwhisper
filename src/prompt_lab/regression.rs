@@ -1540,10 +1540,10 @@ mod tests {
         assert_eq!(complete.status, RunStatus::Complete);
         assert_eq!(complete.meets_targets, Some(false));
         complete.validate_contract().unwrap();
-        // Policy-v1 baselines remain readable when their evidence is safe, but cannot
+        // Pre-quote policy baselines remain readable when their evidence is safe, but cannot
         // be compared against newly strengthened candidate-grounding validation.
         let mut legacy = complete.clone();
-        legacy.realtime.as_mut().unwrap().policy_version = "realtime-context-memory-v1".into();
+        legacy.realtime.as_mut().unwrap().policy_version = "realtime-context-memory-v2".into();
         legacy.validate_contract().unwrap();
         let mut next = request(directory.path().join("next.json"));
         next.stt = complete.stt.clone();

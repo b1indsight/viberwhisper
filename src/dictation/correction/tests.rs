@@ -3,15 +3,120 @@ use crate::dictation::{config::MemoryConfig, memory::Memory};
 use serde_json::json;
 
 fn result(text: &str, term: &str, context: &str) -> DictationResult {
+    quoted_result(text, term, context, &[text])
+}
+
+fn quoted_result(text: &str, term: &str, context: &str, quotes: &[&str]) -> DictationResult {
     DictationResult::parse(
         &json!({
             "text": text, "context": {"kind":"new", "label":context},
-            "memory_candidates":[{"kind":"proper_noun", "text":term}]
+            "memory_candidates":quotes.iter().map(|quote| json!({
+                "kind":"proper_noun", "text":term, "quote":quote
+            })).collect::<Vec<_>>()
         })
         .to_string(),
         &[],
     )
     .unwrap()
+}
+
+#[test]
+fn candidate_quotes_limit_replacements_to_the_extracted_occurrence() {
+    // The same spelling in another sentence is ordinary prose unless the model
+    // separately extracts it. A learned rule must not replace both mentions.
+    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    let prepared = memory.prepare(vec![result("请找张山。", "张山", "同事")], None);
+    memory.confirm("first", &prepared, "请找张珊。", 100);
+    let raw = DictationResult::parse(
+        &json!({
+            "text":"张山负责开发。张山负责联络。",
+            "context":{"kind":"new","label":"同事"},
+            "memory_candidates":[{
+                "kind":"proper_noun", "text":"张山", "quote":"张山负责联络。"
+            }]
+        })
+        .to_string(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        memory.prepare(vec![raw], Some("zh".into())).text,
+        "张山负责开发。张珊负责联络。"
+    );
+}
+
+#[test]
+fn learning_accepts_only_edits_contained_in_the_displayed_candidate() {
+    // Prefix/suffix insertions have no owner in a final-text snapshot. Internal
+    // insertions and replacements/deletions of owned characters remain useful.
+    for (name, learns) in [
+        ("CoXdex", true),
+        ("Codx", true),
+        ("Code", true),
+        ("Kodex", true),
+        ("XCodex", false),
+        ("Codexx", false),
+        ("Call Code", false),
+        ("Code Call", false),
+    ] {
+        for (prefix, suffix) in [("", ""), ("Use ", " today.")] {
+            let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+            let raw = result(&format!("{prefix}Codex{suffix}"), "Codex", "项目");
+            let prepared = memory.prepare(vec![raw.clone()], None);
+            memory.confirm("edited", &prepared, &format!("{prefix}{name}{suffix}"), 100);
+            assert_eq!(
+                memory.prepare(vec![raw], None).text,
+                format!("{prefix}{}{suffix}", if learns { name } else { "Codex" }),
+                "name: {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_prose_cannot_supply_a_restored_candidate_suffix() {
+    // Only C++ Studio is extracted. Punctuation on the following, unextracted
+    // Studio must not make that prose look like an undo of C++ Studio -> C++.
+    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    let seed = result("C++ Studio", "C++ Studio", "项目");
+    let prepared = memory.prepare(vec![seed], None);
+    memory.confirm("first", &prepared, "C++", 100);
+    let raw = result("C++ Studio Studio", "C++ Studio", "项目");
+    let prepared = memory.prepare(vec![raw.clone()], None);
+    assert_eq!(prepared.text, "C++ Studio");
+    let before = memory.snapshot(100).contexts[0].corrections.clone();
+    memory.confirm("punctuation", &prepared, "C++ Studio!", 101);
+    assert_eq!(memory.snapshot(101).contexts[0].corrections, before);
+    assert_eq!(memory.prepare(vec![raw], None).text, "C++ Studio");
+}
+
+#[test]
+fn phrase_memory_does_not_expand_beyond_its_candidate_edges() {
+    // Short-term phrases must not absorb neighboring prose either. Interior
+    // changes remain observations; all edited text still supplies confirmed context.
+    for (edited, learns) in [
+        ("提前完成任务", false),
+        ("任务提前完成", false),
+        ("提前顺利完成", true),
+        ("提前完工", true),
+    ] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let mut raw = result("提前完成", "提前完成", "工作");
+        raw.memory_candidates[0].kind = TermKind::Phrase;
+        let prepared = memory.prepare(vec![raw], Some("zh".into()));
+        memory.confirm("edited", &prepared, edited, 100);
+        let snapshot = memory.snapshot(100);
+        assert_eq!(snapshot.contexts[0].history, vec![edited]);
+        assert_eq!(
+            snapshot.contexts[0]
+                .candidates
+                .iter()
+                .any(|c| c.term.text == edited),
+            learns,
+            "edited: {edited}"
+        );
+        assert!(snapshot.contexts[0].corrections.is_empty());
+    }
 }
 
 #[test]
@@ -69,9 +174,9 @@ fn corrections_use_whole_names_and_revoke_a_reverted_automatic_replacement() {
 }
 
 #[test]
-fn explicit_reversions_precede_name_boundary_heuristics() {
-    // Returning to a known raw spelling is an undo, even when it adds a word or
-    // contains the automatic name. Punctuation must not hide that explicit undo.
+fn reversion_cannot_expand_the_displayed_candidate_boundary() {
+    // The narrow ownership policy also applies to undo: a known raw spelling
+    // cannot authorize newly appended/prepended words or ambiguous whitespace.
     for (original, corrected) in [
         ("Open Eye", "OpenAI"),
         ("Call Codex", "Codex"),
@@ -91,21 +196,22 @@ fn explicit_reversions_precede_name_boundary_heuristics() {
                 assert_eq!(memory.snapshot(101).contexts[0].corrections, evidence);
                 let edited = format!("{prefix}{original}{punctuation}{suffix}");
                 memory.confirm("undo", &prepared, &edited, 102);
-                assert!(
-                    memory.snapshot(102).contexts[0].corrections.is_empty(),
+                assert_eq!(
+                    memory.snapshot(102).contexts[0].corrections,
+                    evidence,
                     "undo: {edited}"
                 );
-                assert_eq!(memory.prepare(vec![raw.clone()], None).text, raw.text);
+                assert_eq!(memory.prepare(vec![raw.clone()], None).text, prepared.text);
             }
         }
     }
 }
 
 #[test]
-fn explicit_reversions_restore_original_segment_boundaries() {
-    // A restored suffix word can land beyond the displayed segment's end. Raw
-    // source ranges retain its owner even if another segment stays auto-corrected.
-    for revert_second in [false, true] {
+fn cross_segment_restorations_do_not_guess_candidate_owners() {
+    // Restoring Studio inserts outside C++. A diff merging it with a neighboring
+    // rename also lacks unique ownership, so neither old rule may be inferred away.
+    for edited in ["C++ Studio Done", "C++ Studio Ready"] {
         let mut memory = Memory::load(None, Default::default(), 100).unwrap();
         for (id, original, corrected) in
             [("first", "C++ Studio", "C++"), ("second", "Ready", "Done")]
@@ -119,17 +225,9 @@ fn explicit_reversions_restore_original_segment_boundaries() {
         ];
         let prepared = memory.prepare(raw.clone(), None);
         assert_eq!(prepared.text, "C++ Done");
-        let edited = if revert_second {
-            "C++ Studio Ready"
-        } else {
-            "C++ Studio Done"
-        };
         memory.confirm("undo", &prepared, edited, 101);
-        assert_eq!(memory.prepare(raw, None).text, edited);
-        assert_eq!(
-            memory.snapshot(101).contexts[0].corrections.len(),
-            usize::from(!revert_second)
-        );
+        assert_eq!(memory.prepare(raw, None).text, "C++ Done");
+        assert_eq!(memory.snapshot(101).contexts[0].corrections.len(), 2);
     }
 }
 
@@ -137,11 +235,7 @@ fn explicit_reversions_restore_original_segment_boundaries() {
 fn neighboring_names_cannot_be_mistaken_for_restored_words() {
     // Raw C++ Studio contains its neighbor's displayed Studio. Adding punctuation
     // to that neighbor must not undo C++ Studio -> C++, in one or two segments.
-    let mut combined = result("C++ Studio Studio", "C++ Studio", "项目");
-    combined.memory_candidates.push(Candidate {
-        kind: TermKind::ProperNoun,
-        text: "Studio".into(),
-    });
+    let combined = result("C++ Studio Studio", "C++ Studio", "项目");
     for raw in [
         vec![combined],
         vec![
@@ -195,6 +289,7 @@ fn overlapping_model_names_do_not_learn_fragment_corrections() {
     raw.memory_candidates.push(Candidate {
         kind: TermKind::ProperNoun,
         text: "山".into(),
+        quote: raw.text.clone(),
     });
     let prepared = memory.prepare(vec![raw.clone()], None);
     memory.confirm("first", &prepared, "请找张珊。", 100);
@@ -223,6 +318,7 @@ fn crossing_model_names_cannot_choose_a_correction_span() {
     raw.memory_candidates.push(Candidate {
         kind: TermKind::ProperNoun,
         text: "York City".into(),
+        quote: raw.text.clone(),
     });
     let prepared = memory.prepare(vec![raw], None);
     memory.confirm("first", &prepared, "New Yolk City", 100);
@@ -244,7 +340,7 @@ fn configured_phrases_protect_their_full_span_from_candidate_corrections() {
     let mut memory = Memory::load(None, settings, 100).unwrap();
     let prepared = memory.prepare(vec![result("York", "York", "地点")], None);
     memory.confirm("first", &prepared, "Yolk", 100);
-    let raw = result("New York; York", "York", "地点");
+    let raw = quoted_result("New York; York", "York", "地点", &["New York", "; York"]);
     let prepared = memory.prepare(vec![raw.clone()], None);
     assert_eq!(prepared.text, "New York; Yolk");
     // Confirming a protected occurrence must not revoke the independently usable rule.
@@ -395,6 +491,7 @@ fn replacement_is_single_pass_and_cycles_are_suppressed() {
     raw.memory_candidates.push(Candidate {
         kind: TermKind::ProperNoun,
         text: "Beta".into(),
+        quote: raw.text.clone(),
     });
     assert_eq!(
         Prepared::new(vec![raw.clone()], &rules, &[], None).text,
@@ -498,7 +595,12 @@ fn different_final_spellings_revoke_a_rule_instead_of_choosing_one_occurrence() 
     let mut memory = Memory::load(None, Default::default(), 100).unwrap();
     let prepared = memory.prepare(vec![result("联系张山。", "张山", "同事")], None);
     memory.confirm("first", &prepared, "联系张珊。", 100);
-    let raw = result("联系张山，再联系张山。", "张山", "同事");
+    let raw = quoted_result(
+        "联系张山，再联系张山。",
+        "张山",
+        "同事",
+        &["联系张山，", "再联系张山。"],
+    );
     let prepared = memory.prepare(vec![raw.clone()], None);
     assert_eq!(prepared.text, "联系张珊，再联系张珊。");
     memory.confirm("different", &prepared, "联系张三，再联系张珊。", 101);
@@ -516,7 +618,16 @@ fn unchanged_occurrences_prevent_learning_a_conflicting_spelling() {
         let mut memory = Memory::load(None, Default::default(), 100).unwrap();
         let sources = vec![
             result("请找张山。", "张山", "同事"),
-            result(unchanged, "张山", "同事"),
+            quoted_result(
+                unchanged,
+                "张山",
+                "同事",
+                if unchanged.contains('和') {
+                    &["张山和", "张山正在开会。"]
+                } else {
+                    &["张山正在开会。"]
+                },
+            ),
         ];
         let prepared = memory.prepare(sources.clone(), Some("zh".into()));
         memory.confirm("mixed", &prepared, &format!("请找张珊。{unchanged}"), 100);
@@ -540,7 +651,12 @@ fn deleting_an_automatic_name_keeps_its_saved_correction() {
         let raw = result("请找张山。", "张山", "同事");
         let prepared = memory.prepare(vec![raw.clone()], None);
         memory.confirm("first", &prepared, "请找张珊。", 100);
-        let prepared = memory.prepare(vec![result(text, "张山", "同事")], None);
+        let mentions = if text.contains('，') {
+            quoted_result(text, "张山", "同事", &["请找张山，", "张山在开会。"])
+        } else {
+            result(text, "张山", "同事")
+        };
+        let prepared = memory.prepare(vec![mentions], None);
         memory.confirm("deleted", &prepared, final_text, 101);
         assert_eq!(memory.prepare(vec![raw], None).text, "请找张珊。");
     }
@@ -566,7 +682,12 @@ fn punctuation_only_edits_do_not_retrain_automatic_names() {
     .into_iter()
     .enumerate()
     {
-        let prepared = memory.prepare(vec![result(text, "Cody", "项目")], None);
+        let mentions = if text.contains(';') {
+            quoted_result(text, "Cody", "项目", &["Cody;", "; Cody"])
+        } else {
+            result(text, "Cody", "项目")
+        };
+        let prepared = memory.prepare(vec![mentions], None);
         memory.confirm(&format!("punctuation-{index}"), &prepared, final_text, 101);
         memory.save().unwrap();
         let after: serde_json::Value =
@@ -606,6 +727,7 @@ fn automatic_preview_ranges_keep_their_original_names() {
     raw.memory_candidates.push(Candidate {
         kind: TermKind::ProperNoun,
         text: "Beta".into(),
+        quote: raw.text.clone(),
     });
     let prepared = memory.prepare(vec![raw.clone()], None);
     assert_eq!(prepared.text, "Beta Gamma");
@@ -632,9 +754,9 @@ fn spelling_feedback_preserves_name_symbols_and_existing_punctuation() {
 
 #[test]
 fn inserted_and_deleted_letters_update_automatic_names() {
-    // A third spelling can differ only by adding/removing letters. Name-edge
-    // edits must work inside sentences and at the end of a multi-segment result.
-    for name in ["Code", "Codexx", "XCodex", "Codx", "CoXdex"] {
+    // Deleting owned letters and inserting strictly inside the name work in
+    // sentences and in either position of a multi-segment result.
+    for name in ["Code", "Codx", "CoXdex"] {
         for (sources, shown, edited) in [
             (
                 vec![result("Cody", "Cody", "项目")],
@@ -715,10 +837,10 @@ fn complete_unchanged_names_anchor_their_final_spans() {
 }
 
 #[test]
-fn unseparated_chinese_letters_still_update_the_whole_name() {
-    // Unicode word boundaries exist between Han characters. An old-name substring
-    // without a separator must not hide a genuine prefix/suffix letter insertion.
-    for name in ["张珊珊", "小张珊", "张小珊"] {
+fn chinese_name_insertions_require_an_interior_position() {
+    // Chinese letters obey the same ownership rule as Latin letters. A name's
+    // edge cannot absorb a new character merely because Unicode splits words there.
+    for (name, learns) in [("张珊珊", false), ("小张珊", false), ("张小珊", true)] {
         let mut memory = Memory::load(None, Default::default(), 100).unwrap();
         let raw = result("张山", "张山", "同事");
         let prepared = memory.prepare(vec![raw.clone()], Some("zh".into()));
@@ -726,7 +848,10 @@ fn unseparated_chinese_letters_still_update_the_whole_name() {
         let prepared = memory.prepare(vec![raw.clone()], Some("zh".into()));
         assert_eq!(prepared.text, "张珊");
         memory.confirm("edited", &prepared, name, 101);
-        assert_eq!(memory.prepare(vec![raw], Some("zh".into())).text, name);
+        assert_eq!(
+            memory.prepare(vec![raw], Some("zh".into())).text,
+            if learns { name } else { "张珊" }
+        );
     }
 }
 
@@ -759,6 +884,7 @@ fn an_insertion_between_adjacent_names_has_no_unique_owner() {
     raw.memory_candidates.push(Candidate {
         kind: TermKind::ProperNoun,
         text: "李四".into(),
+        quote: raw.text.clone(),
     });
     for sources in [
         vec![raw],
@@ -800,6 +926,7 @@ fn unprojectable_neighbors_still_block_shared_edge_insertions() {
         raw.memory_candidates.push(Candidate {
             kind: TermKind::ProperNoun,
             text: "李四".into(),
+            quote: raw.text.clone(),
         });
         let segments = pieces
             .into_iter()

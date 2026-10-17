@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const POLICY: &str = "realtime-context-memory-v2";
+pub(super) const POLICY: &str = "realtime-context-memory-v3";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -100,6 +100,15 @@ impl RealtimeCases {
         }
         contract.digest()
     }
+}
+
+/// Semantic term assertions stay independent of per-response quote provenance,
+/// which is checked separately by each segment's metadata validation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CandidateExpectation {
+    kind: TermKind,
+    text: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -207,8 +216,8 @@ impl SnapshotExpectations {
 pub(crate) struct Expectations {
     pub input: SnapshotExpectations,
     pub context: Option<ContextChoice>,
-    pub candidates_present: Vec<Candidate>,
-    pub candidates_absent: Vec<Candidate>,
+    pub candidates_present: Vec<CandidateExpectation>,
+    pub candidates_absent: Vec<CandidateExpectation>,
     pub memory: SnapshotExpectations,
     pub forbidden_text: Vec<String>,
 }
@@ -297,7 +306,10 @@ impl Expectations {
             for v in values {
                 checks.push(Check::new(
                     format!("candidate:{:?}:{}", v.kind, v.text),
-                    candidates.contains(v) == present,
+                    candidates
+                        .iter()
+                        .any(|c| c.kind == v.kind && c.text == v.text)
+                        == present,
                 ));
             }
         }
@@ -414,7 +426,12 @@ impl RealtimeReport {
                 .collect::<Vec<_>>(),
         )?;
         ensure!(
-            [POLICY, "realtime-context-memory-v1"].contains(&self.policy_version.as_str())
+            [
+                POLICY,
+                "realtime-context-memory-v1",
+                "realtime-context-memory-v2"
+            ]
+            .contains(&self.policy_version.as_str())
                 && self.cases_sha256 == self.cases.digest()?
                 && self.contract_sha256 == self.cases.contract_digest()?,
             "Realtime report identity mismatch"

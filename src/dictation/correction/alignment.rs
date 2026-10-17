@@ -101,12 +101,9 @@ impl<'a> Alignment<'a> {
 
     /// Project a complete source range; an edit crossing a boundary has no safe owner.
     pub fn project(&self, range: Range<usize>) -> Option<Range<usize>> {
-        if range != (0..self.before.len())
-            && self.edits.iter().any(|e| {
-                e.before.is_empty()
-                    && (e.before.start == range.start || e.before.start == range.end)
-            })
-        {
+        if self.edits.iter().any(|e| {
+            e.before.is_empty() && (e.before.start == range.start || e.before.start == range.end)
+        }) {
             return None;
         }
         self.project_range(range)
@@ -134,9 +131,8 @@ impl<'a> Alignment<'a> {
         self.project_range(range.clone())
     }
 
-    /// Include adjacent inserted letters/digits in a name, leaving separators and
-    /// surrounding words outside it. A retained complete name anchors its
-    /// own range before grapheme edits can claim letters from a neighboring word.
+    /// Accept spelling edits only within the displayed candidate. Unchanged
+    /// complete names may refresh memory, but pure edge insertions cannot rename them.
     pub fn project_noun(
         &self,
         spans: &[Range<usize>],
@@ -144,7 +140,7 @@ impl<'a> Alignment<'a> {
         after: &str,
     ) -> Option<Range<usize>> {
         let range = spans.get(index)?;
-        let mut projected = self.project_segment(spans, index)?;
+        let projected = self.project_segment(spans, index)?;
         let unchanged = after[projected.clone()]
             .match_indices(&self.before[range.clone()])
             .map(|(at, name)| projected.start + at..projected.start + at + name.len())
@@ -159,26 +155,17 @@ impl<'a> Alignment<'a> {
         // A local edit can merge a spelling change with adjoining prose. Only
         // replacing the entire candidate gives such added words an explicit scope.
         if self.edits.iter().any(|edit| {
-            edit.before != *range
-                && range.start <= edit.before.start
-                && edit.before.end <= range.end
-                && after[edit.after.clone()].chars().any(char::is_whitespace)
-                && !self.before[edit.before.clone()]
-                    .chars()
-                    .any(char::is_whitespace)
+            (edit.before.is_empty()
+                && (edit.before.start == range.start || edit.before.start == range.end))
+                || (edit.before != *range
+                    && range.start <= edit.before.start
+                    && edit.before.end <= range.end
+                    && after[edit.after.clone()].chars().any(char::is_whitespace)
+                    && !self.before[edit.before.clone()]
+                        .chars()
+                        .any(char::is_whitespace))
         }) {
             return None;
-        }
-        for edit in self.edits.iter().filter(|edit| edit.before.is_empty()) {
-            let inserted = &after[edit.after.clone()];
-            if edit.before.start == range.start {
-                projected.start =
-                    edit.after.start + inserted.trim_end_matches(char::is_alphanumeric).len();
-            }
-            if edit.before.start == range.end {
-                projected.end =
-                    edit.after.end - inserted.trim_start_matches(char::is_alphanumeric).len();
-            }
         }
         Some(projected)
     }

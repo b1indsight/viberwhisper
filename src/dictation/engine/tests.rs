@@ -36,7 +36,7 @@ async fn feedback_commits_only_confirmed_text_before_the_next_recording() {
                 );
             }
             let text = json!({"text":"用维伯耳语。", "context":{"kind":"new", "label":"项目"},
-                "memory_candidates":[{"kind":"proper_noun", "text":"维伯耳语"}]})
+                "memory_candidates":[{"kind":"proper_noun", "text":"维伯耳语", "quote":"用维伯耳语。"}]})
             .to_string();
             complete_response(&mut socket, &event, &format!("r-{turn}"), &text).await;
             delete_audio(&mut socket, &audio).await;
@@ -98,7 +98,7 @@ async fn disconnect_after_completed_response_preserves_only_validated_text() {
             commit_audio(&mut socket, "audio").await;
             let event = expect_event(&mut socket, "response.create").await;
             let text = if valid {
-                json!({"text":"已完成。", "context":{"kind":"new","label":"工作"}, "memory_candidates":[{"kind":"phrase","text":"已完成"}]}).to_string()
+                json!({"text":"已完成。", "context":{"kind":"new","label":"工作"}, "memory_candidates":[{"kind":"phrase","text":"已完成","quote":"已完成。"}]}).to_string()
             } else {
                 "not JSON".into()
             };
@@ -152,7 +152,7 @@ async fn completed_segment_survives_faults_but_not_user_cancellation() {
             let mut socket = accept_session(&listener).await;
             commit_audio(&mut socket, "audio-1").await;
             let event = expect_event(&mut socket, "response.create").await;
-            let text = json!({"text":"保留这一段。", "context":{"kind":"new","label":"工作"}, "memory_candidates":[{"kind":"phrase","text":"保留这一段"}]}).to_string();
+            let text = json!({"text":"保留这一段。", "context":{"kind":"new","label":"工作"}, "memory_candidates":[{"kind":"phrase","text":"保留这一段","quote":"保留这一段。"}]}).to_string();
             complete_response(&mut socket, &event, "r1", &text).await;
             delete_audio(&mut socket, "audio-1").await;
             expect_event(&mut socket, "input_audio_buffer.commit").await;
