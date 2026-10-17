@@ -41,6 +41,8 @@ struct Job {
 /// Keeps the Realtime connection and memory alive across recording sessions.
 pub(crate) struct DictationWorker {
     jobs: async_mpsc::Sender<Job>,
+    shutdown: CancellationToken,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl DictationWorker {
@@ -59,10 +61,36 @@ impl DictationWorker {
             .enable_all()
             .build()?;
         let (jobs, receiver) = async_mpsc::channel(1);
-        std::thread::Builder::new()
+        let shutdown = CancellationToken::new();
+        let worker_shutdown = shutdown.clone();
+        let thread = std::thread::Builder::new()
             .name("realtime-dictation".into())
-            .spawn(move || runtime.block_on(worker(settings, key, memory, receiver, language)))?;
-        Ok(Self { jobs })
+            .spawn(move || {
+                runtime.block_on(worker(
+                    settings,
+                    key,
+                    memory,
+                    receiver,
+                    language,
+                    worker_shutdown,
+                ))
+            })?;
+        Ok(Self {
+            jobs,
+            shutdown,
+            thread: Mutex::new(Some(thread)),
+        })
+    }
+
+    /// Close pending previews and finish accepted feedback before the process exits.
+    pub fn shutdown(&self) {
+        self.shutdown.cancel();
+        let mut thread = self.thread.lock().unwrap();
+        if let Some(thread) = thread.take()
+            && thread.join().is_err()
+        {
+            tracing::warn!("Realtime dictation worker panicked during shutdown");
+        }
     }
 
     pub fn start_session(&self) -> RealtimeSession {
@@ -88,6 +116,12 @@ impl DictationWorker {
             cancelled,
             failure,
         }
+    }
+}
+
+impl Drop for DictationWorker {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -146,16 +180,23 @@ async fn worker(
     mut memory: Memory,
     mut jobs: async_mpsc::Receiver<Job>,
     language: Option<String>,
+    shutdown: CancellationToken,
 ) {
     let mut connection: Option<Connection> = None;
     loop {
         let next = if let Some(socket) = &mut connection {
             tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
                 job = jobs.recv() => job,
                 _ = socket.idle() => { connection = None; continue; }
             }
         } else {
-            jobs.recv().await
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                job = jobs.recv() => job,
+            }
         };
         let Some(mut job) = next else {
             break;
@@ -165,6 +206,7 @@ async fn worker(
         let mut pending = None;
         let result = tokio::select! {
             biased;
+            _ = shutdown.cancelled() => break,
             _ = job.cancelled.cancelled() => Err(anyhow::anyhow!("dictation cancelled")),
             result = async {
                 if connection.is_none() { connection = Some(Connection::connect(&settings, key.as_ref().map(SecretValue::expose)).await?); }
@@ -197,8 +239,14 @@ async fn worker(
                     && let Some(socket) = &mut connection
                 {
                     // Cancellation is sent using the standard event before retiring an interrupted connection.
-                    if let Err(error) = socket.cancel().await {
-                        tracing::debug!(%error, "Retiring Realtime connection after cancellation cleanup failed");
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => break,
+                        result = socket.cancel() => {
+                            if let Err(error) = result {
+                                tracing::debug!(%error, "Retiring Realtime connection after cancellation cleanup failed");
+                            }
+                        }
                     }
                 }
                 connection = None; // Never replay an ambiguous audio commit after a connection failure.
@@ -227,17 +275,28 @@ async fn worker(
         if let Some((prepared, mut receiver)) = pending {
             // Keep answering control traffic while the user edits, without accepting
             // another recording until this result has been confirmed or discarded.
-            let feedback = loop {
-                if let Some(socket) = &mut connection {
-                    tokio::select! {
-                        feedback = &mut receiver => break feedback,
-                        _ = socket.idle() => { connection = None; }
+            let feedback = tokio::select! {
+                biased;
+                feedback = async {
+                    loop {
+                        if let Some(socket) = &mut connection {
+                            tokio::select! {
+                                feedback = &mut receiver => break feedback,
+                                _ = socket.idle() => { connection = None; }
+                            }
+                        } else {
+                            break (&mut receiver).await;
+                        }
                     }
-                } else {
-                    break receiver.await;
+                } => feedback.ok(),
+                _ = shutdown.cancelled() => {
+                    // Close first: a sender racing shutdown either fails or leaves
+                    // a value that must be persisted before this thread is joined.
+                    receiver.close();
+                    receiver.try_recv().ok()
                 }
             };
-            if let Ok(feedback) = feedback {
+            if let Some(feedback) = feedback {
                 memory.confirm(&recording.id, &prepared, &feedback, now());
                 if let Err(error) = memory.save() {
                     tracing::warn!(%error, "Could not save confirmed dictation memory");

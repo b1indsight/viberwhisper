@@ -332,13 +332,21 @@ impl SessionOrchestrator {
             session.fail(error);
         }
     }
+
+    /// Stop recording and persist accepted Realtime feedback during normal exit.
+    pub(crate) fn shutdown(&self) {
+        if let Some(session) = self.inner.lock().unwrap().take() {
+            session.worker.abort();
+        }
+        if let SessionBackend::Realtime(worker) = &self.backend {
+            worker.shutdown();
+        }
+    }
 }
 
 impl Drop for SessionOrchestrator {
     fn drop(&mut self) {
-        if let Some(session) = self.inner.get_mut().unwrap().take() {
-            session.worker.abort();
-        }
+        self.shutdown();
     }
 }
 

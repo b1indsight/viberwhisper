@@ -105,6 +105,59 @@ fn learning_accepts_only_edits_contained_in_the_displayed_candidate() {
 }
 
 #[test]
+fn unrelated_edits_do_not_move_edge_insertions_inside_a_candidate() {
+    // Editing another segment defeats common-prefix/suffix trimming. Repeated
+    // edge letters must still have no owner, while a true interior edit can learn.
+    for (sources, edited, expected) in [
+        (
+            vec![
+                result("Ready.", "Ready", "项目"),
+                result("Use Codex.", "Codex", "项目"),
+            ],
+            "Ready! Use Codexx.",
+            "Ready. Use Codex.",
+        ),
+        (
+            vec![
+                result("Use Codex.", "Codex", "项目"),
+                result("Ready.", "Ready", "项目"),
+            ],
+            "Use CCodex. Ready!",
+            "Use Codex. Ready.",
+        ),
+        (
+            vec![
+                result("Ready.", "Ready", "项目"),
+                result("Use Abab.", "Abab", "项目"),
+            ],
+            "Ready! Use Ababab.",
+            "Ready. Use Abab.",
+        ),
+        (
+            vec![
+                result("Ready.", "Ready", "项目"),
+                result("Use 李莉莉.", "李莉莉", "项目"),
+            ],
+            "Ready! Use 李莉莉莉.",
+            "Ready. Use 李莉莉.",
+        ),
+        (
+            vec![
+                result("Ready.", "Ready", "项目"),
+                result("Use Codex.", "Codex", "项目"),
+            ],
+            "Ready! Use CoXdex.",
+            "Ready. Use CoXdex.",
+        ),
+    ] {
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let prepared = memory.prepare(sources.clone(), None);
+        memory.confirm("edited", &prepared, edited, 100);
+        assert_eq!(memory.prepare(sources, None).text, expected, "{edited}");
+    }
+}
+
+#[test]
 fn phrase_memory_does_not_expand_beyond_its_candidate_edges() {
     // Short-term phrases must not absorb neighboring prose either. Interior
     // changes remain observations; all edited text still supplies confirmed context.

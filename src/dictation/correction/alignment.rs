@@ -11,10 +11,11 @@ struct Edit {
 pub(super) struct Alignment<'a> {
     edits: Vec<Edit>,
     before: &'a str,
+    after: &'a str,
 }
 
 impl<'a> Alignment<'a> {
-    pub fn new(before: &'a str, after: &str) -> Option<Self> {
+    pub fn new(before: &'a str, after: &'a str) -> Option<Self> {
         let a: Vec<_> = before.grapheme_indices(true).collect();
         let b: Vec<_> = after.grapheme_indices(true).collect();
         let mut prefix = 0;
@@ -96,17 +97,52 @@ impl<'a> Alignment<'a> {
                 after: b_byte(start_j)..b_byte(j),
             });
         }
-        Some(Self { edits, before })
+        Some(Self {
+            edits,
+            before,
+            after,
+        })
     }
 
     /// Project a complete source range; an edit crossing a boundary has no safe owner.
     pub fn project(&self, range: Range<usize>) -> Option<Range<usize>> {
-        if self.edits.iter().any(|e| {
-            e.before.is_empty() && (e.before.start == range.start || e.before.start == range.end)
-        }) {
+        if self
+            .edits
+            .iter()
+            .any(|edit| self.insertion_at(edit, range.start) || self.insertion_at(edit, range.end))
+        {
             return None;
         }
         self.project_range(range)
+    }
+
+    /// Repeated graphemes can move an insertion through unchanged text without
+    /// changing the output. Every equivalent candidate-edge position is unowned.
+    fn insertion_at(&self, edit: &Edit, at: usize) -> bool {
+        if !edit.before.is_empty() {
+            return false;
+        }
+        let from = edit.before.start;
+        let start = from.min(at);
+        let end = from.max(at);
+        if self.edits.iter().any(|other| {
+            (other.before.start < end && start < other.before.end)
+                || (other.before.is_empty()
+                    && start < other.before.start
+                    && other.before.start < end)
+        }) {
+            return false;
+        }
+        let source = self.before[start..end].graphemes(true);
+        let inserted = self.after[edit.after.clone()].graphemes(true);
+        if at < from {
+            source
+                .rev()
+                .zip(inserted.rev().cycle())
+                .all(|(a, b)| a == b)
+        } else {
+            source.zip(inserted.cycle()).all(|(a, b)| a == b)
+        }
     }
 
     fn project_range(&self, range: Range<usize>) -> Option<Range<usize>> {
@@ -122,9 +158,8 @@ impl<'a> Alignment<'a> {
             .get(index + 1)
             .is_some_and(|next| range.end == next.start);
         if self.edits.iter().any(|edit| {
-            edit.before.is_empty()
-                && ((shared_start && edit.before.start == range.start)
-                    || (shared_end && edit.before.start == range.end))
+            (shared_start && self.insertion_at(edit, range.start))
+                || (shared_end && self.insertion_at(edit, range.end))
         }) {
             return None;
         }
@@ -133,7 +168,8 @@ impl<'a> Alignment<'a> {
 
     /// Accept spelling edits only within the displayed candidate. Unchanged
     /// complete names may refresh memory, but pure edge insertions cannot rename them.
-    pub fn project_noun(&self, range: Range<usize>, after: &str) -> Option<Range<usize>> {
+    pub fn project_noun(&self, range: Range<usize>) -> Option<Range<usize>> {
+        let after = self.after;
         let projected = self.project_range(range.clone())?;
         let unchanged = after[projected.clone()]
             .match_indices(&self.before[range.clone()])

@@ -591,6 +591,7 @@ impl ApplicationHandler<AppEvent> for ListenerApplication {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.cancel_finalization();
+        self.orchestrator.shutdown();
     }
 }
 

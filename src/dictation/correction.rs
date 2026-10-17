@@ -137,7 +137,7 @@ impl Prepared {
             for term in &segment.terms {
                 let noun = term.kind == TermKind::ProperNoun;
                 let projected = if noun {
-                    alignment.project_noun(term.shown.clone(), final_text)
+                    alignment.project_noun(term.shown.clone())
                 } else {
                     alignment.project(term.shown.clone())
                 };

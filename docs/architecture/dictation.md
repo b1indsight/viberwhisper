@@ -19,6 +19,7 @@ Raw prompt-lab capture deliberately retains the HTTP transcriber.
   Delivery uses the returned final text; no separate verbatim transcript is requested.
 - `feedback`: a single-use confirmation capability; dropping it discards learning, successful
   delivery submits edited text without waiting for persistence; the serial worker commits it before its next job.
+  Normal shutdown closes pending feedback, drains accepted text and joins the worker before returning.
 - `correction`: bounded grapheme alignment, whole-candidate feedback, reversible context-scoped
   single-pass replacement and word boundaries. Source, shown and confirmed text remain distinct.
 - `memory`: 24-hour observations with provenance and independent-recording support counts; bounded
@@ -147,6 +148,9 @@ Changing to a third spelling updates the original source mapping.
 The initial ownership policy accepts replacements and deletions contained in a displayed candidate,
 and pure insertions strictly inside it. Insertions at either candidate edge cannot rename it;
 prefix/suffix extensions and multiword restorations outside the displayed candidate are deferred.
+Repeated graphemes can move an insertion through unchanged text without changing the output.
+If any such equivalent position reaches a candidate edge, learning is skipped even when another
+segment's edit made the global alignment place it inside. Shared segment edges use the same check.
 An edit crossing a candidate or segment boundary skips the affected learning. Segment projection
 still accepts unshared edge insertions for confirmed context text. Before interpreting a name's
 grapheme edits, a retained complete name inside its
