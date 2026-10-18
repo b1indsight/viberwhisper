@@ -114,6 +114,11 @@ before collecting results; abort and orchestrator drop cancel active work. The H
 and convergence rules below remain unchanged. Realtime connection/audio details live in
 [dictation](dictation.md).
 
+Desktop `finish_for_delivery` retains an optional single-use Realtime confirmation handle with
+the text. The preview worker returns final edited text through that handle only after successful
+delivery. The public string-only `finish_session` discards the handle; it cannot silently confirm
+learning. HTTP results and partial failures carry no learning capability.
+
 ### HTTP Worker Concepts
 
 - **Chunk State Machine**: `Flushed → Uploading → Transcribed / Failed`

@@ -4,7 +4,7 @@ use serde_json::json;
 fn response(text: &str) -> String {
     json!({"text": text,
         "context": {"kind":"new", "label":"Rust 项目"},
-        "memory_candidates":[{"kind":"proper_noun", "text":"ViberWhisper"}]
+        "memory_candidates":[{"kind":"proper_noun", "text":"ViberWhisper", "quote":text}]
     })
     .to_string()
 }
@@ -21,12 +21,60 @@ fn invalid_memory_does_not_discard_text_and_cannot_invent_context() {
 }
 
 #[test]
+fn candidate_quotes_must_uniquely_ground_the_term_in_current_text() {
+    // Missing, invented and repeated anchors cannot identify a model-selected
+    // occurrence. Reject their metadata while preserving the delivered text.
+    for (text, candidate, accepted) in [
+        (
+            "请找张山。",
+            json!({"kind":"proper_noun","text":"张山","quote":"请找张山。"}),
+            true,
+        ),
+        (
+            "请找张山。",
+            json!({"kind":"proper_noun","text":"张山"}),
+            false,
+        ),
+        (
+            "请找张山。",
+            json!({"kind":"proper_noun","text":"张山","quote":"请找张山确认。"}),
+            false,
+        ),
+        (
+            "请找张山。请找张山。",
+            json!({"kind":"proper_noun","text":"张山","quote":"请找张山。"}),
+            false,
+        ),
+        (
+            "张山和张山。",
+            json!({"kind":"proper_noun","text":"张山","quote":"张山和张山。"}),
+            false,
+        ),
+        (
+            "哈哈哈",
+            json!({"kind":"proper_noun","text":"哈哈","quote":"哈哈"}),
+            false,
+        ),
+    ] {
+        let wire = json!({"text":text,"context":{"kind":"new","label":"同事"},
+            "memory_candidates":[candidate]});
+        let result = DictationResult::parse(&wire.to_string(), &[]).unwrap();
+        assert_eq!(result.text, text);
+        assert_eq!(
+            !result.memory_candidates.is_empty(),
+            accepted,
+            "wire: {wire}"
+        );
+    }
+}
+
+#[test]
 fn candidates_absent_from_current_text_cannot_pollute_learned_memory() {
     // A real response invented a candidate absent even from its own transcript.
     // Keep the transcript and grounded names, including harmless case/full-width differences.
     let wire = json!({"text":"使用ｒｅｄｉｓ缓存。", "context":{"kind":"new","label":"开发"},
-        "memory_candidates":[{"kind":"proper_noun","text":"Redis"},
-            {"kind":"phrase","text":"3核38都是无统的"}]});
+        "memory_candidates":[{"kind":"proper_noun","text":"Redis","quote":"使用ｒｅｄｉｓ缓存。"},
+            {"kind":"phrase","text":"3核38都是无统的","quote":"使用ｒｅｄｉｓ缓存。"}]});
     let result = DictationResult::parse(&wire.to_string(), &[]).unwrap();
     assert_eq!(result.text, "使用ｒｅｄｉｓ缓存。");
     assert_eq!(result.memory_candidates.len(), 1);

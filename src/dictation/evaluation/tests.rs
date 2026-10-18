@@ -20,7 +20,7 @@ fn replay_preserves_support_counts_expiration_and_failed_recording_rollback() {
         input: state.snapshot(100),
         output: json!({
             "text":"ViberWhisper ready", "context":{"kind":"existing","id":"project"},
-            "memory_candidates":[{"kind":"proper_noun","text":"ViberWhisper"}]
+            "memory_candidates":[{"kind":"proper_noun","text":"ViberWhisper","quote":"ViberWhisper ready"}]
         }),
     };
     let learned = state
@@ -105,7 +105,7 @@ async fn evaluator_sends_production_snapshot_and_rolls_back_cleanup_failure() {
             .unwrap();
             assert_eq!(snapshot.contexts[0].long_term, seeded().long_term);
             assert!(snapshot.contexts[0].history.is_empty());
-            let text = json!({"text":"ViberWhisper ready","context":{"kind":"existing","id":"project"},"memory_candidates":[{"kind":"proper_noun","text":"ViberWhisper"}]}).to_string();
+            let text = json!({"text":"ViberWhisper ready","context":{"kind":"existing","id":"project"},"memory_candidates":[{"kind":"proper_noun","text":"ViberWhisper","quote":"ViberWhisper ready"}]}).to_string();
             for reply in [
                 json!({"type":"response.created","response":{"id":"r","metadata":event["response"]["metadata"]}}),
                 json!({"type":"response.output_text.done","response_id":"r","output_index":0,"content_index":0,"text":text}),

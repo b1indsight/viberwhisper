@@ -25,7 +25,8 @@ use crate::postprocess::{PostProcessor, PostProcessorSession};
 use crate::prompt_lab::{CaptureTranscription, PromptLabCapture, SttSnapshot};
 use crate::session::SessionId;
 use crate::ui::preview::{
-    FinalizationGate, PendingPreview, PreviewCommand, PreviewUpdate, wait_for_confirmation,
+    FinalizationGate, PendingPreview, PreviewCommand, PreviewTranscription, PreviewUpdate,
+    wait_for_confirmation,
 };
 
 #[derive(Debug, Clone)]
@@ -499,7 +500,7 @@ impl ListenerApplication {
                     move || {
                         if !gate.is_cancelled()
                             && let Some(transcription) = finish_transcription(
-                                orchestrator.finish_session(session_id),
+                                orchestrator.finish_for_delivery(session_id),
                                 &mut post_processor,
                             )
                         {
@@ -590,13 +591,18 @@ impl ApplicationHandler<AppEvent> for ListenerApplication {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.cancel_finalization();
+        self.orchestrator.shutdown();
     }
 }
 
 fn finish_transcription(
-    result: Result<String, SessionError>,
+    result: Result<crate::dictation::Transcript, SessionError>,
     post_processor: &mut PostProcessorSession,
-) -> Option<(String, Option<String>)> {
+) -> Option<PreviewTranscription> {
+    let (result, confirmation) = match result {
+        Ok(transcript) => (Ok(transcript.text), transcript.confirmation),
+        Err(error) => (Err(error), None),
+    };
     let prepared = match result {
         Ok(stt_text) => {
             if stt_text.is_empty() {
@@ -649,7 +655,13 @@ fn finish_transcription(
             ))
         }
     };
-    prepared.filter(|(text, _)| !text.trim().is_empty())
+    prepared
+        .filter(|(text, _)| !text.trim().is_empty())
+        .map(|(text, warning)| PreviewTranscription {
+            text,
+            warning,
+            confirmation,
+        })
 }
 
 #[cfg(test)]
