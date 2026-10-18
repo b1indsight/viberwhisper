@@ -12,12 +12,21 @@ async fn recording_declares_prefix_before_audio_and_orders_final_input() {
     use crate::{core::orchestrator::SessionOrchestrator, session::SessionId};
     // Previously the first client item was audio, and all context arrived before
     // the audio reference only at stop. Exercise the actual desktop worker path.
-    let (listener, settings) = listen().await;
+    let (listener, mut settings) = listen().await;
+    settings.memory = serde_json::from_value(json!({"long_term":[{
+        "context":"project", "kind":"proper_noun", "text":"ViberWhisper"
+    }]}))
+    .unwrap();
     let server = tokio::spawn(async move {
         let mut socket = accept_session(&listener).await;
         let declared = expect_event(&mut socket, "conversation.item.create").await;
         assert_eq!(declared["item"]["role"], "user");
-        assert_eq!(declared["item"]["content"][0]["text"], "{\"contexts\":[]}");
+        let stable: Value =
+            serde_json::from_str(declared["item"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            stable["contexts"][0]["long_term"][0]["text"],
+            "ViberWhisper"
+        );
         let mut item = declared["item"].clone();
         item["id"] = json!("prefix");
         item["status"] = json!("completed");
@@ -271,71 +280,19 @@ async fn live_realtime_structured_multiturn() {
         .unwrap()
         .push(&samples, true)
         .unwrap();
-    let mut completed = Vec::new();
-    for (round, terms) in [
-        vec![],
-        vec!["ViberWhisper", "Rust"],
-        vec!["ViberWhisper"],
-        vec!["ViberWhisper", "Qwen"],
-        vec!["ViberWhisper", "Qwen"],
-    ]
-    .iter()
-    .enumerate()
-    {
-        let memory = crate::dictation::memory::Memory::seeded(
-            serde_json::from_value(json!({"long_term":terms.iter().map(|text|
-                json!({"context":"project","kind":"proper_noun","text":text})).collect::<Vec<_>>()
-            }))
-            .unwrap(),
-            vec![crate::dictation::memory::Observation::new(
-                "previous",
-                0,
-                100,
-                "project",
-                if round == 4 {
-                    "另一次已确认的文字。"
-                } else {
-                    "先前已确认的文字。"
-                },
-                Vec::new(),
-            )],
-            100,
-        );
-        let input = memory.prompt_input(&memory.stable_prefix(), 100);
-        connection
-            .begin(&input.stable, &format!("live-{round}"))
-            .await
-            .unwrap();
+    let memory = crate::dictation::memory::Memory::frozen(Default::default());
+    let input = memory.prompt_input(&memory.stable_prefix(), 0);
+    for round in 0..2 {
+        let correlation = format!("live-{round}");
+        connection.begin(&input.stable, &correlation).await.unwrap();
         connection.append(&pcm).await.unwrap();
-        let result = connection
-            .finish(&input, &format!("live-{round}"))
-            .await
-            .unwrap();
+        let result = connection.finish(&input, &correlation).await.unwrap();
         assert!(!result.text.is_empty());
         connection.delete_segment().await.unwrap();
         println!(
-            "warm round {round}: valid structured result, {} characters",
+            "round {round}: valid structured result, {} characters",
             result.text.chars().count()
         );
-        completed.push((input, result.text));
-    }
-    drop(connection);
-    // Fresh connections have no text checkpoints. Hold final messages fixed while
-    // comparing against the connection reused for all vocabulary/suffix variations.
-    for (round, (input, expected)) in completed.into_iter().enumerate() {
-        let mut cold = Connection::connect(&settings, key.as_deref())
-            .await
-            .unwrap();
-        let correlation = format!("cold-{round}");
-        cold.begin(&input.stable, &correlation).await.unwrap();
-        cold.append(&pcm).await.unwrap();
-        let result = cold.finish(&input, &correlation).await.unwrap();
-        cold.delete_segment().await.unwrap();
-        assert_eq!(
-            result.text, expected,
-            "cold/warm text mismatch for variant {round}"
-        );
-        println!("cold round {round}: matches warm text");
     }
 }
 

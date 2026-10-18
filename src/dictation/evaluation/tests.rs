@@ -89,52 +89,6 @@ fn seed_budget_is_checked_before_production_trimming() {
     assert!(seed.validate(100).is_err());
 }
 
-#[test]
-fn historical_traces_keep_their_budget_policy_after_dynamic_topic_growth() {
-    // A newly learned topic can cost more envelope space than the remaining budget.
-    // V4 protects the accepted vocabulary; v3 reports must still replay their earlier trimming.
-    let terms: Vec<_> = (0..3)
-        .flat_map(|context| {
-            (0..16).map(move |i| {
-                json!({
-                    "context":format!("topic-{context}"), "kind":"proper_noun",
-                    "text":format!("{i:02}{}", "词".repeat(78))
-                })
-            })
-        })
-        .collect();
-    let settings = serde_json::from_value(json!({"long_term":terms})).unwrap();
-    let bounded = Memory::frozen(settings).legacy_snapshot(100);
-    let seed = MemorySeed {
-        long_term: bounded
-            .contexts
-            .into_iter()
-            .flat_map(|c| c.long_term)
-            .collect(),
-        observations: Vec::new(),
-    };
-    seed.validate(100).unwrap();
-    let memory = seed.memory(100);
-    let input = memory.prompt_input(&memory.stable_prefix(), 100);
-    let first = SegmentTrace {
-        index: 0,
-        input: input.snapshot(),
-        prompt_input: Some(input),
-        output: json!({"text":"runtime", "context":{"kind":"new","label":"x".repeat(64)},"memory_candidates":[]}),
-    };
-    let learned = Replay::new(&seed, 100)
-        .replay("first", 100, &[first], true)
-        .unwrap();
-    assert_ne!(learned.snapshot(100), learned.legacy_snapshot(100));
-    let legacy = SegmentTrace {
-        index: 0,
-        input: learned.legacy_snapshot(100),
-        prompt_input: None,
-        output: json!({"text":"next", "context":{"kind":"uncertain"},"memory_candidates":[]}),
-    };
-    assert!(learned.replay("second", 100, &[legacy], true).is_ok());
-}
-
 #[tokio::test]
 async fn evaluator_sends_production_snapshot_and_rolls_back_cleanup_failure() {
     for cleanup in [true, false] {

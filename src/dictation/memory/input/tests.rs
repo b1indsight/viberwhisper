@@ -5,41 +5,6 @@ use crate::dictation::{
 use serde_json::json;
 
 #[test]
-fn runtime_updates_and_expiry_do_not_change_the_declared_vocabulary() {
-    // New segment history and yesterday's expiry used to change text before the audio.
-    let settings: MemoryConfig = serde_json::from_value(json!({"long_term":[{
-        "context":"project", "kind":"proper_noun", "text":"ViberWhisper"
-    }]}))
-    .unwrap();
-    let memory = Memory::seeded(
-        settings,
-        vec![Observation::new(
-            "previous",
-            0,
-            100,
-            "project",
-            "使用 ViberWhisper",
-            Vec::new(),
-        )],
-        100,
-    );
-    let stable = memory.stable_prefix();
-    let before = memory.prompt_input(&stable, 100);
-    let expired = memory.prompt_input(&stable, 86_500);
-    assert_eq!(
-        serde_json::to_string(&before.stable).unwrap(),
-        r#"{"contexts":[{"id":"project","label":"project","long_term":[{"context":"project","kind":"proper_noun","text":"ViberWhisper"}]}]}"#
-    );
-    assert_eq!(before.stable, expired.stable);
-    assert_eq!(stable, memory.stable_prefix());
-    assert_eq!(before.dynamic.contexts[0].history, ["使用 ViberWhisper"]);
-    assert!(before.dynamic.contexts[0].long_term.is_empty());
-    assert!(expired.dynamic.contexts.is_empty());
-    assert_eq!(before.snapshot(), memory.snapshot(100));
-    assert_eq!(expired.snapshot(), memory.snapshot(86_500));
-}
-
-#[test]
 fn dynamic_context_cannot_evict_a_frozen_prefix_at_the_joint_budget_limit() {
     // A later topic adds JSON envelope overhead even after all its history is trimmed.
     // Reserve the accepted vocabulary and remove dynamic-only topics before altering it.

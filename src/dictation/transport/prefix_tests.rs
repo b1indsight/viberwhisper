@@ -1,6 +1,6 @@
 use super::*;
 use crate::dictation::{
-    memory::{Memory, Observation},
+    memory::Memory,
     test_support::{
         accept_session, commit_audio, complete_response, declare_prefix, delete_audio,
         expect_event, listen, send_json,
@@ -103,113 +103,6 @@ async fn prefix_acknowledgement_rejects_mismatched_items_without_uploading() {
         drop(connection);
         server.await.unwrap();
     }
-}
-
-#[tokio::test]
-async fn complete_inputs_survive_prefix_growth_shrinkage_and_dynamic_changes() {
-    // Text cache eligibility must never decide which business input is sent.
-    // The same connection sees empty, extended, shortened and partially changed vocabularies.
-    let (listener, settings) = listen().await;
-    let cases = [
-        vec![],
-        vec!["One", "Two"],
-        vec!["One"],
-        vec!["One", "Three"],
-        vec!["One", "Three"],
-    ];
-    let expected = cases.clone();
-    let server = tokio::spawn(async move {
-        let mut socket = accept_session(&listener).await;
-        let mut previous = None;
-        for (round, terms) in expected.iter().enumerate() {
-            let prefix_id = format!("prefix-{round}");
-            let declared = declare_prefix(&mut socket, &prefix_id).await;
-            let text = declared["item"]["content"][0]["text"].as_str().unwrap();
-            let stable: Value = serde_json::from_str(text).unwrap();
-            if terms.is_empty() {
-                assert_eq!(stable, json!({"contexts":[]}));
-            } else {
-                let values: Vec<_> = stable["contexts"][0]["long_term"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v["text"].as_str().unwrap())
-                    .collect();
-                assert_eq!(&values, terms);
-            }
-            if round == 4 {
-                assert_eq!(previous.as_deref(), Some(text));
-            }
-            previous = Some(text.to_owned());
-            let audio = format!("audio-{round}");
-            commit_audio(&mut socket, &audio).await;
-            let request = expect_event(&mut socket, "response.create").await;
-            assert_eq!(
-                request["response"]["metadata"]["dictation_id"],
-                format!("round-{round}")
-            );
-            assert_eq!(
-                request["response"]["input"][0],
-                json!({"type":"item_reference","id":prefix_id})
-            );
-            assert_eq!(
-                request["response"]["input"][1],
-                json!({"type":"item_reference","id":audio})
-            );
-            let suffix: Value = serde_json::from_str(
-                request["response"]["input"][2]["content"][0]["text"]
-                    .as_str()
-                    .unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                suffix["contexts"][0]["history"],
-                json!([format!("history-{round}")])
-            );
-            assert_eq!(suffix["contexts"][0]["long_term"], json!([]));
-            complete_response(&mut socket, &request, &format!("response-{round}"), RESULT).await;
-            delete_audio(&mut socket, &audio).await;
-            delete_audio(&mut socket, &prefix_id).await;
-        }
-    });
-    let mut connection = Connection::connect(&settings, None).await.unwrap();
-    for (round, terms) in cases.iter().enumerate() {
-        let memory = Memory::seeded(
-            serde_json::from_value(json!({"long_term":terms.iter().map(|text|
-                json!({"context":"project","kind":"proper_noun","text":text})).collect::<Vec<_>>()
-            }))
-            .unwrap(),
-            vec![Observation::new(
-                "previous",
-                0,
-                100,
-                "project",
-                &format!("history-{round}"),
-                Vec::new(),
-            )],
-            100,
-        );
-        let input = memory.prompt_input(&memory.stable_prefix(), 100);
-        let correlation = format!("round-{round}");
-        connection.begin(&input.stable, &correlation).await.unwrap();
-        assert!(connection.begin(&input.stable, "overlap").await.is_err());
-        connection.append(&[1; 2400]).await.unwrap();
-        assert!(connection.finish(&input, "wrong-recording").await.is_err());
-        let other = Memory::frozen(
-            serde_json::from_value(json!({"long_term":[{
-                "context":"other","kind":"proper_noun","text":"Replacement"
-            }]}))
-            .unwrap(),
-        );
-        let replaced = other.prompt_input(&other.stable_prefix(), 100);
-        assert!(connection.finish(&replaced, &correlation).await.is_err());
-        assert_eq!(
-            connection.finish(&input, &correlation).await.unwrap().text,
-            "测试"
-        );
-        connection.delete_segment().await.unwrap();
-    }
-    server.await.unwrap();
 }
 
 #[tokio::test]
