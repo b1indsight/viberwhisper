@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const POLICY: &str = "realtime-context-memory-v3";
+pub(super) const POLICY: &str = "realtime-context-memory-v4";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -428,7 +428,8 @@ impl RealtimeReport {
             [
                 POLICY,
                 "realtime-context-memory-v1",
-                "realtime-context-memory-v2"
+                "realtime-context-memory-v2",
+                "realtime-context-memory-v3"
             ]
             .contains(&self.policy_version.as_str())
                 && self.cases_sha256 == self.cases.digest()?
@@ -449,16 +450,32 @@ impl RealtimeReport {
                     .find(|s| s.sample_id == step.sample_id)
                     .unwrap();
                 ensure!(
+                    row.segments.iter().all(
+                        |trace| trace.prompt_input.is_some() == (self.policy_version == POLICY)
+                    ),
+                    "Realtime trace input layout does not match its policy"
+                );
+                ensure!(
                     row.case_id == case.id
                         && row.sample_id == step.sample_id
                         && row.at == at
-                        && row.before == memory.snapshot(at),
+                        && row.before
+                            == if self.policy_version == POLICY {
+                                memory.snapshot(at)
+                            } else {
+                                memory.legacy_snapshot(at)
+                            },
                     "Realtime step input mismatch"
                 );
                 memory =
                     memory.replay(&step.sample_id, at, &row.segments, sample.error.is_none())?;
                 ensure!(
-                    row.after == memory.snapshot(at),
+                    row.after
+                        == if self.policy_version == POLICY {
+                            memory.snapshot(at)
+                        } else {
+                            memory.legacy_snapshot(at)
+                        },
                     "Realtime step memory mismatch"
                 );
                 if let Some(text) = &sample.hypothesis {

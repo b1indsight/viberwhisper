@@ -56,6 +56,11 @@ The same resolved string is used for session instructions, response instructions
 report metadata. Prompt-lab overrides operate on a cloned configuration, clear component selection
 and disable personal memory; saved configuration is untouched.
 
+The default context component explicitly ties the JSON after audio to the same preceding audio.
+It also explains that stable and dynamic context fields combine by ID. Custom full prompts and
+saved component objects retain their exact text; authors should include equivalent guidance for
+the new input order. Default-component updates do not rewrite those user-owned overrides.
+
 ## Audio and lifecycle
 
 The existing recorder emits 200 ms WAV envelopes internally in Realtime mode. This avoids adding
@@ -73,14 +78,30 @@ end is uploaded before commit; stop flushes the resampler and retains short voic
 segments are checked using the shared energy/VAD gate; silent segments clear the server buffer
 without generating text. Already-uploaded frames are not retrospectively normalized or removed.
 
-The service must accept `max_output_tokens=4096`, text delta/done events, cancellation and
-item deletion. `response.create` uses explicit `input`/`item_reference`, `conversation=none`,
-correlation `metadata` and `instructions`; structured JSON is a validated prompt contract.
-Each commit creates an audio item. A single `response.create` references that item and a frozen
-snapshot of relevant context, with `conversation=none`. `response.done` must be completed and
-match the final text before delivery/learning. Validated text is retained before deleting the
-finished audio item. Cleanup errors/timeouts retire the connection and return completed text as
-a partial failure, without learning from the recording. Cancellation reuses the same item cleanup.
+The service must accept `max_output_tokens=4096`, text item creation/acknowledgement, text delta/done
+events, cancellation and item deletion. Before the first audio append of every segment, the client
+creates a user text item containing configured vocabulary. It validates the returned content and
+server-assigned ID, waiting for matching `conversation.item.added` / `conversation.item.done`
+(or a completed `conversation.item.created`). Instructions are acknowledged at session setup.
+The vocabulary bytes remain frozen for the recording, including its later segments.
+
+After commit, `response.create` uses explicit `input` in this order: accepted vocabulary item
+reference, committed audio item reference, inline dynamic-context text. It retains
+`conversation=none`, correlation `metadata`, output settings and exactly the declared instructions.
+The suffix contains candidates, support counts, history and persistent confirmed corrections;
+matching context IDs combine the two text parts, and vocabulary content is sent only once.
+Empty parts consistently serialize as `{"contexts":[]}`. No timestamps or random IDs enter text.
+The joint business snapshot stays within four contexts / 6000 characters, reserving the frozen
+vocabulary before trimming runtime content. Empty dynamic-only topics cannot evict accepted terms.
+
+`response.done` must be completed and match the final text before delivery/learning. Validated text
+is retained before deleting both audio and vocabulary items and awaiting their deletion events.
+Cleanup errors/timeouts retire the connection and return completed text as a partial failure,
+without learning from the recording. Silent segments clear audio and delete their text item;
+recordings without audio create neither. Cancellation resolves pending item acknowledgements,
+uses the same cleanup, and never replays an ambiguous audio commit. Reconnects declare full input
+with fresh IDs. Cache misses and shorter common prefixes do not change the input sent; text-item
+deletion makes no assumption about whether the server retains token-verified KV checkpoints.
 Each recording
 works on a copy of memory; cancellation/failure discards its updates. Successful desktop recordings
 retain original term spellings and displayed ranges with a single-use feedback handle. Only successful preview delivery commits

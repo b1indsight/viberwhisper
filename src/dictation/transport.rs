@@ -12,7 +12,32 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig},
 };
 
-use super::{config::DictationConfig, memory::Snapshot, result::DictationResult};
+use super::{
+    config::DictationConfig,
+    memory::{PromptInput, StablePrefix},
+    result::DictationResult,
+};
+
+struct Segment {
+    correlation: String,
+    prefix_text: String,
+    prefix: PrefixState,
+    audio: AudioState,
+}
+
+enum PrefixState {
+    Pending { added_id: Option<String> },
+    Ready(String),
+    Deleting(String),
+}
+
+enum AudioState {
+    Recording,
+    Committing,
+    Committed(String),
+    Deleting(String),
+    Deleted,
+}
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -20,8 +45,7 @@ pub(super) struct Connection {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     instructions: String,
     response_id: Option<String>,
-    audio_id: Option<String>,
-    commit_pending: bool,
+    segment: Option<Segment>,
     response_pending: Option<String>,
     pending_events: VecDeque<Value>,
 }
@@ -56,8 +80,7 @@ impl Connection {
             socket,
             instructions: settings.prompt(),
             response_id: None,
-            audio_id: None,
-            commit_pending: false,
+            segment: None,
             response_pending: None,
             pending_events: VecDeque::new(),
         };
@@ -160,7 +183,92 @@ impl Connection {
         }
     }
 
+    /// Declare the exact model prefix before uploading any part of this segment.
+    pub async fn begin(&mut self, stable: &StablePrefix, correlation: &str) -> Result<()> {
+        ensure!(
+            self.segment.is_none(),
+            "previous Realtime segment has not been cleaned up"
+        );
+        let text = serde_json::to_string(stable)?;
+        self.segment = Some(Segment {
+            correlation: correlation.to_owned(),
+            prefix_text: text.clone(),
+            prefix: PrefixState::Pending { added_id: None },
+            audio: AudioState::Recording,
+        });
+        timeout(Duration::from_secs(10), async {
+            self.send(json!({"type":"conversation.item.create", "item":{
+                "type":"message", "role":"user", "content":[{"type":"input_text", "text":text}]
+            }}))
+            .await?;
+            self.confirm_prefix().await
+        })
+        .await
+        .context("Realtime prefix declaration timeout")?
+    }
+
+    /// Bind server-assigned IDs only after validating the complete echoed text item.
+    /// The created event supports providers using the earlier single-ack protocol.
+    async fn confirm_prefix(&mut self) -> Result<()> {
+        while matches!(
+            self.segment.as_ref().map(|s| &s.prefix),
+            Some(PrefixState::Pending { .. })
+        ) {
+            let event = self.receive().await?;
+            let kind = event["type"].as_str().unwrap_or_default();
+            if !matches!(
+                kind,
+                "conversation.item.added" | "conversation.item.done" | "conversation.item.created"
+            ) {
+                continue;
+            }
+            let item = &event["item"];
+            if item["role"] != "user" {
+                continue;
+            }
+            let segment = self.segment.as_mut().unwrap();
+            ensure!(
+                item["type"] == "message"
+                    && item["content"].as_array().is_some_and(|c| c.len() == 1)
+                    && item["content"][0]["type"] == "input_text"
+                    && item["content"][0]["text"] == segment.prefix_text,
+                "Realtime prefix acknowledgement differs from declared content"
+            );
+            let id = item["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .context("missing Realtime prefix item id")?
+                .to_owned();
+            let PrefixState::Pending { added_id } = &mut segment.prefix else {
+                unreachable!()
+            };
+            if kind == "conversation.item.added" {
+                ensure!(added_id.is_none(), "duplicate Realtime prefix item");
+                *added_id = Some(id);
+            } else {
+                ensure!(
+                    item["status"] == "completed",
+                    "Realtime prefix item is not completed"
+                );
+                ensure!(
+                    added_id.as_ref() == Some(&id)
+                        || (kind == "conversation.item.created" && added_id.is_none()),
+                    "unexpected Realtime prefix completion"
+                );
+                segment.prefix = PrefixState::Ready(id);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn append(&mut self, pcm: &[i16]) -> Result<()> {
+        ensure!(
+            self.segment
+                .as_ref()
+                .is_some_and(|s| matches!(s.prefix, PrefixState::Ready(_))
+                    && matches!(s.audio, AudioState::Recording)),
+            "Realtime audio requires an acknowledged prefix"
+        );
         for frame in pcm.chunks(4800) {
             let bytes: Vec<_> = frame.iter().flat_map(|s| s.to_le_bytes()).collect();
             self.send(json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(bytes)}))
@@ -174,6 +282,7 @@ impl Connection {
             self.send(json!({"type":"input_audio_buffer.clear"}))
                 .await?;
             self.wait_type("input_audio_buffer.cleared").await?;
+            self.delete_segment().await?;
             Ok::<_, anyhow::Error>(())
         })
         .await
@@ -182,15 +291,19 @@ impl Connection {
 
     pub async fn cancel(&mut self) -> Result<()> {
         timeout(Duration::from_secs(10), async {
-            if self.commit_pending {
+            self.confirm_prefix().await?;
+            if self
+                .segment
+                .as_ref()
+                .is_some_and(|s| matches!(s.audio, AudioState::Committing))
+            {
                 let event = self.wait_type("input_audio_buffer.committed").await?;
-                self.audio_id = Some(
+                self.segment.as_mut().unwrap().audio = AudioState::Committed(
                     event["item_id"]
                         .as_str()
                         .context("missing committed item")?
                         .to_owned(),
                 );
-                self.commit_pending = false;
             }
             if let Some(correlation) = self.response_pending.take() {
                 let event = self.wait_type("response.created").await?;
@@ -215,55 +328,101 @@ impl Connection {
                     }
                 }
             }
-            if self.audio_id.is_some() {
-                self.delete_audio().await?;
-            }
+            self.delete_segment().await?;
             self.clear().await
         })
         .await
         .context("Realtime cancellation timeout")?
     }
 
-    /// Delete the completed input item. Callers retain validated text before awaiting cleanup.
-    pub async fn delete_audio(&mut self) -> Result<()> {
-        let audio_id = self
-            .audio_id
-            .clone()
-            .context("no Realtime audio item to delete")?;
+    /// Delete this segment's audio and text, retaining ownership until both are acknowledged.
+    /// Callers retain validated text before awaiting this fallible cleanup.
+    pub async fn delete_segment(&mut self) -> Result<()> {
         timeout(Duration::from_secs(10), async {
-            self.send(json!({"type":"conversation.item.delete","item_id":audio_id}))
-                .await?;
-            loop {
-                let event = self.wait_type("conversation.item.deleted").await?;
-                if event["item_id"] == audio_id {
-                    break;
-                }
+            let Some(segment) = &self.segment else {
+                return Ok(());
+            };
+            ensure!(
+                !matches!(segment.prefix, PrefixState::Pending { .. }),
+                "cannot clean up an unacknowledged Realtime prefix"
+            );
+            ensure!(
+                !matches!(segment.audio, AudioState::Committing),
+                "cannot clean up an unacknowledged Realtime audio commit"
+            );
+            let audio = match &segment.audio {
+                AudioState::Committed(id) => Some((id.clone(), false)),
+                AudioState::Deleting(id) => Some((id.clone(), true)),
+                _ => None,
+            };
+            if let Some((id, pending)) = audio {
+                self.segment.as_mut().unwrap().audio = AudioState::Deleting(id.clone());
+                self.delete_item(&id, pending).await?;
+                self.segment.as_mut().unwrap().audio = AudioState::Deleted;
             }
-            self.audio_id = None;
+            let (id, pending) = match &self.segment.as_ref().unwrap().prefix {
+                PrefixState::Ready(id) => (id.clone(), false),
+                PrefixState::Deleting(id) => (id.clone(), true),
+                PrefixState::Pending { .. } => unreachable!(),
+            };
+            self.segment.as_mut().unwrap().prefix = PrefixState::Deleting(id.clone());
+            self.delete_item(&id, pending).await?;
+            self.segment = None;
             Ok::<_, anyhow::Error>(())
         })
         .await
-        .context("Realtime audio cleanup timeout")?
+        .context("Realtime segment cleanup timeout")?
     }
 
-    /// Return a validated response independently of audio cleanup (see `delete_audio`).
-    /// Each response sees an explicit snapshot and one audio item, independent of connection history.
+    /// Resume an interrupted deletion by reading its acknowledgement, never resending its ID.
+    async fn delete_item(&mut self, id: &str, pending: bool) -> Result<()> {
+        if !pending {
+            self.send(json!({"type":"conversation.item.delete","item_id":id}))
+                .await?;
+        }
+        loop {
+            let event = self.wait_type("conversation.item.deleted").await?;
+            if event["item_id"] == id {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Return a validated response independently of item cleanup (see `delete_segment`).
+    /// Model input is the accepted prefix, this segment's audio, then its dynamic context.
     pub async fn finish(
         &mut self,
-        snapshot: &Snapshot,
+        input: &PromptInput,
         correlation: &str,
     ) -> Result<DictationResult> {
-        timeout(RESPONSE_TIMEOUT, self.finish_inner(snapshot, correlation))
+        timeout(RESPONSE_TIMEOUT, self.finish_inner(input, correlation))
             .await
             .context("Realtime response timeout")?
     }
 
     async fn finish_inner(
         &mut self,
-        snapshot: &Snapshot,
+        input: &PromptInput,
         correlation: &str,
     ) -> Result<DictationResult> {
-        self.commit_pending = true;
+        let segment = self
+            .segment
+            .as_mut()
+            .context("no declared Realtime segment")?;
+        ensure!(
+            segment.correlation == correlation
+                && segment.prefix_text == serde_json::to_string(&input.stable)?,
+            "Realtime response does not match the declared segment prefix"
+        );
+        let PrefixState::Ready(prefix_id) = &segment.prefix else {
+            bail!("Realtime prefix has not been acknowledged");
+        };
+        let prefix_id = prefix_id.clone();
+        ensure!(
+            matches!(segment.audio, AudioState::Recording),
+            "Realtime audio was already committed"
+        );
+        segment.audio = AudioState::Committing;
         self.send(json!({"type":"input_audio_buffer.commit"}))
             .await?;
         let committed = self.wait_type("input_audio_buffer.committed").await?;
@@ -271,15 +430,15 @@ impl Connection {
             .as_str()
             .context("missing committed audio item")?
             .to_owned();
-        self.audio_id = Some(audio_id.clone());
-        self.commit_pending = false;
+        self.segment.as_mut().unwrap().audio = AudioState::Committed(audio_id.clone());
         self.response_pending = Some(correlation.to_owned());
         self.send(json!({"type":"response.create", "response":{
             "conversation":"none", "output_modalities":["text"], "instructions":self.instructions,
             "max_output_tokens":4096, "metadata":{"dictation_id":correlation},
-            "input":[{"type":"message","role":"user","content":[{"type":"input_text",
-                "text":serde_json::to_string(snapshot)?}]},
-                {"type":"item_reference","id":audio_id}]
+            "input":[{"type":"item_reference","id":prefix_id},
+                {"type":"item_reference","id":audio_id},
+                {"type":"message","role":"user","content":[{"type":"input_text",
+                    "text":serde_json::to_string(&input.dynamic)?}]}]
         }}))
         .await?;
         let mut response_id = None;
@@ -369,9 +528,12 @@ impl Connection {
                 _ => {}
             }
         };
-        DictationResult::parse(&complete, &snapshot.ids())
+        DictationResult::parse(&complete, &input.snapshot().ids())
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod prefix_tests;

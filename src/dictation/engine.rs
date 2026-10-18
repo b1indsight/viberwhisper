@@ -315,6 +315,7 @@ pub(super) struct Recording {
     results: Vec<super::result::DictationResult>,
     index: usize,
     evaluation: Option<(u64, Vec<super::evaluation::SegmentTrace>)>,
+    stable: Option<super::memory::StablePrefix>,
 }
 
 impl Recording {
@@ -333,6 +334,7 @@ impl Recording {
             results: Vec::new(),
             index: 0,
             evaluation: None,
+            stable: None,
         }
     }
 
@@ -394,6 +396,12 @@ impl Recording {
         mut pcm: &[i16],
     ) -> Result<()> {
         while !pcm.is_empty() {
+            if self.segment.is_empty() {
+                let stable = self.stable.get_or_insert_with(|| memory.stable_prefix());
+                connection
+                    .begin(stable, &format!("{}-{}", self.id, self.index))
+                    .await?;
+            }
             let count = (SEGMENT_SAMPLES - self.segment.len()).min(pcm.len());
             connection.append(&pcm[..count]).await?;
             self.segment.extend_from_slice(&pcm[..count]);
@@ -432,9 +440,12 @@ impl Recording {
             .as_ref()
             .map(|(at, _)| *at)
             .unwrap_or_else(now);
-        let snapshot = memory.snapshot(at);
+        let input = memory.prompt_input(
+            self.stable.as_ref().expect("uploaded audio has a prefix"),
+            at,
+        );
         let result = connection
-            .finish(&snapshot, &format!("{}-{}", self.id, self.index))
+            .finish(&input, &format!("{}-{}", self.id, self.index))
             .await?;
         // Log lengths without exposing dictation contents.
         tracing::debug!(
@@ -444,14 +455,15 @@ impl Recording {
         if let Some((_, traces)) = &mut self.evaluation {
             traces.push(super::evaluation::SegmentTrace {
                 index: self.index,
-                input: snapshot,
+                input: input.snapshot(),
+                prompt_input: Some(input),
                 output: result.raw.clone(),
             });
         }
         self.results.push(result);
         // Cleanup is fallible even after the model has completed and passed validation.
         // Keep the text for partial delivery, but learn only once cleanup succeeds.
-        connection.delete_audio().await?;
+        connection.delete_segment().await?;
         memory.learn(&self.id, self.index, self.results.last().unwrap(), at);
         Ok(())
     }

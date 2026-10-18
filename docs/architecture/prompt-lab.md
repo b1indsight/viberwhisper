@@ -119,8 +119,10 @@ that exact independent-recording support count. `candidates_absent` complements 
 `context` accepts existing/new/uncertain and checks the final segment; candidate checks cover all
 segments. Metadata validity is always checked, including fields discarded by production parsing.
 
-The response uses the production `input_text` Snapshot and audio reference. References, assertions
-and forbidden strings are never sent. Reports include seeds and history, so store them appropriately.
+The response uses the production declared vocabulary reference, audio reference and inline dynamic
+context, in that order. Segment traces retain both wire text parts and the reconstructed Snapshot;
+replay validates them against the seeded memory and the recording's frozen vocabulary. References,
+assertions and forbidden strings are never sent. Reports include seeds and history, so store them appropriately.
 Schema-2 reports replay traces through production Memory and recompute assertions on read and review.
 Malformed metadata or failed assertions preserve an awaiting-review report but fail `gates.realtime`;
 transport or transcription errors yield an incomplete report. Semantic review must also inspect
@@ -130,12 +132,17 @@ by `comparison.realtime_inputs_changed` and per-case `realtime_seed_changes` wit
 Ordinary and scenario reports cannot compare directly. A new topic reusing a known label fails the
 metadata gate even though the live text parser tolerates it.
 
-Realtime policy `realtime-context-memory-v3` requires a unique verbatim source quote for each
+Realtime policy `realtime-context-memory-v4` records the stable-prefix / audio / dynamic input
+layout and requires its wire input evidence in every segment trace. It retains v3's unique verbatim source quote for each
 candidate and a unique complete term within that quote under production NFKC/lowercase matching.
 Term assertions still use kind and text; metadata checks validate the occurrence independently.
-Policy-v1/v2 reports remain readable only when their
+Policy-v1/v2/v3 reports remain readable only when their
 snapshots and checks still replay under current parsing. Cross-policy comparisons are rejected
-before networking; rerun the baseline to compare with policy v3.
+before networking; rerun the baseline to compare with policy v4. All new Realtime evaluations,
+including ordinary runs without scenarios, record `stt.input_layout=stable-prefix-audio-dynamic-v1`.
+Legacy reports omit that optional field; different layouts cannot compare as identical request
+identities. HTTP metadata retains its existing shape. Historical WER from context-before-audio
+does not establish the quality of this input order.
 
 ## Metrics
 

@@ -1,10 +1,75 @@
 use super::*;
 use crate::dictation::test_support::{
-    accept, accept_session, commit_audio, delete_audio, expect_event, listen, send_json,
+    accept, accept_session, commit_audio, commit_segment, complete_response, declare_prefix,
+    delete_audio, delete_segment, expect_event, listen, send_json,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio_tungstenite::tungstenite::Message;
+
+#[tokio::test]
+async fn recording_declares_prefix_before_audio_and_orders_final_input() {
+    use crate::{core::orchestrator::SessionOrchestrator, session::SessionId};
+    // Previously the first client item was audio, and all context arrived before
+    // the audio reference only at stop. Exercise the actual desktop worker path.
+    let (listener, settings) = listen().await;
+    let server = tokio::spawn(async move {
+        let mut socket = accept_session(&listener).await;
+        let declared = expect_event(&mut socket, "conversation.item.create").await;
+        assert_eq!(declared["item"]["role"], "user");
+        assert_eq!(declared["item"]["content"][0]["text"], "{\"contexts\":[]}");
+        let mut item = declared["item"].clone();
+        item["id"] = json!("prefix");
+        item["status"] = json!("completed");
+        for kind in ["conversation.item.added", "conversation.item.done"] {
+            send_json(&mut socket, json!({"type":kind,"item":item})).await;
+        }
+        expect_event(&mut socket, "input_audio_buffer.append").await;
+        commit_audio(&mut socket, "audio").await;
+        let request = expect_event(&mut socket, "response.create").await;
+        assert_eq!(request["response"]["conversation"], "none");
+        assert_eq!(request["response"]["input"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            request["response"]["input"][0],
+            json!({"type":"item_reference","id":"prefix"})
+        );
+        assert_eq!(
+            request["response"]["input"][1],
+            json!({"type":"item_reference","id":"audio"})
+        );
+        assert_eq!(
+            request["response"]["input"][2]["content"][0]["text"],
+            "{\"contexts\":[]}"
+        );
+        complete_response(
+            &mut socket,
+            &request,
+            "response",
+            r#"{"memory_candidates":[],"context":{"kind":"uncertain"},"text":"测试"}"#,
+        )
+        .await;
+        delete_audio(&mut socket, "audio").await;
+        delete_audio(&mut socket, "prefix").await;
+    });
+    let client = tokio::task::spawn_blocking(move || {
+        let engine = SessionOrchestrator::new_realtime(settings, None, None, None).unwrap();
+        let id = SessionId(0);
+        engine.start_session(id).unwrap();
+        engine.on_chunk_ready(
+            id,
+            crate::audio::WavChunk::from_encoded_bytes(
+                include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
+            ),
+        );
+        engine.finish_for_delivery(id).unwrap().text
+    });
+    let (text, ()) = timeout(Duration::from_secs(10), async {
+        (client.await.unwrap(), server.await.unwrap())
+    })
+    .await
+    .unwrap();
+    assert_eq!(text, "测试");
+}
 
 #[tokio::test]
 async fn upload_preserves_protocol_events_in_a_bounded_queue() {
@@ -55,6 +120,7 @@ async fn recording_answers_heartbeat_and_reports_server_error_before_stop() {
     let (heartbeat, answered) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let mut socket = accept_session(&listener).await;
+        declare_prefix(&mut socket, "prefix").await;
         expect_event(&mut socket, "input_audio_buffer.append").await;
         socket
             .send(Message::Ping(b"during-recording".to_vec().into()))
@@ -123,7 +189,7 @@ async fn truncated_response_is_rejected_even_when_text_done_looks_valid() {
     let (listener, settings) = listen().await;
     let server = tokio::spawn(async move {
         let mut socket = accept_session(&listener).await;
-        commit_audio(&mut socket, "audio").await;
+        commit_segment(&mut socket, "audio").await;
         let event = expect_event(&mut socket, "response.create").await;
         // Text completion alone must not deliver a response cut off by the token limit.
         for reply in [
@@ -135,9 +201,11 @@ async fn truncated_response_is_rejected_even_when_text_done_looks_valid() {
         }
     });
     let mut connection = Connection::connect(&settings, None).await.unwrap();
+    let memory = crate::dictation::memory::Memory::frozen(Default::default());
+    let input = memory.prompt_input(&memory.stable_prefix(), 0);
+    connection.begin(&input.stable, "truncated").await.unwrap();
     connection.append(&[1; 2400]).await.unwrap();
-    let snapshot = crate::dictation::memory::Memory::frozen(Default::default()).snapshot(0);
-    let error = connection.finish(&snapshot, "truncated").await.unwrap_err();
+    let error = connection.finish(&input, "truncated").await.unwrap_err();
     assert!(error.to_string().contains("truncated"));
     server.await.unwrap();
 }
@@ -149,7 +217,7 @@ async fn cancellation_between_create_and_ack_still_cancels_the_correct_response(
     let (release, resume) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let mut socket = accept_session(&listener).await;
-        commit_audio(&mut socket, "audio").await;
+        commit_segment(&mut socket, "audio").await;
         let event = expect_event(&mut socket, "response.create").await;
         // Stop finish() while its response ID is still awaiting acknowledgement.
         ready.send(()).unwrap();
@@ -162,14 +230,16 @@ async fn cancellation_between_create_and_ack_still_cancels_the_correct_response(
             json!({"type":"response.done","response":{"id":"pending-r","status":"cancelled"}}),
         )
         .await;
-        delete_audio(&mut socket, "audio").await;
+        delete_segment(&mut socket, "audio").await;
         expect_event(&mut socket, "input_audio_buffer.clear").await;
         send_json(&mut socket, json!({"type":"input_audio_buffer.cleared"})).await;
     });
     let mut connection = Connection::connect(&settings, None).await.unwrap();
-    let snapshot = crate::dictation::memory::Memory::frozen(Default::default()).snapshot(0);
+    let memory = crate::dictation::memory::Memory::frozen(Default::default());
+    let input = memory.prompt_input(&memory.stable_prefix(), 0);
+    connection.begin(&input.stable, "cancelled").await.unwrap();
     tokio::select! {
-        result = connection.finish(&snapshot, "cancelled") => panic!("unexpected completion {result:?}"),
+        result = connection.finish(&input, "cancelled") => panic!("unexpected completion {result:?}"),
         _ = waiting => {}
     }
     release.send(()).unwrap();
@@ -183,13 +253,14 @@ async fn live_realtime_structured_multiturn() {
     let settings = crate::dictation::config::DictationConfig {
         url: std::env::var("VIBERWHISPER_REALTIME_TEST_URL")
             .expect("set VIBERWHISPER_REALTIME_TEST_URL"),
+        model: std::env::var("VIBERWHISPER_REALTIME_TEST_MODEL")
+            .unwrap_or_else(|_| DictationConfig::default().model),
         ..Default::default()
     };
     let key = std::env::var("REALTIME_API_KEY").ok();
     let mut connection = Connection::connect(&settings, key.as_deref())
         .await
         .unwrap();
-    let snapshot = crate::dictation::memory::Memory::frozen(Default::default()).snapshot(0);
     let mut reader = hound::WavReader::new(std::io::Cursor::new(include_bytes!(
         "../../../tests/fixtures/audio/speech.wav"
     )))
@@ -200,18 +271,71 @@ async fn live_realtime_structured_multiturn() {
         .unwrap()
         .push(&samples, true)
         .unwrap();
-    for round in 0..2 {
+    let mut completed = Vec::new();
+    for (round, terms) in [
+        vec![],
+        vec!["ViberWhisper", "Rust"],
+        vec!["ViberWhisper"],
+        vec!["ViberWhisper", "Qwen"],
+        vec!["ViberWhisper", "Qwen"],
+    ]
+    .iter()
+    .enumerate()
+    {
+        let memory = crate::dictation::memory::Memory::seeded(
+            serde_json::from_value(json!({"long_term":terms.iter().map(|text|
+                json!({"context":"project","kind":"proper_noun","text":text})).collect::<Vec<_>>()
+            }))
+            .unwrap(),
+            vec![crate::dictation::memory::Observation::new(
+                "previous",
+                0,
+                100,
+                "project",
+                if round == 4 {
+                    "另一次已确认的文字。"
+                } else {
+                    "先前已确认的文字。"
+                },
+                Vec::new(),
+            )],
+            100,
+        );
+        let input = memory.prompt_input(&memory.stable_prefix(), 100);
+        connection
+            .begin(&input.stable, &format!("live-{round}"))
+            .await
+            .unwrap();
         connection.append(&pcm).await.unwrap();
         let result = connection
-            .finish(&snapshot, &format!("live-{round}"))
+            .finish(&input, &format!("live-{round}"))
             .await
             .unwrap();
         assert!(!result.text.is_empty());
-        connection.delete_audio().await.unwrap();
+        connection.delete_segment().await.unwrap();
         println!(
-            "round {round}: valid structured result, {} characters",
+            "warm round {round}: valid structured result, {} characters",
             result.text.chars().count()
         );
+        completed.push((input, result.text));
+    }
+    drop(connection);
+    // Fresh connections have no text checkpoints. Hold final messages fixed while
+    // comparing against the connection reused for all vocabulary/suffix variations.
+    for (round, (input, expected)) in completed.into_iter().enumerate() {
+        let mut cold = Connection::connect(&settings, key.as_deref())
+            .await
+            .unwrap();
+        let correlation = format!("cold-{round}");
+        cold.begin(&input.stable, &correlation).await.unwrap();
+        cold.append(&pcm).await.unwrap();
+        let result = cold.finish(&input, &correlation).await.unwrap();
+        cold.delete_segment().await.unwrap();
+        assert_eq!(
+            result.text, expected,
+            "cold/warm text mismatch for variant {round}"
+        );
+        println!("cold round {round}: matches warm text");
     }
 }
 
@@ -237,6 +361,13 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
                     assert!(event["session"]["audio"]["input"].get("transcription").is_none());
                     replies.push(json!({"type":"session.updated"}));
                 }
+                "conversation.item.create" => {
+                    let mut item = event["item"].clone();
+                    item["id"] = json!(format!("prefix-{round}"));
+                    item["status"] = json!("completed");
+                    replies.push(json!({"type":"conversation.item.added", "item":item}));
+                    replies.push(json!({"type":"conversation.item.done", "item":item}));
+                }
                 "input_audio_buffer.append" => {
                     use base64::Engine;
                     bytes += base64::engine::general_purpose::STANDARD.decode(event["audio"].as_str().unwrap()).unwrap().len();
@@ -246,7 +377,8 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
                     assert_eq!(event["response"]["instructions"], PROMPT);
                     assert_eq!(event["response"]["conversation"], "none");
                     assert_eq!(event["response"]["input"][1]["id"], format!("audio-{round}"));
-                    assert_eq!(event["response"]["input"][0]["content"][0]["type"], "input_text");
+                    assert_eq!(event["response"]["input"][0]["id"], format!("prefix-{round}"));
+                    assert_eq!(event["response"]["input"][2]["content"][0]["type"], "input_text");
                     let id = format!("response-{round}");
                     let text = json!({"text":"重复。", "context":{"kind":"new","label":"测试语境"}, "memory_candidates":[{"kind":"phrase","text":"重复","quote":"重复。"}]}).to_string();
                     replies.push(json!({"type":"response.created", "response":{"id":id, "metadata":event["response"]["metadata"]}}));
@@ -258,7 +390,9 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
                 }
                 "conversation.item.delete" => {
                     replies.push(json!({"type":"conversation.item.deleted","item_id":event["item_id"]}));
-                    round += 1;
+                    if event["item_id"] == format!("prefix-{round}") {
+                        round += 1;
+                    }
                 }
                 other => panic!("unexpected event: {other}"),
             }

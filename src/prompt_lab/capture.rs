@@ -285,6 +285,7 @@ mod tests {
 
     fn snapshot() -> SttSnapshot {
         SttSnapshot {
+            input_layout: None,
             endpoint: "https://api.example.test/v1/audio/transcriptions".to_string(),
             model: "whisper-test".to_string(),
             language: Some("zh".to_string()),

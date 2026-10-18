@@ -1,6 +1,7 @@
 use super::*;
 use crate::dictation::test_support::{
-    accept_session, commit_audio, complete_response, delete_audio, expect_event, listen, send_json,
+    accept_session, commit_segment, complete_response, declare_prefix, delete_segment,
+    expect_event, listen, send_json,
 };
 use crate::{
     core::orchestrator::{SessionOrchestrator, SessionRoutingError},
@@ -8,6 +9,113 @@ use crate::{
 };
 use serde_json::json;
 use tokio::time::{Duration, timeout};
+
+#[tokio::test]
+async fn failed_recording_reconnects_with_a_complete_prefix_and_fresh_audio() {
+    // A dropped connection invalidates both item types; the next user recording
+    // must declare its entire prefix again rather than replay the interrupted upload.
+    let (listener, settings) = listen().await;
+    let server = tokio::spawn(async move {
+        let mut socket = accept_session(&listener).await;
+        let first = declare_prefix(&mut socket, "retired-prefix").await;
+        expect_event(&mut socket, "input_audio_buffer.append").await;
+        socket.close(None).await.unwrap();
+        let mut socket = accept_session(&listener).await;
+        let next = commit_segment(&mut socket, "new-audio").await;
+        assert_eq!(first["item"]["content"], next["item"]["content"]);
+        let request = expect_event(&mut socket, "response.create").await;
+        assert_eq!(request["response"]["input"][0]["id"], "prefix-new-audio");
+        assert_eq!(request["response"]["input"][1]["id"], "new-audio");
+        complete_response(
+            &mut socket,
+            &request,
+            "new-response",
+            r#"{"memory_candidates":[],"context":{"kind":"uncertain"},"text":"重试成功"}"#,
+        )
+        .await;
+        delete_segment(&mut socket, "new-audio").await;
+    });
+    timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            let engine = SessionOrchestrator::new_realtime(settings, None, None, None).unwrap();
+            for turn in 0..2 {
+                let id = SessionId(turn);
+                engine.start_session(id).unwrap();
+                engine.on_chunk_ready(
+                    id,
+                    WavChunk::from_encoded_bytes(
+                        include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
+                    ),
+                );
+                let result = engine.finish_for_delivery(id);
+                if turn == 0 {
+                    assert!(result.is_err());
+                } else {
+                    assert_eq!(result.unwrap().text, "重试成功");
+                }
+            }
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn silence_and_empty_recordings_leave_no_prefix_for_the_next_recording() {
+    // Silence has no committed audio item, but still owns a declared text item.
+    // Clearing only audio used to be sufficient; now text must be deleted as well.
+    let (listener, settings) = listen().await;
+    let server = tokio::spawn(async move {
+        let mut socket = accept_session(&listener).await;
+        declare_prefix(&mut socket, "silent-prefix").await;
+        expect_event(&mut socket, "input_audio_buffer.clear").await;
+        send_json(&mut socket, json!({"type":"input_audio_buffer.cleared"})).await;
+        crate::dictation::test_support::delete_audio(&mut socket, "silent-prefix").await;
+        commit_segment(&mut socket, "voiced").await;
+        let request = expect_event(&mut socket, "response.create").await;
+        assert_eq!(request["response"]["input"][0]["id"], "prefix-voiced");
+        complete_response(
+            &mut socket,
+            &request,
+            "voiced-response",
+            r#"{"memory_candidates":[],"context":{"kind":"uncertain"},"text":"有声音"}"#,
+        )
+        .await;
+        delete_segment(&mut socket, "voiced").await;
+    });
+    timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            let engine = SessionOrchestrator::new_realtime(settings, None, None, None).unwrap();
+            for turn in 0..3 {
+                let id = SessionId(turn);
+                engine.start_session(id).unwrap();
+                if turn == 0 {
+                    engine.on_chunk_ready(
+                        id,
+                        crate::audio::chunk::encode_i16_wav(&[0; 4800], 24000).unwrap(),
+                    );
+                } else if turn == 2 {
+                    engine.on_chunk_ready(
+                        id,
+                        WavChunk::from_encoded_bytes(
+                            include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
+                        ),
+                    );
+                }
+                let text = engine.finish_for_delivery(id).unwrap().text;
+                assert_eq!(text, if turn == 2 { "有声音" } else { "" });
+            }
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    server.await.unwrap();
+}
 
 #[tokio::test]
 async fn feedback_commits_only_confirmed_text_before_the_next_recording() {
@@ -18,10 +126,10 @@ async fn feedback_commits_only_confirmed_text_before_the_next_recording() {
         let mut socket = accept_session(&listener).await;
         for turn in 0..3 {
             let audio = format!("audio-{turn}");
-            commit_audio(&mut socket, &audio).await;
+            commit_segment(&mut socket, &audio).await;
             let event = expect_event(&mut socket, "response.create").await;
             let snapshot: serde_json::Value = serde_json::from_str(
-                event["response"]["input"][0]["content"][0]["text"]
+                event["response"]["input"][2]["content"][0]["text"]
                     .as_str()
                     .unwrap(),
             )
@@ -39,7 +147,7 @@ async fn feedback_commits_only_confirmed_text_before_the_next_recording() {
                 "memory_candidates":[{"kind":"proper_noun", "text":"维伯耳语", "quote":"用维伯耳语。"}]})
             .to_string();
             complete_response(&mut socket, &event, &format!("r-{turn}"), &text).await;
-            delete_audio(&mut socket, &audio).await;
+            delete_segment(&mut socket, &audio).await;
         }
     });
     let directory = tempfile::tempdir().unwrap();
@@ -98,13 +206,13 @@ async fn shutdown_drains_confirmation_without_another_recording() {
         let (listener, settings) = listen().await;
         let server = tokio::spawn(async move {
             let mut socket = accept_session(&listener).await;
-            commit_audio(&mut socket, "audio").await;
+            commit_segment(&mut socket, "audio").await;
             let event = expect_event(&mut socket, "response.create").await;
             let text = json!({"text":"Use Cody.", "context":{"kind":"new", "label":"项目"},
                 "memory_candidates":[{"kind":"proper_noun", "text":"Cody", "quote":"Use Cody."}]})
             .to_string();
             complete_response(&mut socket, &event, "r", &text).await;
-            delete_audio(&mut socket, "audio").await;
+            delete_segment(&mut socket, "audio").await;
         });
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("memory.json");
@@ -159,7 +267,7 @@ async fn shutdown_does_not_wait_for_an_in_flight_recording_response() {
     let (release, resume) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let mut socket = accept_session(&listener).await;
-        commit_audio(&mut socket, "audio").await;
+        commit_segment(&mut socket, "audio").await;
         expect_event(&mut socket, "response.create").await;
         waiting.send(()).unwrap();
         resume.await.unwrap();
@@ -194,7 +302,7 @@ async fn disconnect_after_completed_response_preserves_only_validated_text() {
         let (listener, settings) = listen().await;
         let server = tokio::spawn(async move {
             let mut socket = accept_session(&listener).await;
-            commit_audio(&mut socket, "audio").await;
+            commit_segment(&mut socket, "audio").await;
             let event = expect_event(&mut socket, "response.create").await;
             let text = if valid {
                 json!({"text":"已完成。", "context":{"kind":"new","label":"工作"}, "memory_candidates":[{"kind":"phrase","text":"已完成","quote":"已完成。"}]}).to_string()
@@ -249,11 +357,12 @@ async fn completed_segment_survives_faults_but_not_user_cancellation() {
         let (release, resume) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let mut socket = accept_session(&listener).await;
-            commit_audio(&mut socket, "audio-1").await;
+            commit_segment(&mut socket, "audio-1").await;
             let event = expect_event(&mut socket, "response.create").await;
             let text = json!({"text":"保留这一段。", "context":{"kind":"new","label":"工作"}, "memory_candidates":[{"kind":"phrase","text":"保留这一段","quote":"保留这一段。"}]}).to_string();
             complete_response(&mut socket, &event, "r1", &text).await;
-            delete_audio(&mut socket, "audio-1").await;
+            delete_segment(&mut socket, "audio-1").await;
+            declare_prefix(&mut socket, "prefix-audio-2").await;
             expect_event(&mut socket, "input_audio_buffer.commit").await;
             // Hold the second commit after the first segment has been learned locally.
             // This makes backlog overflow deterministic and tests rollback of that memory.
@@ -264,7 +373,7 @@ async fn completed_segment_survives_faults_but_not_user_cancellation() {
                 json!({"type":"input_audio_buffer.committed","item_id":"audio-2"}),
             )
             .await;
-            delete_audio(&mut socket, "audio-2").await;
+            delete_segment(&mut socket, "audio-2").await;
             expect_event(&mut socket, "input_audio_buffer.clear").await;
             send_json(&mut socket, json!({"type":"input_audio_buffer.cleared"})).await;
         });

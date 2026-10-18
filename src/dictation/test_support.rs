@@ -49,6 +49,23 @@ pub(super) async fn accept_session(listener: &TcpListener) -> WebSocketStream<Tc
     socket
 }
 
+pub(super) async fn declare_prefix(socket: &mut WebSocketStream<TcpStream>, id: &str) -> Value {
+    let declared = expect_event(socket, "conversation.item.create").await;
+    let mut item = declared["item"].clone();
+    item["id"] = json!(id);
+    item["status"] = json!("completed");
+    for kind in ["conversation.item.added", "conversation.item.done"] {
+        send_json(socket, json!({"type":kind,"item":item})).await;
+    }
+    declared
+}
+
+pub(super) async fn commit_segment(socket: &mut WebSocketStream<TcpStream>, id: &str) -> Value {
+    let prefix = declare_prefix(socket, &format!("prefix-{id}")).await;
+    commit_audio(socket, id).await;
+    prefix
+}
+
 pub(super) async fn commit_audio(socket: &mut WebSocketStream<TcpStream>, id: &str) {
     expect_event(socket, "input_audio_buffer.commit").await;
     send_json(
@@ -66,6 +83,11 @@ pub(super) async fn delete_audio(socket: &mut WebSocketStream<TcpStream>, id: &s
         json!({"type":"conversation.item.deleted","item_id":event["item_id"]}),
     )
     .await;
+}
+
+pub(super) async fn delete_segment(socket: &mut WebSocketStream<TcpStream>, id: &str) {
+    delete_audio(socket, id).await;
+    delete_audio(socket, &format!("prefix-{id}")).await;
 }
 
 /// Complete one response with correlated, consistent final-text events.
