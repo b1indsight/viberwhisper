@@ -95,6 +95,8 @@ impl MemorySeed {
 pub(crate) struct SegmentTrace {
     pub index: usize,
     pub input: Snapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_input: Option<super::memory::PromptInput>,
     pub output: Value,
 }
 
@@ -112,6 +114,11 @@ impl MemoryReplay {
     pub fn snapshot(&self, at: u64) -> Snapshot {
         self.memory.snapshot(at)
     }
+
+    /// Historical report assertions retain their original context-envelope budget decisions.
+    pub fn legacy_snapshot(&self, at: u64) -> Snapshot {
+        self.memory.legacy_snapshot(at)
+    }
     pub fn replay(
         &self,
         id: &str,
@@ -120,16 +127,24 @@ impl MemoryReplay {
         success: bool,
     ) -> Result<Self> {
         let mut memory = self.memory.clone();
+        let stable = memory.stable_prefix();
         let mut previous = None;
         for trace in traces {
             ensure!(
                 previous.is_none_or(|index| trace.index > index),
                 "segment indices out of order"
             );
-            ensure!(
-                trace.input == memory.snapshot(at),
-                "trace input differs from replayed memory"
-            );
+            if let Some(input) = &trace.prompt_input {
+                ensure!(
+                    *input == memory.prompt_input(&stable, at) && trace.input == input.snapshot(),
+                    "trace prompt input differs from replayed memory"
+                );
+            } else {
+                ensure!(
+                    trace.input == memory.legacy_snapshot(at),
+                    "trace input differs from replayed memory"
+                );
+            }
             let result = super::result::DictationResult::parse(
                 &trace.output.to_string(),
                 &trace.input.ids(),

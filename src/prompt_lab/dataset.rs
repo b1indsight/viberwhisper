@@ -80,6 +80,8 @@ pub(crate) struct SttSnapshot {
     pub(crate) language: Option<String>,
     pub(crate) temperature: f32,
     pub(crate) prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) input_layout: Option<String>,
 }
 
 impl From<TranscriberMetadata> for SttSnapshot {
@@ -90,6 +92,7 @@ impl From<TranscriberMetadata> for SttSnapshot {
             language: metadata.language,
             temperature: metadata.temperature,
             prompt: metadata.prompt,
+            input_layout: None,
         }
     }
 }
@@ -866,6 +869,7 @@ mod tests {
 
     fn snapshot() -> SttSnapshot {
         SttSnapshot {
+            input_layout: None,
             endpoint: "https://api.example.test/v1/audio/transcriptions".to_string(),
             model: "whisper-test".to_string(),
             language: Some("zh".to_string()),

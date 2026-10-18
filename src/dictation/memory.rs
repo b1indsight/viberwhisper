@@ -11,6 +11,9 @@ use super::{
 
 const DAY: u64 = 86_400;
 
+mod input;
+pub(crate) use input::{PromptInput, StablePrefix};
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Observation {
@@ -85,6 +88,32 @@ impl Snapshot {
     #[cfg(test)]
     pub fn history_is_empty(&self) -> bool {
         self.contexts.iter().all(|c| c.history.is_empty())
+    }
+
+    fn within_budget(&self) -> bool {
+        serde_json::to_string(self)
+            .expect("serializable snapshot")
+            .chars()
+            .count()
+            <= 6000
+    }
+
+    /// Discard lower-priority runtime content globally before touching configured terms.
+    fn trim_runtime(&mut self) -> bool {
+        self.contexts
+            .iter_mut()
+            .rev()
+            .any(|c| c.history.pop().is_some())
+            || self
+                .contexts
+                .iter_mut()
+                .rev()
+                .any(|c| c.candidates.pop().is_some())
+            || self
+                .contexts
+                .iter_mut()
+                .rev()
+                .any(|c| c.corrections.pop().is_some())
     }
 }
 
@@ -207,9 +236,24 @@ impl Memory {
     }
 
     pub fn snapshot(&self, now: u64) -> Snapshot {
+        self.prompt_input(&self.stable_prefix(), now).snapshot()
+    }
+
+    /// Reproduce the pre-layout-v4 budget policy when validating historical reports.
+    pub(super) fn legacy_snapshot(&self, now: u64) -> Snapshot {
         let mut snapshot = self.untrimmed_snapshot(now);
         Self::trim_snapshot(&mut snapshot);
         snapshot
+    }
+
+    /// Freeze configured vocabulary independently of runtime history and its expiry.
+    pub fn stable_prefix(&self) -> StablePrefix {
+        StablePrefix::new(Self::frozen(self.settings.clone()).legacy_snapshot(0))
+    }
+
+    /// Fill the remaining prompt budget without changing the already declared prefix.
+    pub fn prompt_input(&self, stable: &StablePrefix, now: u64) -> PromptInput {
+        PromptInput::new(stable.clone(), self.untrimmed_snapshot(now))
     }
 
     fn usable_corrections(&self) -> impl DoubleEndedIterator<Item = &Correction> {
@@ -317,27 +361,8 @@ impl Memory {
     fn trim_snapshot(snapshot: &mut Snapshot) {
         // Trim globally by priority, so one context's history cannot crowd out
         // another context's configured terms. Configuration order breaks ties.
-        while serde_json::to_string(&*snapshot)
-            .expect("serializable snapshot")
-            .chars()
-            .count()
-            > 6000
-        {
-            if snapshot
-                .contexts
-                .iter_mut()
-                .rev()
-                .any(|c| c.history.pop().is_some())
-                || snapshot
-                    .contexts
-                    .iter_mut()
-                    .rev()
-                    .any(|c| c.candidates.pop().is_some())
-                || snapshot
-                    .contexts
-                    .iter_mut()
-                    .rev()
-                    .any(|c| c.corrections.pop().is_some())
+        while !snapshot.within_budget() {
+            if snapshot.trim_runtime()
                 || snapshot
                     .contexts
                     .iter_mut()

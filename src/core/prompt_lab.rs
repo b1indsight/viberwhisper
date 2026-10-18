@@ -117,7 +117,8 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
             document.dictation_key(),
             document.transcription.language.clone(),
         )?;
-        let stt = SttSnapshot::from(transcriber.metadata());
+        let mut stt = SttSnapshot::from(transcriber.metadata());
+        stt.input_layout = Some(crate::dictation::INPUT_LAYOUT.into());
         (Box::new(transcriber), stt)
     } else {
         let mut config = TranscriberConfig::from_config(&document)?;

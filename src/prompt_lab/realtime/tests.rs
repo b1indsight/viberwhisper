@@ -93,6 +93,7 @@ fn discarded_metadata_and_history_leaks_fail_local_checks() {
     }))
     .unwrap();
     let segments = vec![crate::dictation::SegmentTrace {
+        prompt_input: None,
         index: 0,
         input: crate::dictation::Snapshot { contexts: vec![] },
         output: json!({"text":"old secret", "context":{"kind":"existing","id":"invented"},
@@ -123,6 +124,7 @@ fn new_topic_cannot_redeclare_an_existing_snapshot_label() {
     }]}))
     .unwrap();
     let traces = vec![SegmentTrace {
+        prompt_input: None,
         index: 0,
         input: snapshot.clone(),
         output: json!({
@@ -141,6 +143,7 @@ fn new_topic_cannot_redeclare_an_existing_snapshot_label() {
 fn ungrounded_candidates_fail_metadata_checks_even_when_text_is_valid() {
     let empty = Snapshot { contexts: vec![] };
     let traces = vec![SegmentTrace {
+        prompt_input: None,
         index: 0,
         input: empty.clone(),
         output: json!({

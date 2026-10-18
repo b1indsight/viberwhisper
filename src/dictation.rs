@@ -1,5 +1,7 @@
 //! Realtime audio dictation with locally owned context and memory.
 
+pub(crate) const INPUT_LAYOUT: &str = "stable-prefix-audio-dynamic-v1";
+
 pub(crate) mod config;
 mod correction;
 mod engine;

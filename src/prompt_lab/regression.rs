@@ -416,6 +416,13 @@ impl EvaluationReport {
                     "Realtime report requires a WebSocket endpoint".into(),
                 ));
             }
+            if (realtime.policy_version == super::realtime::POLICY)
+                != (self.stt.input_layout.as_deref() == Some(crate::dictation::INPUT_LAYOUT))
+            {
+                return Err(RegressionError::Invalid(
+                    "Realtime policy and input layout differ".into(),
+                ));
+            }
             realtime
                 .validate(&self.samples, self.stt.language.clone())
                 .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
@@ -756,6 +763,7 @@ pub(crate) fn evaluate(
             || request.stt.model != run.settings.model
             || request.stt.prompt.as_deref() != Some(run.settings.prompt().as_str())
             || request.language != request.stt.language
+            || request.stt.input_layout.as_deref() != Some(crate::dictation::INPUT_LAYOUT)
         {
             return Err(RegressionError::Invalid(
                 "Realtime settings differ from recorded STT metadata".into(),
@@ -970,6 +978,13 @@ fn validate_stt(stt: &SttSnapshot) -> Result<()> {
             "STT endpoint metadata must be sanitized".to_string(),
         ));
     }
+    if let Some(layout) = &stt.input_layout
+        && (layout != crate::dictation::INPUT_LAYOUT || !matches!(endpoint.scheme(), "ws" | "wss"))
+    {
+        return Err(RegressionError::Invalid(
+            "STT input layout is invalid for this endpoint".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -1097,6 +1112,7 @@ fn validate_comparison(
         && prior.stt.model == stt.model
         && prior.stt.language == stt.language
         && prior.stt.temperature == stt.temperature
+        && prior.stt.input_layout == stt.input_layout
         && prior.failures.is_empty();
     if compatible {
         Ok(())
@@ -1233,6 +1249,7 @@ mod tests {
 
     fn snapshot(prompt: Option<&str>) -> SttSnapshot {
         SttSnapshot {
+            input_layout: None,
             endpoint: "https://api.example.test/v1/audio/transcriptions".to_string(),
             model: "whisper-test".to_string(),
             language: Some("zh".to_string()),
@@ -1499,6 +1516,12 @@ mod tests {
         let cases:RealtimeCases = serde_json::from_value(serde_json::json!({"schema_version":1,"cases":[{"id":"case","at":100,"steps":[{"sample_id":"sample-1-1","expect":{"context":{"kind":"uncertain"}}}]}]})).unwrap();
         let empty = crate::dictation::Snapshot { contexts: vec![] };
         let segments = vec![crate::dictation::SegmentTrace {
+            prompt_input: Some(
+                serde_json::from_value(serde_json::json!({
+                    "stable":{"contexts":[]}, "dynamic":{"contexts":[]}
+                }))
+                .unwrap(),
+            ),
             index: 0,
             input: empty.clone(),
             output: serde_json::json!({"text":"使用 Codex","context":{"kind":"existing","id":"unknown"},"memory_candidates":[]}),
@@ -1507,6 +1530,7 @@ mod tests {
             .expect
             .check(&empty, &segments, &empty, "使用 Codex");
         report.stt.endpoint = "ws://localhost/v1/realtime".into();
+        report.stt.input_layout = Some(crate::dictation::INPUT_LAYOUT.into());
         report.realtime = Some(RealtimeReport {
             policy_version: super::super::realtime::POLICY.into(),
             cases_sha256: cases.digest().unwrap(),
@@ -1525,8 +1549,13 @@ mod tests {
         report.validate_contract().unwrap();
         assert_eq!(report.gate_results(100.0).realtime, Some(false));
         let mut legacy = report.clone();
+        legacy.stt.input_layout = None;
+        legacy.realtime.as_mut().unwrap().steps[0].segments[0].prompt_input = None;
         legacy.realtime.as_mut().unwrap().policy_version = "realtime-context-memory-v1".into();
         legacy.validate_contract().unwrap();
+        let mut missing_input = report.clone();
+        missing_input.realtime.as_mut().unwrap().steps[0].segments[0].prompt_input = None;
+        assert!(missing_input.validate_contract().is_err());
         let mut tampered = report.clone();
         tampered.realtime.as_mut().unwrap().steps[0]
             .checks
@@ -1543,10 +1572,13 @@ mod tests {
         // Pre-quote policy baselines remain readable when their evidence is safe, but cannot
         // be compared against newly strengthened candidate-grounding validation.
         let mut legacy = complete.clone();
+        legacy.stt.input_layout = None;
+        legacy.realtime.as_mut().unwrap().steps[0].segments[0].prompt_input = None;
         legacy.realtime.as_mut().unwrap().policy_version = "realtime-context-memory-v2".into();
         legacy.validate_contract().unwrap();
         let mut next = request(directory.path().join("next.json"));
         next.stt = complete.stt.clone();
+        next.stt.input_layout = Some(crate::dictation::INPUT_LAYOUT.into());
         next.realtime = Some(crate::prompt_lab::realtime::RealtimeRun {
             cases: complete.realtime.unwrap().cases,
             settings: crate::dictation::config::DictationConfig {
@@ -1559,7 +1591,7 @@ mod tests {
         });
         next.compare_to = Some(legacy);
         let error = evaluate(&store, &SequenceTranscriber::new([]), next).unwrap_err();
-        assert!(error.to_string().contains("policy"));
+        assert!(error.to_string().contains("compatible"));
     }
 
     #[test]

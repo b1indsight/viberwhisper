@@ -1,6 +1,6 @@
 use super::*;
 use crate::dictation::test_support::{
-    accept_session, commit_audio, delete_audio, expect_event, listen, send_json,
+    accept_session, commit_segment, delete_segment, expect_event, listen, send_json,
 };
 use serde_json::json;
 
@@ -16,6 +16,7 @@ fn replay_preserves_support_counts_expiration_and_failed_recording_rollback() {
     let seed = seeded();
     let state = Replay::new(&seed, 100);
     let trace = SegmentTrace {
+        prompt_input: None,
         index: 0,
         input: state.snapshot(100),
         output: json!({
@@ -46,6 +47,7 @@ fn replay_preserves_support_counts_expiration_and_failed_recording_rollback() {
     );
     assert_eq!(snapshot.contexts[0].candidates[0].supporting_recordings, 1);
     let second = SegmentTrace {
+        prompt_input: None,
         input: snapshot,
         ..trace.clone()
     };
@@ -94,17 +96,26 @@ async fn evaluator_sends_production_snapshot_and_rolls_back_cleanup_failure() {
         settings.prompt = Some("test instructions".into());
         let server = tokio::spawn(async move {
             let mut socket = accept_session(&listener).await;
-            commit_audio(&mut socket, "audio").await;
+            let declared = commit_segment(&mut socket, "audio").await;
             let event = expect_event(&mut socket, "response.create").await;
             assert_eq!(event["response"]["instructions"], "test instructions");
             let snapshot: Snapshot = serde_json::from_str(
-                event["response"]["input"][0]["content"][0]["text"]
+                event["response"]["input"][2]["content"][0]["text"]
                     .as_str()
                     .unwrap(),
             )
             .unwrap();
-            assert_eq!(snapshot.contexts[0].long_term, seeded().long_term);
-            assert!(snapshot.contexts[0].history.is_empty());
+            let stable: Value =
+                serde_json::from_str(declared["item"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(
+                stable["contexts"][0]["long_term"],
+                serde_json::to_value(seeded().long_term).unwrap()
+            );
+            assert!(
+                snapshot.contexts.is_empty(),
+                "vocabulary must not be repeated after audio"
+            );
             let text = json!({"text":"ViberWhisper ready","context":{"kind":"existing","id":"project"},"memory_candidates":[{"kind":"proper_noun","text":"ViberWhisper","quote":"ViberWhisper ready"}]}).to_string();
             for reply in [
                 json!({"type":"response.created","response":{"id":"r","metadata":event["response"]["metadata"]}}),
@@ -114,7 +125,7 @@ async fn evaluator_sends_production_snapshot_and_rolls_back_cleanup_failure() {
                 send_json(&mut socket, reply).await;
             }
             if cleanup {
-                delete_audio(&mut socket, "audio").await;
+                delete_segment(&mut socket, "audio").await;
             } else {
                 socket.close(None).await.unwrap();
             }
