@@ -609,3 +609,28 @@ Clippy 检查均已完成：`cargo build --locked`、`cargo fmt --check`、`git 
 `cargo fmt --check` 和 `git diff --check` 均通过：303 项测试通过、2 项真实服务测试
 忽略。输出保存在同目录 `edge-shutdown-final-checks.json`；未运行真实语音评测或
 桌面 GUI 人工测试。
+
+### [011] — 2026-10-18 — 用 Tokio 标准 API 结束运行时等待
+
+**触发与决定：** [010] 的独立审阅指出，取消连接 future 不会停止已启动的阻塞
+域名解析任务，默认 `Runtime::drop` 仍可能无限等待，导致外部线程 join 卡住。
+用户要求修复。本条补齐 [010] 的退出顺序：worker 完成已接收反馈的处理与保存、
+`block_on` 返回后，调用 `runtime.shutdown_background()`，最后回收 worker 线程。
+该标准 API 不等待剩余阻塞任务；系统解析仍可继续运行至自行返回。此时业务反馈已由
+worker 处理，保留原有文件系统失败日志。选择该 API 而非额外的等待超时配置，产品
+代码仅增加显式关闭调用及其原因注释。
+
+**验证与取舍：** 复用 engine 的确认后立即退出、关闭未确认预览和网络等待取消回归。
+另用本地受控实验替代真实外部 DNS：在锁定版本 Tokio 的阻塞池启动任务，通过通道
+阻止其返回，等待 `block_on` 结束，再分别执行默认 Drop 和 `shutdown_background`。
+默认 Drop 在释放任务前未返回；标准后台关闭在任务仍阻塞时返回。两组最后均释放并
+等待阻塞任务结束。实验不依赖系统 DNS 状态，不作为真实 DNS 故障测试或延迟基准。
+没有新增业务状态或关闭抽象，比较范围仅为这两种标准运行时关闭方式。
+
+实验源文件为 `.cache/2026-10-16/runtime-shutdown-repro.rs`，编译命令及实际输出
+保存在同目录 `runtime-shutdown-probe.json`。`cargo build --locked`、
+`cargo test --locked -q`、
+`cargo clippy --locked --all-targets --features integration -- -D warnings`、
+`cargo fmt --check` 和 `git diff --check` 均通过，303 项测试通过、2 项真实服务测试
+忽略，输出见同目录 `runtime-shutdown-final-checks.json`。未运行真实 DNS 故障注入或
+桌面 GUI 人工测试。

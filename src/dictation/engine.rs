@@ -73,7 +73,9 @@ impl DictationWorker {
                     receiver,
                     language,
                     worker_shutdown,
-                ))
+                ));
+                // The worker has finished; stalled blocking DNS must not delay thread exit.
+                runtime.shutdown_background();
             })?;
         Ok(Self {
             jobs,

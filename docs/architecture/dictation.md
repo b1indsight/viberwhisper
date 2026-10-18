@@ -20,6 +20,8 @@ Raw prompt-lab capture deliberately retains the HTTP transcriber.
 - `feedback`: a single-use confirmation capability; dropping it discards learning, successful
   delivery submits edited text without waiting for persistence; the serial worker commits it before its next job.
   Normal shutdown closes pending feedback, drains accepted text and joins the worker before returning.
+  After the worker returns, `Runtime::shutdown_background` prevents outstanding blocking DNS
+  tasks from delaying runtime teardown; it runs after feedback handling and persistence.
 - `correction`: bounded grapheme alignment, whole-candidate feedback, reversible context-scoped
   single-pass replacement and word boundaries. Source, shown and confirmed text remain distinct.
 - `memory`: 24-hour observations with provenance and independent-recording support counts; bounded
