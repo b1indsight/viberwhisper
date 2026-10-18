@@ -1,6 +1,6 @@
 # 59 — Realtime 稳定前缀、音频与动态上下文
 
-**阶段：** 客户端实现与本地检查完成；实模边界验收仍有未完成项，PR 保持 Draft。
+**阶段：** 客户端实现、本地检查、跨平台 CI 与最终实模对照完成；缓存性能与完整质量验收待补，PR 保持 Draft。
 **Issue：** [#152](https://github.com/b1indsight/viberwhisper/issues/152)
 **PR：** [#153](https://github.com/b1indsight/viberwhisper/pull/153)；方案与实现沿用此 PR。
 **基线：** `master@origin`，`1597ed6d`。
@@ -327,3 +327,47 @@ cargo test --locked live_realtime_structured_multiturn -- --ignored --nocapture
   矩阵使用同一份最终 instructions，完整证据放在独立的
   `.cache/2026-10-18/issue-152-quality-final/`，避免与 [004] 的初始提示词结果混用。
   最终矩阵仍在运行；本条不声称已经通过全部实模质量验收或获得缓存性能收益。
+
+### [006] 2026-10-18 — 最终提示词完整对照与提交审阅
+
+**完整质量对照。** [005] 的最终固定说明已用于全部回归。旧客户端基线 `1597ed6d` 与
+新客户端各完成 49 次请求：19 条开发录音、10 条留出录音、10 条人工词表场景和 10 条
+历史场景。两侧均无传输或转写失败。两侧使用相同 Qwen 服务、模型、WAV、语言、场景
+seed 和最终 instructions；逐组核对 ready sample ID、数据 digest、场景内容及 prompt
+SHA-256 相同。最终 prompt SHA-256 为
+`dfa543dabaa929c91703958cabc3d862a99ef655478e4a308853d109e90c62f8`。
+
+| 场景 | 条数 | 旧顺序 WER | 新顺序 WER | 旧 / 新专名准确率 | 场景检查 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 开发集，无记忆 | 19 | 20.0000% | 14.5946% | 72.7273% / 72.7273% | 不适用 |
+| 曾使用的留出集，无记忆 | 10 | 15.5172% | 15.5172% | 66.6667% / 66.6667% | 不适用 |
+| 留出集，人工词表场景 | 10 | 19.8276% | 19.8276% | 75% / 75% | 两侧各 310/310 |
+| 留出集，历史场景 | 10 | 13.7931% | 13.7931% | 75% / 75% | 两侧各 370/370 |
+
+最终完整历史场景覆盖 [004] 的触发录音，未再出现此前的 response timeout 或 metadata
+检查失败。初始失败及 [005] 的两条试验仍保留为独立证据，不混入最终矩阵。上述结果只说明
+本轮样本中的客观质量与场景检查；WER 和专名仍有未达目标的项目，报告状态仍为
+`awaiting_agent_review`，`meets_targets` 未被置为 true，不能据此声称全部语义质量门槛
+通过或普遍改善。
+
+**证据与复现。** 最终八份 JSON 及汇总 `comparison-summary.json` 保留在本地
+`.cache/2026-10-18/issue-152-quality-final/`；开发集 digest 为
+`1e1334f72e13af4bfa4b15d1f2f34ea2d9463536e1df2c7d88de38f72504cd68`，留出集为
+`10bd6f65aa657ce56cfdeab781bf467d83b669b4f2236aa5b46d4947a62fd057`。
+沿用 [004] 的私有 harness，以 `ISSUE152_MODE=old-final` 或 `new-final` 和
+`ISSUE152_QUALITY_ROOT` 指定最终目录，串行执行同一测试命令；两侧临时 lib 接入均已移除。
+
+**审阅与 CI。** 独立 Codex review 对代码提交
+`099406be69e88c47d23cb3a352738e56bce5d895` 返回无 findings，报告为本地
+`.git/jj-reviews/rlwquzluqozt-099406be69e8.json`。该提交的
+[macOS 与 Windows CI](https://github.com/b1indsight/viberwhisper/actions/runs/39130114954)
+均成功；本地 313 测试通过、2 个测试默认忽略，fmt、locked build、all-targets Clippy
+及 CI 使用的 rdev 定向测试通过。本条只补充验证文档，代码保持该审阅提交的内容。
+
+最终固定说明下再次执行正式忽略测试 `live_realtime_structured_multiturn`：同一连接五轮
+与五个新连接的完整输入逐组相同，覆盖空前缀、延长、缩短、尾部变化及仅动态后缀变化。
+10 次均返回合法结构化结果，五组文字全部一致，测试耗时 73.84 秒。该测试不按录音时间
+轴发送音频，不能证明录音期间的计算进度或实际 KV 命中。
+
+**剩余边界。** 用户说明目前不能读取服务端 prefill 日志；实际命中 token 数、有效缓存
+边界、prefill 计算时间和停录后延迟仍无验收证据。PR 继续保持 Draft，不自动合并。
