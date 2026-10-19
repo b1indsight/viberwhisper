@@ -32,6 +32,11 @@ canonicalized; symlink storage, path escape, unexpected fields, invalid versions
 and digest mismatches are rejected or reported. IDs combine a Unix-millisecond timestamp and a
 process sequence.
 
+Only `record` creates dataset storage. Evaluation, validation and sample commands require an
+existing manifest and all three owned directories; they fail without creating or repairing missing
+storage. Sample show/list/correct share the regular-file and dataset-containment checks, so a
+sidecar symlink is rejected before its contents are read or corrected.
+
 Prompt-lab listener output clones complete immutable `WavChunk` values into a bounded archive
 worker. The worker validates a stable 16-bit integer WAV format and appends decoded samples in
 session order to one final WAV. Finalization closes that writer, hashes the WAV, and directly writes
@@ -110,7 +115,9 @@ learning support and expiration; replace its `first`/`second` IDs before running
 `seed.observations` entries have `recording`, `segment`, `at`, `context`, `text`, `terms` (the same
 shape as long-term terms). Seed recording names cannot begin with `sample:`. Future timestamps,
 invalid fields, excessive memory counts and initial snapshots over the production budget are rejected
-before networking. Production snapshot limits still expose the newest three histories per context.
+before networking. Validation checks that production initialization retains every seed observation;
+observations aged 24 hours or more are rejected, using production retention rather than copied rules.
+Production snapshot limits still expose the newest three histories per context.
 
 Both `input` and `memory` accept `contexts_present/absent`, `terms_present/absent` and
 `history_present/absent`. History and `forbidden_text` use exact substring matching. Term assertions

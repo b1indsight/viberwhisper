@@ -70,7 +70,7 @@ impl Default for DictationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            url: "ws://192.168.50.156:8080/v1/realtime".into(),
+            url: "ws://127.0.0.1:8080/v1/realtime".into(),
             model: "mlx-community/gemma-4-e4b-it-4bit".into(),
             api_key_env: "REALTIME_API_KEY".into(),
             prompt: None,

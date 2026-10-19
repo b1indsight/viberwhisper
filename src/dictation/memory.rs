@@ -184,6 +184,10 @@ impl Memory {
         memory
     }
 
+    pub(super) fn observation_count(&self) -> usize {
+        self.observations.len()
+    }
+
     fn prune(&mut self, now: u64) {
         self.corrections.retain(|c| {
             super::config::valid_label(&c.context)

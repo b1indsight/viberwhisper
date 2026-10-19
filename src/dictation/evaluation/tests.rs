@@ -89,6 +89,29 @@ fn seed_budget_is_checked_before_production_trimming() {
     assert!(seed.validate(100).is_err());
 }
 
+#[test]
+fn seed_validation_rejects_observations_expiring_before_the_first_request() {
+    // A scenario must not claim to seed history that production drops on initialization.
+    let seed = MemorySeed {
+        observations: vec![Observation::new(
+            "prior-recording",
+            0,
+            100,
+            "project",
+            "历史",
+            vec![],
+        )],
+        ..Default::default()
+    };
+    seed.validate(100 + 86_399).unwrap();
+    assert!(
+        !Replay::new(&seed, 100 + 86_399)
+            .snapshot(100 + 86_399)
+            .history_is_empty()
+    );
+    assert!(seed.validate(100 + 86_400).is_err());
+}
+
 #[tokio::test]
 async fn evaluator_sends_production_snapshot_and_rolls_back_cleanup_failure() {
     for cleanup in [true, false] {

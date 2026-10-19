@@ -166,7 +166,7 @@ impl TextTyper for WindowsTyper {
             bail!("SendInput only sent {}/{} events", sent, inputs.len());
         }
 
-        info!(text = %text, "Text typed");
+        info!(chars = text.chars().count(), "Text typed");
         Ok(())
     }
 }

@@ -14,6 +14,7 @@ use crate::transcriber::TranscriberMetadata;
 
 const DATASET_SCHEMA_VERSION: u32 = 1;
 const SAMPLE_SCHEMA_VERSION: u32 = 1;
+const STORAGE_DIRECTORIES: [&str; 3] = ["audio", "samples", "runs"];
 
 type Result<T> = std::result::Result<T, DatasetError>;
 
@@ -315,29 +316,42 @@ pub(crate) struct DatasetStore {
 }
 
 impl DatasetStore {
+    /// Open a complete dataset without creating or repairing any of its storage.
+    pub(crate) fn open(root: PathBuf) -> Result<Self> {
+        let root = fs::canonicalize(root)?;
+        for name in STORAGE_DIRECTORIES {
+            validate_owned_directory(&root, name)?;
+        }
+        let manifest_path =
+            owned_regular_file(&root, &root.join("dataset.json"), "dataset manifest")?;
+        let manifest: DatasetManifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
+        if manifest.schema_version != DATASET_SCHEMA_VERSION {
+            return Err(DatasetError::Invalid(format!(
+                "unsupported dataset schema_version {}; expected {DATASET_SCHEMA_VERSION}",
+                manifest.schema_version
+            )));
+        }
+        Ok(Self {
+            root,
+            next_id: AtomicU64::new(1),
+        })
+    }
+
+    /// Initialize capture storage, then apply the same checks as existing-dataset consumers.
     pub(crate) fn open_or_create(root: PathBuf) -> Result<Self> {
         fs::create_dir_all(&root)?;
         let root = fs::canonicalize(root)?;
-        for name in ["audio", "samples", "runs"] {
-            ensure_owned_directory(&root, name)?;
+        for name in STORAGE_DIRECTORIES {
+            match fs::create_dir(root.join(name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+            validate_owned_directory(&root, name)?;
         }
         let manifest_path = root.join("dataset.json");
         match fs::symlink_metadata(&manifest_path) {
-            Ok(metadata) => {
-                if !metadata.is_file() || metadata.file_type().is_symlink() {
-                    return Err(DatasetError::Invalid(format!(
-                        "dataset manifest must be a regular file: {}",
-                        manifest_path.display()
-                    )));
-                }
-                let manifest: DatasetManifest = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-                if manifest.schema_version != DATASET_SCHEMA_VERSION {
-                    return Err(DatasetError::Invalid(format!(
-                        "unsupported dataset schema_version {}; expected {DATASET_SCHEMA_VERSION}",
-                        manifest.schema_version
-                    )));
-                }
-            }
+            Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 write_json(
                     &manifest_path,
@@ -349,10 +363,7 @@ impl DatasetStore {
             }
             Err(error) => return Err(error.into()),
         }
-        Ok(Self {
-            root,
-            next_id: AtomicU64::new(1),
-        })
+        Self::open(root)
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -437,8 +448,7 @@ impl DatasetStore {
     }
 
     pub(crate) fn load_sample(&self, id: &str) -> Result<SampleRecord> {
-        validate_id(id)?;
-        let path = self.sample_path(id)?;
+        let path = owned_regular_file(&self.root, &self.sample_path(id)?, "sample sidecar")?;
         let sample: SampleRecord = serde_json::from_slice(&fs::read(path)?)?;
         self.validate_sample_identity(&sample, id)?;
         sample.capture.transcription.validate()?;
@@ -615,20 +625,11 @@ impl DatasetStore {
     }
 
     fn validate_audio(&self, sample: &SampleRecord) -> Result<()> {
-        let path = self.root.join(&sample.audio.path);
-        let metadata = fs::symlink_metadata(&path)?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(DatasetError::Invalid(format!(
-                "sample audio is not a regular file: {}",
-                path.display()
-            )));
-        }
-        let canonical = fs::canonicalize(&path)?;
-        if !canonical.starts_with(&self.root) {
-            return Err(DatasetError::Invalid(
-                "sample audio escapes the dataset root".to_string(),
-            ));
-        }
+        let canonical = owned_regular_file(
+            &self.root,
+            &self.root.join(&sample.audio.path),
+            "sample audio",
+        )?;
         validate_wav(&canonical)?;
         let actual = sha256_file(&canonical)?;
         if actual != sample.audio.sha256 {
@@ -641,16 +642,9 @@ impl DatasetStore {
     }
 }
 
-fn ensure_owned_directory(root: &Path, name: &str) -> Result<()> {
+fn validate_owned_directory(root: &Path, name: &str) -> Result<()> {
     let path = root.join(name);
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(&path)?;
-            fs::symlink_metadata(&path)?
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let metadata = fs::symlink_metadata(&path)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(DatasetError::Invalid(format!(
             "dataset {name} directory must not be a symlink: {}",
@@ -664,6 +658,23 @@ fn ensure_owned_directory(root: &Path, name: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn owned_regular_file(root: &Path, path: &Path, kind: &str) -> Result<PathBuf> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(DatasetError::Invalid(format!(
+            "{kind} must be a regular file: {}",
+            path.display()
+        )));
+    }
+    let canonical = fs::canonicalize(path)?;
+    if !canonical.starts_with(root) {
+        return Err(DatasetError::Invalid(format!(
+            "{kind} escapes the dataset root"
+        )));
+    }
+    Ok(canonical)
 }
 
 fn validate_id(id: &str) -> Result<()> {
@@ -948,6 +959,31 @@ mod tests {
 
         assert!(error.to_string().contains("expected_occurrences"));
         assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sample_consumers_reject_sidecar_links_without_rewriting_the_target() {
+        use std::os::unix::fs::symlink;
+
+        // A shared dataset can contain a valid sidecar linked to another dataset.
+        // Reading or correcting it must not follow that link, even when its WAV matches.
+        let directory = tempdir().unwrap();
+        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
+        let id = captured_sample(&store, 42);
+        let sidecar = store.sample_path(&id).unwrap();
+        let outside = directory.path().join("outside.json");
+        fs::rename(&sidecar, &outside).unwrap();
+        symlink(&outside, &sidecar).unwrap();
+        let before = fs::read(&outside).unwrap();
+
+        let correction = store.correct_sample(&id, "修改后的参考文字", Vec::new());
+
+        assert_eq!(fs::read(&outside).unwrap(), before);
+        assert!(correction.is_err());
+        assert!(store.load_sample(&id).is_err());
+        assert!(store.list_samples(None).is_err());
+        assert_eq!(store.validate().unwrap().invalid_count, 1);
     }
 
     #[test]
