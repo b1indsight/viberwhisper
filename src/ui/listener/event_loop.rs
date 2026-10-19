@@ -664,21 +664,6 @@ fn finish_transcription(
         })
 }
 
-#[cfg(test)]
-fn deliver_text(
-    typer: &dyn TextTyper,
-    gate: &FinalizationGate,
-    text: &str,
-    notify_permission_required: &impl Fn(),
-) {
-    if let Err(error) = gate.type_text_if_active(typer, text, &|| Ok(())) {
-        error!(%error, "Failed to type text");
-        if !gate.is_cancelled() && crate::platform::is_text_delivery_permission_error(&error) {
-            notify_permission_required();
-        }
-    }
-}
-
 fn capture_transcription(
     result: Result<String, SessionError>,
     stt: SttSnapshot,
@@ -719,32 +704,9 @@ mod tests {
     use crate::transcriber::TranscribeError;
 
     use super::{
-        FinalizationGate, FinalizationTask, capture_transcription, deliver_text,
-        finalization_completion_event, spawn_finalization_worker,
+        FinalizationGate, FinalizationTask, capture_transcription, finalization_completion_event,
+        spawn_finalization_worker,
     };
-
-    #[test]
-    fn unrelated_errors_and_canceled_delivery_do_not_request_permission_guidance() {
-        struct FailingTyper(AtomicUsize);
-        impl TextTyper for FailingTyper {
-            fn type_text(&self, _: &str) -> anyhow::Result<()> {
-                self.0.fetch_add(1, Ordering::Relaxed);
-                // A matching message is insufficient: only the platform's typed denial counts.
-                anyhow::bail!("Accessibility permission is required")
-            }
-        }
-        let typer = FailingTyper(AtomicUsize::new(0));
-        let prompts = AtomicUsize::new(0);
-        let notify = || {
-            prompts.fetch_add(1, Ordering::Relaxed);
-        };
-        let gate = FinalizationGate::new();
-        deliver_text(&typer, &gate, "test", &notify);
-        gate.cancel();
-        deliver_text(&typer, &gate, "late text", &notify);
-        assert_eq!(typer.0.load(Ordering::Relaxed), 1);
-        assert_eq!(prompts.load(Ordering::Relaxed), 0);
-    }
 
     fn stt_snapshot() -> SttSnapshot {
         SttSnapshot {

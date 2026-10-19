@@ -1,3 +1,4 @@
+2026-10-19: Fix six P2 review findings: reject linked dataset sidecars, require existing datasets outside capture, default Realtime to loopback, log transcript lengths only, test the real confirmation permission path, and validate seeds against production memory retention
 2026-10-18: Declare and acknowledge stable Realtime vocabulary before audio, place dynamic memory after audio, bind and clean up segment items across cancellation/clear/reconnect, and version prompt-lab input evidence as policy v4
 2026-10-18: Explicitly shut down the Realtime Tokio runtime after draining feedback so stalled blocking DNS tasks cannot delay worker thread exit
 2026-10-18: Reject repeated-grapheme insertions with equivalent candidate-edge positions; drain accepted Realtime feedback on normal exit while closing pending previews and cancelling network I/O

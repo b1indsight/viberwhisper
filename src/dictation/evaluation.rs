@@ -1,6 +1,6 @@
 //! Isolated seeded memory and structured observations through the production recording path.
 use super::{
-    config::{DictationConfig, LongTerm, MemoryConfig, valid_label, valid_term},
+    config::{DictationConfig, LongTerm, MemoryConfig},
     engine::Recording,
     memory::{Memory, Observation, Snapshot},
     transport::Connection,
@@ -41,35 +41,24 @@ impl MemorySeed {
             counts.len() <= 4 && counts.values().all(|n| *n <= 16),
             "seed vocabulary exceeds snapshot limits"
         );
-        let mut observations_per_context = HashMap::new();
         for o in &self.observations {
             ensure!(
-                valid_label(&o.context)
-                    && !o.recording.is_empty()
+                !o.recording.is_empty()
                     && o.recording.len() <= 128
                     && !o.recording.starts_with("sample:")
-                    && o.at <= at
-                    && o.text.chars().count() <= 1024
                     && !o.text.contains('\0')
-                    && o.terms.len() <= 8
-                    && o.terms
-                        .iter()
-                        .all(|t| t.context == o.context && valid_term(&t.text))
                     && origins.insert((o.recording.clone(), o.segment)),
                 "invalid seed observation"
             );
-            *observations_per_context
-                .entry(o.context.clone())
-                .or_insert(0usize) += 1;
             counts.entry(o.context.clone()).or_insert(0);
         }
-        ensure!(
-            counts.len() <= 4
-                && observations_per_context.values().all(|n| *n <= 20)
-                && serde_json::to_vec(&self.observations)?.len() <= 3 * 1024 * 1024,
-            "seed observations exceed memory limits"
-        );
+        ensure!(counts.len() <= 4, "seed contexts exceed snapshot limits");
         let memory = self.memory(at);
+        // Production owns retention, including expiration and per-context limits.
+        ensure!(
+            memory.observation_count() == self.observations.len(),
+            "seed observations would be discarded by production memory retention"
+        );
         // Validate the untrimmed visible snapshot: raising the budget here would change production policy.
         let size = serde_json::to_string(&memory.untrimmed_snapshot(at))?
             .chars()

@@ -713,6 +713,64 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_errors_and_canceled_confirmation_do_not_request_permission_guidance() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct FailingTyper(AtomicUsize);
+        impl TextTyper for FailingTyper {
+            fn type_text(&self, _: &str) -> Result<()> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                bail!("Accessibility permission is required")
+            }
+        }
+        // An unrelated failure can mention Accessibility. Only a typed denial warrants
+        // guidance; a confirmation queued just before cancellation must not type at all.
+        for (capture_fails, cancelled) in [(false, false), (true, false), (false, true)] {
+            let typer = FailingTyper(AtomicUsize::new(0));
+            let gate = FinalizationGate::new();
+            let guidance = Cell::new(0);
+            let failures = Cell::new(0);
+            wait_for_confirmation(
+                SessionId(9),
+                ("candidate".into(), None).into(),
+                &typer,
+                None,
+                &gate,
+                || {
+                    if capture_fails {
+                        bail!("Accessibility permission is required");
+                    }
+                    Ok(Target(Cell::new(true)))
+                },
+                &|event| {
+                    match event {
+                        PreviewUpdate::Ready { commands, .. } => {
+                            commands
+                                .send(PreviewCommand::Confirm("candidate".into()))
+                                .unwrap();
+                            if cancelled {
+                                gate.cancel();
+                            }
+                        }
+                        PreviewUpdate::PermissionRequired => guidance.set(guidance.get() + 1),
+                        PreviewUpdate::DeliveryFailed { .. } => {
+                            failures.set(failures.get() + 1);
+                            return false;
+                        }
+                        _ => panic!("unexpected event"),
+                    }
+                    true
+                },
+            );
+            assert_eq!(guidance.get(), 0);
+            assert_eq!(failures.get(), usize::from(!cancelled));
+            assert_eq!(
+                typer.0.load(Ordering::Relaxed),
+                usize::from(!capture_fails && !cancelled)
+            );
+        }
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
     fn permission_revocation_in_target_operations_requests_guidance() {
         use crate::platform::NativeTarget;

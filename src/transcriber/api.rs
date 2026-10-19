@@ -23,7 +23,7 @@ impl Transcriber for MockTranscriber {
     fn transcribe(&self, _chunk: &WavChunk) -> Result<String, TranscribeError> {
         info!("Starting transcription");
         let text = "This is mock transcribed text".to_string();
-        info!(result = %text, "Transcription complete");
+        info!(chars = text.chars().count(), "Transcription complete");
         Ok(text)
     }
 }
@@ -260,7 +260,7 @@ impl Transcriber for ApiTranscriber {
             return Ok(String::new());
         };
         let text = self.upload_chunk_with_retry(&prepared)?;
-        info!(result = %text, "Transcription complete");
+        info!(chars = text.chars().count(), "Transcription complete");
         Ok(text)
     }
 }

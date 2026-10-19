@@ -84,7 +84,7 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
     {
         return Err(std::io::Error::other("candidate prompt file must not be empty").into());
     }
-    let dataset = DatasetStore::open_or_create(command.dataset)?;
+    let dataset = DatasetStore::open(command.dataset)?;
     let prior = command
         .compare_to
         .as_deref()
@@ -206,7 +206,7 @@ fn record(root: PathBuf) -> Result<()> {
 fn sample(action: PromptLabSampleCommand) -> Result<()> {
     match action {
         PromptLabSampleCommand::List { dataset, status } => {
-            let store = DatasetStore::open_or_create(dataset)?;
+            let store = DatasetStore::open(dataset)?;
             let status = status.map(|status| match status {
                 PromptLabSampleStatus::Pending => ReferenceStatus::Pending,
                 PromptLabSampleStatus::Ready => ReferenceStatus::Ready,
@@ -221,7 +221,7 @@ fn sample(action: PromptLabSampleCommand) -> Result<()> {
             Ok(())
         }
         PromptLabSampleCommand::Show { dataset, id } => {
-            let store = DatasetStore::open_or_create(dataset)?;
+            let store = DatasetStore::open(dataset)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&store.load_sample(&id)?)?
@@ -246,7 +246,7 @@ fn sample(action: PromptLabSampleCommand) -> Result<()> {
                 }
                 None => Vec::new(),
             };
-            let store = DatasetStore::open_or_create(dataset)?;
+            let store = DatasetStore::open(dataset)?;
             let sample = store.correct_sample(&id, &reference, proper_nouns)?;
             println!("{}", serde_json::to_string_pretty(&sample)?);
             Ok(())
@@ -257,7 +257,7 @@ fn sample(action: PromptLabSampleCommand) -> Result<()> {
 fn dataset(action: PromptLabDatasetCommand) -> Result<()> {
     match action {
         PromptLabDatasetCommand::Validate { dataset } => {
-            let store = DatasetStore::open_or_create(dataset)?;
+            let store = DatasetStore::open(dataset)?;
             let report = store.validate()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if report.issues.is_empty() {
@@ -277,6 +277,39 @@ fn dataset(action: PromptLabDatasetCommand) -> Result<()> {
 mod tests {
     use super::*;
     use crate::dictation::config::{DictationConfig, PromptComponents};
+
+    #[test]
+    fn validation_does_not_create_or_repair_a_dataset() {
+        // A typo or incomplete copy must fail validation instead of becoming an empty dataset.
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("dataset");
+        assert!(
+            dataset(PromptLabDatasetCommand::Validate {
+                dataset: root.clone()
+            })
+            .is_err()
+        );
+        assert!(!root.exists());
+
+        fs::create_dir(&root).unwrap();
+        assert!(
+            dataset(PromptLabDatasetCommand::Validate {
+                dataset: root.clone()
+            })
+            .is_err()
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+
+        DatasetStore::open_or_create(root.clone()).unwrap();
+        fs::remove_dir(root.join("runs")).unwrap();
+        assert!(
+            dataset(PromptLabDatasetCommand::Validate {
+                dataset: root.clone()
+            })
+            .is_err()
+        );
+        assert!(!root.join("runs").exists());
+    }
 
     #[test]
     fn realtime_evaluation_keeps_components_unless_a_full_override_is_requested() {

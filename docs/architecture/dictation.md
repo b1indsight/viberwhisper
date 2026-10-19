@@ -6,6 +6,9 @@ The orchestrator owns active-session identity, routing, start/finish/cancel and 
 for both paths. Delivery disables the old LLM postprocessor.
 Raw prompt-lab capture deliberately retains the HTTP transcriber.
 
+Realtime is disabled by default. An omitted URL resolves to
+`ws://127.0.0.1:8080/v1/realtime`; explicitly configured endpoints are preserved.
+
 ## Ownership
 
 - `config`: typed optional v3 configuration, endpoint validation, environment authentication,
