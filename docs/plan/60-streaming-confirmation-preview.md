@@ -1,6 +1,6 @@
 # 60 - Realtime 流式预览与最终文本纠正 — Feature record
 
-**Stage:** Listener regression coverage added locally; Claude review completed with no findings.
+**Stage:** Listener regression coverage published; Claude and publication-gate reviews found no issues.
 **PR:** [#156](https://github.com/b1indsight/viberwhisper/pull/156)，分支
 `feat/streaming-confirmation-preview`；未合并或部署，原工作副本中的其他任务修改保留。
 
@@ -381,4 +381,10 @@ UI 适配只保留最新进度并合并唤醒，避免按 token 无界积压事�
 - **Remaining verification limits:** 新测试仍不覆盖 `render_progress` 闭包内原生
   Show/Update 映射或错误分支；本轮没有 winit、Windows 桌面或真实服务端到端验证。
   这些是验证范围限制，Claude 未将其列为缺陷发现。
-- **Delivery status:** 本批修复及 Claude 审查已完成，仅在隔离工作副本中；未推送或合并。
+- **Publication review:** 用户随后要求推送。独立 Codex 发布门禁审查精确提交
+  [`85094941`](https://github.com/b1indsight/viberwhisper/commit/850949411913f2715e8ce20f09491dec3e617d86)，
+  结构化结果解析成功、退出码 0、无发现；此轮为静态审查，没有重跑测试。源码与
+  Claude 审查时一致，报告为 `.git/jj-reviews/yywmkmqvstlr-850949411913.json`。
+- **Delivery status:** 已将通过发布门禁的精确修复提交推送到同一个 PR；此后只更新
+  本文和 PR 的过期 Low 说明，不改已审查源码。保留草稿，不合并、安装或部署；
+  CI 跟踪本次最终 head，原工作副本和其他任务修改保留。
