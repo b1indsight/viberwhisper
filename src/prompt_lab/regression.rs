@@ -99,7 +99,6 @@ impl Thresholds {
 
 pub(crate) struct EvaluationRequest {
     pub(crate) stt: SttSnapshot,
-    pub(crate) language: Option<String>,
     pub(crate) thresholds: Thresholds,
     pub(crate) output: Option<PathBuf>,
     pub(crate) compare_to: Option<EvaluationReport>,
@@ -762,7 +761,6 @@ pub(crate) fn evaluate(
         if request.stt.endpoint != run.settings.url
             || request.stt.model != run.settings.model
             || request.stt.prompt.as_deref() != Some(run.settings.prompt().as_str())
-            || request.language != request.stt.language
             || request.stt.input_layout.as_deref() != Some(crate::dictation::INPUT_LAYOUT)
         {
             return Err(RegressionError::Invalid(
@@ -816,7 +814,7 @@ pub(crate) fn evaluate(
             .iter()
             .map(|s| (s.id.clone(), store.root().join(&s.audio.path)))
             .collect();
-        let (report, outcomes) = super::realtime::run(run, &audio, request.language.clone())
+        let (report, outcomes) = super::realtime::run(run, &audio, request.stt.language.clone())
             .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
         (Some(report), outcomes)
     } else {
@@ -840,7 +838,7 @@ pub(crate) fn evaluate(
             transcribe_sample(
                 &store.root().join(&sample.audio.path),
                 transcriber,
-                request.language.clone(),
+                request.stt.language.clone(),
             )
         };
         match result {
@@ -1285,7 +1283,6 @@ mod tests {
     fn request(output: std::path::PathBuf) -> EvaluationRequest {
         EvaluationRequest {
             stt: snapshot(Some("candidate")),
-            language: Some("zh".to_string()),
             thresholds: Thresholds {
                 max_wer_percent: 20.0,
                 min_llm_score: 90.0,

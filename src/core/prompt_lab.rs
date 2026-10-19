@@ -133,13 +133,11 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
         let stt = SttSnapshot::from(config.metadata());
         (Box::new(ApiTranscriber::new(config)?), stt)
     };
-    let language = stt.language.clone();
     let outcome = evaluate(
         &dataset,
         transcriber.as_ref(),
         EvaluationRequest {
             stt,
-            language,
             thresholds: command.thresholds,
             output: command.output,
             compare_to: prior,

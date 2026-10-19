@@ -488,29 +488,7 @@ impl DatasetStore {
     }
 
     pub(crate) fn scoring_snapshot(&self, scoring_policy_version: &str) -> Result<ScoringDataset> {
-        let validation = self.validate()?;
-        let mut entries = fs::read_dir(self.samples_dir())?.collect::<std::io::Result<Vec<_>>>()?;
-        entries.sort_by_key(|entry| entry.file_name());
-        let mut samples = Vec::new();
-        for entry in entries {
-            let path = entry.path();
-            if entry.file_type()?.is_symlink()
-                || path.extension().and_then(|extension| extension.to_str()) != Some("json")
-            {
-                continue;
-            }
-            let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            let Ok(sample) = self.load_sample(id) else {
-                continue;
-            };
-            if self.validate_audio(&sample).is_ok()
-                && sample.reference.status == ReferenceStatus::Ready
-            {
-                samples.push(sample);
-            }
-        }
+        let (validation, samples) = self.scan()?;
         let digest = scoring_digest(scoring_policy_version, &samples)?;
         Ok(ScoringDataset {
             digest,
@@ -521,12 +499,18 @@ impl DatasetStore {
     }
 
     pub(crate) fn validate(&self) -> Result<DatasetValidation> {
+        self.scan().map(|(report, _)| report)
+    }
+
+    /// Collect diagnostics and ordered ready samples from the same sidecar and audio checks.
+    fn scan(&self) -> Result<(DatasetValidation, Vec<SampleRecord>)> {
         let mut report = DatasetValidation {
             ready_count: 0,
             pending_count: 0,
             invalid_count: 0,
             issues: Vec::new(),
         };
+        let mut samples = Vec::new();
         let mut referenced_audio = HashSet::new();
         let mut entries = fs::read_dir(self.samples_dir())?.collect::<std::io::Result<Vec<_>>>()?;
         entries.sort_by_key(|entry| entry.file_name());
@@ -568,7 +552,10 @@ impl DatasetStore {
                 .and_then(|()| self.validate_audio(&sample));
             match validation {
                 Ok(()) => match sample.reference.status {
-                    ReferenceStatus::Ready => report.ready_count += 1,
+                    ReferenceStatus::Ready => {
+                        report.ready_count += 1;
+                        samples.push(sample);
+                    }
                     ReferenceStatus::Pending => report.pending_count += 1,
                 },
                 Err(error) => {
@@ -598,7 +585,7 @@ impl DatasetStore {
                 ));
             }
         }
-        Ok(report)
+        Ok((report, samples))
     }
 
     fn validate_sample_identity(&self, sample: &SampleRecord, expected_id: &str) -> Result<()> {

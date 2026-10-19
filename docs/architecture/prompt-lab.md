@@ -55,10 +55,14 @@ truncated WAV/JSON or an unreferenced file; `dataset validate` reports it and pe
 
 ## Scoring Snapshot and Execution
 
-Evaluation first validates all sidecars and snapshots every valid `ready` sample in stable ID
-order. Its dataset digest covers only the scoring-policy version, IDs, WAV SHA-256 values, human
+Validation and scoring share one ordered scan of the sidecars and their audio. The scan returns
+diagnostics and valid `ready` samples together, so evaluation does not reparse sidecars or rehash
+audio to construct its snapshot. Sample listing keeps its separate fail-fast behavior.
+The dataset digest covers only the scoring-policy version, IDs, WAV SHA-256 values, human
 references, and proper-noun annotations. Initial capture text is excluded. At least one ready sample,
 one scoreable reference token, and one expected proper-noun occurrence are required.
+The evaluation request's STT snapshot owns the language used for both HTTP chunk merging and
+Realtime segment merging, as well as the language persisted in the report.
 
 The selected recognizer receives an in-memory prompt override. Realtime evaluates the full task
 instructions, including the initial meta instructions and base prompt. `--prompt-file` replaces them;
