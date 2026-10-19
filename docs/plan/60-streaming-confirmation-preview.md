@@ -1,6 +1,6 @@
 # 60 - Realtime 流式预览与最终文本纠正 — Feature record
 
-**Stage:** Published as a draft PR; unresolved review findings below.
+**Stage:** Review fixes implemented and validated; follow-up review/publication status below.
 **PR:** [#156](https://github.com/b1indsight/viberwhisper/pull/156)，分支
 `feat/streaming-confirmation-preview`；未合并或部署，原工作副本中的其他任务修改保留。
 
@@ -301,3 +301,35 @@ UI 适配只保留最新进度并合并唤醒，避免按 token 无界积压事�
   不标记 Ready、不合并。此后只追加本记录，不改动已审查实现。
 - **Delivery status:** 已推送到用户自己的仓库；尚未合并、安装或部署。原工作副本及
   其他任务修改未移动；真实服务 delta 和 Windows 桌面运行仍未验证。
+
+### [006] — 2026-10-19 — 修复四项已报告问题
+
+- **Context / requirement:** 用户在收到 [005] 的四项发现后要求修复。旧 head 的
+  macOS、Windows CI 均成功，但不能排除这些布局、取消时序及 smoke 覆盖问题。
+- **Implemented changes:** Windows 删除只定位一次的 `positioned` 状态；每次正文、
+  编辑或提示区改变尺寸时重新使用共享 `preview_origin`，按实际新尺寸翻转和限位，
+  不调用激活 API。Windows 无自定义拖动定位；macOS 原有手动位置保留逻辑不变。
+  这修正了 [001] 在 Windows 保持旧中心/顶边但未限制屏幕边界的实现。
+- **Implemented changes:** 确认 worker 先接收已捕获目标，再进入可取消命令循环；
+  循环仅返回是否成功交付。所有未交付出口统一恢复目标，包括首次取消检查、Ready
+  发送失败、UI 丢弃 Ready、通道断开和过期确认；完成通知仍在恢复尝试之后发送。
+  流式元数据通知失败也走原有恢复路径。目标对象仍留在捕获它的 worker，不跨线程。
+- **Implemented changes:** 只有尚未展示过气泡时才忽略空进度；已展示气泡接收空正文
+  补丁，删除撤回的暂定文字，后续进度及最终 Ready 继续复用该窗口。Windows 流式
+  smoke 直接检查自身控件，不再因尚未成为前台而返回成功；补充屏幕四角短→长、
+  Ready 和提示区布局检查，旧确认 smoke 也改按 caret/work-area 策略校验位置。
+- **Evidence / ablation:** 新回归先在未修复代码执行，`BeforeCapture` 恢复计数为 0，
+  退出 101；修复后同一回归的五种时序均通过，确认恢复早于 finalization 完成，且
+  输入次数、历史新增及学习均为零。日志为 `.amp/in/artifacts/streaming-fixes-before.log`
+  和 `streaming-fixes-regression.log`。取消校验仍由既有 focus-delay 回归覆盖。
+- **Evidence:** fmt、diff whitespace、check、普通及 integration 测试、严格 Clippy
+  均通过；两次测试各 319 passed、0 failed、2 ignored。原生 fixture 执行
+  草稿→空正文撤回→新草稿→最终纠正，通过只读/选区/Ready 检查；实际 PNG 已查看，
+  空正文没有残留文字，新草稿与最终文本完整。日志为
+  `.amp/in/artifacts/streaming-fixes-verification.log`，截图为 `streaming-fixes/`。
+- **Platform / service limits:** 独立小 crate 直接引用本次 Windows preview、定位、共享
+  patch 及 integration smoke 源码，GNU 目标 check 通过，日志为
+  `.amp/in/artifacts/streaming-fixes-windows-check.log`。此检查不代表 Windows 桌面
+  实测；完整 cross-build 的 ort/SDK 限制未改变。两个 ignored 用例仍需要私有 VAD
+  数据集和真实服务。未请求共享 Realtime 服务、不暂停其他评测、不改个人配置。
+- **Delivery status:** 本批修复尚待一次后续独立审查和同 PR 推送；不合并或部署。

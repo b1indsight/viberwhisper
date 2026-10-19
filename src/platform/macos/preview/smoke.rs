@@ -94,6 +94,17 @@ impl NativePreview {
             text.string().to_string() == "我们明天上午去上海。",
             "Streaming correction did not apply Chinese tail replacement"
         );
+        self.update_text("", false, None)?;
+        let text = &self
+            .window
+            .as_ref()
+            .expect("streaming preview was checked")
+            .ivars()
+            .text;
+        ensure!(
+            text.string().is_empty() && !text.isEditable(),
+            "An empty aggregate did not retract the read-only provisional text"
+        );
         self.window
             .as_ref()
             .expect("streaming preview was checked")

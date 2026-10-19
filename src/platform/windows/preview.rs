@@ -167,7 +167,6 @@ struct WindowState {
     laying_out: Cell<bool>,
     max_width: Cell<i32>,
     anchor: Cell<Option<PreviewRect>>,
-    positioned: Cell<bool>,
 }
 
 impl WindowState {
@@ -329,13 +328,11 @@ impl WindowState {
             // Match the macOS viewport bounds; taller text stays scrollable.
             let editor_height = content_height.clamp(28, 196);
             let height = editor_height + 24 + if self.message_visible.get() { 48 } else { 0 };
-            let origin = (!self.positioned.get())
-                .then(|| {
-                    self.anchor.get().zip(work).map(|(anchor, work)| {
-                        preview_origin(anchor, (width as f64, height as f64), work)
-                    })
-                })
-                .flatten();
+            // Re-evaluate placement at the new size, including the warning footer.
+            let origin =
+                self.anchor.get().zip(work).map(|(anchor, work)| {
+                    preview_origin(anchor, (width as f64, height as f64), work)
+                });
             unsafe {
                 ensure!(
                     SetWindowPos(
@@ -397,7 +394,6 @@ impl WindowState {
                 }
                 // Windows owns the region after successful SetWindowRgn.
             }
-            self.positioned.set(true);
             Ok(())
         })();
         self.laying_out.set(false);
@@ -580,7 +576,6 @@ impl NativePreview {
                 laying_out: Cell::new(false),
                 max_width: Cell::new(420),
                 anchor: Cell::new(None),
-                positioned: Cell::new(false),
             }),
         }
     }
@@ -728,7 +723,6 @@ impl NativePreview {
         }
         self.state.session_id.set(Some(session_id));
         self.state.anchor.set(anchor);
-        self.state.positioned.set(false);
         self.state.keys.borrow_mut().reset();
         self.state.held_keys.set(0);
         self.state.retry_allowed.set(true);
@@ -773,7 +767,6 @@ impl NativePreview {
         }
         self.state.session_id.set(Some(session_id));
         self.state.anchor.set(anchor);
-        self.state.positioned.set(false);
         self.state.keys.borrow_mut().reset();
         self.state.held_keys.set(0);
         self.state.retry_allowed.set(false);
@@ -935,7 +928,6 @@ impl NativePreview {
     pub(crate) fn close(&mut self) {
         self.state.session_id.set(None);
         self.state.anchor.set(None);
-        self.state.positioned.set(false);
         self.state.keys.borrow_mut().reset();
         self.state.held_keys.set(0);
         self.hide();

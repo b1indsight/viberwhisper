@@ -75,7 +75,12 @@ pub fn run_preview_demo(smoke: bool, artifacts: Option<PathBuf>) -> Result<()> {
             .as_ref()
             .ok()
             .and_then(DeliveryTarget::preview_anchor);
-        for text in ["我们明天", "我们明天下午去北京。"] {
+        for text in [
+            "我们明天",
+            "我们明天下午去北京。",
+            "",
+            "我们明天下午去北京。",
+        ] {
             let (applied, receiver) = mpsc::sync_channel(0);
             if proxy
                 .send_event(DemoEvent::Progress {
@@ -188,7 +193,9 @@ impl ApplicationHandler<DemoEvent> for Demo {
                             "Generating preview confirmed before completion"
                         );
                     }
-                    self.capture(if self.streaming {
+                    self.capture(if text.is_empty() {
+                        "streaming-retracted.png"
+                    } else if self.streaming {
                         "streaming-draft.png"
                     } else {
                         "streaming-prefix.png"

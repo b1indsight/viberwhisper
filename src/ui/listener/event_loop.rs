@@ -309,7 +309,7 @@ impl ListenerApplication {
         let Some((destination, anchor)) = &stream.destination else {
             return;
         };
-        if text.is_empty() {
+        if text.is_empty() && !stream.shown {
             return;
         }
         let display = if stream.shown {
@@ -715,10 +715,9 @@ impl ListenerApplication {
                             .as_ref()
                             .ok()
                             .and_then(DeliveryTarget::preview_anchor),
-                    }) {
-                        return;
-                    }
-                    if stop.recv().is_err() || gate.is_cancelled() {
+                    }) || stop.recv().is_err()
+                        || gate.is_cancelled()
+                    {
                         if let Ok(target) = &target
                             && let Err(error) = target.restore()
                         {
@@ -1073,6 +1072,109 @@ mod tests {
             session_id
         );
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn cancelled_preview_handoffs_restore_before_finalization_completes() {
+        use crate::dictation::Confirmation;
+        use crate::history::HistoryStore;
+        use crate::platform::DeliveryTarget;
+        use crate::ui::preview::{
+            PreviewCommand, PreviewTranscription, PreviewUpdate, wait_for_confirmation,
+        };
+
+        struct RestoreTarget(Arc<AtomicUsize>);
+        impl DeliveryTarget for RestoreTarget {
+            fn name(&self) -> String {
+                "saved editor".into()
+            }
+            fn restore(&self) -> anyhow::Result<()> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn validate(&self) -> anyhow::Result<()> {
+                panic!("an abandoned preview must not validate for injection")
+            }
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum Handoff {
+            BeforeCapture,
+            DuringCapture,
+            RejectedReady,
+            DisconnectedReady,
+            CancelledCommand,
+        }
+        // Esc can win before Ready, while it is queued, or before its command is
+        // consumed. Dropping Ready also disconnects the worker without a command.
+        for handoff in [
+            Handoff::BeforeCapture,
+            Handoff::DuringCapture,
+            Handoff::RejectedReady,
+            Handoff::DisconnectedReady,
+            Handoff::CancelledCommand,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let history = HistoryStore::at(directory.path().join("history.jsonl"), 4096);
+            let worker_history = history.clone();
+            let restores = Arc::new(AtomicUsize::new(0));
+            let restored = Arc::clone(&restores);
+            let typer = Arc::new(CountingTyper(AtomicUsize::new(0)));
+            let worker_typer = Arc::clone(&typer);
+            let (confirmation, feedback) = Confirmation::channel();
+            let (completed, completion) = mpsc::channel();
+            let worker = spawn_finalization_worker(
+                SessionId(11),
+                move || {
+                    let gate = FinalizationGate::new();
+                    let target = RestoreTarget(restores); // Already captured by streaming.
+                    if matches!(handoff, Handoff::BeforeCapture) {
+                        gate.cancel();
+                    }
+                    wait_for_confirmation(
+                        SessionId(11),
+                        PreviewTranscription {
+                            text: "candidate".into(),
+                            warning: None,
+                            confirmation: Some(confirmation),
+                        },
+                        worker_typer.as_ref(),
+                        Some(&worker_history),
+                        &gate,
+                        || {
+                            if matches!(handoff, Handoff::DuringCapture) {
+                                gate.cancel();
+                            }
+                            Ok(target)
+                        },
+                        &|update| {
+                            let PreviewUpdate::Ready { commands, .. } = update else {
+                                panic!("an abandoned preview must not save or learn");
+                            };
+                            if matches!(handoff, Handoff::CancelledCommand) {
+                                gate.cancel();
+                                commands
+                                    .send(PreviewCommand::Confirm("stale".into()))
+                                    .unwrap();
+                            }
+                            !matches!(handoff, Handoff::RejectedReady)
+                        },
+                    );
+                },
+                move |session_id| {
+                    assert_eq!(restored.load(Ordering::SeqCst), 1, "{handoff:?}");
+                    completed.send(session_id).unwrap();
+                },
+            );
+            assert_eq!(
+                completion.recv_timeout(Duration::from_secs(1)).unwrap(),
+                SessionId(11)
+            );
+            worker.join().unwrap();
+            assert_eq!(typer.0.load(Ordering::Relaxed), 0);
+            assert!(history.load_recent().unwrap().is_empty());
+            assert!(feedback.blocking_recv().is_err());
+        }
     }
 
     #[test]
