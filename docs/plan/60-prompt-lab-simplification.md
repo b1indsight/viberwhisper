@@ -1,7 +1,7 @@
 # 60 - Prompt-lab 扫描与评测语言简化 — Feature record
 
-**Stage:** Implementation and local validation complete; preparing publication.
-**PR:** `refactor/prompt-lab-scan-language` → `master`；发布后补录链接。
+**Stage:** Published for review; local validation and standard workflow review passed; hosted CI pending.
+**PR:** [#155](https://github.com/b1indsight/viberwhisper/pull/155)，`refactor/prompt-lab-scan-language` → `master`。
 
 ## 1. Initial plan
 
@@ -50,4 +50,7 @@ ready 顺序与 digest 相同，中文/非中文 HTTP 和 Realtime 多段合并�
 - **Final review:** 用户随后指定收尾审阅使用当前仓库工作流，只有明确要求时才使用 Claude。
   已运行 `plan-first-workflow/scripts/review.sh @`，通过独立只读 Codex 审阅，退出 0，
   结构化结果为 `findings: []`。该审阅未运行测试或修改源码；测试证据来自上述本地验证。
-  审阅后仅更新本文档中的交付状态，未改动源码；发布前会对最终提交再运行当前工作流审阅。
+  发布前对[最终代码提交](https://github.com/b1indsight/viberwhisper/commit/c26293d5025af0a786c5ae60b279258bcd334987)
+  再次运行同一工作流，退出 0、无 findings；fmt、build、313 项测试与 Clippy 再次通过。
+  随后推送同一个 bookmark 并创建非草稿 PR #155。审阅后仅补录本文档中的发布链接及结果，
+  未改动源码；GitHub macOS/Windows CI 尚待完成，未执行合并。
