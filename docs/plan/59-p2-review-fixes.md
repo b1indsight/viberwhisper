@@ -1,7 +1,7 @@
 # 59 - 仓库代码准则检查 P2 修复 — Feature record
 
-**Stage:** Implemented and validated on current master; publication review pending.
-**PR:** 待通过 `fix/p2-review-findings` 提交至 `master`。
+**Stage:** Published for review; local validation and Claude review passed; hosted CI pending.
+**PR:** [#154](https://github.com/b1indsight/viberwhisper/pull/154)，`fix/p2-review-findings` → `master`。
 
 ## 1. Initial plan
 
@@ -180,3 +180,9 @@ schema、子目录所有权等现有约定继续生效。允许正常使用指�
   验证限制仍适用，没有因重放而宣称 Windows 验证通过。
 - **Evidence:** 原工作副本的 `.amp/in/artifacts/p2-pr-base-checks.txt` 和
   `p2-pr-cli-verification.json` 记录本次集成验证，均不进入版本控制。
+- **Publication review:** Claude Code Opus 5.5 静态复审
+  [实际发布的代码提交](https://github.com/b1indsight/viberwhisper/commit/dee3de11638bb743aafae8218838dd04dafd8eee)
+  及随附的相关源码，未发现新的可执行 P1/P2/P3。初始化与实际响应均为 `claude-opus-5-5`，
+  tools/MCP 为空，进程退出 0 且结果非错误；测试由主代理独立执行，不能归为审阅者执行。
+  报告及校验元数据在原工作副本的 `.amp/in/artifacts/p2-pr-claude-review.md` 和
+  `p2-pr-claude-review.validation.json`。发布后仅以文档提交补充 PR 链接和此结果，业务代码未改。
