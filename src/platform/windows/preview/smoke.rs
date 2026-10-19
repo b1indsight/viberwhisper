@@ -2,9 +2,67 @@
 
 use super::super::nul_terminated_utf16;
 use super::*;
-use windows_sys::Win32::UI::Controls::EM_REPLACESEL;
+use windows_sys::Win32::UI::Controls::{EM_CANUNDO, EM_GETSEL, EM_REPLACESEL};
 
 impl NativePreview {
+    pub(crate) fn smoke_streaming(&mut self) -> Result<()> {
+        if unsafe { GetForegroundWindow() } != self.state.window.get() {
+            return Ok(());
+        }
+        let seed = nul_terminated_utf16("hello 😀 old");
+        self.state.set_read_only(false);
+        unsafe {
+            SendMessageW(self.state.text.get(), EM_SETSEL, 0, -1);
+            SendMessageW(
+                self.state.text.get(),
+                EM_REPLACESEL,
+                0,
+                seed.as_ptr() as isize,
+            );
+            // This prefix is before the corrected word and must survive in
+            // UTF-16 units even though the later emoji uses a surrogate pair.
+            SendMessageW(self.state.text.get(), EM_SETSEL, 0, 6);
+        }
+        self.state.set_read_only(true);
+        self.update_text("hello 😀 new", false, None)?;
+        ensure!(
+            self.state.normalized_text()? == "hello 😀 new",
+            "Streaming patch did not replace only the tail"
+        );
+        let mut start = 0u32;
+        let mut end = 0u32;
+        unsafe {
+            SendMessageW(
+                self.state.text.get(),
+                EM_GETSEL,
+                (&raw mut start) as usize,
+                (&raw mut end) as isize,
+            );
+        }
+        ensure!(
+            (start, end) == (0, 6),
+            "Streaming patch changed an unaffected selection"
+        );
+        ensure!(
+            unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) } as u32
+                & ES_READONLY as u32
+                != 0,
+            "Streaming preview remained editable"
+        );
+        ensure!(
+            unsafe { SendMessageW(self.state.text.get(), EM_CANUNDO, 0, 0) } == 0,
+            "Streaming patch entered the undo history"
+        );
+        self.update_text("hello 😀 final", true, None)?;
+        ensure!(
+            unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) } as u32
+                & ES_READONLY as u32
+                == 0,
+            "Final preview did not become editable"
+        );
+        Ok(())
+    }
+
     pub(crate) fn smoke_confirmation(
         &self,
         edited_text: &str,

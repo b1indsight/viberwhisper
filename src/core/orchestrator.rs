@@ -14,7 +14,9 @@ use tracing::{debug, error, info, warn};
 
 use super::config::SecretValue;
 use crate::audio::WavChunk;
-use crate::dictation::{DictationWorker, RealtimeSession, Transcript, config::DictationConfig};
+use crate::dictation::{
+    DictationWorker, Progress, RealtimeSession, Transcript, config::DictationConfig,
+};
 use crate::session::SessionId;
 use crate::text::merge_texts;
 use crate::transcriber::Transcriber;
@@ -235,6 +237,19 @@ impl SessionOrchestrator {
     }
 
     pub fn start_session(&self, session_id: SessionId) -> Result<(), SessionStartError> {
+        self.start_session_with_progress(session_id, None)
+    }
+
+    pub(crate) fn is_realtime(&self) -> bool {
+        matches!(self.backend, SessionBackend::Realtime(_))
+    }
+
+    /// Desktop callers may observe provisional text without changing final-result ownership.
+    pub(crate) fn start_session_with_progress(
+        &self,
+        session_id: SessionId,
+        progress: Option<Progress>,
+    ) -> Result<(), SessionStartError> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(active) = inner.as_ref() {
             return Err(SessionStartError {
@@ -247,7 +262,9 @@ impl SessionOrchestrator {
                 transcriber,
                 config,
             } => SessionWorker::Http(HttpSession::new(Arc::clone(transcriber), config.clone())),
-            SessionBackend::Realtime(worker) => SessionWorker::Realtime(worker.start_session()),
+            SessionBackend::Realtime(worker) => {
+                SessionWorker::Realtime(worker.start_session(progress))
+            }
         };
         *inner = Some(ActiveSessionInner { session_id, worker });
         info!(session_id = session_id.0, "Session started");

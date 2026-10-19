@@ -9,7 +9,7 @@ repository = "https://github.com/b1indsight/viberwhisper"
 default-run = "viberwhisper"
 
 [features]
-integration = []
+integration = ["objc2-app-kit/NSBitmapImageRep", "objc2-app-kit/NSImageRep"]
 windows-app = []
 
 [[bin]]

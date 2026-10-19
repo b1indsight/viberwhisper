@@ -11,6 +11,7 @@ use super::{
     config::DictationConfig,
     feedback::{Confirmation, Transcript},
     memory::Memory,
+    progress::Progress,
     transport::Connection,
 };
 use crate::{
@@ -36,6 +37,7 @@ struct Job {
     result: mpsc::SyncSender<Result<Transcript, SessionError>>,
     cancelled: CancellationToken,
     failure: Arc<Mutex<Option<String>>>,
+    progress: Option<Progress>,
 }
 
 /// Keeps the Realtime connection and memory alive across recording sessions.
@@ -95,10 +97,14 @@ impl DictationWorker {
         }
     }
 
-    pub fn start_session(&self) -> RealtimeSession {
+    pub fn start_session(&self, progress: Option<Progress>) -> RealtimeSession {
         let (sender, frames) = async_mpsc::channel(FRAME_QUEUE);
         let (result_tx, result) = mpsc::sync_channel(1);
-        let cancelled = CancellationToken::new();
+        let cancelled = progress
+            .as_ref()
+            .map_or_else(CancellationToken::new, |progress| {
+                progress.cancelled.clone()
+            });
         let failure = Arc::new(Mutex::new(None));
         if self
             .jobs
@@ -107,6 +113,7 @@ impl DictationWorker {
                 result: result_tx,
                 cancelled: cancelled.clone(),
                 failure: Arc::clone(&failure),
+                progress,
             })
             .is_err()
         {
@@ -205,6 +212,10 @@ async fn worker(
         };
         let mut working_memory = memory.clone();
         let mut recording = Recording::new();
+        recording.progress = job
+            .progress
+            .take()
+            .map(|progress| (progress, language.clone()));
         let mut pending = None;
         let result = tokio::select! {
             biased;
@@ -316,6 +327,7 @@ pub(super) struct Recording {
     index: usize,
     evaluation: Option<(u64, Vec<super::evaluation::SegmentTrace>)>,
     stable: Option<super::memory::StablePrefix>,
+    progress: Option<(Progress, Option<String>)>,
 }
 
 impl Recording {
@@ -335,6 +347,7 @@ impl Recording {
             index: 0,
             evaluation: None,
             stable: None,
+            progress: None,
         }
     }
 
@@ -444,9 +457,20 @@ impl Recording {
             self.stable.as_ref().expect("uploaded audio has a prefix"),
             at,
         );
-        let result = connection
-            .finish(&input, &format!("{}-{}", self.id, self.index))
-            .await?;
+        let correlation = format!("{}-{}", self.id, self.index);
+        let result = if let Some((progress, language)) = &self.progress {
+            let prefix = self.text(language.clone());
+            connection
+                .finish_streaming(&input, &correlation, &mut |text| {
+                    progress.publish(crate::text::merge_texts(
+                        &[prefix.clone(), text.into()],
+                        language.clone(),
+                    ));
+                })
+                .await?
+        } else {
+            connection.finish(&input, &correlation).await?
+        };
         // Log lengths without exposing dictation contents.
         tracing::debug!(
             final_chars = result.text.chars().count(),
@@ -461,6 +485,9 @@ impl Recording {
             });
         }
         self.results.push(result);
+        if let Some((progress, language)) = &self.progress {
+            progress.publish(self.text(language.clone()));
+        }
         // Cleanup is fallible even after the model has completed and passed validation.
         // Keep the text for partial delivery, but learn only once cleanup succeeds.
         connection.delete_segment().await?;

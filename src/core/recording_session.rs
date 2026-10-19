@@ -15,6 +15,9 @@ pub enum RecordingState {
 pub enum SessionEvent {
     StartRequested,
     StopRequested,
+    CancelRequested {
+        session_id: SessionId,
+    },
     SessionStarted {
         session_id: SessionId,
     },
@@ -63,6 +66,7 @@ impl SessionEvent {
         match self {
             Self::StartRequested => ("start_requested", None),
             Self::StopRequested => ("stop_requested", None),
+            Self::CancelRequested { session_id } => ("cancel_requested", Some(*session_id)),
             Self::SessionStarted { session_id } => ("session_started", Some(*session_id)),
             Self::SessionStartFailed { session_id, .. } => {
                 ("session_start_failed", Some(*session_id))
@@ -154,6 +158,19 @@ fn transition(
     match (state, event) {
         (RecordingState::ShuttingDown { .. }, _) => None,
         (state, SessionEvent::ShutdownRequested) => Some(shutdown_transition(state)),
+        (
+            RecordingState::Starting { session_id }
+            | RecordingState::Recording { session_id }
+            | RecordingState::Stopping { session_id },
+            SessionEvent::CancelRequested { .. },
+        ) => Some(Transition {
+            next: RecordingState::Stopping { session_id },
+            effects: vec![
+                SessionEffect::CancelRecorder { session_id },
+                SessionEffect::AbortOrchestrator { session_id },
+                SessionEffect::SetTrayRecording(false),
+            ],
+        }),
         (RecordingState::Idle, SessionEvent::StartRequested) => Some(Transition {
             next: RecordingState::Starting { session_id },
             effects: vec![SessionEffect::StartSession { session_id }],
@@ -438,6 +455,40 @@ mod tests {
                 session_id: SessionId(1)
             }
         );
+    }
+
+    #[test]
+    fn cancellation_is_session_scoped_and_waits_for_cleanup_before_restart() {
+        // Esc during a long recording or its detached finalizer must stop intake
+        // and keep a new recording from racing the old destination's restoration.
+        for stopping in [false, true] {
+            let mut machine = RecordingSessionMachine::new();
+            let session_id = SessionId(1);
+            machine.handle(SessionEvent::StartRequested);
+            machine.handle(SessionEvent::SessionStarted { session_id });
+            if stopping {
+                machine.handle(SessionEvent::StopRequested);
+            }
+            assert!(
+                machine
+                    .handle(SessionEvent::CancelRequested {
+                        session_id: SessionId(99)
+                    })
+                    .is_empty()
+            );
+            assert_eq!(
+                machine.handle(SessionEvent::CancelRequested { session_id }),
+                vec![
+                    SessionEffect::CancelRecorder { session_id },
+                    SessionEffect::AbortOrchestrator { session_id },
+                    SessionEffect::SetTrayRecording(false),
+                ]
+            );
+            assert_eq!(*machine.state(), RecordingState::Stopping { session_id });
+            assert!(machine.handle(SessionEvent::StartRequested).is_empty());
+            machine.handle(SessionEvent::SessionStopped { session_id });
+            assert_eq!(*machine.state(), RecordingState::Idle);
+        }
     }
 
     #[test]

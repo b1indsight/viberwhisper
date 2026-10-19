@@ -33,6 +33,11 @@ impl From<(String, Option<String>)> for PreviewTranscription {
 
 #[derive(Debug, Clone)]
 pub(super) enum PreviewUpdate {
+    Streaming {
+        session_id: SessionId,
+        destination: String,
+        anchor: Option<PreviewRect>,
+    },
     Ready {
         session_id: SessionId,
         text: String,

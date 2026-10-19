@@ -4,6 +4,123 @@ use super::*;
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
 
 impl NativePreview {
+    /// Snapshot this fixture's own rendered content, never another application.
+    pub(crate) fn smoke_capture(&self, path: &std::path::Path) -> Result<()> {
+        let window = self
+            .window
+            .as_ref()
+            .ok_or_else(|| anyhow!("Preview not created"))?;
+        let view = window
+            .contentView()
+            .ok_or_else(|| anyhow!("Preview has no content"))?;
+        window.displayIfNeeded();
+        let bitmap = view
+            .bitmapImageRepForCachingDisplayInRect(view.bounds())
+            .ok_or_else(|| anyhow!("Could not capture preview"))?;
+        view.cacheDisplayInRect_toBitmapImageRep(view.bounds(), &bitmap);
+        // SAFETY: Empty properties use AppKit's documented default PNG encoding;
+        // the immutable data is retained until its bytes have been written.
+        let png = unsafe {
+            bitmap.representationUsingType_properties(
+                objc2_app_kit::NSBitmapImageFileType::PNG,
+                &NSDictionary::new(),
+            )
+        }
+        .ok_or_else(|| anyhow!("Could not encode preview PNG"))?;
+        std::fs::write(path, unsafe { png.as_bytes_unchecked() })?;
+        Ok(())
+    }
+
+    pub(crate) fn smoke_streaming(&mut self) -> Result<()> {
+        {
+            let window = self
+                .window
+                .as_ref()
+                .ok_or_else(|| anyhow!("Streaming preview was not created"))?;
+            let text = &window.ivars().text;
+            ensure!(
+                !text.isEditable() && text.isSelectable() && !window.ivars().retry_allowed.get(),
+                "Streaming preview accepted edits or confirmation"
+            );
+            window.notify_key(PreviewKey::Confirm);
+            window
+                .ivars()
+                .keys
+                .borrow_mut()
+                .press(PreviewKey::Confirm, false);
+        }
+
+        // The replacement starts at shared word/grapheme boundaries, so a prefix
+        // selection remains selected while English, Chinese, emoji, and newlines
+        // receive final model corrections.
+        self.window
+            .as_ref()
+            .expect("streaming preview was checked")
+            .ivars()
+            .text
+            .setString(&NSString::from_str("I like coding"));
+        self.window
+            .as_ref()
+            .expect("streaming preview was checked")
+            .ivars()
+            .text
+            .setSelectedRange(NSRange::new(0, 2));
+        self.update_text("I love coding", false, None)?;
+        let text = &self
+            .window
+            .as_ref()
+            .expect("streaming preview was checked")
+            .ivars()
+            .text;
+        ensure!(
+            text.string().to_string() == "I love coding"
+                && text.selectedRange() == NSRange::new(0, 2),
+            "Streaming correction rewrote the selected prefix"
+        );
+        self.window
+            .as_ref()
+            .expect("streaming preview was checked")
+            .ivars()
+            .text
+            .setString(&NSString::from_str("我们明天下午去北京。"));
+        self.update_text("我们明天上午去上海。", false, None)?;
+        let text = &self
+            .window
+            .as_ref()
+            .expect("streaming preview was checked")
+            .ivars()
+            .text;
+        ensure!(
+            text.string().to_string() == "我们明天上午去上海。",
+            "Streaming correction did not apply Chinese tail replacement"
+        );
+        self.window
+            .as_ref()
+            .expect("streaming preview was checked")
+            .ivars()
+            .text
+            .setString(&NSString::from_str("👩‍💻\nold"));
+        self.update_text("👩‍💻\nnew", true, None)?;
+        let window = self.window.as_ref().expect("streaming preview was checked");
+        let text = &window.ivars().text;
+        ensure!(
+            text.string().to_string() == "👩‍💻\nnew"
+                && text.isEditable()
+                && window.ivars().retry_allowed.get(),
+            "Streaming preview did not become an editable final candidate"
+        );
+        ensure!(
+            window
+                .ivars()
+                .keys
+                .borrow_mut()
+                .release(PreviewKey::Confirm)
+                .is_none(),
+            "A generating Enter survived the ready transition"
+        );
+        Ok(())
+    }
+
     pub(crate) fn smoke_confirmation(
         &self,
         edited_text: &str,

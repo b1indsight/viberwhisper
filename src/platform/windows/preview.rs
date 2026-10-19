@@ -11,8 +11,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    EM_GETLINECOUNT, EM_GETMARGINS, EM_GETRECT, EM_SCROLLCARET, EM_SETLIMITTEXT, EM_SETRECTNP,
-    EM_SETSEL,
+    EM_EMPTYUNDOBUFFER, EM_GETFIRSTVISIBLELINE, EM_GETLINECOUNT, EM_GETMARGINS, EM_GETRECT,
+    EM_GETSEL, EM_LINESCROLL, EM_REPLACESEL, EM_SCROLLCARET, EM_SETLIMITTEXT, EM_SETMODIFY,
+    EM_SETREADONLY, EM_SETRECTNP, EM_SETSEL,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT,
@@ -22,7 +23,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::platform::preview::{
     ConfirmationKey, DeliveryTarget, PreviewAction, PreviewEvent, PreviewKey, PreviewNotify,
-    PreviewRect, preview_origin, wait_for_activation,
+    PreviewRect, TextPatch, preview_origin, wait_for_activation,
 };
 use crate::session::SessionId;
 
@@ -159,15 +160,67 @@ struct WindowState {
     text: Cell<HWND>,
     status: Cell<HWND>,
     keys: RefCell<ConfirmationKey>,
+    held_keys: Cell<u8>,
     composing: Cell<bool>,
     retry_allowed: Cell<bool>,
     message_visible: Cell<bool>,
     laying_out: Cell<bool>,
     max_width: Cell<i32>,
     anchor: Cell<Option<PreviewRect>>,
+    positioned: Cell<bool>,
 }
 
 impl WindowState {
+    fn normalized_text(&self) -> Result<String> {
+        let length = unsafe { GetWindowTextLengthW(self.text.get()) };
+        let mut text = vec![0u16; length as usize + 1];
+        let count =
+            unsafe { GetWindowTextW(self.text.get(), text.as_mut_ptr(), text.len() as i32) };
+        ensure!(length == 0 || count > 0, "无法读取预览文字");
+        Ok(String::from_utf16_lossy(&text[..count as usize]).replace("\r\n", "\n"))
+    }
+
+    fn set_read_only(&self, read_only: bool) {
+        unsafe {
+            SendMessageW(self.text.get(), EM_SETREADONLY, read_only as usize, 0);
+        }
+    }
+
+    fn clear_programmatic_undo(&self) {
+        unsafe {
+            SendMessageW(self.text.get(), EM_EMPTYUNDOBUFFER, 0, 0);
+            SendMessageW(self.text.get(), EM_SETMODIFY, 0, 0);
+        }
+    }
+
+    fn at_scroll_tail(&self) -> Result<bool> {
+        let first = unsafe { SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) } as i32;
+        let lines = unsafe { SendMessageW(self.text.get(), EM_GETLINECOUNT, 0, 0) } as i32;
+        let mut viewport = RECT::default();
+        ensure!(
+            unsafe { GetClientRect(self.text.get(), &mut viewport) } != 0,
+            "无法获取输入框尺寸"
+        );
+        let (_, line_height) = self.text_metrics()?;
+        Ok(first + (viewport.bottom / line_height.max(1)) >= lines)
+    }
+
+    fn scroll_to_tail(&self) {
+        let length = unsafe { GetWindowTextLengthW(self.text.get()) } as usize;
+        unsafe {
+            SendMessageW(self.text.get(), EM_SETSEL, length, length as isize);
+            SendMessageW(self.text.get(), EM_SCROLLCARET, 0, 0);
+        }
+    }
+
+    fn disarm_held_keys(&self) {
+        let held = [(VK_RETURN, 1), (VK_ESCAPE, 2)]
+            .into_iter()
+            .filter(|(key, _)| unsafe { GetKeyState(*key as i32) } < 0)
+            .fold(0, |held, (_, flag)| held | flag);
+        self.held_keys.set(held);
+    }
+
     fn set_message(&self, message: Option<&str>) -> Result<()> {
         let text = super::nul_terminated_utf16(message.unwrap_or(""));
         self.message_visible.set(message.is_some());
@@ -276,10 +329,13 @@ impl WindowState {
             // Match the macOS viewport bounds; taller text stays scrollable.
             let editor_height = content_height.clamp(28, 196);
             let height = editor_height + 24 + if self.message_visible.get() { 48 } else { 0 };
-            let origin =
-                self.anchor.get().zip(work).map(|(anchor, work)| {
-                    preview_origin(anchor, (width as f64, height as f64), work)
-                });
+            let origin = (!self.positioned.get())
+                .then(|| {
+                    self.anchor.get().zip(work).map(|(anchor, work)| {
+                        preview_origin(anchor, (width as f64, height as f64), work)
+                    })
+                })
+                .flatten();
             unsafe {
                 ensure!(
                     SetWindowPos(
@@ -320,7 +376,6 @@ impl WindowState {
                     0,
                     (&raw const format) as isize,
                 );
-                SendMessageW(self.text.get(), EM_SCROLLCARET, 0, 0);
                 InvalidateRect(self.text.get(), null(), 1);
                 ensure!(
                     SetWindowPos(
@@ -342,6 +397,7 @@ impl WindowState {
                 }
                 // Windows owns the region after successful SetWindowRgn.
             }
+            self.positioned.set(true);
             Ok(())
         })();
         self.laying_out.set(false);
@@ -355,11 +411,17 @@ impl WindowState {
     }
 
     fn key(&self, key: WPARAM, pressed: bool, is_repeat: bool) -> bool {
-        let action = match key as u16 {
-            VK_RETURN => PreviewKey::Confirm,
-            VK_ESCAPE => PreviewKey::Cancel,
+        let (action, held_flag) = match key as u16 {
+            VK_RETURN => (PreviewKey::Confirm, 1),
+            VK_ESCAPE => (PreviewKey::Cancel, 2),
             _ => return false,
         };
+        if self.held_keys.get() & held_flag != 0 {
+            if !pressed {
+                self.held_keys.set(self.held_keys.get() & !held_flag);
+            }
+            return true;
+        }
         if !pressed {
             let action = self.keys.borrow_mut().release(action);
             if let Some(action) = action {
@@ -511,12 +573,14 @@ impl NativePreview {
                 text: Cell::new(null_mut()),
                 status: Cell::new(null_mut()),
                 keys: RefCell::new(ConfirmationKey::default()),
+                held_keys: Cell::new(0),
                 composing: Cell::new(false),
                 retry_allowed: Cell::new(true),
                 message_visible: Cell::new(false),
                 laying_out: Cell::new(false),
                 max_width: Cell::new(420),
                 anchor: Cell::new(None),
+                positioned: Cell::new(false),
             }),
         }
     }
@@ -664,7 +728,9 @@ impl NativePreview {
         }
         self.state.session_id.set(Some(session_id));
         self.state.anchor.set(anchor);
+        self.state.positioned.set(false);
         self.state.keys.borrow_mut().reset();
+        self.state.held_keys.set(0);
         self.state.retry_allowed.set(true);
         self.state.composing.set(false);
         let title = super::nul_terminated_utf16(&format!("ViberWhisper · {destination}"));
@@ -682,11 +748,160 @@ impl NativePreview {
                 (text.len() - 1) as isize,
             );
         }
+        self.state.set_read_only(false);
+        self.state.clear_programmatic_undo();
         self.state.set_message(warning)?;
         if anchor.is_none() {
             position::center(self.state.window.get());
         }
+        self.state.scroll_to_tail();
         self.focus();
+        Ok(())
+    }
+
+    /// Show provisional transcription without taking focus unless the recording has stopped.
+    pub(crate) fn show_streaming(
+        &mut self,
+        session_id: SessionId,
+        text: &str,
+        destination: &str,
+        anchor: Option<PreviewRect>,
+        activate: bool,
+    ) -> Result<()> {
+        if self.state.window.get().is_null() {
+            self.create()?;
+        }
+        self.state.session_id.set(Some(session_id));
+        self.state.anchor.set(anchor);
+        self.state.positioned.set(false);
+        self.state.keys.borrow_mut().reset();
+        self.state.held_keys.set(0);
+        self.state.retry_allowed.set(false);
+        self.state.composing.set(false);
+        let title = super::nul_terminated_utf16(&format!("ViberWhisper · {destination}"));
+        let text = super::nul_terminated_utf16(&text.replace("\r\n", "\n").replace('\n', "\r\n"));
+        unsafe {
+            ensure!(
+                SetWindowTextW(self.state.text.get(), text.as_ptr()) != 0,
+                "无法显示识别文字"
+            );
+            SetWindowTextW(self.state.window.get(), title.as_ptr());
+            SendMessageW(
+                self.state.text.get(),
+                EM_SETSEL,
+                text.len() - 1,
+                (text.len() - 1) as isize,
+            );
+        }
+        self.state.set_read_only(true);
+        self.state.clear_programmatic_undo();
+        self.state.set_message(None)?;
+        if anchor.is_none() {
+            position::center(self.state.window.get());
+        }
+        self.state.scroll_to_tail();
+        if activate {
+            self.focus();
+        } else {
+            unsafe {
+                ShowWindow(self.state.window.get(), SW_SHOWNOACTIVATE);
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply a word-aligned tail patch while preserving selection and user scroll state.
+    pub(crate) fn update_text(
+        &mut self,
+        text: &str,
+        ready: bool,
+        warning: Option<&str>,
+    ) -> Result<()> {
+        let old = self.state.normalized_text()?;
+        let text = text.replace("\r\n", "\n");
+        let mut restore_selection = None;
+        let mut first_visible_line = None;
+        let mut follow_tail = false;
+        if let Some(patch) = TextPatch::between(&old, &text) {
+            let prefix = &old[..patch.start];
+            let prefix_units = prefix
+                .encode_utf16()
+                .map(|unit| if unit == b'\n' as u16 { 2 } else { 1 })
+                .sum::<usize>();
+            let replacement = patch.replacement.replace('\n', "\r\n");
+            let replacement_units = replacement.encode_utf16().count();
+            let replacement_utf16 = super::nul_terminated_utf16(&replacement);
+            let mut selection_start = 0u32;
+            let mut selection_end = 0u32;
+            unsafe {
+                SendMessageW(
+                    self.state.text.get(),
+                    EM_GETSEL,
+                    (&raw mut selection_start) as usize,
+                    (&raw mut selection_end) as isize,
+                );
+            }
+            let first =
+                unsafe { SendMessageW(self.state.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) } as i32;
+            follow_tail = self.state.at_scroll_tail()?;
+            if !follow_tail {
+                first_visible_line = Some(first);
+            }
+            // EM_REPLACESEL accepts a programmatic replacement while read-only is
+            // temporarily lifted; callers all run on the UI thread, so no user input can race it.
+            self.state.set_read_only(false);
+            unsafe {
+                SendMessageW(self.state.text.get(), EM_SETSEL, prefix_units, -1);
+                SendMessageW(
+                    self.state.text.get(),
+                    EM_REPLACESEL,
+                    0,
+                    replacement_utf16.as_ptr() as isize,
+                );
+            }
+            let replacement_end = prefix_units + replacement_units;
+            let map_selection = |index: u32| {
+                if index as usize <= prefix_units {
+                    index as usize
+                } else {
+                    replacement_end
+                }
+            };
+            restore_selection =
+                Some((map_selection(selection_start), map_selection(selection_end)));
+            self.state.clear_programmatic_undo();
+        }
+        self.state.set_message(warning)?;
+        if let Some((start, end)) = restore_selection {
+            if follow_tail {
+                self.state.scroll_to_tail();
+            } else if let Some(first) = first_visible_line {
+                let current =
+                    unsafe { SendMessageW(self.state.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) }
+                        as i32;
+                unsafe {
+                    SendMessageW(
+                        self.state.text.get(),
+                        EM_LINESCROLL,
+                        0,
+                        (first - current) as isize,
+                    );
+                }
+            }
+            unsafe {
+                SendMessageW(self.state.text.get(), EM_SETSEL, start, end as isize);
+            }
+        }
+        if ready {
+            self.state.keys.borrow_mut().reset();
+            self.state.disarm_held_keys();
+            self.state.retry_allowed.set(true);
+            self.state.set_read_only(false);
+            self.state.clear_programmatic_undo();
+        } else {
+            self.state.retry_allowed.set(false);
+            self.state.set_read_only(true);
+        }
         Ok(())
     }
 
@@ -720,7 +935,9 @@ impl NativePreview {
     pub(crate) fn close(&mut self) {
         self.state.session_id.set(None);
         self.state.anchor.set(None);
+        self.state.positioned.set(false);
         self.state.keys.borrow_mut().reset();
+        self.state.held_keys.set(0);
         self.hide();
         if !self.state.text.get().is_null() {
             let empty = [0u16];

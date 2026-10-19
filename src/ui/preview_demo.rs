@@ -1,9 +1,11 @@
 //! Editable native preview with the production destination capture and delivery path.
 //! No microphone, network, configuration or persistent history is needed.
 
+use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
+    mpsc,
 };
 use std::time::{Duration, Instant};
 
@@ -14,14 +16,22 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use super::preview::{
     FinalizationGate, PendingPreview, PreviewCommand, PreviewUpdate, wait_for_confirmation,
 };
-use crate::platform::{NativePreview, NativeTarget, PreviewAction, PreviewEvent};
+use crate::platform::{
+    DeliveryTarget, NativePreview, NativeTarget, PreviewAction, PreviewEvent, PreviewRect,
+};
 use crate::session::SessionId;
 
-const SAMPLE_TEXT: &str = "明天下午三点开会，请提前准备演示材料。";
+const SAMPLE_TEXT: &str = "我们明天上午去上海。";
 const SMOKE_TEXT: &str = "已编辑的文字：中文、English 和 emoji 🎙️。";
 
 enum DemoEvent {
     Update(PreviewUpdate),
+    Progress {
+        text: String,
+        destination: String,
+        anchor: Option<PreviewRect>,
+        applied: mpsc::SyncSender<()>,
+    },
     Input(PreviewEvent),
     Finished,
 }
@@ -29,7 +39,13 @@ enum DemoEvent {
 /// Gives the user three seconds to focus a destination, then opens the editable
 /// bubble. Enter really delivers the edited text. `smoke` uses the already focused
 /// destination and tests native editing, held Enter and production delivery.
-pub fn run_preview_demo(smoke: bool) -> Result<()> {
+/// On macOS, `artifacts` instead runs a self-contained streaming/render fixture;
+/// it never captures a destination, injects text, or changes persistent history.
+pub fn run_preview_demo(smoke: bool, artifacts: Option<PathBuf>) -> Result<()> {
+    if let Some(directory) = &artifacts {
+        std::fs::create_dir_all(directory)?;
+    }
+    let render_only = artifacts.is_some();
     let event_loop = EventLoop::<DemoEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let notifications = Arc::new(AtomicUsize::new(0));
@@ -38,20 +54,71 @@ pub fn run_preview_demo(smoke: bool) -> Result<()> {
     let gate = Arc::new(FinalizationGate::new());
     let worker_gate = Arc::clone(&gate);
     let typer = crate::platform::preview_typer();
-    println!("Focus a text field within 3 seconds; Enter will insert the edited text.");
+    if render_only {
+        println!("Rendering streaming preview fixture without a delivery target.");
+    } else {
+        println!("Focus a text field within 3 seconds; Enter will insert the edited text.");
+    }
     let worker = std::thread::spawn(move || {
-        if !smoke {
+        if !smoke && !render_only {
             std::thread::sleep(Duration::from_secs(3));
         }
-        wait_for_confirmation(
-            SessionId(1),
-            (SAMPLE_TEXT.into(), None).into(),
-            typer.as_ref(),
-            None,
-            &worker_gate,
-            NativeTarget::capture,
-            &|update| proxy.send_event(DemoEvent::Update(update)).is_ok(),
-        );
+        let target = if render_only {
+            Err(anyhow!("Render fixture has no delivery target"))
+        } else {
+            NativeTarget::capture()
+        };
+        let destination = target
+            .as_ref()
+            .map_or_else(|_| "原应用".into(), DeliveryTarget::name);
+        let anchor = target
+            .as_ref()
+            .ok()
+            .and_then(DeliveryTarget::preview_anchor);
+        for text in ["我们明天", "我们明天下午去北京。"] {
+            let (applied, receiver) = mpsc::sync_channel(0);
+            if proxy
+                .send_event(DemoEvent::Progress {
+                    text: text.into(),
+                    destination: destination.clone(),
+                    anchor,
+                    applied,
+                })
+                .is_err()
+                || receiver.recv().is_err()
+            {
+                return;
+            }
+            if !smoke && !render_only {
+                std::thread::sleep(Duration::from_millis(900));
+            }
+        }
+        if render_only {
+            let (commands, receiver) = mpsc::channel();
+            if proxy
+                .send_event(DemoEvent::Update(PreviewUpdate::Ready {
+                    session_id: SessionId(1),
+                    text: SAMPLE_TEXT.into(),
+                    destination,
+                    anchor,
+                    warning: None,
+                    commands,
+                }))
+                .is_ok()
+            {
+                let _ = receiver.recv();
+            }
+        } else {
+            wait_for_confirmation(
+                SessionId(1),
+                (SAMPLE_TEXT.into(), None).into(),
+                typer.as_ref(),
+                None,
+                &worker_gate,
+                || target,
+                &|update| proxy.send_event(DemoEvent::Update(update)).is_ok(),
+            );
+        }
         let _ = proxy.send_event(DemoEvent::Finished);
     });
     let mut demo = Demo {
@@ -61,6 +128,8 @@ pub fn run_preview_demo(smoke: bool) -> Result<()> {
         })),
         smoke,
         sent: false,
+        streaming: false,
+        artifacts,
         pending: None,
         deadline: Instant::now() + Duration::from_secs(10),
         error: None,
@@ -84,6 +153,8 @@ struct Demo {
     preview: NativePreview,
     smoke: bool,
     sent: bool,
+    streaming: bool,
+    artifacts: Option<PathBuf>,
     pending: Option<PendingPreview>,
     deadline: Instant,
     error: Option<String>,
@@ -96,6 +167,40 @@ impl ApplicationHandler<DemoEvent> for Demo {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: DemoEvent) {
         match event {
+            DemoEvent::Progress {
+                text,
+                destination,
+                anchor,
+                applied,
+            } => {
+                let display = if self.streaming {
+                    self.preview.update_text(&text, false, None)
+                } else {
+                    self.preview
+                        .show_streaming(SessionId(1), &text, &destination, anchor, true)
+                };
+                if let Err(error) = display.and_then(|_| {
+                    if (self.smoke || self.artifacts.is_some()) && self.streaming {
+                        self.preview.smoke_streaming()?;
+                        self.preview.update_text(&text, false, None)?;
+                        anyhow::ensure!(
+                            self.notifications.load(Ordering::Relaxed) == 0,
+                            "Generating preview confirmed before completion"
+                        );
+                    }
+                    self.capture(if self.streaming {
+                        "streaming-draft.png"
+                    } else {
+                        "streaming-prefix.png"
+                    })?;
+                    Ok(())
+                }) {
+                    self.error = Some(error.to_string());
+                    event_loop.exit();
+                }
+                self.streaming = true;
+                let _ = applied.send(());
+            }
             DemoEvent::Update(PreviewUpdate::Ready {
                 session_id,
                 text,
@@ -111,15 +216,35 @@ impl ApplicationHandler<DemoEvent> for Demo {
                         println!("Preview warning: {warning}");
                     }
                 }
-                if let Err(error) =
+                let display = if self.streaming {
+                    self.preview.update_text(&text, true, warning.as_deref())
+                } else {
                     self.preview
                         .show(session_id, &text, &destination, anchor, warning.as_deref())
-                {
+                };
+                if let Err(error) = display {
                     self.error = Some(error.to_string());
                     event_loop.exit();
                 }
+                if self.artifacts.is_some() {
+                    if let Err(error) = self.capture("ready.png") {
+                        self.error = Some(error.to_string());
+                    }
+                    let _ = self
+                        .pending
+                        .as_ref()
+                        .unwrap()
+                        .commands
+                        .send(PreviewCommand::Cancel);
+                }
             }
             DemoEvent::Input(event) => {
+                if self.pending.is_none() && matches!(event.action, PreviewAction::Cancel) {
+                    self.gate.cancel();
+                    self.preview.close();
+                    event_loop.exit();
+                    return;
+                }
                 let Some(pending) = &mut self.pending else {
                     return;
                 };
@@ -172,7 +297,9 @@ impl ApplicationHandler<DemoEvent> for Demo {
                 event_loop.exit();
             }
             DemoEvent::Update(
-                PreviewUpdate::HistorySaved(_) | PreviewUpdate::PermissionRequired,
+                PreviewUpdate::Streaming { .. }
+                | PreviewUpdate::HistorySaved(_)
+                | PreviewUpdate::PermissionRequired,
             ) => {}
         }
     }
@@ -214,5 +341,20 @@ impl ApplicationHandler<DemoEvent> for Demo {
         _: winit::window::WindowId,
         _: winit::event::WindowEvent,
     ) {
+    }
+}
+
+impl Demo {
+    fn capture(&self, name: &str) -> Result<()> {
+        if let Some(directory) = &self.artifacts {
+            #[cfg(target_os = "macos")]
+            self.preview.smoke_capture(&directory.join(name))?;
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (directory, name);
+                anyhow::bail!("Preview artifact capture currently requires macOS");
+            }
+        }
+        Ok(())
     }
 }
