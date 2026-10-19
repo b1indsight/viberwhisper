@@ -1,7 +1,8 @@
 # 60 - Realtime 流式预览与最终文本纠正 — Feature record
 
-**Stage:** Implemented locally; verification and delivery status below.
-**PR:** 尚未创建；本次实现未提交或推送，保留工作副本中的其他任务修改。
+**Stage:** Published as a draft PR; unresolved review findings below.
+**PR:** [#156](https://github.com/b1indsight/viberwhisper/pull/156)，分支
+`feat/streaming-confirmation-preview`；未合并或部署，原工作副本中的其他任务修改保留。
 
 ## 1. Initial plan
 
@@ -278,3 +279,25 @@ UI 适配只保留最新进度并合并唤醒，避免按 token 无界积压事�
   `.amp/in/artifacts/streaming-publication/`。正文解析、mailbox、词边界补丁及原生交互
   与 [002] 已消融验证的实现相同；协议契约回归再次验证完成前正文和取消后的清理。
 - **Delivery status:** 该隔离版本待审查和推送；真实服务与 Windows 桌面验证限制不变。
+
+### [005] — 2026-10-19 — 审查结果与草稿发布
+
+- **Evidence:** Oracle 与独立 Codex gate 审查了同一实现
+  [`333aa9b7`](https://github.com/b1indsight/viberwhisper/commit/333aa9b78032e39d3d13deb398bebfeddf3eb234)。
+  gate 完成结构化结果解析，退出码 0，无 critical；结果为 2 medium、2 low，已向用户
+  完整报告。Oracle 同时指出下表前两项。gate 本地报告为
+  `.git/jj-reviews/poryqruwtzoq-333aa9b78032.json`。
+
+  | 严重度 | 尚未修复的问题 | 位置 |
+  | --- | --- | --- |
+  | Medium | Windows 气泡增长后不再按 work area 限位，可能超出屏幕边缘 | `platform/windows/preview.rs:332` |
+  | Medium | Esc 与 Ready 移交并发时，早退或命令通道断开可跳过已捕获目标的恢复 | `ui/listener/event_loop.rs:741` |
+  | Low | 已验证的空文本快照被忽略，已撤回的暂定文字可能继续显示到后续更新 | `ui/listener/event_loop.rs:312` |
+  | Low | Windows smoke 未取得前台时返回成功，可能未执行流式断言 | `platform/windows/preview/smoke.rs:9` |
+
+- **Decision / consequences:** 遵循仓库 critical-only 门禁及 findings-driven rework 规则，
+  本轮只报告发现，不自动改代码或重跑审查。按用户要求推送通过门禁的精确提交并创建
+  [草稿 PR #156](https://github.com/b1indsight/viberwhisper/pull/156)，PR 描述列出全部未修复项，
+  不标记 Ready、不合并。此后只追加本记录，不改动已审查实现。
+- **Delivery status:** 已推送到用户自己的仓库；尚未合并、安装或部署。原工作副本及
+  其他任务修改未移动；真实服务 delta 和 Windows 桌面运行仍未验证。
