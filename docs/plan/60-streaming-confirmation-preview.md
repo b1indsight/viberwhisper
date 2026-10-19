@@ -1,6 +1,6 @@
 # 60 - Realtime 流式预览与最终文本纠正 — Feature record
 
-**Stage:** Review fixes implemented and validated; follow-up review/publication status below.
+**Stage:** Review fixes published; one low-priority regression-coverage finding remains.
 **PR:** [#156](https://github.com/b1indsight/viberwhisper/pull/156)，分支
 `feat/streaming-confirmation-preview`；未合并或部署，原工作副本中的其他任务修改保留。
 
@@ -333,3 +333,19 @@ UI 适配只保留最新进度并合并唤醒，避免按 token 无界积压事�
   实测；完整 cross-build 的 ort/SDK 限制未改变。两个 ignored 用例仍需要私有 VAD
   数据集和真实服务。未请求共享 Realtime 服务、不暂停其他评测、不改个人配置。
 - **Delivery status:** 本批修复尚待一次后续独立审查和同 PR 推送；不合并或部署。
+
+### [007] — 2026-10-19 — 复审后的覆盖缺口
+
+- **Evidence:** 独立 Codex gate 审查修复提交
+  [`41782883`](https://github.com/b1indsight/viberwhisper/commit/4178288380848308c5339118d549505050d4929c)，
+  完成结构化解析、退出码 0，无 critical。报告没有发现确定的运行时缺陷，新增一项
+  **Low：空进度撤回缺少经过 listener 分发的回归测试**。现有 smoke/demo 直接调用
+  `NativePreview::update_text`，即使 `render_progress` 再次错误过滤空文本，它们也会
+  通过；缺少非空→空→非空和初始空文本不展示的 listener 路径检查。
+- **Decision / consequences:** 该新发现已报告，按 findings-driven rework 规则本轮不再
+  改代码或重跑审查。保留草稿状态，并在 PR 描述列明这一测试缺口，不把原生渲染
+  通过扩大解释为 listener 分发已有自动回归覆盖。审查报告为
+  `.amp/in/artifacts/streaming-fixes-review-findings.json`。
+- **Delivery status:** 已将通过门禁的精确修复提交推送到同一个 PR；本次仅追加此
+  文档记录，不改已审查源码。未合并、安装或部署；后续 CI 跟踪最终 PR head，
+  Windows 桌面与真实服务 delta 的验证限制保持不变。
