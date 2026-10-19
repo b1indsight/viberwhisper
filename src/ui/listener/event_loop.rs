@@ -53,6 +53,31 @@ struct StreamingPreview {
     shown: bool,
 }
 
+impl StreamingPreview {
+    /// Route snapshots to the existing bubble, suppressing only an initially empty one.
+    /// The UI owner supplies native window operations; filtering and shown state stay here.
+    fn render(
+        &mut self,
+        text: &str,
+        display: impl FnOnce(bool, &str, Option<PreviewRect>) -> anyhow::Result<()>,
+    ) {
+        let Some((destination, anchor)) = &self.destination else {
+            return;
+        };
+        if text.is_empty() && !self.shown {
+            return;
+        }
+        match display(self.shown, destination, *anchor) {
+            Ok(()) => self.shown = true,
+            Err(error) => {
+                error!(%error, "Could not display streaming recognition");
+                // Recognition can still complete into the ordinary final preview.
+                self.progress.close();
+            }
+        }
+    }
+}
+
 fn finalization_completion_event(
     finalization: &mut Option<FinalizationTask>,
     session_id: SessionId,
@@ -306,31 +331,19 @@ impl ListenerApplication {
             return;
         };
         let text = stream.progress.latest();
-        let Some((destination, anchor)) = &stream.destination else {
-            return;
-        };
-        if text.is_empty() && !stream.shown {
-            return;
-        }
-        let display = if stream.shown {
-            self.preview.update_text(&text, false, None)
-        } else {
-            self.preview.show_streaming(
-                session_id,
-                &text,
-                destination,
-                *anchor,
-                matches!(self.machine.state(), RecordingState::Stopping { .. }),
-            )
-        };
-        match display {
-            Ok(()) => stream.shown = true,
-            Err(error) => {
-                error!(%error, "Could not display streaming recognition");
-                // Recognition can still complete into the ordinary final preview.
-                stream.progress.close();
+        stream.render(&text, |shown, destination, anchor| {
+            if shown {
+                self.preview.update_text(&text, false, None)
+            } else {
+                self.preview.show_streaming(
+                    session_id,
+                    &text,
+                    destination,
+                    anchor,
+                    matches!(self.machine.state(), RecordingState::Stopping { .. }),
+                )
             }
-        }
+        });
     }
 
     fn handle_preview_event(&mut self, event_loop: &ActiveEventLoop, event: PreviewEvent) {
@@ -904,9 +917,44 @@ mod tests {
     use crate::transcriber::TranscribeError;
 
     use super::{
-        FinalizationGate, FinalizationTask, capture_transcription, finalization_completion_event,
-        spawn_finalization_worker,
+        FinalizationGate, FinalizationTask, StreamingPreview, capture_transcription,
+        finalization_completion_event, spawn_finalization_worker,
     };
+
+    #[test]
+    fn listener_progress_retracts_and_resumes_without_opening_an_initially_empty_bubble() {
+        let mut stream = StreamingPreview {
+            session_id: SessionId(1),
+            progress: crate::dictation::Progress::new(|| {}),
+            destination: Some(("saved editor".into(), None)),
+            shown: false,
+        };
+        let mut visible = None;
+        let mut operations = Vec::new();
+        // A validated empty aggregate retracts a previously streamed draft while
+        // recording continues. Exercise the listener's routing, not NativePreview directly.
+        for (snapshot, expected) in [
+            ("", None),
+            ("暂定正文", Some("暂定正文")),
+            ("", Some("")),
+            ("后续识别正文", Some("后续识别正文")),
+        ] {
+            stream.render(snapshot, |shown, destination, anchor| {
+                assert_eq!(
+                    shown,
+                    visible.is_some(),
+                    "updates must reuse the visible bubble"
+                );
+                assert_eq!(destination, "saved editor");
+                assert!(anchor.is_none());
+                operations.push(shown);
+                visible = Some(snapshot.to_owned());
+                Ok(())
+            });
+            assert_eq!(visible.as_deref(), expected);
+        }
+        assert_eq!(operations, [false, true, true]); // Show once, then two updates.
+    }
 
     fn stt_snapshot() -> SttSnapshot {
         SttSnapshot {

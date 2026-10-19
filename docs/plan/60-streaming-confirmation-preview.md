@@ -1,6 +1,6 @@
 # 60 - Realtime 流式预览与最终文本纠正 — Feature record
 
-**Stage:** Review fixes published; one low-priority regression-coverage finding remains.
+**Stage:** Listener regression coverage added locally; Claude review completed with no findings.
 **PR:** [#156](https://github.com/b1indsight/viberwhisper/pull/156)，分支
 `feat/streaming-confirmation-preview`；未合并或部署，原工作副本中的其他任务修改保留。
 
@@ -349,3 +349,36 @@ UI 适配只保留最新进度并合并唤醒，避免按 token 无界积压事�
 - **Delivery status:** 已将通过门禁的精确修复提交推送到同一个 PR；本次仅追加此
   文档记录，不改已审查源码。未合并、安装或部署；后续 CI 跟踪最终 PR head，
   Windows 桌面与真实服务 delta 的验证限制保持不变。
+
+### [008] — 2026-10-19 — listener 空正文撤回回归
+
+- **Context / requirement:** 用户要求修复 [007] 的 Low，再由 Claude 按 review skill
+  标准审查。本轮只做这一覆盖修复和一次审查，不额外推送或改动共享服务。
+- **Implemented changes / rationale:** 将 listener 既有的空正文过滤、目标元数据检查和
+  `shown` 状态更新收拢到 `StreamingPreview::render`；实际 `render_progress` 获取
+  mailbox 快照并校验会话后调用此路径。以闭包保留 UI 拥有的原生 Show/Update 操作，
+  不新增通用 UI trait、测试专用生产 API 或第二套过滤条件，原有行为及错误处理不变。
+- **Evidence:** 新增一个 listener 层回归，在同一路由方法输入初始空、非空草稿、
+  空正文撤回及后续非空正文；断言初始没有窗口操作，此后只创建一次气泡并更新两次，
+  撤回时输出确实为空，恢复时复用原气泡。测试替换的是原生窗口副作用，不直接调用
+  `NativePreview::update_text`；它不声称覆盖整个 winit 事件循环或实际桌面显示。
+- **Ablation:** 临时仅把同一路径的过滤条件恢复为 `if text.is_empty()`，同一回归
+  退出 101：可见内容仍为“暂定正文”，预期为空。还原正确条件后完整测试通过；
+  日志为 `.amp/in/artifacts/streaming-low-old-filter.log`。这证明新增检查能捕获此前
+  原生 smoke 无法捕获的过滤回退，无需额外机制或新的平台抽象。
+- **Evidence:** fmt、diff whitespace、check、普通及 integration 测试、严格 Clippy
+  通过；两次测试各 320 passed、0 failed、2 ignored。日志为
+  `.amp/in/artifacts/streaming-low-verification.log`。忽略项、Windows 桌面及真实服务
+  验证限制不变；此前已推送 head 的 macOS、Windows CI 已成功，不代表本批新代码的 CI。
+- **Review scope:** Claude 审查本批精确差异及直接相关调用，采用 `jj-review-gate`
+  skill 的正确性、安全性、可维护性、实质测试缺口及 critical/high/medium/low 标准；
+  只读报告所有确定发现，不自动根据发现改代码或重新审查，不冒充 Codex gate。
+- **Review outcome:** [Claude 只读审查](https://ampcode.com/threads/T-01a1555c-be63-701e-b18e-04e850fed583)
+  完成，四级发现均为 0，确认原 Low 已解决。审查对象为精确本地快照
+  `ccbccd077d41d2dbd1267192e30e70d037e3aa02` 相对其父提交的差异；审查者另行执行
+  新增回归，1 passed，并核对旧条件失败日志。结果记录在
+  `.amp/in/artifacts/streaming-low-claude-review.md`；审查后仅更新本文记录，源码未改。
+- **Remaining verification limits:** 新测试仍不覆盖 `render_progress` 闭包内原生
+  Show/Update 映射或错误分支；本轮没有 winit、Windows 桌面或真实服务端到端验证。
+  这些是验证范围限制，Claude 未将其列为缺陷发现。
+- **Delivery status:** 本批修复及 Claude 审查已完成，仅在隔离工作副本中；未推送或合并。
