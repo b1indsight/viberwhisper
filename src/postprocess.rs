@@ -1,8 +1,11 @@
 mod llm;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use crate::core::config::{ApiAuth, ConfigDocument, fields};
+use crate::dictation::{LearningWorker, Transcript, config::MemoryConfig};
 use anyhow::Context;
-pub use llm::{ConservativeLlmSession, LlmPostProcessor, PreheatLlmSession};
+pub use llm::LlmPostProcessor;
 use std::fmt;
 use tracing::warn;
 
@@ -61,7 +64,9 @@ impl PostProcessConfig {
 pub enum PostProcessError {
     Http(reqwest::Error),
     Json(serde_json::Error),
-    Api { status: u16, body: String },
+    InvalidResult,
+    Memory(anyhow::Error),
+    Api { status: u16 },
     MissingContent,
     EmptyContent,
 }
@@ -71,7 +76,10 @@ impl fmt::Display for PostProcessError {
         match self {
             Self::Http(error) => write!(f, "LLM request failed: {error}"),
             Self::Json(error) => write!(f, "invalid LLM response: {error}"),
-            Self::Api { status, body } => write!(f, "LLM API error {status}: {body}"),
+            Self::InvalidResult => write!(f, "invalid structured cleanup result"),
+            Self::Memory(error) => write!(f, "cleanup memory unavailable: {error}"),
+            // Providers may echo the transcript or context in their error body.
+            Self::Api { status } => write!(f, "LLM API error {status}"),
             Self::MissingContent => write!(f, "content field not found in LLM response"),
             Self::EmptyContent => write!(f, "LLM returned empty content"),
         }
@@ -83,7 +91,10 @@ impl std::error::Error for PostProcessError {
         match self {
             Self::Http(error) => Some(error),
             Self::Json(error) => Some(error),
-            Self::Api { .. } | Self::MissingContent | Self::EmptyContent => None,
+            Self::Memory(error) => Some(error.as_ref()),
+            Self::InvalidResult | Self::Api { .. } | Self::MissingContent | Self::EmptyContent => {
+                None
+            }
         }
     }
 }
@@ -106,16 +117,32 @@ impl From<serde_json::Error> for PostProcessError {
 /// is optional and must not make speech-to-text unavailable.
 pub enum PostProcessor {
     Disabled,
-    Llm(LlmPostProcessor),
+    Llm(Box<LlmPostProcessor>),
 }
 
 impl PostProcessor {
+    /// Desktop-only memory ownership; disabled cleanup never loads personal memory.
+    pub(crate) fn new_desktop(
+        config: PostProcessConfig,
+        memory: MemoryConfig,
+        path: Option<std::path::PathBuf>,
+        language: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let mut processor = Self::new(config);
+        if let Self::Llm(processor) = &mut processor
+            && memory.enabled
+        {
+            processor.learning = Some(LearningWorker::new(memory, path, language)?);
+        }
+        Ok(processor)
+    }
+
     /// Creates a processor from resolved runtime settings.
     pub fn new(config: PostProcessConfig) -> Self {
         match config {
             PostProcessConfig::Disabled => Self::Disabled,
             PostProcessConfig::Llm(config) => match LlmPostProcessor::new(config) {
-                Ok(processor) => Self::Llm(processor),
+                Ok(processor) => Self::Llm(Box::new(processor)),
                 Err(error) => {
                     warn!(error = %error, "Failed to create LLM post-processor, falling back to noop");
                     Self::Disabled
@@ -132,60 +159,21 @@ impl PostProcessor {
         }
     }
 
-    /// Creates independent state for incremental text cleanup.
-    pub fn create_session(&self) -> PostProcessorSession {
+    /// Preserve validated recognition metadata until the user successfully delivers the result.
+    pub(crate) fn process_for_delivery(&self, text: &str) -> Result<Transcript, PostProcessError> {
         match self {
-            Self::Disabled => PostProcessorSession::Noop(NoopSession::default()),
-            Self::Llm(processor) => processor.create_session(),
-        }
-    }
-}
-
-/// Incremental text cleanup state for one recording session.
-///
-/// Created by [`PostProcessor::create_session`]. Feed stable text chunks with
-/// [`Self::push_stable_chunk`], then call [`Self::finish`] for the final text.
-pub enum PostProcessorSession {
-    Noop(NoopSession),
-    Conservative(ConservativeLlmSession),
-    Preheat(PreheatLlmSession),
-}
-
-impl PostProcessorSession {
-    /// Adds a stable text fragment to the session's accumulated input.
-    pub fn push_stable_chunk(&mut self, text: &str) {
-        match self {
-            Self::Noop(session) => session.push_stable_chunk(text),
-            Self::Conservative(session) => session.push_stable_chunk(text),
-            Self::Preheat(session) => session.push_stable_chunk(text),
+            Self::Disabled => Ok(text.to_owned().into()),
+            Self::Llm(processor) => processor.process_for_delivery(text),
         }
     }
 
-    /// Completes cleanup and returns the processed text.
-    pub fn finish(&mut self) -> Result<String, PostProcessError> {
-        match self {
-            Self::Noop(session) => session.finish(),
-            Self::Conservative(session) => session.finish(),
-            Self::Preheat(session) => session.finish(),
+    /// Drain accepted feedback without waiting for an unconfirmed preview or HTTP request.
+    pub(crate) fn shutdown(&self) {
+        if let Self::Llm(processor) = self
+            && let Some(learning) = &processor.learning
+        {
+            learning.shutdown();
         }
-    }
-}
-
-/// Pass-through state owned by [`PostProcessorSession::Noop`].
-#[derive(Default)]
-pub struct NoopSession {
-    chunks: Vec<String>,
-}
-
-impl NoopSession {
-    fn push_stable_chunk(&mut self, text: &str) {
-        if !text.is_empty() {
-            self.chunks.push(text.to_string());
-        }
-    }
-
-    fn finish(&mut self) -> Result<String, PostProcessError> {
-        Ok(self.chunks.join(""))
     }
 }
 
@@ -202,12 +190,11 @@ mod tests {
     }
 
     #[test]
-    fn test_noop_session() {
+    fn disabled_delivery_has_no_confirmation_feedback() {
         let p = PostProcessor::new(PostProcessConfig::Disabled);
-        let mut session = p.create_session();
-        session.push_stable_chunk("hello");
-        session.push_stable_chunk("world");
-        assert_eq!(session.finish().unwrap(), "helloworld");
+        let result = p.process_for_delivery("hello world").unwrap();
+        assert_eq!(result.text, "hello world");
+        assert!(result.confirmation.is_none());
     }
 
     #[test]

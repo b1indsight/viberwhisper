@@ -18,7 +18,7 @@ Module-level design docs covering structs, methods, and dependencies.
 | [input.md](architecture/input.md) | Target-neutral hotkey/tray drivers and the thread-safe text-delivery contract |
 | [transcriber.md](architecture/transcriber.md) | Transcription trait, `ApiTranscriber` (OpenAI-compatible API), chunking, retry, text merging |
 | [platform.md](architecture/platform.md) | Compile-time desktop interface for native input, status/history menus, config paths, text delivery, and clipboard copy |
-| [postprocess.md](architecture/postprocess.md) | Post-processing — concrete processor facade, LLM integration, preheat/conservative sessions |
+| [postprocess.md](architecture/postprocess.md) | HTTP LLM cleanup — shared self-correction rules, structured validation, confirmed learning and memory ownership |
 | [prompt-lab.md](architecture/prompt-lab.md) | STT prompt dataset capture, deterministic local metrics, agent review, and JSON report lifecycle |
 
 ## Examples
@@ -73,3 +73,4 @@ Implementation plans and technical specs for each feature.
 | [44-remove-local-inference-mode.md](plan/44-remove-local-inference-mode.md) | Implemented | Remove the bundled Local inference profile, model runtime, CLI, configuration, and supporting Python surface |
 | [45-prompt-lab-review-rules.md](plan/45-prompt-lab-review-rules.md) | Implemented | Share agent-review validation, LLM aggregation, and threshold calculations across review application and report loading |
 | [48-hotkey-simplification.md](plan/48-hotkey-simplification.md) | Implemented | Simplify callback state and paired hotkey bindings, and share one canonical-name/alias catalog |
+| [61-http-postprocess-correction.md](plan/61-http-postprocess-correction.md) | Implemented locally | Share Realtime cleanup rules, context-scoped repairs and confirmed-edit memory with ordinary HTTP post-processing; model and Windows verification limits recorded |

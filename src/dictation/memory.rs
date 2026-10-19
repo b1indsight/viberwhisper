@@ -63,7 +63,7 @@ pub(crate) struct SupportedTerm {
     pub supporting_recordings: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Snapshot {
     pub contexts: Vec<Context>,
