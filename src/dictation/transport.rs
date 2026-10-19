@@ -395,15 +395,30 @@ impl Connection {
         input: &PromptInput,
         correlation: &str,
     ) -> Result<DictationResult> {
-        timeout(RESPONSE_TIMEOUT, self.finish_inner(input, correlation))
-            .await
-            .context("Realtime response timeout")?
+        self.finish_streaming(input, correlation, &mut |_| {}).await
+    }
+
+    /// Provisional decoded body text may differ from the authoritative completion.
+    /// The observer cannot make a response deliverable before final validation.
+    pub async fn finish_streaming(
+        &mut self,
+        input: &PromptInput,
+        correlation: &str,
+        notify: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<DictationResult> {
+        timeout(
+            RESPONSE_TIMEOUT,
+            self.finish_inner(input, correlation, notify),
+        )
+        .await
+        .context("Realtime response timeout")?
     }
 
     async fn finish_inner(
         &mut self,
         input: &PromptInput,
         correlation: &str,
+        notify: &mut (dyn FnMut(&str) + Send),
     ) -> Result<DictationResult> {
         let segment = self
             .segment
@@ -443,7 +458,8 @@ impl Connection {
         .await?;
         let mut response_id = None;
         let mut seen = HashSet::new();
-        let mut delta = String::new();
+        let mut delta_bytes = 0;
+        let mut stream = super::text_stream::TextStream::default();
         let mut done_text = None;
         let complete = loop {
             let event = self.receive().await?;
@@ -483,14 +499,16 @@ impl Connection {
                         "unexpected Realtime content part"
                     );
                     if event["type"] == "response.output_text.delta" {
-                        delta.push_str(event["delta"].as_str().context("missing text delta")?);
-                        ensure!(delta.len() <= 64 * 1024, "Realtime response too large");
+                        ensure!(done_text.is_none(), "Realtime delta after text completion");
+                        let delta = event["delta"].as_str().context("missing text delta")?;
+                        delta_bytes += delta.len();
+                        ensure!(delta_bytes <= 64 * 1024, "Realtime response too large");
+                        if let Some(text) = stream.push(delta) {
+                            notify(text);
+                        }
                     } else {
                         let text = event["text"].as_str().context("missing final text")?;
-                        ensure!(
-                            delta.is_empty() || delta == text,
-                            "Realtime delta/final mismatch"
-                        );
+                        ensure!(text.len() <= 64 * 1024, "Realtime response too large");
                         done_text = Some(text.to_owned());
                     }
                 }

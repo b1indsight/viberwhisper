@@ -384,7 +384,10 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
         let samples = samples.clone();
         let text = tokio::task::spawn_blocking(move || {
             let id = SessionId(turn);
-            engine.start_session(id).unwrap();
+            let progress = crate::dictation::Progress::new(|| {});
+            engine
+                .start_session_with_progress(id, Some(progress.clone()))
+                .unwrap();
             // Two 33-second recordings share a socket and each produces two responses.
             for _ in 0..11 {
                 for frame in samples.chunks(3200) {
@@ -395,6 +398,7 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
                 }
             }
             let transcript = engine.finish_for_delivery(id).unwrap();
+            assert_eq!(progress.latest(), transcript.text);
             transcript
                 .confirmation
                 .unwrap()

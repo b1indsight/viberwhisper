@@ -33,6 +33,11 @@ impl From<(String, Option<String>)> for PreviewTranscription {
 
 #[derive(Debug, Clone)]
 pub(super) enum PreviewUpdate {
+    Streaming {
+        session_id: SessionId,
+        destination: String,
+        anchor: Option<PreviewRect>,
+    },
     Ready {
         session_id: SessionId,
         text: String,
@@ -182,6 +187,7 @@ pub(super) fn confirm_delivery(
 /// Keeps native destination objects on this worker until confirmation or cancellation.
 /// Capture and event publishing are injected so the real command loop can be tested
 /// without a desktop, network, or native target crossing a thread boundary.
+/// Always acquires the saved target, even if cancellation won the Ready handoff.
 pub(super) fn wait_for_confirmation<T: DeliveryTarget>(
     session_id: SessionId,
     transcription: PreviewTranscription,
@@ -191,15 +197,40 @@ pub(super) fn wait_for_confirmation<T: DeliveryTarget>(
     capture: impl FnOnce() -> Result<T>,
     notify: &impl Fn(PreviewUpdate) -> bool,
 ) {
+    let target = capture();
+    if !run_confirmation(
+        session_id,
+        transcription,
+        typer,
+        history,
+        gate,
+        &target,
+        notify,
+    ) && let Ok(target) = &target
+        && let Err(error) = target.restore()
+    {
+        debug!(%error, "Could not restore abandoned preview destination");
+    }
+}
+
+/// Returns whether delivery succeeded; every other exit restores the target in the caller.
+fn run_confirmation<T: DeliveryTarget>(
+    session_id: SessionId,
+    transcription: PreviewTranscription,
+    typer: &dyn TextTyper,
+    history: Option<&HistoryStore>,
+    gate: &FinalizationGate,
+    target: &Result<T>,
+    notify: &impl Fn(PreviewUpdate) -> bool,
+) -> bool {
     if gate.is_cancelled() {
-        return;
+        return false;
     }
     let PreviewTranscription {
         text,
         warning,
         mut confirmation,
     } = transcription;
-    let target = capture();
     let anchor = target
         .as_ref()
         .ok()
@@ -231,32 +262,20 @@ pub(super) fn wait_for_confirmation<T: DeliveryTarget>(
             commands,
         })
     {
-        return;
+        return false;
     }
     let mut saved = None;
     while let Ok(command) = receiver.recv() {
         if gate.is_cancelled() {
-            return;
+            return false;
         }
         match command {
-            PreviewCommand::Cancel => {
-                if let Ok(target) = &target
-                    && let Err(error) = target.restore()
-                {
-                    debug!(%error, "Could not restore destination after preview cancellation");
-                }
-                return;
-            }
+            PreviewCommand::Cancel => return false,
             PreviewCommand::Confirm(text) => {
                 if text.trim().is_empty() {
-                    if let Ok(target) = &target
-                        && let Err(error) = target.restore()
-                    {
-                        debug!(%error, "Could not restore destination after clearing preview");
-                    }
-                    return;
+                    return false;
                 }
-                let result = match &target {
+                let result = match target {
                     Ok(target) => {
                         confirm_delivery(typer, target, &text, history, &mut saved, gate, |text| {
                             notify(PreviewUpdate::HistorySaved(text));
@@ -272,11 +291,11 @@ pub(super) fn wait_for_confirmation<T: DeliveryTarget>(
                         {
                             error!(%error, "Confirmed text was delivered but dictation learning failed");
                         }
-                        return;
+                        return delivered;
                     }
                     Err(error) => {
                         if gate.is_cancelled() {
-                            return;
+                            return false;
                         }
                         error!(%error, "Confirmed text delivery failed");
                         if capture_permission_denied
@@ -290,13 +309,14 @@ pub(super) fn wait_for_confirmation<T: DeliveryTarget>(
                             error: error.to_string(),
                             retry_allowed,
                         }) {
-                            return;
+                            return false;
                         }
                     }
                 }
             }
         }
     }
+    false
 }
 
 #[cfg(test)]

@@ -17,7 +17,11 @@ Realtime is disabled by default. An omitted URL resolves to
   bounded backlog, ordered 30-second response segments, final text concatenation without deduplication.
 - `audio::PcmResampler`: shared stateful 24 kHz conversion with filter-delay and final-tail compensation.
 - `transport`: standard session/response events, explicit audio-item references and context input,
-  out-of-band responses, correlation, delta/final consistency, completion status and item deletion.
+  out-of-band responses, correlation, final-event consistency, completion status and item deletion.
+- `text_stream`: provisional top-level JSON `text` decoding across escaped strings and surrogate pairs;
+  nested metadata is skipped and complete-result validation remains authoritative.
+- `progress`: one latest-body snapshot and coalesced wake-up per recording; closing rejects late
+  updates, while cancellation also interrupts a finalizer already detached from the orchestrator.
 - `result`: strict complete JSON boundary and independently validated optional context/term metadata.
   Delivery uses the returned final text; no separate verbatim transcript is requested.
 - `feedback`: a single-use confirmation capability; dropping it discards learning, successful
@@ -105,6 +109,16 @@ recordings without audio create neither. Cancellation resolves pending item ackn
 uses the same cleanup, and never replays an ambiguous audio commit. Reconnects declare full input
 with fresh IDs. Cache misses and shorter common prefixes do not change the input sent; text-item
 deletion makes no assumption about whether the server retains token-verified KV checkpoints.
+
+Desktop progress combines validated preceding segments with the provisional current body using
+the same language separator as final output. Delta text may differ from the completed result;
+only agreement between `response.output_text.done` and completed `response.done`, followed by
+the existing JSON/schema checks, authorizes final text. Existing final preparation applies local
+corrections, then the UI reconciles its read-only draft before allowing edits or confirmation.
+Progress never creates confirmation feedback, history or destination input. Requests still occur
+only at a 30-second boundary or stop, so a short recording streams generation after stop rather
+than during speech. Stable-prefix declarations and both item-deletion acknowledgements are unchanged.
+
 Each recording
 works on a copy of memory; cancellation/failure discards its updates. Successful desktop recordings
 retain original term spellings and displayed ranges with a single-use feedback handle. Only successful preview delivery commits

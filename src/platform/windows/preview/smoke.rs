@@ -2,9 +2,134 @@
 
 use super::super::nul_terminated_utf16;
 use super::*;
-use windows_sys::Win32::UI::Controls::EM_REPLACESEL;
+use windows_sys::Win32::UI::Controls::{EM_CANUNDO, EM_GETSEL, EM_REPLACESEL};
 
 impl NativePreview {
+    pub(crate) fn smoke_streaming(&mut self) -> Result<()> {
+        // These checks address our own controls directly and need no foreground activation.
+        ensure!(
+            unsafe { IsWindow(self.state.window.get()) } != 0,
+            "Streaming preview was not created"
+        );
+        let seed = nul_terminated_utf16("hello 😀 old");
+        self.state.set_read_only(false);
+        unsafe {
+            SendMessageW(self.state.text.get(), EM_SETSEL, 0, -1);
+            SendMessageW(
+                self.state.text.get(),
+                EM_REPLACESEL,
+                0,
+                seed.as_ptr() as isize,
+            );
+            // This prefix is before the corrected word and must survive in
+            // UTF-16 units even though the later emoji uses a surrogate pair.
+            SendMessageW(self.state.text.get(), EM_SETSEL, 0, 6);
+        }
+        self.state.set_read_only(true);
+        self.update_text("hello 😀 new", false, None)?;
+        ensure!(
+            self.state.normalized_text()? == "hello 😀 new",
+            "Streaming patch did not replace only the tail"
+        );
+        let mut start = 0u32;
+        let mut end = 0u32;
+        unsafe {
+            SendMessageW(
+                self.state.text.get(),
+                EM_GETSEL,
+                (&raw mut start) as usize,
+                (&raw mut end) as isize,
+            );
+        }
+        ensure!(
+            (start, end) == (0, 6),
+            "Streaming patch changed an unaffected selection"
+        );
+        ensure!(
+            unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) } as u32
+                & ES_READONLY as u32
+                != 0,
+            "Streaming preview remained editable"
+        );
+        ensure!(
+            unsafe { SendMessageW(self.state.text.get(), EM_CANUNDO, 0, 0) } == 0,
+            "Streaming patch entered the undo history"
+        );
+        self.update_text("", false, None)?;
+        ensure!(
+            self.state.normalized_text()?.is_empty(),
+            "An empty aggregate did not retract the provisional text"
+        );
+        self.smoke_placement()?;
+        self.update_text("hello 😀 final", true, None)?;
+        ensure!(
+            unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) } as u32
+                & ES_READONLY as u32
+                == 0,
+            "Final preview did not become editable"
+        );
+        Ok(())
+    }
+
+    /// Resize the actual controls at each screen corner, both generating and editable.
+    fn smoke_placement(&mut self) -> Result<()> {
+        let mut bounds = RECT::default();
+        ensure!(
+            unsafe { GetWindowRect(self.state.window.get(), &mut bounds) } != 0,
+            "Could not read bubble bounds"
+        );
+        let current = PreviewRect::new(
+            bounds.left as f64,
+            bounds.top as f64,
+            (bounds.right - bounds.left) as f64,
+            (bounds.bottom - bounds.top) as f64,
+        )
+        .ok_or_else(|| anyhow!("Invalid bubble bounds"))?;
+        let work = position::work_area(current).ok_or_else(|| anyhow!("No preview work area"))?;
+        let saved_anchor = self.state.anchor.get();
+        let long = "中文 English 🎙️ 自动换行。".repeat(40);
+        let result = (|| {
+            for x in [work.x + 8.0, work.x + work.width - 9.0] {
+                for y in [work.y + 8.0, work.y + work.height - 26.0] {
+                    let anchor = PreviewRect::new(x, y, 1.0, 18.0).unwrap();
+                    self.state.anchor.set(Some(anchor));
+                    for (text, ready, warning) in [
+                        ("短句", false, None),
+                        (long.as_str(), false, None),
+                        ("短句", true, None),
+                        (long.as_str(), true, Some("测试提示")),
+                    ] {
+                        self.update_text(text, ready, warning)?;
+                        ensure!(
+                            unsafe { GetWindowRect(self.state.window.get(), &mut bounds) } != 0,
+                            "Could not read resized bubble bounds"
+                        );
+                        let expected = preview_origin(
+                            anchor,
+                            (
+                                (bounds.right - bounds.left) as f64,
+                                (bounds.bottom - bounds.top) as f64,
+                            ),
+                            work,
+                        );
+                        ensure!(
+                            (bounds.left as f64 - expected.0).abs() <= 1.0
+                                && (bounds.top as f64 - expected.1).abs() <= 1.0
+                                && bounds.left as f64 >= work.x + 7.0
+                                && bounds.top as f64 >= work.y + 7.0
+                                && bounds.right as f64 <= work.x + work.width - 7.0
+                                && bounds.bottom as f64 <= work.y + work.height - 7.0,
+                            "Resized preview escaped its work area"
+                        );
+                    }
+                }
+            }
+            Ok(())
+        })();
+        self.state.anchor.set(saved_anchor);
+        result
+    }
+
     pub(crate) fn smoke_confirmation(
         &self,
         edited_text: &str,
@@ -45,10 +170,28 @@ impl NativePreview {
             grown.right - grown.left > short.right - short.left && grown.right - grown.left <= 420,
             "Short candidate did not shrink below the wrapping width"
         );
-        ensure!(
-            grown.top == short.top,
-            "Bubble top edge moved while growing"
-        );
+        if let Some(anchor) = self.state.anchor.get() {
+            let work =
+                position::work_area(anchor).ok_or_else(|| anyhow!("No preview work area"))?;
+            let expected = preview_origin(
+                anchor,
+                (
+                    (grown.right - grown.left) as f64,
+                    (grown.bottom - grown.top) as f64,
+                ),
+                work,
+            );
+            ensure!(
+                (grown.left as f64 - expected.0).abs() <= 1.0
+                    && (grown.top as f64 - expected.1).abs() <= 1.0,
+                "Growing bubble ignored its caret and work area"
+            );
+        } else {
+            ensure!(
+                grown.top == short.top,
+                "Unanchored bubble top edge moved while growing"
+            );
+        }
         replace(&"中文 English 🎙️ 自动换行。".repeat(200));
         let capped = bounds()?;
         ensure!(

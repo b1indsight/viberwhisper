@@ -41,6 +41,24 @@ restores the target and validates it after the platform
 focus delay. Failures preserve the candidate; partial SendInput acceptance disables automatic retry.
 Cancel drops the candidate without saving history; exit cancels the gate and disconnects the worker.
 
+Realtime starts this same delivery worker when recording starts, captures the destination before
+any preview can take focus, and waits for the recorder's stop signal before finalization. Native
+target objects stay on that worker. A recording-scoped latest-text mailbox wakes the UI without
+queuing every token. Provisional text is read-only/selectable, Enter cannot confirm it, and no
+`PendingPreview` command channel exists until final validation. During recording the bubble is
+non-activating; stop focuses it once. Esc closes progress, cancels the recognition token even
+after finalizer detachment, and drives session-scoped recorder/orchestrator cleanup. The machine
+stays `Stopping` until cleanup and destination restoration finish, preventing restart races.
+
+Ready closes the mailbox before enabling editing, so old progress cannot overwrite manual edits.
+The same native window replaces only a word-aligned changed tail; unchanged text is not replaced
+and pure additions append. Shared `platform::preview::TextPatch` uses Chinese segmentation and
+Unicode word/grapheme boundaries; native adapters convert byte offsets to UTF-16 (including
+Windows CRLF), preserve prefix selection and scroll, and clear programmatic undo/held-key state
+at the ready transition. Failure discards the current unvalidated tail; only validated partial
+results can enter the existing warning/confirmation path. HTTP and dataset capture keep their
+existing finalization path.
+
 The prepared preview also retains an optional opaque Realtime confirmation capability. History,
 native injection and feedback use the same edited text. Only successful injection consumes the
 capability; failed attempts retain it for the next edit/retry, and cancellation drops it. The UI

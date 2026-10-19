@@ -12,6 +12,10 @@ mod placement;
 pub(crate) use placement::PreviewRect;
 pub(super) use placement::preview_origin;
 
+#[path = "preview/text.rs"]
+mod text;
+pub(crate) use text::TextPatch;
+
 #[cfg(target_os = "macos")]
 pub(crate) use super::macos::preview::{NativePreview, NativeTarget};
 #[cfg(target_os = "windows")]
@@ -128,9 +132,26 @@ mod fallback {
             anyhow::bail!("Desktop preview is unsupported on this platform")
         }
         pub(crate) fn show_error(&mut self, _: &str, _: bool) {}
+        pub(crate) fn show_streaming(
+            &mut self,
+            _: SessionId,
+            _: &str,
+            _: &str,
+            _: Option<PreviewRect>,
+            _: bool,
+        ) -> Result<()> {
+            anyhow::bail!("Desktop preview is unsupported on this platform")
+        }
+        pub(crate) fn update_text(&mut self, _: &str, _: bool, _: Option<&str>) -> Result<()> {
+            anyhow::bail!("Desktop preview is unsupported on this platform")
+        }
         pub(crate) fn focus(&self) {}
         pub(crate) fn hide(&self) {}
         pub(crate) fn close(&mut self) {}
+        #[cfg(feature = "integration")]
+        pub(crate) fn smoke_streaming(&mut self) -> Result<()> {
+            anyhow::bail!("Unsupported platform")
+        }
         #[cfg(feature = "integration")]
         pub(crate) fn smoke_confirmation(
             &self,

@@ -23,7 +23,7 @@ use super::AccessibilityError;
 use super::accessibility::{copy_attribute, native_error, validated_focused_element};
 use crate::platform::preview::{
     ConfirmationKey, DeliveryTarget, PreviewAction, PreviewEvent, PreviewKey, PreviewNotify,
-    PreviewRect, wait_for_activation,
+    PreviewRect, TextPatch, wait_for_activation,
 };
 use crate::session::SessionId;
 
@@ -409,6 +409,46 @@ impl PreviewWindow {
             (self.ivars().notify)(PreviewEvent { session_id, action });
         }
     }
+
+    /// Replace only the model-revisable tail, leaving a user's prefix selection and
+    /// scroll position alone. A tail-following viewer stays at the newest text.
+    fn replace_streaming_text(&self, new: &str) {
+        let state = self.ivars();
+        let old = state.text.string().to_string();
+        let Some(patch) = TextPatch::between(&old, new) else {
+            return;
+        };
+        let location = old[..patch.start].encode_utf16().count();
+        let length = old[patch.start..].encode_utf16().count();
+        let selection = state.text.selectedRange();
+        let selection_is_preserved = selection.location + selection.length <= location;
+        let visible = state.scroll.documentVisibleRect();
+        let follows_tail =
+            visible.origin.y + visible.size.height >= state.text.frame().size.height - 1.0;
+        if let Some(undo) = state.text.undoManager() {
+            undo.disableUndoRegistration();
+            state.text.replaceCharactersInRange_withString(
+                NSRange::new(location, length),
+                &NSString::from_str(patch.replacement),
+            );
+            undo.enableUndoRegistration();
+        } else {
+            state.text.replaceCharactersInRange_withString(
+                NSRange::new(location, length),
+                &NSString::from_str(patch.replacement),
+            );
+        }
+        self.resize_to_text();
+        if selection_is_preserved {
+            state.text.setSelectedRange(selection);
+        }
+        if follows_tail {
+            let end = new.encode_utf16().count();
+            state.text.scrollRangeToVisible(NSRange::new(end, 0));
+        } else {
+            state.text.scrollPoint(visible.origin);
+        }
+    }
 }
 
 pub(crate) struct NativePreview {
@@ -557,6 +597,7 @@ impl NativePreview {
         window.ivars().last_origin.set(None);
         window.ivars().keys.borrow_mut().reset();
         window.ivars().text.setString(&NSString::from_str(text));
+        window.ivars().text.setEditable(true);
         window.setTitle(&NSString::from_str(&format!(
             "ViberWhisper · {destination}"
         )));
@@ -571,6 +612,76 @@ impl NativePreview {
             .text
             .setSelectedRange(NSRange::new(text.encode_utf16().count(), 0));
         self.focus();
+        Ok(())
+    }
+
+    pub(crate) fn show_streaming(
+        &mut self,
+        session_id: SessionId,
+        text: &str,
+        destination: &str,
+        anchor: Option<PreviewRect>,
+        activate: bool,
+    ) -> Result<()> {
+        if self.window.is_none() {
+            self.create()?;
+        }
+        let window = self.window.as_ref().expect("created window");
+        let state = window.ivars();
+        state.session_id.set(Some(session_id));
+        state.anchor.set(anchor);
+        state.last_origin.set(None);
+        state.keys.borrow_mut().reset();
+        state.retry_allowed.set(false);
+        state.text.setEditable(false);
+        state.text.setSelectable(true);
+        state.text.setString(&NSString::from_str(text));
+        if let Some(undo) = state.text.undoManager() {
+            undo.removeAllActions();
+        }
+        window.setTitle(&NSString::from_str(&format!(
+            "ViberWhisper · {destination}"
+        )));
+        window.set_message(None);
+        if anchor.is_none() {
+            window.center();
+            state.last_origin.set(Some(window.frame().origin));
+        }
+        state
+            .text
+            .setSelectedRange(NSRange::new(text.encode_utf16().count(), 0));
+        if activate {
+            self.focus();
+        } else {
+            window.orderFront(None);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn update_text(
+        &mut self,
+        text: &str,
+        ready: bool,
+        warning: Option<&str>,
+    ) -> Result<()> {
+        let window = self
+            .window
+            .as_ref()
+            .ok_or_else(|| anyhow!("预览窗口尚未创建"))?;
+        window.replace_streaming_text(text);
+        window.set_message(warning);
+        let state = window.ivars();
+        if ready {
+            state.keys.borrow_mut().reset();
+            state.retry_allowed.set(true);
+            state.text.setEditable(true);
+            if let Some(undo) = state.text.undoManager() {
+                undo.removeAllActions();
+            }
+        } else {
+            state.retry_allowed.set(false);
+            state.text.setEditable(false);
+        }
         Ok(())
     }
 

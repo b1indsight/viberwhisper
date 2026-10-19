@@ -436,3 +436,112 @@ async fn completed_segment_survives_faults_but_not_user_cancellation() {
         );
     }
 }
+
+#[tokio::test]
+async fn provisional_text_precedes_completion_but_only_validated_final_text_is_deliverable() {
+    // A server can correct its streamed draft, truncate after streaming a plausible
+    // sentence, or still be generating when Esc cancels a detached finalizer.
+    for outcome in ["completed", "incomplete", "mismatched_final", "cancelled"] {
+        let (listener, settings) = listen().await;
+        let (release, resume) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut socket = accept_session(&listener).await;
+            commit_segment(&mut socket, "audio").await;
+            let request = expect_event(&mut socket, "response.create").await;
+            send_json(&mut socket, json!({"type":"response.created","response":{"id":"r","metadata":request["response"]["metadata"]}})).await;
+            let delta = json!({"type":"response.output_text.delta", "event_id":"draft", "response_id":"r", "output_index":0, "content_index":0,
+                "delta":r#"{"memory_candidates":[{"text":"must stay hidden"}],"text":"我们明天下午去北京。"#});
+            send_json(&mut socket, delta.clone()).await;
+            send_json(&mut socket, delta).await; // Replayed events cannot duplicate the body.
+            resume.await.unwrap(); // No completion is sent until the consumer sees the draft.
+            if outcome == "cancelled" {
+                let event = expect_event(&mut socket, "response.cancel").await;
+                assert_eq!(event["response_id"], "r");
+                send_json(
+                    &mut socket,
+                    json!({"type":"response.done","response":{"id":"r","status":"cancelled"}}),
+                )
+                .await;
+                delete_segment(&mut socket, "audio").await;
+                expect_event(&mut socket, "input_audio_buffer.clear").await;
+                send_json(&mut socket, json!({"type":"input_audio_buffer.cleared"})).await;
+            } else {
+                let text = json!({"text":"我们明天上午去上海。"}).to_string();
+                send_json(&mut socket, json!({"type":"response.output_text.done","response_id":"r","output_index":0,"content_index":0,"text":text})).await;
+                let status = if outcome == "mismatched_final" {
+                    "completed"
+                } else {
+                    outcome
+                };
+                let completed_text = if outcome == "mismatched_final" {
+                    r#"{"text":"different final"}"#
+                } else {
+                    &text
+                };
+                send_json(&mut socket, json!({"type":"response.done","response":{"id":"r","status":status,"output":[{"content":[{"type":"output_text","text":completed_text}]}]}})).await;
+                if outcome == "completed" {
+                    delete_segment(&mut socket, "audio").await;
+                }
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("memory.json");
+        let engine = Arc::new(
+            SessionOrchestrator::new_realtime(
+                settings,
+                None,
+                Some(path.clone()),
+                Some("zh".into()),
+            )
+            .unwrap(),
+        );
+        let (notify, mut updates) = tokio::sync::mpsc::channel(1);
+        let progress = super::Progress::new(move || {
+            let _ = notify.try_send(());
+        });
+        let id = SessionId(1);
+        engine
+            .start_session_with_progress(id, Some(progress.clone()))
+            .unwrap();
+        engine.on_chunk_ready(
+            id,
+            WavChunk::from_encoded_bytes(
+                include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
+            ),
+        );
+        let finalizer = engine.clone();
+        let finished = tokio::task::spawn_blocking(move || finalizer.finish_for_delivery(id));
+        timeout(Duration::from_secs(5), updates.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(progress.latest(), "我们明天下午去北京。");
+        assert!(
+            !finished.is_finished(),
+            "a delta must not finish recognition"
+        );
+        assert!(!path.exists(), "provisional text must not be learned");
+        if outcome == "cancelled" {
+            progress.cancel();
+        }
+        release.send(()).unwrap();
+        let result = timeout(Duration::from_secs(5), finished)
+            .await
+            .unwrap()
+            .unwrap();
+        match (outcome, result) {
+            ("completed", Ok(transcript)) => {
+                assert_eq!(transcript.text, "我们明天上午去上海。");
+                assert_eq!(progress.latest(), transcript.text);
+                drop(transcript); // No confirmation: no history/memory side effect.
+            }
+            (_, Err(SessionError::PartialFailure { partial_text, .. })) => {
+                assert!(partial_text.is_empty())
+            }
+            other => panic!("unexpected stream outcome: {other:?}"),
+        }
+        engine.shutdown();
+        assert!(!path.exists());
+        server.await.unwrap();
+    }
+}
