@@ -10,6 +10,20 @@ fn response(text: &str) -> String {
 }
 
 #[test]
+fn realtime_results_keep_segment_text_and_json_limits() {
+    // Aggregate HTTP cleanup must not relax the bounds used for Realtime segments.
+    for length in [16_384, 16_385] {
+        let wire = json!({"text":"a".repeat(length)}).to_string();
+        assert_eq!(DictationResult::parse(&wire, &[]).is_ok(), length == 16_384);
+    }
+    let mut padded = r#"{"text":"ok"}"#.to_owned();
+    padded.push_str(&" ".repeat(64 * 1024 - padded.len()));
+    assert!(DictationResult::parse(&padded, &[]).is_ok());
+    padded.push(' ');
+    assert!(DictationResult::parse(&padded, &[]).is_err());
+}
+
+#[test]
 fn invalid_memory_does_not_discard_text_and_cannot_invent_context() {
     assert!(DictationResult::parse("```json\n{}\n```", &[]).is_err());
     let mut value: serde_json::Value = serde_json::from_str(&response("你好。")).unwrap();
