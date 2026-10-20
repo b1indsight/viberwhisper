@@ -1,7 +1,7 @@
 # 61 - 普通后处理复用改口与纠错学习 — Feature record
 
-**Stage:** 本地实现完成；客户端回归通过，真实模型样例与跨平台验证限制见时间线。
-**PR:** 尚未创建。本次改动已隔离到基于 `master@origin` 的独立 jj 工作区；原工作区的其他修改保持原样，尚未提交或推送。
+**Stage:** 已提交 PR；实现、本地回归和独立复审完成，CI 与跨平台验证状态见 PR。
+**PR:** [#157](https://github.com/b1indsight/viberwhisper/pull/157)（`feat/http-postprocess-correction` → `master`）。原工作区的其他修改保持原样；未合并或部署。
 
 ## 1. Initial plan
 
