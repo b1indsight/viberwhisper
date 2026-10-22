@@ -50,10 +50,14 @@ are required for a custom object; unknown keys and non-string values are rejecte
 The final instructions retain the 4096-Unicode-character limit, including separators.
 
 The bundled default distributes the selected candidate's rules across all seven components.
-`cleanup` includes word-fidelity, correction and independent-negation examples;
-`output_format` includes JSON examples for questions and unfinished fragments. Context selection
-and memory extraction remain in their respective fields. Composition follows the fixed order
-above, so the instructions are reordered relative to the full-string prompt used in evaluation.
+`task` protects short words, unfinished fragments and meaningful repetition; `cleanup` restricts
+self-correction to explicitly withdrawn values while preserving independent negation, operation
+objects and later clauses. `output_format` requests context, memory_candidates, then text in one
+JSON object. Context selection and memory extraction remain in their respective fields, with
+at most two distinct candidates requested. All 16 replacement examples follow the memory rules
+at the very end, so no example appears before a later rule. The fixed composition order and
+stable/dynamic context guidance mean this default is an adaptation of the evaluated full-string
+prompt, not byte-identical to it; historical recognition scores do not validate the adapted string.
 
 `prompt` and `prompt_components` default to null. With both absent/null, the embedded JSON provides
 the default components. A full-string `prompt`, including an empty string, replaces all components;
