@@ -1,3 +1,4 @@
+2026-10-22: Update default Realtime dictation rules for faithful short fragments, bounded self-correction and two distinct memory candidates; place 16 replacement examples after all rules while preserving custom overrides and stable/dynamic context guidance
 2026-10-19: Stream Realtime body deltas into a read-only native preview; reconcile validated final text from the earliest differing word, preserve the editor and destination, and enable editing/confirmation only after completion
 2026-10-19: Share prompt-lab validation and scoring scans, and use the STT snapshot as the single evaluation language source without changing dataset or report schemas
 2026-10-19: Fix six P2 review findings: reject linked dataset sidecars, require existing datasets outside capture, default Realtime to loopback, log transcript lengths only, test the real confirmation permission path, and validate seeds against production memory retention
