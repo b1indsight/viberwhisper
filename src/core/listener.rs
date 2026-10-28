@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::audio::AudioConfig;
 use crate::core::config::{ConfigDocument, InputSection, fields};
 use crate::core::recognition::RecognitionConfig;
+use crate::dictation::config::MemoryConfig;
 use crate::input::hotkey::HotkeyConfig;
 use crate::postprocess::PostProcessConfig;
 
@@ -44,6 +45,8 @@ impl RecordingConfig {
 pub(crate) struct ListenerConfig {
     pub(crate) recording: RecordingConfig,
     pub(crate) post_process: PostProcessConfig,
+    pub(crate) memory: MemoryConfig,
+    pub(crate) language: Option<String>,
 }
 
 impl ListenerConfig {
@@ -55,6 +58,8 @@ impl ListenerConfig {
             } else {
                 PostProcessConfig::from_config(document)?
             },
+            memory: document.dictation.memory.clone(),
+            language: document.transcription.language.clone(),
         })
     }
 }

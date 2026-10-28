@@ -22,7 +22,7 @@ use crate::platform::{
     DeliveryTarget, NativePlatform, NativePreview, NativeTarget, PlatformAction, PlatformEvent,
     PreviewAction, PreviewEvent, PreviewRect,
 };
-use crate::postprocess::{PostProcessor, PostProcessorSession};
+use crate::postprocess::PostProcessor;
 use crate::prompt_lab::{CaptureTranscription, PromptLabCapture, SttSnapshot};
 use crate::session::SessionId;
 use crate::ui::preview::{
@@ -119,7 +119,7 @@ pub(super) struct ListenerApplication {
 pub(super) enum ListenerOutput {
     Delivery {
         typer: Arc<dyn TextTyper>,
-        post_processor: PostProcessor,
+        post_processor: Arc<PostProcessor>,
         history: Option<HistoryStore>,
     },
     Capture {
@@ -136,7 +136,7 @@ impl ListenerOutput {
     ) -> Self {
         Self::Delivery {
             typer,
-            post_processor,
+            post_processor: Arc::new(post_processor),
             history,
         }
     }
@@ -704,7 +704,7 @@ impl ListenerApplication {
             return;
         };
         let orchestrator = Arc::clone(&self.orchestrator);
-        let mut post_processor = post_processor.create_session();
+        let post_processor = Arc::clone(post_processor);
         let typer = Arc::clone(typer);
         let history = history.clone();
         let proxy = self.proxy.clone();
@@ -746,7 +746,7 @@ impl ListenerApplication {
                     .then(|| {
                         finish_transcription(
                             orchestrator.finish_for_delivery(session_id),
-                            &mut post_processor,
+                            &post_processor,
                         )
                     })
                     .flatten();
@@ -805,14 +805,17 @@ impl ApplicationHandler<AppEvent> for ListenerApplication {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.cancel_finalization();
         self.orchestrator.shutdown();
+        if let ListenerOutput::Delivery { post_processor, .. } = &self.output {
+            post_processor.shutdown();
+        }
     }
 }
 
 fn finish_transcription(
     result: Result<crate::dictation::Transcript, SessionError>,
-    post_processor: &mut PostProcessorSession,
+    post_processor: &PostProcessor,
 ) -> Option<PreviewTranscription> {
-    let (result, confirmation) = match result {
+    let (result, mut confirmation) = match result {
         Ok(transcript) => (Ok(transcript.text), transcript.confirmation),
         Err(error) => (Err(error), None),
     };
@@ -822,9 +825,11 @@ fn finish_transcription(
                 info!("Transcription returned empty text");
                 return None;
             }
-            post_processor.push_stable_chunk(&stt_text);
-            let text = match post_processor.finish() {
-                Ok(processed) if !processed.is_empty() => processed,
+            let text = match post_processor.process_for_delivery(&stt_text) {
+                Ok(processed) if !processed.text.is_empty() => {
+                    confirmation = processed.confirmation.or(confirmation);
+                    processed.text
+                }
                 Ok(_) => {
                     warn!("Post-processing returned empty text, using original STT text");
                     stt_text
@@ -965,6 +970,100 @@ mod tests {
             temperature: 0.0,
             prompt: Some("候选提示词".to_string()),
         }
+    }
+
+    #[test]
+    fn http_finalization_keeps_feedback_and_guards_failed_or_untrusted_results() {
+        use crate::core::{config::ConfigDocument, listener::ListenerConfig};
+        use crate::postprocess::{PostProcessor, test_support::stub};
+        use serde_json::json;
+
+        // Exercise the actual desktop finalization adapter: returning a clean
+        // string but losing its confirmation handle would silently disable learning.
+        let wrong = "使用维伯耳语。";
+        let response = |context| {
+            json!({
+                "text":wrong, "context":context,
+                "memory_candidates":[{"kind":"proper_noun","text":"维伯耳语","quote":wrong}]
+            })
+            .to_string()
+        };
+        let (endpoint, requests) = stub(vec![
+            response(json!({"kind":"new","label":"项目"})),
+            response(json!({"kind":"new","label":"项目"})),
+            response(json!({"kind":"existing","id":"项目"})),
+            response(json!({"kind":"new","label":"其他"})),
+            json!({"text":wrong,"context":{"kind":"existing","id":"项目"},"memory_candidates":[]})
+                .to_string(),
+            "invalid JSON".into(),
+            response(json!({"kind":"existing","id":"项目"})),
+        ]);
+        let mut document = ConfigDocument::default();
+        document.dictation.url = "unused invalid Realtime URL".into();
+        document.post_process.enabled = true;
+        document.post_process.preheat_enabled = false;
+        document.inference.api.post_process.api_url = Some(endpoint.to_string());
+        document.inference.api.post_process.model = Some("fixture".into());
+        let config = ListenerConfig::from_config(&document).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dictation-memory.json");
+        let processor = PostProcessor::new_desktop(
+            config.post_process,
+            config.memory,
+            Some(path.clone()),
+            config.language,
+        )
+        .unwrap();
+        let finish =
+            || super::finish_transcription(Ok(wrong.to_owned().into()), &processor).unwrap();
+        drop(finish()); // Cancel the first preview before confirming any edit.
+        let first = finish();
+        assert!(!path.exists());
+        first
+            .confirmation
+            .unwrap()
+            .confirm("使用ViberWhisper。".into())
+            .unwrap();
+        let corrected = finish();
+        assert_eq!(corrected.text, "使用ViberWhisper。");
+        drop(corrected);
+        for _ in 0..2 {
+            let unchanged = finish();
+            assert_eq!(
+                unchanged.text, wrong,
+                "different context or missing candidate must not trigger replacement"
+            );
+            drop(unchanged);
+        }
+        let fallback = finish();
+        assert_eq!(fallback.text, wrong);
+        assert!(fallback.confirmation.is_none());
+        assert_eq!(processor.process_text(wrong).unwrap(), wrong); // CLI/setup stay isolated.
+        processor.shutdown();
+
+        let inputs: Vec<serde_json::Value> = (0..7)
+            .map(|_| {
+                let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+                serde_json::from_str(request.body["messages"][1]["content"].as_str().unwrap())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(inputs[0]["contexts"], json!([]));
+        assert_eq!(
+            inputs[1]["contexts"],
+            json!([]),
+            "cancelled output must not supply context"
+        );
+        assert_eq!(
+            inputs[6]["contexts"],
+            json!([]),
+            "plain-text entry must not upload personal memory"
+        );
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(stored["observations"].as_array().unwrap().len(), 1);
+        assert_eq!(stored["observations"][0]["text"], "使用ViberWhisper。");
+        assert_eq!(stored["corrections"].as_array().unwrap().len(), 1);
     }
 
     #[test]

@@ -3,13 +3,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::{info, warn};
 
+use crate::audio;
 use crate::core::listener::{ListenerConfig, RecordingConfig};
 use crate::core::recording_session::{RecordingState, SessionEvent};
 use crate::history::HistoryStore;
 use crate::platform::PlatformAction;
-use crate::postprocess::PostProcessConfig;
+use crate::postprocess::PostProcessor;
 use crate::prompt_lab::{DatasetStore, PromptLabCapture, SttSnapshot};
-use crate::{audio, postprocess};
 
 mod event_loop;
 mod permission;
@@ -38,10 +38,13 @@ fn toggle_session_event(state: &RecordingState) -> Option<SessionEvent> {
 
 /// Runs the listener using an already resolved workflow configuration.
 pub(crate) fn run_with_config(config: ListenerConfig) -> Result<()> {
-    run_with_mode(
-        config.recording,
-        ListenerMode::Delivery(config.post_process),
-    )
+    let post_processor = PostProcessor::new_desktop(
+        config.post_process,
+        config.memory,
+        crate::core::config::config_dir().map(|path| path.join("dictation-memory.json")),
+        config.language,
+    )?;
+    run_with_mode(config.recording, ListenerMode::Delivery(post_processor))
 }
 
 pub(crate) fn run_capture(config: RecordingConfig, store: DatasetStore) -> Result<()> {
@@ -49,7 +52,7 @@ pub(crate) fn run_capture(config: RecordingConfig, store: DatasetStore) -> Resul
 }
 
 enum ListenerMode {
-    Delivery(PostProcessConfig),
+    Delivery(PostProcessor),
     Capture(Arc<DatasetStore>),
 }
 
@@ -58,7 +61,6 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
 
     use audio::AudioRecorder;
     use event_loop::{AppEvent, ListenerApplication, ListenerOutput};
-    use postprocess::PostProcessor;
     use winit::event_loop::{ControlFlow, EventLoop};
 
     use crate::platform::NativePlatform;
@@ -102,11 +104,7 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
                 })
                 .unwrap_or_default();
             platform.set_history(recent_history);
-            ListenerOutput::delivery(
-                platform.text_typer(),
-                PostProcessor::new(post_process),
-                history_store,
-            )
+            ListenerOutput::delivery(platform.text_typer(), post_process, history_store)
         }
         ListenerMode::Capture(store) => ListenerOutput::capture(
             PromptLabCapture::new(store),

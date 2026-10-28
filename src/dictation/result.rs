@@ -75,9 +75,17 @@ impl DictationResult {
         }
     }
 
-    /// Text survives malformed optional metadata; invalid JSON never reaches the input field.
+    /// Validate a Realtime segment within its JSON and UTF-8 text budgets.
     pub fn parse(text: &str, context_ids: &[String]) -> Result<Self> {
         ensure!(text.len() <= 64 * 1024, "dictation response is too large");
+        let result = Self::parse_transcript(text, context_ids)?;
+        ensure!(result.text.len() <= 16_384, "dictation text is too long");
+        Ok(result)
+    }
+
+    /// Validate a complete HTTP transcript without applying Realtime segment budgets.
+    /// Text survives malformed optional metadata; invalid JSON never reaches the input field.
+    pub fn parse_transcript(text: &str, context_ids: &[String]) -> Result<Self> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
@@ -89,7 +97,6 @@ impl DictationResult {
         }
         let raw: Value = serde_json::from_str(text)?;
         let wire: Wire = serde_json::from_value(raw.clone())?;
-        ensure!(wire.text.len() <= 16_384, "dictation text is too long");
         ensure!(!wire.text.contains('\0'), "invalid text");
         let context = serde_json::from_value::<ContextChoice>(wire.context)
             .ok()
