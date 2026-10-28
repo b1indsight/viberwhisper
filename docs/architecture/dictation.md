@@ -34,13 +34,18 @@ Realtime is disabled by default. An omitted URL resolves to
 - `memory`: 24-hour observations with provenance and independent-recording support counts; bounded
   per-topic recent history, candidate retrieval, persistent user corrections and user-configured
   terms; one writer and atomic storage.
+- `learning`: HTTP cleanup's serial memory owner, reusing the same snapshot, result validation,
+  reversible preview and confirmation APIs without connecting to Realtime. The selected desktop
+  recognition path owns the single writer; both paths use `dictation.memory` and the same schema-2
+  file. See [post-processing](postprocess.md) for request and privacy boundaries.
 - `offline`: conversion and regression with frozen context and no live-memory persistence.
 
 ## Prompt configuration
 
-`assets/dictation-prompt.default.json` is the sole source of default instruction text. The JSON
-resource is embedded for portable macOS/Windows packaging; Rust contains only its strict seven-field
-type, source selection, validation and composition. Users edit `dictation.prompt_components` in
+`assets/dictation-prompt.default.json` is the source of default Realtime instruction text and the
+shared cleanup/protocol rules used by ordinary HTTP post-processing. The JSON resource is embedded
+for portable macOS/Windows packaging; Rust defines its strict seven-field type, source selection,
+validation, composition and a text-specific post-processing task. Users edit `dictation.prompt_components` in
 their existing config file and restart; no compilation or auxiliary files are needed.
 
 Components are joined in the fixed order task, language, numbers, cleanup, output_format, context,
