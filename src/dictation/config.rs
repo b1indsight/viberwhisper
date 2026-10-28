@@ -230,6 +230,16 @@ mod prompt_tests {
     }
 
     #[test]
+    fn example_config_resolves_to_the_bundled_prompt() {
+        // Copying the editable example must not silently select stale rules instead of the bundled default.
+        let example: serde_json::Value =
+            serde_json::from_str(include_str!("../../config.example.json")).unwrap();
+        let config: DictationConfig = serde_json::from_value(example["dictation"].clone()).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.prompt(), DictationConfig::default().prompt());
+    }
+
+    #[test]
     fn legacy_full_prompt_and_empty_override_remain_exact() {
         for text in ["  自定义全文\n", ""] {
             let config: DictationConfig = serde_json::from_value(json!({"prompt": text})).unwrap();

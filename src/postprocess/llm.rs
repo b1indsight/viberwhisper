@@ -555,7 +555,7 @@ mod tests {
                 sent[0]["messages"][0]["content"]
                     .as_str()
                     .unwrap()
-                    .contains("明确改口时仅用最终值替换旧值")
+                    .contains("旧值被明确撤回并紧接肯定的新值时")
             );
         }
     }
