@@ -1,6 +1,7 @@
 //! Realtime audio dictation with locally owned context and memory.
 
 pub(crate) const INPUT_LAYOUT: &str = "stable-prefix-audio-dynamic-v1";
+pub(crate) const UNKNOWN_CONTEXT: &str = "未知语境";
 
 pub(crate) mod config;
 mod correction;
@@ -21,7 +22,7 @@ pub(crate) use offline::OfflineDictation;
 mod evaluation;
 pub(crate) use evaluation::{MemorySeed, RealtimeEvaluator, Replay, SegmentTrace};
 pub(crate) use memory::Snapshot;
-pub(crate) use result::{ContextChoice, DictationResult};
+pub(crate) use result::DictationResult;
 
 #[cfg(test)]
 mod tests;

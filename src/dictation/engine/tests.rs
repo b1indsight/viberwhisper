@@ -30,7 +30,7 @@ async fn failed_recording_reconnects_with_a_complete_prefix_and_fresh_audio() {
             &mut socket,
             &request,
             "new-response",
-            r#"{"memory_candidates":[],"context":{"kind":"uncertain"},"text":"重试成功"}"#,
+            r#"{"memory_candidates":[],"context":"未知语境","text":"重试成功"}"#,
         )
         .await;
         delete_segment(&mut socket, "new-audio").await;
@@ -81,7 +81,7 @@ async fn silence_and_empty_recordings_leave_no_prefix_for_the_next_recording() {
             &mut socket,
             &request,
             "voiced-response",
-            r#"{"memory_candidates":[],"context":{"kind":"uncertain"},"text":"有声音"}"#,
+            r#"{"memory_candidates":[],"context":"未知语境","text":"有声音"}"#,
         )
         .await;
         delete_segment(&mut socket, "voiced").await;
@@ -143,8 +143,8 @@ async fn feedback_commits_only_confirmed_text_before_the_next_recording() {
                     "ViberWhisper"
                 );
             }
-            let text = json!({"text":"用维伯耳语。", "context":{"kind":"new", "label":"项目"},
-                "memory_candidates":[{"kind":"proper_noun", "text":"维伯耳语", "quote":"用维伯耳语。"}]})
+            let text = json!({"text":"用维伯耳语。", "context":"项目",
+                "memory_candidates":["维伯耳语"]})
             .to_string();
             complete_response(&mut socket, &event, &format!("r-{turn}"), &text).await;
             delete_segment(&mut socket, &audio).await;
@@ -208,8 +208,8 @@ async fn shutdown_drains_confirmation_without_another_recording() {
             let mut socket = accept_session(&listener).await;
             commit_segment(&mut socket, "audio").await;
             let event = expect_event(&mut socket, "response.create").await;
-            let text = json!({"text":"Use Cody.", "context":{"kind":"new", "label":"项目"},
-                "memory_candidates":[{"kind":"proper_noun", "text":"Cody", "quote":"Use Cody."}]})
+            let text = json!({"text":"Use Cody.", "context":"项目",
+                "memory_candidates":["Cody"]})
             .to_string();
             complete_response(&mut socket, &event, "r", &text).await;
             delete_segment(&mut socket, "audio").await;
@@ -305,7 +305,7 @@ async fn disconnect_after_completed_response_preserves_only_validated_text() {
             commit_segment(&mut socket, "audio").await;
             let event = expect_event(&mut socket, "response.create").await;
             let text = if valid {
-                json!({"text":"已完成。", "context":{"kind":"new","label":"工作"}, "memory_candidates":[{"kind":"phrase","text":"已完成","quote":"已完成。"}]}).to_string()
+                json!({"text":"已完成。", "context":"工作", "memory_candidates":[]}).to_string()
             } else {
                 "not JSON".into()
             };
@@ -359,7 +359,8 @@ async fn completed_segment_survives_faults_but_not_user_cancellation() {
             let mut socket = accept_session(&listener).await;
             commit_segment(&mut socket, "audio-1").await;
             let event = expect_event(&mut socket, "response.create").await;
-            let text = json!({"text":"保留这一段。", "context":{"kind":"new","label":"工作"}, "memory_candidates":[{"kind":"phrase","text":"保留这一段","quote":"保留这一段。"}]}).to_string();
+            let text = json!({"text":"保留这一段。", "context":"工作", "memory_candidates":[]})
+                .to_string();
             complete_response(&mut socket, &event, "r1", &text).await;
             delete_segment(&mut socket, "audio-1").await;
             declare_prefix(&mut socket, "prefix-audio-2").await;
@@ -450,7 +451,7 @@ async fn provisional_text_precedes_completion_but_only_validated_final_text_is_d
             let request = expect_event(&mut socket, "response.create").await;
             send_json(&mut socket, json!({"type":"response.created","response":{"id":"r","metadata":request["response"]["metadata"]}})).await;
             let delta = json!({"type":"response.output_text.delta", "event_id":"draft", "response_id":"r", "output_index":0, "content_index":0,
-                "delta":r#"{"memory_candidates":[{"text":"must stay hidden"}],"text":"我们明天下午去北京。"#});
+                "delta":r#"{"memory_candidates":["must stay hidden"],"text":"我们明天下午去北京。"#});
             send_json(&mut socket, delta.clone()).await;
             send_json(&mut socket, delta).await; // Replayed events cannot duplicate the body.
             resume.await.unwrap(); // No completion is sent until the consumer sees the draft.

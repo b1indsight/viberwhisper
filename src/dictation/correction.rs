@@ -27,7 +27,6 @@ pub(super) struct Correction {
 }
 
 struct Term {
-    kind: TermKind,
     original: String,
     shown: Range<usize>,
     protected: bool,
@@ -92,7 +91,7 @@ impl Prepared {
                 term.shown = start + term.shown.start..start + term.shown.end;
             }
             segments.push(Segment {
-                context: source.context_label().map(str::to_owned),
+                context: source.context,
                 shown: start..text.len(),
                 terms,
             });
@@ -135,33 +134,23 @@ impl Prepared {
             }
             let mut terms = Vec::new();
             for term in &segment.terms {
-                let noun = term.kind == TermKind::ProperNoun;
-                let projected = if noun {
-                    alignment.project_noun(term.shown.clone())
-                } else {
-                    alignment.project(term.shown.clone())
-                };
-                let Some(projected) = projected else {
+                let Some(projected) = alignment.project_noun(term.shown.clone()) else {
                     continue;
                 };
                 let shown = &self.text[term.shown.clone()];
-                let value = if noun {
-                    name_without_added_sentence_end(shown, &final_text[projected])
-                } else {
-                    &final_text[projected]
-                };
+                let value = name_without_added_sentence_end(shown, &final_text[projected]);
                 if !valid_term(value) {
                     continue;
                 }
                 let remembered = LongTerm {
                     context: label.clone(),
-                    kind: term.kind.clone(),
+                    kind: TermKind::ProperNoun,
                     text: value.into(),
                 };
                 if !terms.contains(&remembered) {
                     terms.push(remembered);
                 }
-                if !noun || term.protected {
+                if term.protected {
                     continue;
                 }
                 let decision = if !valid_replacement(shown, value) {
@@ -219,36 +208,6 @@ pub(super) fn valid_replacement(from: &str, to: &str) -> bool {
             .ne(to.chars().filter(|c| c.is_alphabetic()))
 }
 
-/// Select complete model-extracted names for both learning and application.
-/// A containing name owns nested fragments; crossing overlaps are ambiguous.
-fn proper_noun_spans(source: &DictationResult) -> Vec<Range<usize>> {
-    let mut spans: Vec<_> = source
-        .memory_candidates
-        .iter()
-        .filter(|term| term.kind == TermKind::ProperNoun)
-        .map(|term| term.span.clone())
-        .collect();
-    spans.sort_unstable_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
-    spans.dedup();
-
-    let mut selected = Vec::new();
-    let mut at = 0;
-    while at < spans.len() {
-        let first = &spans[at];
-        let mut end = first.end;
-        let mut next = at + 1;
-        while next < spans.len() && spans[next].start < end {
-            end = end.max(spans[next].end);
-            next += 1;
-        }
-        if first.end == end {
-            selected.push(first.clone());
-        }
-        at = next;
-    }
-    selected
-}
-
 fn cyclic(rule: &Correction, rules: &[Correction]) -> bool {
     let mut current = rule.rule.to.as_str();
     let mut visited = std::collections::HashSet::new();
@@ -268,14 +227,13 @@ fn cyclic(rule: &Correction, rules: &[Correction]) -> bool {
 }
 
 /// Apply known replacements backwards so original source positions stay valid.
-/// Translate overlapping phrases directly; boundaries inside a changed name are dropped.
+/// The parser supplies disjoint complete names in source order.
 fn render(
     source: &DictationResult,
     rules: &[Correction],
     long_term: &[LongTerm],
 ) -> (String, Vec<Term>) {
-    let names = proper_noun_spans(source);
-    let label = source.context_label();
+    let label = source.context.as_deref();
     let protected: Vec<_> = long_term
         .iter()
         .filter(|term| Some(term.context.as_str()) == label)
@@ -284,9 +242,7 @@ fn render(
     let mut terms: Vec<_> = source
         .memory_candidates
         .iter()
-        .filter(|term| term.kind == TermKind::Phrase || names.contains(&term.span))
         .map(|term| Term {
-            kind: term.kind.clone(),
             original: source.text[term.span.clone()].into(),
             shown: term.span.clone(),
             protected: protected
@@ -295,7 +251,8 @@ fn render(
         })
         .collect();
     let mut output = source.text.clone();
-    for span in names.iter().rev() {
+    for candidate in source.memory_candidates.iter().rev() {
+        let span = &candidate.span;
         let Some(rule) = rules.iter().find(|rule| {
             Some(rule.context.as_str()) == label
                 && source.text[span.clone()] == rule.rule.from
@@ -313,19 +270,14 @@ fn render(
         };
         let to = &rule.rule.to;
         output.replace_range(span.clone(), to);
-        terms.retain_mut(|term| {
+        for term in &mut terms {
             if span.end <= term.shown.start {
                 term.shown.start = term.shown.start - span.len() + to.len();
                 term.shown.end = term.shown.end - span.len() + to.len();
-            } else if term.shown.end <= span.start {
-                // Earlier text has not moved; later replacements are already rendered.
-            } else if term.shown.start <= span.start && span.end <= term.shown.end {
-                term.shown.end = term.shown.end - span.len() + to.len();
-            } else {
-                return false;
+            } else if term.shown == *span {
+                term.shown.end = span.start + to.len();
             }
-            true
-        });
+        }
     }
     (output, terms)
 }

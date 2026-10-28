@@ -160,7 +160,7 @@ impl LlmRequest {
         }
 
         // Schema errors may quote personal content; keep only the safe error category.
-        let result = DictationResult::parse_transcript(&content, &self.snapshot.ids())
+        let result = DictationResult::parse_transcript(&content)
             .map_err(|_| PostProcessError::InvalidResult)?;
         if result.text.trim().is_empty() {
             return Err(PostProcessError::EmptyContent);
@@ -470,10 +470,10 @@ mod tests {
         }
     }
 
-    fn structured(text: &str, context: serde_json::Value) -> String {
+    fn structured(text: &str, context: &str) -> String {
         serde_json::json!({
             "text": text, "context": context,
-            "memory_candidates": [{"kind":"proper_noun", "text":"维伯耳语", "quote":text}]
+            "memory_candidates": ["维伯耳语"]
         })
         .to_string()
     }
@@ -489,9 +489,9 @@ mod tests {
             let path = dir.path().join("dictation-memory.json");
             let wrong = "请打开维伯耳语。";
             let (endpoint, requests) = stub(vec![
-                structured(wrong, json!({"kind":"new", "label":"项目"})),
-                structured(wrong, json!({"kind":"existing", "id":"项目"})),
-                structured(wrong, json!({"kind":"existing", "id":"项目"})),
+                structured(wrong, "项目"),
+                structured(wrong, "项目"),
+                structured(wrong, "项目"),
             ]);
             let build = || {
                 let mut config = config_with_postprocess(preheat, None);
@@ -569,7 +569,7 @@ mod tests {
         std::fs::write(&path, "do not read or overwrite").unwrap();
         // A disabled memory setting must not touch even an invalid existing file.
         let (endpoint, requests) = stub(vec![
-            structured("维伯耳语", json!({"kind":"new","label":"项目"})),
+            structured("维伯耳语", "项目"),
             "not JSON".into(),
             json!("private transcript must not be logged").to_string(),
         ]);

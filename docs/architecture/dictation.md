@@ -59,8 +59,9 @@ The bundled default distributes the selected candidate's rules across all seven 
 self-correction to explicitly withdrawn values while preserving independent negation, operation
 objects and later clauses. `output_format` requests context, memory_candidates, then text in one
 JSON object. Context selection and memory extraction remain in their respective fields, with
-at most two distinct candidates requested. All 16 replacement examples follow the memory rules
-at the very end, so no example appears before a later rule. The fixed composition order and
+the first eight proper-noun occurrences requested, including repeated mentions. All 16 replacement
+examples and one repeated-name example follow the memory rules at the very end, so no example
+appears before a later rule. The fixed composition order and
 stable/dynamic context guidance mean this default is an adaptation of the evaluated full-string
 prompt, not byte-identical to it; historical recognition scores do not validate the adapted string.
 
@@ -147,42 +148,62 @@ then candidates, then corrections, before touching configured vocabulary. There 
 unexpired observations, persistent corrections and configured terms supply labels, including in long-running processes.
 Model-returned observations of already
 known terms refresh their short-term lifetime; merely including a term in the prompt does not.
-Uncertain/new topics are model decisions, not proof
-of accurate classification; unknown existing IDs are rejected. Candidates contain kind, text and
-a verbatim source `quote` of at most 320 Unicode characters. The quote must occur exactly once
-in the response text, including overlapping matches, and contain exactly one complete occurrence
-of the candidate under NFKC normalization and lowercasing. The resulting range must also respect
-word boundaries in the full response. Only that extracted occurrence authorizes correction;
-identical prose elsewhere is not implicitly extracted. Each entry is parsed and grounded independently,
-so a missing quote or malformed item cannot discard valid neighboring candidates. Validated candidates
-retain their source ranges; quote metadata is not reused as confirmed memory content.
-Custom prompts must return the same quote metadata. Term-only prompt-lab
-expectations retain their existing format; per-occurrence grounding is checked by the metadata gate.
-The original JSON remains available for prompt-lab metadata validation. This checks textual
-support, not acoustic accuracy or whether a phrase is suitable for future memory.
+Topic selection remains a model decision, not proof of accurate classification. The output uses
+`context: String`, `memory_candidates: Vec<String>` and `text: String`, in that order. A topic label
+can reuse a snapshot ID or name a new topic; the exact reserved string `"未知语境"` means unknown.
+`DictationResult.context: Option<String>` maps that sentinel to `None`; malformed null, missing or
+wrong-type context also degrades to `None`, but fails evaluation metadata checks. Unknown context
+requires an empty candidate array and cannot apply or learn topic-scoped corrections, observations
+or terms. Delivered text and global transcription history remain unaffected. Manual vocabulary
+cannot use the sentinel as a topic: validation asks the user to rename it. Legacy sentinel-named
+records remain readable and are excluded from snapshots before selecting four topics, without
+rewriting stored records or changing generic label validation.
+
+Candidates are complete proper-noun strings, at most 80 Unicode characters each, listed by source
+occurrence with repeats and capped at eight entries. More than eight discards the candidate group;
+malformed individual entries do not discard valid neighboring names. The result boundary groups
+NFKC/lowercase-equivalent names, locates complete Unicode terms and processes longer names first.
+Full names own their nested fragments even when their supplied count is invalid. A group is accepted
+only when its supplied count equals all remaining eligible occurrences and none overlap themselves
+or cross another name. The retained candidates preserve model spelling separately from UTF-8 source
+ranges and are sorted by source position. The client cannot select one of two same-spelled mentions
+from a single string: that whole name is skipped, rather than guessing an occurrence or globally
+replacing the spelling. Custom prompts must use this new protocol; old context/candidate objects
+degrade metadata without discarding valid text. The result boundary separately reports metadata
+validity: fewer than eight entries must cover the supplied names' owned occurrences, while exactly
+eight may be their grounded source-order prefix. Thus nine mentions with eight supplied strings
+are protocol-valid, but that incomplete name group still cannot authorize correction or learning.
+Original JSON remains available for exact raw-context assertions. These checks establish textual
+support, not acoustic truth or whether a returned string is semantically a proper noun.
+
+Each name search builds a Unicode word-boundary table for constant-time lookups in its matching
+loop. Containment and crossing checks advance through source-ordered spans rather than restarting
+from the first occurrence. With at most eight names of at most 80 characters, grounding takes
+\(O(n)\) time and space in transcript length. Prefix validation sorts at most eight positions per
+group (64 total), never all transcript occurrences.
 
 The schema-2 memory file adds at most 512 persistent corrections with context, source spelling,
 target spelling, recording provenance and last manual-edit time; v1 model observations retain their
 original expiration. Confirmed proper-noun edits create whole-word rules only when alignment and
 topic assignment are unambiguous. One displayed-to-final grapheme alignment projects every candidate;
 removed or
-unassignable candidates are dropped. Phrase candidates remain short-term observations. Expensive
+unassignable candidates are dropped. New terms are stored as `ProperNoun`; existing stored phrases
+and both kinds of manual vocabulary remain supported without a memory-schema change. Expensive
 rewrites exceed a fixed alignment-cell budget and skip learning. Live text is always delivered
 unchanged by feedback validation.
 
 Snapshots expose correction pairs without provenance. A matching response topic enables local,
 single-pass replacements before preview only within complete proper-noun candidates extracted by
-that response. Missing candidates and phrase candidates never authorize local text replacement.
-Learning and application share the same candidate spans: a containing name owns nested fragments;
-crossing overlaps without one enclosing candidate are skipped. Rules match the entire candidate,
+that response. Missing or ambiguous candidates never authorize local text replacement.
+Learning and application consume the same disjoint spans validated at the result boundary. Rules match the entire candidate,
 so a rule for a shorter name cannot edit part of a longer extracted name. Configured vocabulary
 protects its full occurrences in that topic, including against intersecting candidate replacements;
 the same rule can still apply outside those occurrences. Rendering preserves this protection even
 before any rules exist. Protected occurrences refresh short-term candidates but supply no fragment
 rules or spelling-conflict evidence for standalone names. Ambiguous or cyclic rules are skipped.
-Rendering retains original spellings and exact displayed ranges for all eligible names and phrases.
+Rendering retains original spellings and exact displayed ranges for all retained names.
 Replacements use original source ranges in reverse order; candidate ranges translate directly with
-the known byte changes. Phrases with boundaries inside a changed name are dropped. Prepared feedback
+the known byte changes. Prepared feedback
 does not retain or rewrite model JSON. Confirmed terms become bounded memory observations directly.
 Feedback compares displayed text with the confirmed revision; it never treats the
 program's earlier replacement as a manual edit. All surviving unprotected occurrences participate in spelling

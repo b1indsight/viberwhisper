@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "cases": [{
     "id": "project",
     "at": 100,
@@ -11,8 +11,8 @@
     "steps": [
       {"sample_id": "first", "expect": {
         "input": {"contexts_present": ["project"], "history_present": ["history-only sentinel"]},
-        "context": {"kind": "existing", "id": "project"},
-        "candidates_present": [{"kind": "proper_noun", "text": "ViberWhisper"}],
+        "context": "project",
+        "candidates_present": ["ViberWhisper"],
         "memory": {"terms_present": [{"context": "project", "kind": "proper_noun",
           "text": "ViberWhisper", "supporting_recordings": 1}]},
         "forbidden_text": ["history-only sentinel"]

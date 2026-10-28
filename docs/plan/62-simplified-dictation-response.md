@@ -1,11 +1,13 @@
 # 62 - 简化听写响应结构 — Feature record
 
-**Stage:** Planning；方案待用户审批，未修改产品代码或测试。
+**Stage:** Implementation；产品代码及本地验证已完成，实现尚未推送或合并。
 **PR:** [#161](https://github.com/b1indsight/viberwhisper/pull/161)（draft，目标 `master`）。
 **Bookmark:** `refactor/dictation-response-schema`，后续方案与实现沿用同一个 PR。
 
-**当前修订：** [001](#001--2026-10-28--未知语境使用保留字符串) 提议以字符串
-`"未知语境"` 代替 `null`；原始方案保留，冲突处以该修订为准。
+**当前修订：** [003](#003--2026-10-28--分离八项前缀校验并消除重复扫描) 修复八项
+上限的评测冲突与全文定位的重复扫描；[002](#002--2026-10-28--实现字符串协议与保守定位)
+已按 [001](#001--2026-10-28--未知语境使用保留字符串) 实现保留字符串 `"未知语境"`。
+原始方案与修订历史保留，冲突处以已批准的后续修订为准。
 
 ## 1. Initial plan
 
@@ -246,3 +248,124 @@
 
 **验证状态。** 本次为文档修订，产品测试和真实模型比较尚未执行。规划咨询的初始化
 和响应均核验实际模型为 `claude-opus-5-5`；咨询建议不作为运行验证。
+
+### [002] — 2026-10-28 — 实现字符串协议与保守定位
+
+**需求与实现。** 落实原方案及 [001](#001--2026-10-28--未知语境使用保留字符串)：
+Realtime 和 HTTP 后处理共用话题字符串、专名字符串数组、正文的新输出协议。
+[结果边界](../../src/dictation/result.rs)删除 `ContextChoice`、候选 wire 对象及
+`context_label()`；两条解析入口不再接收语境 ID 列表。未知语境直接得到 `None`，
+保留原始 JSON 供评测核对；没有引入 `deserialize_context_assertion` 或双层 `Option`。
+候选只保留模型拼写与已校验的 UTF-8 范围；无效元数据不丢弃有效正文。
+
+[纠错](../../src/dictation/correction.rs)和[记忆](../../src/dictation/memory.rs)
+共同消费结果边界给出的互不重叠位置，删除运行时短语分支和第二次重叠选择。
+新观察统一为 `ProperNoun`，人工词表与存量短语仍保留原有 `TermKind`，存储 schema 2
+不变。未知语境不能应用或学习按话题隔离的记录；保留名人工词表返回需改名的错误。
+旧同名记录仍能读取，在选择四个话题前过滤，不改写原文件或通用 `valid_label`。
+
+默认提示词和配置示例同步新格式；原有 task/language/numbers/cleanup 及十六个示例的
+正文不变，新增重复专名示例。请求布局、正文流式提取、确认界面和成功交付边界不变，
+没有新增推理调用、依赖或配置开关。
+
+**定位选择与代价。** 同名数组必须覆盖该名称全部可定位出现，不能从多个同名位置
+中任选一处。完整名称先占用其内部片段，即使完整名称本组次数不合法，也不让短名
+借该位置纠错；交叉和自重叠组跳过。这样会少学部分名称，但避免误改正文或学习片段。
+有效邻项继续保留，超过八项则丢弃整组候选。生产结果按位置排序，评测检查原始顺序，
+不会用客户端排序掩盖模型输出不合格。
+
+**消融设置与结果。** 使用临时 Rust 单测 `schema_grounding_ablation`，复用正式
+`term_spans` 与 `DictationResult::parse`，对所有策略提供相同文本和名称数组；预期
+UTF-8 范围独立手写。八组固定输入包括：同名只列一次、完整重复、完整名加独立短名、
+交叉、自重叠、完整名次数错误但包含短名、普通唯一名、全角 Unicode 对照。
+
+| 策略 | 本组固定用例满足定位合同 |
+| --- | --- |
+| 按名称取全部完整词匹配 | 3/8 |
+| 每个名称只取第一次匹配 | 2/8 |
+| 只检查次数，不处理包含或重叠 | 4/8 |
+| 正式定位：完整名优先、次数一致、排除交叉和自重叠 | 8/8 |
+
+例如 `New York; York` 必须保留完整名与独立短名，不能把完整名内的 `York` 计为
+独立出现；完整名次数错误时，短名也不能在其内部获得修正规则。因此保留上述机制。
+执行命令为 `cargo test --locked --lib schema_grounding_ablation -- --nocapture`；
+输入、预期与各策略实际范围保存在[本地实验记录](../../.amp/in/artifacts/dictation-schema-ablation.log)
+（不提交）。临时源文件和 include 已删除；正式回归可用
+`cargo test --locked --lib candidate_groups_require_unambiguous_complete_occurrences` 复现。
+这些是客户端合同实验，不是模型识别率或推理速度对照。
+
+**评测迁移。** [Realtime 评测](../../src/prompt_lab/realtime.rs)使用
+`Option<String>` 语境断言；省略/null 不检查，保留字符串检查原始输出。候选断言为
+字符串数组，快照和 seed 术语仍有类型。cases schema 2 与 policy
+`realtime-context-memory-v5` 在嵌套反序列化前校验；旧 Realtime cases/报告需迁移并
+重跑，不能按新规则重计分。直接类型校验和比较入口也拒绝旧策略，非 Realtime
+schema-1/schema-2 报告仍可读。回放必须包含当前 `prompt_input` 证据。
+
+**验证与限制。** 新重复专名回归先在旧产品代码上失败，再在新代码上通过；覆盖未知
+语境、保留名配置、四话题容量、存量文件不改写、候选界限、确认学习、两种 HTTP 会话、
+Realtime 传输与评测元数据。内置提示词与示例相同，组合后低于 4096 字符上限。
+`cargo fmt --check`、`cargo build --locked --all-features`、`cargo test --locked`、
+`cargo clippy --locked --all-targets --all-features -- -D warnings` 和 `git diff --check`
+均通过；第三方 rdev 的既有 macOS 警告未改动。
+[完整本地检查记录](../../.amp/in/artifacts/dictation-schema-validation.log)不提交。
+未运行真实模型的新旧提示词对照，也未进行 Windows 实机验证；不宣称识别质量或延迟
+改善。两项依赖外部数据/服务的既有测试仍为 ignored。本次不更改 UI 外观。
+
+### [003] — 2026-10-28 — 分离八项前缀校验并消除重复扫描
+
+**触发与状态。** 独立审查指出：正文有九次同名出现时，按提示词提供八个字符串会因
+完整组被丢弃而误判 metadata；全文定位的边界与包含检查还会重复扫描。用户要求修复
+并定位复杂度原因。本条已在本地实现和验证，尚未推送。它修正 [002] 中将元数据合格
+等同于全部候选可用于纠错的约定，保留“不完整名称组不纠错、不学习”的安全边界。
+
+**原因与实现。** 旧 `term_spans` 每次命中都会调用 `word_boundary`，后者为起点和终点
+分别从正文开头重新枚举 Unicode 边界；短名检查又对每处命中从头遍历此前完整名位置。
+当出现次数随正文增长时，两处都能产生平方级工作量。旧交叉检查受次数一致条件约束，
+并不是此次无界平方增长的第三个来源。
+
+[结果边界](../../src/dictation/result.rs)现在为每次名称扫描建立边界表，匹配循环查询
+为 \(O(1)\)；包含和交叉检查使用源位置有序的游标扫描。候选最多八项、每项最多八十
+字符，因此完整定位在正文长度上为 \(O(n)\) 时间和空间；读取正文及统计全部同名位置
+本身不能是 \(O(1)\)。前八项校验每组只收集前八个位置，总共最多排序六十四个位置，
+不对全文全部命中做排序。
+
+共享解析同时计算内部 `metadata_valid: bool`，不添加模型 JSON 字段。少于八项时，
+数组必须按顺序覆盖所提供名称的全部有效出现；恰好八项时，允许是这些名称的前八次
+出现。名称不存在、乱序、包含片段、交叉、自重叠、非法字段及超过八项仍判失败。
+[评测](../../src/prompt_lab/realtime.rs)直接使用该判定，不复制定位逻辑，也不将
+“数组长度为八”一概放行。`memory_candidates` 继续只含次数完整的安全名称组；
+`candidates_present/absent` 仍断言这些保留候选，而非所有原始数组项。
+
+**消融与实测。** 临时单测 `candidate_grounding_scaling` 在同一 release 构建中比较
+修复前源码、只缓存 Unicode 边界、正式修复三个版本。固定正文为 `Codex `、
+`New York; York; `、`ordinary words ` 的重复，分别使用八个 `Codex`、
+`["New York", "York"]`、`["Codex"]`；都断言正文保留且不返回次数不完整的候选。
+每组解析三次取中位数，包含 JSON 和候选定位，不含输入构造。下表为完整名与独立短名
+交替输入的实测毫秒：
+
+| 正文字节 | 修复前 | 仅缓存边界 | 正式修复 |
+| --- | ---: | ---: | ---: |
+| 16 KiB | 325.384 | 2.158 | 1.557 |
+| 32 KiB | 1330.335 | 5.104 | 3.152 |
+| 128 KiB | 未运行 | 44.757 | 12.884 |
+| 256 KiB | 未运行 | 152.586 | 25.526 |
+
+仅缓存边界仍保留随重复次数扩大的包含遍历；正式版本在本组输入翻倍时接近两倍耗时，
+因此保留游标扫描。单名称与无匹配对照也通过；以上是本地合成解析延迟，不是模型推理
+或端到端听写延迟。实验命令为分别设置 `GROUNDING_PHASE=before/boundary_only/after`
+并执行 `cargo test --locked --release --lib candidate_grounding_scaling -- --ignored --nocapture`。
+固定种子 `0x12de1a00b3ff259a` 的临时 `candidate_grounding_equivalence` 比较含中文、
+兼容字形、组合字符、重复、包含、交叉及畸形元数据的输入，正文、话题、原始 JSON 和
+保留名称的拼写/UTF-8 范围均与修复前一致；元数据仅增加合法八项前缀这一类通过情况。
+[完整消融与差分记录](../../.amp/in/artifacts/dictation-grounding-ablation.log)不提交。
+实验入口、临时源码与原始咨询流均已移除，正式代码不依赖这些临时文件。
+
+**回归与验证。** 新增公开解析/评测回归
+`capped_candidate_prefix_is_valid_without_authorizing_partial_name_groups`，先复现九次出现
+配八项时失败，再验证修复通过；同时区分七/八/九项、有效邻项、乱序、虚构和重叠。
+原有纠错、人工保护和确认学习检查继续通过。清理实验源码后重新执行
+`cargo fmt --check`、`cargo build --locked --all-features`、`cargo test --locked`、
+`cargo clippy --locked --all-targets --all-features -- -D warnings`、`git diff --check`
+均通过，见[本地完整复验](../../.amp/in/artifacts/dictation-grounding-validation.log)。
+既有外部依赖测试仍为 ignored，第三方 rdev 警告未变；未扩大真实模型或 Windows 原生
+验证范围，也没有修改提示词、配置、请求顺序或学习权限。

@@ -17,7 +17,7 @@ src/
     learning.rs       — HTTP cleanup's serial memory owner and confirmation wait
     memory.rs         — shared bounded snapshots and atomic schema-2 persistence
     correction.rs     — shared whole-candidate correction and final-edit alignment
-    result.rs         — shared JSON and candidate-quote validation
+    result.rs         — shared JSON validation and conservative candidate-occurrence grounding
 ```
 
 ## `PostProcessor`
@@ -75,13 +75,20 @@ The system message carries these instructions; the user message contains a seria
 ```
 
 Desktop memory provides up to four contexts within the existing 6000-character snapshot budget.
-The provider returns `memory_candidates`, `context`, and `text` in the same call; no second
-metadata-extraction inference is added. `DictationResult::parse_transcript` shares complete JSON,
-context-ID and individual candidate-quote validation with Realtime. HTTP cleanup processes a whole
+The provider returns `context`, `memory_candidates`, and `text`, in that order, in the same call;
+no second metadata-extraction inference is added. Context is a topic string or the exact reserved
+`"未知语境"`; candidates are the first eight proper-noun occurrence strings in source order, including
+repeats. Unknown context requires an empty candidate array and cannot apply or learn topic-scoped
+corrections, observations or terms. `DictationResult::parse_transcript` shares complete JSON,
+topic validation and conservative occurrence grounding with Realtime. Counts must match all eligible
+mentions, full names protect nested fragments, and ambiguous or crossing groups are skipped.
+See [the shared response contract](dictation.md) for Unicode matching and limits.
+HTTP cleanup processes a whole
 merged transcript without Realtime's per-segment 16 KiB text / 64 KiB JSON budgets; the Realtime
 parser retains both limits. Invalid optional metadata is discarded independently; invalid JSON,
 empty text or request failures return an error and the listener/CLI keeps the original STT.
-JSON is never injected as fallback text.
+JSON is never injected as fallback text. Existing custom output instructions using context or
+candidate objects must be migrated; user configuration and stored memory are not rewritten.
 
 ## Confirmation and memory ownership
 
