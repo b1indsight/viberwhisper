@@ -1,76 +1,57 @@
-# ViberWhisper Documentation
+# ViberWhisper 文档
 
-## Contributor and Maintainer Guides
+## 使用文档
 
-| Document | Description |
+| 文档 | 内容 |
 |---|---|
-| [../CONTRIBUTING.md](../CONTRIBUTING.md) | Development setup, quality checks, STT prompt regression, cross-platform guidance, and pull request workflow |
-| [releasing.md](releasing.md) | Prepare, dry-run, publish, verify, and recover macOS/Windows releases |
+| [快速上手](../README.md) | 下载、首次设置、录音、预览确认与常用命令 |
+| [使用详情与故障排查](usage.md) | 安装校验、原生气泡、平台权限、剪贴板与本地历史 |
+| [配置指南](configuration.md) | 严格 v3 配置、密钥、麦克风、单键热键、HTTP STT 与可选 LLM 整理 |
+| [Realtime 与确认后学习](dictation.md) | WebSocket 服务、提示词组件、两条桌面路径共用的语境记忆和人工纠错 |
+| [命令行参考](cli.md) | CLI 入口、setup、config、离线 WAV 转写与 Prompt-lab 入口 |
+| [配置示例](../config.example.json) | 不含密钥的完整 v3 示例，含可编辑提示词组件；增益示例为 3.0，内置默认值为 1.0 |
 
-## Architecture
+## 贡献与维护
 
-Module-level design docs covering structs, methods, and dependencies.
-
-| Document | Description |
+| 文档 | 内容 |
 |---|---|
-| [audio.md](architecture/audio.md) | Audio recording — `AudioRecorder`, cpal stream management, live chunking, WAV output |
-| [core.md](architecture/core.md) | Strict v3 config persistence, API runtime assembly, CLI parsing, and `SessionOrchestrator` |
-| [input.md](architecture/input.md) | Target-neutral hotkey/tray drivers and the thread-safe text-delivery contract |
-| [transcriber.md](architecture/transcriber.md) | Transcription trait, `ApiTranscriber` (OpenAI-compatible API), chunking, retry, text merging |
-| [platform.md](architecture/platform.md) | Compile-time desktop interface for native input, status/history menus, config paths, text delivery, and clipboard copy |
-| [postprocess.md](architecture/postprocess.md) | HTTP LLM cleanup — shared self-correction rules, structured validation, confirmed learning and memory ownership |
-| [prompt-lab.md](architecture/prompt-lab.md) | STT prompt dataset capture, deterministic local metrics, agent review, and JSON report lifecycle |
+| [贡献指南](../CONTRIBUTING.md) | 源码构建、质量检查、原生预览验证、STT Prompt 回归、跨平台与 PR 流程 |
+| [发布手册](releasing.md) | macOS / Windows 打包、dry-run、版本与 tag、发布校验及失败恢复 |
 
-## Examples
+## 架构
 
-Tracked example files for application setup.
-
-| File | Description |
+| 文档 | 当前职责 |
 |---|---|
-| [../config.example.json](../config.example.json) | Canonical secret-free v3 configuration example |
+| [audio](architecture/audio.md) | 麦克风录音、分段、增益与 Silero VAD 静音过滤 |
+| [core](architecture/core.md) | 进程入口、严格 v3 配置、CLI、录音状态机与会话编排 |
+| [ui](architecture/ui.md) | 桌面事件循环、首次设置、原生预览与确认投递 |
+| [input](architecture/input.md) | 热键与托盘驱动、文字投递契约 |
+| [platform](architecture/platform.md) | macOS / Windows 原生预览、目标恢复、文字输入、剪贴板与权限 |
+| [transcriber](architecture/transcriber.md) | HTTP STT、分段请求、固定重试与文字拼接 |
+| [dictation](architecture/dictation.md) | Realtime 生命周期、流式正文、提示词组合、语境与确认后学习 |
+| [postprocess](architecture/postprocess.md) | HTTP LLM 整理、结构化校验、共用纠错规则及记忆所有权 |
+| [prompt-lab](architecture/prompt-lab.md) | 录音数据集、WER / 专有名词指标、语义复核与 JSON 报告 |
+| [Realtime 评测记录](architecture/realtime-prompt-evaluation.md) | 2026-10-12 的指定服务与模型实验，包含质量和兼容性限制 |
 
-## Feature Plans
+## 实现记录
 
-Implementation plans and technical specs for each feature.
+以下计划记录设计、验证范围与已知限制。早期计划可能已被后续实现替代，当前使用方式以使用文档和代码为准。
+完整历史见 [plan 目录](plan/)，近期主题可从下列入口阅读：
 
-| Document | Status | Description |
-|---|---|---|
-| [01-hotkey-recording.md](plan/01-hotkey-recording.md) | Done | Global hotkey (F8) triggered audio recording with WAV output |
-| [02-toggle-recording.md](plan/02-toggle-recording.md) | Done | Dual-mode recording: hold-to-record (F8) and toggle (F9) |
-| [03-cross-platform.md](plan/03-cross-platform.md) | Done | macOS + Windows support via platform-specific `TextTyper` implementations |
-| [04-multiple-models.md](plan/04-multiple-models.md) | Done | Provider + model config abstraction (evolved to URL-based config) |
-| [05-long-audio-streaming.md](plan/05-long-audio-streaming.md) | Done | Long audio chunking, offline split, retry with exponential backoff, and text merge |
-| [06-end-to-end-stream-recognition.md](plan/06-end-to-end-stream-recognition.md) | Done | Session orchestrator: unified Hold/Toggle lifecycle, chunk state machine, convergence |
-| [08-llm-post-processing.md](plan/08-llm-post-processing.md) | Done | LLM text post-processing: punctuation, filler removal, preheat/conservative modes |
-| [09-floating-window.md](plan/09-floating-window.md) | Superseded | Historical cross-platform floating overlay design, removed by plan 14 |
-| [10-objc2-overlay-migration.md](plan/10-objc2-overlay-migration.md) | Historical | Historical macOS overlay binding migration |
-| [11-packaging-and-ci.md](plan/11-packaging-and-ci.md) | Superseded | Original cross-platform CI and unexercised tag-release design; hardened by plan 27 |
-| [12-local-gemma-service.md](plan/12-local-gemma-service.md) | Superseded | Historical Local Gemma service removed by plan 44 |
-| [13-full-hotkey-support.md](plan/13-full-hotkey-support.md) | Implemented | Expand Hold/Toggle configuration to named single keys, including standalone right Alt/Option |
-| [14-tray-recording-control.md](plan/14-tray-recording-control.md) | Done | Tray-only control, input-independent recording state, and strict SessionId routing |
-| [16-session-owned-chunk-results.md](plan/16-session-owned-chunk-results.md) | Done | Keep chunk state and transcription results owned by one session; workers return events instead of mutating shared chunk storage |
-| [17-shared-text-merge.md](plan/17-shared-text-merge.md) | Done | Centralize transcription text merging for offline chunks and session orchestration |
-| [18-config-architecture-refactor.md](plan/18-config-architecture-refactor.md) | Done | Strict v2-only config, module-owned validation, minimal runtime views, and explicit API/Local profiles |
-| [24-rust-2018-module-layout.md](plan/24-rust-2018-module-layout.md) | Done | Replace every `mod.rs` module entry with the Rust 2018-style sibling module file layout |
-| [25-test-suite-pruning.md](plan/25-test-suite-pruning.md) | Done | Remove redundant tests and make retained coverage deterministic, fast, and proportional to risk |
-| [26-symbol-icon-refresh.md](plan/26-symbol-icon-refresh.md) | Done | Replace placeholder bundle artwork and generated tray dots with one cross-platform voice-input symbol |
-| [27-release-path-hardening.md](plan/27-release-path-hardening.md) | Implemented | Make API-mode macOS and Windows packages reproducible, manually testable, and safe to publish |
-| [28-winit-event-loop.md](plan/28-winit-event-loop.md) | Implemented | Replace fixed listener polling with a main-thread winit event loop and non-blocking finalization |
-| [29-native-macos-text-injection.md](plan/29-native-macos-text-injection.md) | Implemented | Replace macOS osascript injection with direct AX insertion and a clipboard-replacing native paste fallback |
-| [30-compile-time-platform-interface.md](plan/30-compile-time-platform-interface.md) | Implemented | Hide native icon, hotkey, and text-delivery details behind one compile-time-selected platform interface |
-| [31-macos-chromium-paste-fallback.md](plan/31-macos-chromium-paste-fallback.md) | Implemented | Route identified Chromium browsers through recoverable native paste without activating web accessibility |
-| [32-transcription-history.md](plan/32-transcription-history.md) | In progress | Persist a bounded transcription history and expose the newest five entries as exact clipboard-copy actions in the tray menu |
-| [33-stt-prompt-regression-suite.md](plan/33-stt-prompt-regression-suite.md) | Implemented | Capture corrected audio datasets and rerun STT prompts with local metrics plus agent-reviewed LLM scoring in JSON |
-| [34-prompt-lab-scoring-hardening.md](plan/34-prompt-lab-scoring-hardening.md) | Implemented | Preserve report validation across JSON float round trips and score Latin proper nouns next to Han text |
-| [35-silent-audio-hallucination-suppression.md](plan/35-silent-audio-hallucination-suppression.md) | Implemented | Suppress effectively silent WAV chunks before STT upload and preserve empty no-output behavior |
-| [36-ci-platform-quality-gates.md](plan/36-ci-platform-quality-gates.md) | Implemented | Enforce formatting and Windows-specific Clippy in normal hosted CI |
-| [37-github-actions-node24.md](plan/37-github-actions-node24.md) | Implemented | Upgrade workflow Actions to Node 24-compatible, full-SHA-pinned releases with Dependabot maintenance |
-| [38-release-environment-approval.md](plan/38-release-environment-approval.md) | Implemented | Pause tagged publication behind a protected GitHub Environment approval |
-| [39-release-notes-automation.md](plan/39-release-notes-automation.md) | Implemented | Prepend validated distribution guidance to automatically generated Release Notes |
-| [40-windows-gui-launcher.md](plan/40-windows-gui-launcher.md) | Implemented | Launch the Windows tray application without a console while preserving the existing CLI executable |
-| [42-structured-runtime-logging.md](plan/42-structured-runtime-logging.md) | Implemented | Route runtime diagnostics through structured tracing while preserving intentional CLI stdout |
-| [43-anyhow-error-boundaries.md](plan/43-anyhow-error-boundaries.md) | Implemented | Replace boxed dynamic-error result boundaries with consistent contextual `anyhow` results while retaining typed domain errors |
-| [44-remove-local-inference-mode.md](plan/44-remove-local-inference-mode.md) | Implemented | Remove the bundled Local inference profile, model runtime, CLI, configuration, and supporting Python surface |
-| [45-prompt-lab-review-rules.md](plan/45-prompt-lab-review-rules.md) | Implemented | Share agent-review validation, LLM aggregation, and threshold calculations across review application and report loading |
-| [48-hotkey-simplification.md](plan/48-hotkey-simplification.md) | Implemented | Simplify callback state and paired hotkey bindings, and share one canonical-name/alias catalog |
-| [61-http-postprocess-correction.md](plan/61-http-postprocess-correction.md) | In review — [#157](https://github.com/b1indsight/viberwhisper/pull/157) | Share Realtime cleanup rules, context-scoped repairs and confirmed-edit memory with ordinary HTTP post-processing; model and Windows verification limits recorded |
+| 记录 | 主题 |
+|---|---|
+| [音量与 VAD](plan/50-audio-loudness-adjustment.md) | 有界增益与本机语音活动检测 |
+| [core / UI 边界](plan/50-core-ui-boundary.md) | 进程与工作流归 core，桌面交互归 UI |
+| [Windows 设置输入](plan/51-windows-setup-input-dialogs.md) | 原生 Unicode 文本和密码输入 |
+| [Realtime 听写](plan/52-contextual-streaming-dictation.md) | 分段、语境记忆与服务兼容性验证范围 |
+| [提示词组件](plan/53-configurable-dictation-prompt-components.md) | 文件配置、默认资源和全文覆盖 |
+| [Realtime 场景回归](plan/54-realtime-prompt-lab-context-memory-validation.md) | 显式种子、模拟时钟、记忆断言与报告 |
+| [macOS 热键与权限](plan/55-macos-hotkey-crash-and-permission-guidance.md) | 原生热键修复和辅助功能授权提示 |
+| [配置补齐](plan/56-realtime-config-default-materialization.md) | 验证后补齐缺失字段，保留显式值 |
+| [确认气泡](plan/57-floating-confirmation-preview.md) | 编辑、确认键释放、目标恢复与投递 |
+| [确认后学习](plan/58-confirmed-text-learning.md) | 已确认文字、候选定位与人工纠错 |
+| [P2 修复](plan/59-p2-review-fixes.md) | 跨模块边界与错误处理修复 |
+| [稳定前缀](plan/59-realtime-stable-prefix.md) | 音频前后语境与连接复用 |
+| [Prompt-lab 简化](plan/60-prompt-lab-simplification.md) | 共用扫描与评测语言配置 |
+| [流式确认气泡](plan/60-streaming-confirmation-preview.md) | 只读正文增量、最终纠正与取消 |
+| [HTTP 整理与学习](plan/61-http-postprocess-correction.md) | 与 Realtime 共用改口规则、语境纠错和确认反馈 |
