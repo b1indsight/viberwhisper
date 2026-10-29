@@ -54,7 +54,7 @@ async fn recording_declares_prefix_before_audio_and_orders_final_input() {
             &mut socket,
             &request,
             "response",
-            r#"{"memory_candidates":[],"context":{"kind":"uncertain"},"text":"测试"}"#,
+            r#"{"memory_candidates":[],"context":"未知语境","text":"测试"}"#,
         )
         .await;
         delete_audio(&mut socket, "audio").await;
@@ -337,7 +337,7 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
                     assert_eq!(event["response"]["input"][0]["id"], format!("prefix-{round}"));
                     assert_eq!(event["response"]["input"][2]["content"][0]["type"], "input_text");
                     let id = format!("response-{round}");
-                    let text = json!({"text":"重复。", "context":{"kind":"new","label":"测试语境"}, "memory_candidates":[{"kind":"phrase","text":"重复","quote":"重复。"}]}).to_string();
+                    let text = json!({"text":"重复。", "context":"测试语境", "memory_candidates":[]}).to_string();
                     replies.push(json!({"type":"response.created", "response":{"id":id, "metadata":event["response"]["metadata"]}}));
                     let delta = json!({"type":"response.output_text.delta", "event_id":format!("delta-{round}"), "response_id":id, "item_id":"out", "output_index":0,"content_index":0,"delta":text});
                     replies.push(delta.clone());

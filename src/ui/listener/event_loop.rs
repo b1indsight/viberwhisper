@@ -981,22 +981,21 @@ mod tests {
         // Exercise the actual desktop finalization adapter: returning a clean
         // string but losing its confirmation handle would silently disable learning.
         let wrong = "使用维伯耳语。";
-        let response = |context| {
+        let response = |context: &str| {
             json!({
                 "text":wrong, "context":context,
-                "memory_candidates":[{"kind":"proper_noun","text":"维伯耳语","quote":wrong}]
+                "memory_candidates":["维伯耳语"]
             })
             .to_string()
         };
         let (endpoint, requests) = stub(vec![
-            response(json!({"kind":"new","label":"项目"})),
-            response(json!({"kind":"new","label":"项目"})),
-            response(json!({"kind":"existing","id":"项目"})),
-            response(json!({"kind":"new","label":"其他"})),
-            json!({"text":wrong,"context":{"kind":"existing","id":"项目"},"memory_candidates":[]})
-                .to_string(),
+            response("项目"),
+            response("项目"),
+            response("项目"),
+            response("其他"),
+            json!({"text":wrong,"context":"项目","memory_candidates":[]}).to_string(),
             "invalid JSON".into(),
-            response(json!({"kind":"existing","id":"项目"})),
+            response("项目"),
         ]);
         let mut document = ConfigDocument::default();
         document.dictation.url = "unused invalid Realtime URL".into();

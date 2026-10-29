@@ -104,10 +104,6 @@ impl MemoryReplay {
         self.memory.snapshot(at)
     }
 
-    /// Historical report assertions retain their original context-envelope budget decisions.
-    pub fn legacy_snapshot(&self, at: u64) -> Snapshot {
-        self.memory.legacy_snapshot(at)
-    }
     pub fn replay(
         &self,
         id: &str,
@@ -123,21 +119,14 @@ impl MemoryReplay {
                 previous.is_none_or(|index| trace.index > index),
                 "segment indices out of order"
             );
-            if let Some(input) = &trace.prompt_input {
-                ensure!(
-                    *input == memory.prompt_input(&stable, at) && trace.input == input.snapshot(),
-                    "trace prompt input differs from replayed memory"
-                );
-            } else {
-                ensure!(
-                    trace.input == memory.legacy_snapshot(at),
-                    "trace input differs from replayed memory"
-                );
-            }
-            let result = super::result::DictationResult::parse(
-                &trace.output.to_string(),
-                &trace.input.ids(),
-            )?;
+            let input = trace.prompt_input.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Realtime trace lacks the current prompt input; rerun evaluation")
+            })?;
+            ensure!(
+                *input == memory.prompt_input(&stable, at) && trace.input == input.snapshot(),
+                "trace prompt input differs from replayed memory"
+            );
+            let result = super::result::DictationResult::parse(&trace.output.to_string())?;
             memory.learn(&format!("sample:{id}"), trace.index, &result, at);
             previous = Some(trace.index);
         }

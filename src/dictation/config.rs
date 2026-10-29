@@ -171,6 +171,11 @@ impl MemoryConfig {
         );
         for term in &self.long_term {
             ensure!(
+                term.context != super::UNKNOWN_CONTEXT,
+                "long-term context \"{}\" is reserved for unknown context; rename it to a real topic",
+                super::UNKNOWN_CONTEXT
+            );
+            ensure!(
                 valid_label(&term.context) && valid_term(&term.text),
                 "invalid long-term memory entry"
             );

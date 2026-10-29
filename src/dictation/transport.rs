@@ -546,7 +546,7 @@ impl Connection {
                 _ => {}
             }
         };
-        DictationResult::parse(&complete, &input.snapshot().ids())
+        DictationResult::parse(&complete)
     }
 }
 

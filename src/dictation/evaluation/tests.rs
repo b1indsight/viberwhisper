@@ -16,12 +16,16 @@ fn replay_preserves_support_counts_expiration_and_failed_recording_rollback() {
     let seed = seeded();
     let state = Replay::new(&seed, 100);
     let trace = SegmentTrace {
-        prompt_input: None,
+        prompt_input: Some(
+            state
+                .memory
+                .prompt_input(&state.memory.stable_prefix(), 100),
+        ),
         index: 0,
         input: state.snapshot(100),
         output: json!({
-            "text":"ViberWhisper ready", "context":{"kind":"existing","id":"project"},
-            "memory_candidates":[{"kind":"proper_noun","text":"ViberWhisper","quote":"ViberWhisper ready"}]
+            "text":"ViberWhisper ready", "context":"project",
+            "memory_candidates":["ViberWhisper"]
         }),
     };
     let learned = state
@@ -34,9 +38,7 @@ fn replay_preserves_support_counts_expiration_and_failed_recording_rollback() {
         long_term: seed.long_term.clone(),
     });
     assert_eq!(frozen.snapshot(100), state.snapshot(100));
-    let result =
-        super::super::result::DictationResult::parse(&trace.output.to_string(), &trace.input.ids())
-            .unwrap();
+    let result = super::super::result::DictationResult::parse(&trace.output.to_string()).unwrap();
     frozen.learn("sample:first", 0, &result, 100);
     assert!(frozen.snapshot(100).contexts[0].candidates.is_empty());
     assert!(frozen.snapshot(100).contexts[0].history.is_empty());
@@ -47,7 +49,11 @@ fn replay_preserves_support_counts_expiration_and_failed_recording_rollback() {
     );
     assert_eq!(snapshot.contexts[0].candidates[0].supporting_recordings, 1);
     let second = SegmentTrace {
-        prompt_input: None,
+        prompt_input: Some(
+            learned
+                .memory
+                .prompt_input(&learned.memory.stable_prefix(), 100),
+        ),
         input: snapshot,
         ..trace.clone()
     };
@@ -69,6 +75,9 @@ fn replay_preserves_support_counts_expiration_and_failed_recording_rollback() {
     assert_eq!(expired.contexts[0].long_term, seed.long_term);
     assert!(expired.contexts[0].history.is_empty());
     assert!(expired.contexts[0].candidates.is_empty());
+    let mut missing_input = trace.clone();
+    missing_input.prompt_input = None;
+    assert!(state.replay("first", 100, &[missing_input], true).is_err());
     let mut tampered = trace;
     tampered.input.contexts.clear();
     assert!(state.replay("first", 100, &[tampered], true).is_err());
@@ -139,7 +148,11 @@ async fn evaluator_sends_production_snapshot_and_rolls_back_cleanup_failure() {
                 snapshot.contexts.is_empty(),
                 "vocabulary must not be repeated after audio"
             );
-            let text = json!({"text":"ViberWhisper ready","context":{"kind":"existing","id":"project"},"memory_candidates":[{"kind":"proper_noun","text":"ViberWhisper","quote":"ViberWhisper ready"}]}).to_string();
+            let text = json!({
+                "text":"ViberWhisper ready", "context":"project",
+                "memory_candidates":["ViberWhisper"]
+            })
+            .to_string();
             for reply in [
                 json!({"type":"response.created","response":{"id":"r","metadata":event["response"]["metadata"]}}),
                 json!({"type":"response.output_text.done","response_id":"r","output_index":0,"content_index":0,"text":text}),
