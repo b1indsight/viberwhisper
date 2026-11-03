@@ -1,7 +1,7 @@
 # 63 - 听写审查缺陷修复 — Feature record
 
 **Stage:** Planning；待明确批准，尚未修改业务代码或测试。
-**PR:** 待创建纯文档草稿 PR；`fix/audit-findings` → `master`，创建后补充链接。
+**PR:** [#162](https://github.com/b1indsight/viberwhisper/pull/162)（草稿）；`fix/audit-findings` → `master`。
 
 ## 1. Initial plan
 
