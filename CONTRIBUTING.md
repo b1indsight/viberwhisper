@@ -27,13 +27,15 @@ PowerShell 7.3+ 中运行 `./scripts/build-windows-vad-runtime.ps1`，再设置
 推理库。构建输出保存在当天的 `.cache` 目录中，可重复运行复用。
 
 应用需要麦克风权限；macOS 的文字输入还需要辅助功能权限。API 和运行配置方法见
-[README 的使用指南](README.md#使用指南)。
+[配置指南](docs/configuration.md)。
 
 ## 主要技术栈
 
 - `rdev`：全局热键监听
 - `cpal` / `hound`：跨平台录音与 WAV 处理
 - `reqwest`：OpenAI-compatible STT/LLM HTTP 客户端
+- `tokio` / `tokio-tungstenite`：Realtime WebSocket 听写与连接生命周期
+- `ort` / Silero VAD：本机静音过滤
 - `tray-icon` / `winit`：系统托盘与原生事件循环
 - `serde` / `serde_json`：配置、历史和报告序列化
 - `clap`：CLI 参数解析
@@ -73,6 +75,29 @@ cargo clippy --locked --all-targets --features windows-app -- -D warnings
 测试应覆盖可观察行为和错误边界。文档改动至少运行 `git diff --check`，并检查链接、命令和模块名称
 是否仍与代码一致。
 
+## 原生预览验证
+
+运行不录音、不调用 API、不保存历史的气泡演示：
+
+```bash
+cargo run --locked --features integration --bin viberwhisper-preview
+```
+
+启动后有 3 秒选择专用测试输入框，再演示流式正文、最终纠正和可编辑气泡。
+Enter 会实际写入目标，Esc 取消后退出。正常听写仍使用默认程序入口。
+
+```bash
+# 对已聚焦的测试输入框执行原生编辑、按住 Enter 不确认、释放后只投递一次的检查
+cargo run --locked --features integration --bin viberwhisper-preview -- --smoke
+
+# macOS：不捕获目标或输入文字，保存正文追加与最终纠正的 PNG
+cargo run --locked --features integration --bin viberwhisper-preview -- \
+  --artifacts .cache/$(date +%F)/streaming-preview
+```
+
+后一个模式不需要麦克风、API、个人配置或历史；产物放在忽略提交的缓存目录。
+原生窗口、输入法和目标恢复机制见 [UI 架构](docs/architecture/ui.md)。
+
 ## STT Prompt 回归调试
 
 采集测试样本时使用现有托盘与 Hold/Toggle 热键：
@@ -111,10 +136,13 @@ WAV，并在 `samples/` 下保存同 ID 的 JSON；初始识别不是标准答�
 
 `prompt-lab evaluate` 每次都会按稳定 ID 顺序重新读取并转写全部 `ready` WAV，不复用旧 STT
 结果，也不把人工参考文本发给 STT。`--prompt-file` 的原文只覆盖本次进程内的
-`transcription.prompt`，不会修改 `config.json`；省略它会使用当前配置作为基线，`--no-prompt`
-则明确不发送 multipart prompt。`--compare-to` 可指向一份已完成且数据集、后端与评分版本兼容的
+提示词，不会修改 `config.json`；HTTP 路径覆盖 `transcription.prompt`，Realtime 路径覆盖完整任务提示词并忽略配置组件。
+省略它会使用当前配置作为基线，`--no-prompt` 在 HTTP 路径不发送 multipart prompt，在 Realtime 路径清空指令。
+`--compare-to` 可指向一份已完成且数据集、后端与评分版本兼容的
 旧报告；不兼容会在任何 STT 请求前失败。报告默认直接写入数据集的 `runs/`，只生成 JSON，
 不生成 Markdown 或网页报告。
+
+Realtime 评估不读取个人记忆；`--realtime-cases cases.json` 可使用显式种子与模拟时钟检查语境、记忆学习和过期，场景历史保存在评估报告中。格式与示例见[场景回归说明](docs/architecture/prompt-lab.md#realtime-context-and-memory-scenarios)。
 
 三项指标各自独立，不合成加权总分：
 
@@ -145,8 +173,7 @@ WAV，并在 `samples/` 下保存同 ID 的 JSON；初始识别不是标准答�
 
 ## 文档与发布
 
-行为、配置字段或 CLI 变化应同步更新 README、配置示例和相关架构文档。新增或完成计划后，也要
-更新 `docs/README.md` 的状态与说明。
+README 保留安装与日常使用入口。行为、配置字段或 CLI 变化应同步更新相应的[使用文档](docs/README.md#使用文档)、配置示例与架构文档；源码构建和验证步骤维护在本贡献指南，打包步骤维护在发布手册。新增文档或实现记录时更新[文档索引](docs/README.md)，避免把历史计划中的状态当作当前使用说明。
 
 维护者执行打包、版本校验、tag 发布、产物验证或失败恢复前，必须遵循
 [发布手册](docs/releasing.md)。
