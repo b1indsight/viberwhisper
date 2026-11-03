@@ -3,8 +3,7 @@ use super::dataset::sha256_bytes;
 use crate::{
     core::config::SecretValue,
     dictation::{
-        ContextChoice, DictationResult, MemorySeed, RealtimeEvaluator, Replay, SegmentTrace,
-        Snapshot,
+        DictationResult, MemorySeed, RealtimeEvaluator, Replay, SegmentTrace, Snapshot,
         config::{DictationConfig, TermKind, valid_label, valid_term},
     },
 };
@@ -16,7 +15,28 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const POLICY: &str = "realtime-context-memory-v4";
+pub(super) const POLICY: &str = "realtime-context-memory-v5";
+const CASES_SCHEMA_VERSION: u32 = 2;
+
+fn validate_cases_version(version: Option<u64>) -> Result<()> {
+    ensure!(
+        version == Some(u64::from(CASES_SCHEMA_VERSION)),
+        "unsupported Realtime cases schema_version {version:?}; expected {CASES_SCHEMA_VERSION}; migrate context assertions and candidate names to strings, then rerun Realtime evaluation"
+    );
+    Ok(())
+}
+
+/// Check versions before legacy nested assertions can obscure the migration error during decoding.
+pub(super) fn validate_report_version(
+    policy: Option<&str>,
+    cases_schema: Option<u64>,
+) -> Result<()> {
+    ensure!(
+        policy == Some(POLICY),
+        "unsupported Realtime report policy {policy:?}; expected {POLICY}; migrate Realtime cases to schema {CASES_SCHEMA_VERSION} and rerun evaluation instead of rescoring old reports"
+    );
+    validate_cases_version(cases_schema)
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,14 +72,18 @@ impl RealtimeCases {
             meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= 4 * 1024 * 1024,
             "Realtime cases must be a regular JSON file of at most 4 MiB"
         );
-        Ok(serde_json::from_slice(&fs::read(path)?)?)
+        let bytes = fs::read(path)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        validate_cases_version(value["schema_version"].as_u64())?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     /// Complete, unique coverage keeps the existing report's metric weights and review IDs stable.
     pub fn validate(&self, ready: &[String]) -> Result<()> {
+        validate_cases_version(Some(u64::from(self.schema_version)))?;
         ensure!(
-            self.schema_version == 1 && !self.cases.is_empty() && self.cases.len() <= ready.len(),
-            "invalid Realtime case schema or case count"
+            !self.cases.is_empty() && self.cases.len() <= ready.len(),
+            "invalid Realtime case count"
         );
         let mut cases = HashSet::new();
         let mut samples = HashSet::new();
@@ -100,15 +124,6 @@ impl RealtimeCases {
         }
         contract.digest()
     }
-}
-
-/// Semantic term assertions stay independent of per-response quote provenance,
-/// which is checked separately by each segment's metadata validation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct CandidateExpectation {
-    kind: TermKind,
-    text: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -215,9 +230,9 @@ impl SnapshotExpectations {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Expectations {
     pub input: SnapshotExpectations,
-    pub context: Option<ContextChoice>,
-    pub candidates_present: Vec<CandidateExpectation>,
-    pub candidates_absent: Vec<CandidateExpectation>,
+    pub context: Option<String>,
+    pub candidates_present: Vec<String>,
+    pub candidates_absent: Vec<String>,
     pub memory: SnapshotExpectations,
     pub forbidden_text: Vec<String>,
 }
@@ -227,18 +242,11 @@ impl Expectations {
         self.input.validate()?;
         self.memory.validate()?;
         if let Some(context) = &self.context {
-            ensure!(
-                match context {
-                    ContextChoice::Existing { id } => valid_label(id),
-                    ContextChoice::New { label } => valid_label(label),
-                    ContextChoice::Uncertain => true,
-                },
-                "invalid context assertion"
-            );
+            ensure!(valid_label(context), "invalid context assertion");
         }
         for values in [&self.candidates_present, &self.candidates_absent] {
             ensure!(
-                values.len() <= 32 && values.iter().all(|c| valid_term(&c.text)),
+                values.len() <= 32 && values.iter().all(|c| valid_term(c)),
                 "invalid candidate assertions"
             );
         }
@@ -265,22 +273,8 @@ impl Expectations {
         self.memory.check(after, "memory", &mut checks);
         let mut candidates = Vec::new();
         for trace in segments {
-            let parsed = DictationResult::parse(&trace.output.to_string(), &trace.input.ids());
-            let raw_context =
-                serde_json::from_value::<ContextChoice>(trace.output["context"].clone());
-            let raw_candidates = trace.output["memory_candidates"].as_array();
-            let valid = parsed.as_ref().is_ok_and(|p| {
-                raw_context.as_ref().is_ok_and(|context| match context {
-                    ContextChoice::Uncertain => raw_candidates.is_some_and(Vec::is_empty),
-                    _ => {
-                        p.context.as_ref() == Some(context)
-                            && !matches!(context, ContextChoice::New { label } if trace.input.ids().contains(label))
-                            // Parsing only discards invalid entries, so equal counts
-                            // prove that every supplied candidate passed grounding.
-                            && raw_candidates.is_some_and(|c| c.len() == p.memory_candidates.len())
-                    }
-                })
-            });
+            let parsed = DictationResult::parse(&trace.output.to_string());
+            let valid = parsed.as_ref().is_ok_and(|p| p.metadata_valid);
             checks.push(Check::new(
                 format!("segment.{}.metadata", trace.index),
                 valid,
@@ -290,12 +284,10 @@ impl Expectations {
             }
         }
         if let Some(expected) = &self.context {
-            let actual = segments.last().and_then(|s| {
-                serde_json::from_value::<ContextChoice>(s.output["context"].clone()).ok()
-            });
+            let actual = segments.last().and_then(|s| s.output["context"].as_str());
             checks.push(Check::new(
                 "context".into(),
-                actual.as_ref() == Some(expected),
+                actual == Some(expected.as_str()),
             ));
         }
         for (present, values) in [
@@ -304,11 +296,8 @@ impl Expectations {
         ] {
             for v in values {
                 checks.push(Check::new(
-                    format!("candidate:{:?}:{}", v.kind, v.text),
-                    candidates
-                        .iter()
-                        .any(|c| c.kind == v.kind && c.text == v.text)
-                        == present,
+                    format!("candidate:{v}"),
+                    candidates.iter().any(|c| c.text == *v) == present,
                 ));
             }
         }
@@ -418,6 +407,10 @@ impl RealtimeReport {
         samples: &[super::regression::SampleResult],
         language: Option<String>,
     ) -> Result<()> {
+        validate_report_version(
+            Some(&self.policy_version),
+            Some(u64::from(self.cases.schema_version)),
+        )?;
         self.cases.validate(
             &samples
                 .iter()
@@ -425,14 +418,7 @@ impl RealtimeReport {
                 .collect::<Vec<_>>(),
         )?;
         ensure!(
-            [
-                POLICY,
-                "realtime-context-memory-v1",
-                "realtime-context-memory-v2",
-                "realtime-context-memory-v3"
-            ]
-            .contains(&self.policy_version.as_str())
-                && self.cases_sha256 == self.cases.digest()?
+            self.cases_sha256 == self.cases.digest()?
                 && self.contract_sha256 == self.cases.contract_digest()?,
             "Realtime report identity mismatch"
         );
@@ -450,32 +436,22 @@ impl RealtimeReport {
                     .find(|s| s.sample_id == step.sample_id)
                     .unwrap();
                 ensure!(
-                    row.segments.iter().all(
-                        |trace| trace.prompt_input.is_some() == (self.policy_version == POLICY)
-                    ),
+                    row.segments
+                        .iter()
+                        .all(|trace| trace.prompt_input.is_some()),
                     "Realtime trace input layout does not match its policy"
                 );
                 ensure!(
                     row.case_id == case.id
                         && row.sample_id == step.sample_id
                         && row.at == at
-                        && row.before
-                            == if self.policy_version == POLICY {
-                                memory.snapshot(at)
-                            } else {
-                                memory.legacy_snapshot(at)
-                            },
+                        && row.before == memory.snapshot(at),
                     "Realtime step input mismatch"
                 );
                 memory =
                     memory.replay(&step.sample_id, at, &row.segments, sample.error.is_none())?;
                 ensure!(
-                    row.after
-                        == if self.policy_version == POLICY {
-                            memory.snapshot(at)
-                        } else {
-                            memory.legacy_snapshot(at)
-                        },
+                    row.after == memory.snapshot(at),
                     "Realtime step memory mismatch"
                 );
                 if let Some(text) = &sample.hypothesis {

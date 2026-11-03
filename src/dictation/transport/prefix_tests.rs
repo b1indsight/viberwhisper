@@ -7,7 +7,7 @@ use crate::dictation::{
     },
 };
 
-const RESULT: &str = r#"{"memory_candidates":[],"context":{"kind":"uncertain"},"text":"测试"}"#;
+const RESULT: &str = r#"{"memory_candidates":[],"context":"未知语境","text":"测试"}"#;
 
 #[tokio::test]
 async fn cancellation_during_cleanup_never_repeats_an_item_delete() {

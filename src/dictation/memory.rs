@@ -4,7 +4,8 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    config::{LongTerm, MemoryConfig},
+    UNKNOWN_CONTEXT,
+    config::{LongTerm, MemoryConfig, TermKind},
     correction::{Correction, Decision, Prepared, Replacement},
     result::DictationResult,
 };
@@ -82,6 +83,7 @@ pub(crate) struct Context {
 }
 
 impl Snapshot {
+    #[cfg(test)]
     pub fn ids(&self) -> Vec<String> {
         self.contexts.iter().map(|c| c.id.clone()).collect()
     }
@@ -301,7 +303,11 @@ impl Memory {
         let mut snapshot = Snapshot {
             contexts: Vec::new(),
         };
-        for label in labels.into_iter().take(4) {
+        for label in labels
+            .into_iter()
+            .filter(|label| label != UNKNOWN_CONTEXT)
+            .take(4)
+        {
             let recent: Vec<_> = self
                 .observations
                 .iter()
@@ -391,7 +397,7 @@ impl Memory {
         {
             return;
         }
-        let Some(label) = result.context_label() else {
+        let Some(label) = result.context.as_deref() else {
             return;
         };
         self.observations.push(Observation::new(
@@ -405,7 +411,7 @@ impl Memory {
                 .iter()
                 .map(|c| LongTerm {
                     context: label.into(),
-                    kind: c.kind.clone(),
+                    kind: TermKind::ProperNoun,
                     text: c.text.clone(),
                 })
                 .collect(),

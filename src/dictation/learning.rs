@@ -162,10 +162,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("dictation-memory.json");
         let settings = MemoryConfig::default();
-        let source = DictationResult::parse(&json!({
-            "text":"使用维伯耳语。", "context":{"kind":"new","label":"项目"},
-            "memory_candidates":[{"kind":"proper_noun","text":"维伯耳语","quote":"使用维伯耳语。"}]
-        }).to_string(), &[]).unwrap();
+        let source = DictationResult::parse(
+            &json!({
+                "text":"使用维伯耳语。", "context":"项目",
+                "memory_candidates":["维伯耳语"]
+            })
+            .to_string(),
+        )
+        .unwrap();
         let mut realtime = Memory::load(Some(path.clone()), settings.clone(), now()).unwrap();
         let prepared = realtime.prepare(vec![source.clone()], Some("zh".into()));
         realtime.confirm("realtime-source", &prepared, "使用ViberWhisper。", now());
@@ -194,8 +198,7 @@ mod tests {
         let unconfirmed = worker
             .prepare(
                 DictationResult::parse(
-                    &json!({"text":"未确认", "context":{"kind":"new","label":"其他"}}).to_string(),
-                    &[],
+                    &json!({"text":"未确认", "context":"其他", "memory_candidates":[]}).to_string(),
                 )
                 .unwrap(),
             )

@@ -171,7 +171,7 @@ viberwhisper config set inference.api.transcription.model whisper-1
 默认语言、数字、改口和保真规则复用 [Realtime 提示词](../assets/dictation-prompt.default.json)，
 普通后处理只依据 STT 文本，不能重新听音频。
 
-普通桌面路径在同一次推理中提取语境及带 `quote` 的候选，复用[语境记忆与确认后学习](dictation.md#确认后学习)，
+普通桌面路径在同一次推理中提取话题字符串及专名字符串数组，复用[语境记忆与确认后学习](dictation.md#确认后学习)，
 不再增加一次推理。`dictation.enabled=false` 选择普通识别；`dictation.memory` 控制两条
 桌面路径的记忆，使用同一个 `dictation-memory.json`。关闭后处理不会创建记忆写入者。
 
@@ -180,7 +180,7 @@ viberwhisper config set inference.api.transcription.model whisper-1
 `convert` 与 setup 仅使用整理规则，不读取、上传或更新个人记忆；原始采集保持原样。
 
 接口继续使用 OpenAI-compatible chat completions，`stream=false`。模型现在必须返回
-`memory_candidates`、`context`、`text` 三个字段的 JSON；程序只显示/交付 `text`。
+`context`、`memory_candidates`、`text` 三个字段的 JSON；程序只显示/交付 `text`。
 `post_process.prompt` 替换默认整理规则，程序仍附加任务边界、JSON 格式及候选定位说明。
 旧自定义提示词中的“只输出纯文本”等要求应移除，以免与协议冲突。整个 JSON 无效、正文为空
 或请求失败时回退原始 STT；个别候选无效时只跳过该候选，不丢弃有效正文。

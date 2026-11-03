@@ -162,8 +162,8 @@ mod tests {
     #[test]
     fn arbitrary_delta_boundaries_reveal_only_top_level_decoded_text() {
         // Model metadata can precede the transcript, and escapes/surrogate pairs
-        // can span tokens. Nested candidates must never become preview content.
-        let raw = r#"{"memory_candidates":[{"text":"secret"}],"text":"中文\n\"quote\"\\\ud83c\udf99️","context":{"text":"hidden"}}"#;
+        // can span tokens. Candidate names and topics must never become preview content.
+        let raw = r#"{"memory_candidates":["secret"],"text":"中文\n\"quote\"\\\ud83c\udf99️","context":"hidden"}"#;
         for width in 1..=raw.chars().count() {
             let mut stream = TextStream::default();
             let characters = raw.chars().collect::<Vec<_>>();

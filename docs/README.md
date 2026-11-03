@@ -55,3 +55,4 @@
 | [Prompt-lab 简化](plan/60-prompt-lab-simplification.md) | 共用扫描与评测语言配置 |
 | [流式确认气泡](plan/60-streaming-confirmation-preview.md) | 只读正文增量、最终纠正与取消 |
 | [HTTP 整理与学习](plan/61-http-postprocess-correction.md) | 与 Realtime 共用改口规则、语境纠错和确认反馈 |
+| [听写响应简化](plan/62-simplified-dictation-response.md) | 话题字符串、有序专名候选、保守定位与评测迁移 |

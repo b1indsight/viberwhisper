@@ -171,6 +171,11 @@ impl MemoryConfig {
         );
         for term in &self.long_term {
             ensure!(
+                term.context != super::UNKNOWN_CONTEXT,
+                "long-term context \"{}\" is reserved for unknown context; rename it to a real topic",
+                super::UNKNOWN_CONTEXT
+            );
+            ensure!(
                 valid_label(&term.context) && valid_term(&term.text),
                 "invalid long-term memory entry"
             );
@@ -227,6 +232,16 @@ mod prompt_tests {
             components().compose(),
             "任务 {audio} \\path\n语言\n清理\n{\"text\":\"原句\"}\n语境\n记忆"
         );
+    }
+
+    #[test]
+    fn example_config_resolves_to_the_bundled_prompt() {
+        // Copying the editable example must not silently select stale rules instead of the bundled default.
+        let example: serde_json::Value =
+            serde_json::from_str(include_str!("../../config.example.json")).unwrap();
+        let config: DictationConfig = serde_json::from_value(example["dictation"].clone()).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.prompt(), DictationConfig::default().prompt());
     }
 
     #[test]

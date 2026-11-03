@@ -339,7 +339,16 @@ impl EvaluationReport {
                 path.display()
             )));
         }
-        let report: Self = serde_json::from_slice(&fs::read(path)?)?;
+        let bytes = fs::read(path)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if let Some(realtime) = value.get("realtime").filter(|value| !value.is_null()) {
+            super::realtime::validate_report_version(
+                realtime["policy_version"].as_str(),
+                realtime["cases"]["schema_version"].as_u64(),
+            )
+            .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
+        }
+        let report: Self = serde_json::from_slice(&bytes)?;
         report.validate_contract()?;
         Ok(report)
     }
@@ -352,6 +361,13 @@ impl EvaluationReport {
     }
 
     pub(crate) fn validate_contract(&self) -> Result<()> {
+        if let Some(realtime) = &self.realtime {
+            super::realtime::validate_report_version(
+                Some(&realtime.policy_version),
+                Some(u64::from(realtime.cases.schema_version)),
+            )
+            .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
+        }
         if ![1, REPORT_SCHEMA_VERSION].contains(&self.schema_version)
             || (self.schema_version == 1 && self.realtime.is_some())
         {
@@ -415,9 +431,7 @@ impl EvaluationReport {
                     "Realtime report requires a WebSocket endpoint".into(),
                 ));
             }
-            if (realtime.policy_version == super::realtime::POLICY)
-                != (self.stt.input_layout.as_deref() == Some(crate::dictation::INPUT_LAYOUT))
-            {
+            if self.stt.input_layout.as_deref() != Some(crate::dictation::INPUT_LAYOUT) {
                 return Err(RegressionError::Invalid(
                     "Realtime policy and input layout differ".into(),
                 ));
@@ -1510,7 +1524,13 @@ mod tests {
         )
         .unwrap()
         .report;
-        let cases:RealtimeCases = serde_json::from_value(serde_json::json!({"schema_version":1,"cases":[{"id":"case","at":100,"steps":[{"sample_id":"sample-1-1","expect":{"context":{"kind":"uncertain"}}}]}]})).unwrap();
+        let cases: RealtimeCases = serde_json::from_value(serde_json::json!({
+            "schema_version":2,
+            "cases":[{"id":"case", "at":100, "steps":[{
+                "sample_id":"sample-1-1", "expect":{"context":"未知语境"}
+            }]}]
+        }))
+        .unwrap();
         let empty = crate::dictation::Snapshot { contexts: vec![] };
         let segments = vec![crate::dictation::SegmentTrace {
             prompt_input: Some(
@@ -1521,7 +1541,9 @@ mod tests {
             ),
             index: 0,
             input: empty.clone(),
-            output: serde_json::json!({"text":"使用 Codex","context":{"kind":"existing","id":"unknown"},"memory_candidates":[]}),
+            output: serde_json::json!({
+                "text":"使用 Codex", "context":null, "memory_candidates":[]
+            }),
         }];
         let checks = cases.cases[0].steps[0]
             .expect
@@ -1545,11 +1567,46 @@ mod tests {
         });
         report.validate_contract().unwrap();
         assert_eq!(report.gate_results(100.0).realtime, Some(false));
-        let mut legacy = report.clone();
-        legacy.stt.input_layout = None;
-        legacy.realtime.as_mut().unwrap().steps[0].segments[0].prompt_input = None;
-        legacy.realtime.as_mut().unwrap().policy_version = "realtime-context-memory-v1".into();
-        legacy.validate_contract().unwrap();
+        for old_policy in [
+            "realtime-context-memory-v1",
+            "realtime-context-memory-v2",
+            "realtime-context-memory-v3",
+            "realtime-context-memory-v4",
+        ] {
+            let mut legacy = report.clone();
+            legacy.realtime.as_mut().unwrap().policy_version = old_policy.into();
+            let error = legacy.validate_contract().unwrap_err().to_string();
+            assert!(error.contains("realtime-context-memory-v5") && error.contains("rerun"));
+            let error = legacy
+                .realtime
+                .as_ref()
+                .unwrap()
+                .validate(&legacy.samples, legacy.stt.language.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("realtime-context-memory-v5") && error.contains("rerun"));
+            let mut value = serde_json::to_value(&legacy).unwrap();
+            // Preflight must run before old nested objects fail the new string assertion types.
+            value["realtime"]["cases"]["schema_version"] = 1.into();
+            value["realtime"]["cases"]["cases"][0]["steps"][0]["expect"] = serde_json::json!({
+                "context":{"kind":"uncertain"},
+                "candidates_present":[{"kind":"proper_noun", "text":"Codex"}]
+            });
+            fs::write(&output, serde_json::to_vec(&value).unwrap()).unwrap();
+            let error = EvaluationReport::read(&output).unwrap_err().to_string();
+            assert!(error.contains("realtime-context-memory-v5") && error.contains("rerun"));
+            assert!(error.contains("migrate"));
+        }
+        let mut old_cases = report.clone();
+        old_cases.realtime.as_mut().unwrap().cases.schema_version = 1;
+        let error = old_cases.validate_contract().unwrap_err().to_string();
+        assert!(error.contains("schema_version") && error.contains("migrate"));
+        let mut value = serde_json::to_value(&old_cases).unwrap();
+        value["realtime"]["cases"]["cases"][0]["steps"][0]["expect"]["context"] =
+            serde_json::json!({"kind":"uncertain"});
+        fs::write(&output, serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = EvaluationReport::read(&output).unwrap_err().to_string();
+        assert!(error.contains("schema_version") && error.contains("rerun"));
         let mut missing_input = report.clone();
         missing_input.realtime.as_mut().unwrap().steps[0].segments[0].prompt_input = None;
         assert!(missing_input.validate_contract().is_err());
@@ -1566,13 +1623,9 @@ mod tests {
         assert_eq!(complete.status, RunStatus::Complete);
         assert_eq!(complete.meets_targets, Some(false));
         complete.validate_contract().unwrap();
-        // Pre-quote policy baselines remain readable when their evidence is safe, but cannot
-        // be compared against newly strengthened candidate-grounding validation.
+        // A typed baseline supplied by an in-process caller must be rejected before any new STT.
         let mut legacy = complete.clone();
-        legacy.stt.input_layout = None;
-        legacy.realtime.as_mut().unwrap().steps[0].segments[0].prompt_input = None;
-        legacy.realtime.as_mut().unwrap().policy_version = "realtime-context-memory-v2".into();
-        legacy.validate_contract().unwrap();
+        legacy.realtime.as_mut().unwrap().policy_version = "realtime-context-memory-v4".into();
         let mut next = request(directory.path().join("next.json"));
         next.stt = complete.stt.clone();
         next.stt.input_layout = Some(crate::dictation::INPUT_LAYOUT.into());
@@ -1588,11 +1641,11 @@ mod tests {
         });
         next.compare_to = Some(legacy);
         let error = evaluate(&store, &SequenceTranscriber::new([]), next).unwrap_err();
-        assert!(error.to_string().contains("compatible"));
+        assert!(error.to_string().contains("rerun"));
     }
 
     #[test]
-    fn legacy_v1_ordinary_reports_still_read_without_claiming_memory_validation() {
+    fn ordinary_v1_and_v2_reports_still_read_without_claiming_memory_validation() {
         let directory = tempdir().unwrap();
         let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
         add_ready_sample(&store, 1, "使用 Codex", "Codex");
@@ -1604,13 +1657,16 @@ mod tests {
         )
         .unwrap()
         .report;
-        let mut value = serde_json::to_value(&report).unwrap();
-        value["schema_version"] = 1.into();
-        value.as_object_mut().unwrap().remove("realtime");
-        fs::write(&output, serde_json::to_vec(&value).unwrap()).unwrap();
-        let legacy = EvaluationReport::read(&output).unwrap();
-        assert!(legacy.realtime.is_none());
-        assert!(legacy.gate_results(100.0).realtime.is_none());
+        for schema_version in [1, REPORT_SCHEMA_VERSION] {
+            let mut value = serde_json::to_value(&report).unwrap();
+            value["schema_version"] = schema_version.into();
+            value.as_object_mut().unwrap().remove("realtime");
+            fs::write(&output, serde_json::to_vec(&value).unwrap()).unwrap();
+            let legacy = EvaluationReport::read(&output).unwrap();
+            assert_eq!(legacy.schema_version, schema_version);
+            assert!(legacy.realtime.is_none());
+            assert!(legacy.gate_results(100.0).realtime.is_none());
+        }
     }
 
     fn write_review(path: &Path, run_id: &str, score: u8, with_difference: bool) {
