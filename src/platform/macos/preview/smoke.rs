@@ -31,6 +31,31 @@ impl NativePreview {
         Ok(())
     }
 
+    /// Exercise the native key dispatcher without posting keys to another app.
+    /// The caller checks that Enter emitted nothing before Esc emits cancellation.
+    pub(crate) fn smoke_error(&self, verify_pending: &dyn Fn() -> Result<()>) -> Result<()> {
+        let window = self
+            .window
+            .as_ref()
+            .ok_or_else(|| anyhow!("Error preview was not created"))?;
+        let state = window.ivars();
+        ensure!(
+            state.text.string().is_empty()
+                && !state.text.isEditable()
+                && state.text.isSelectable()
+                && !state.retry_allowed.get(),
+            "Error preview retained text, accepted edits, or enabled confirmation"
+        );
+        ensure!(
+            !state.status.isHidden() && state.status.stringValue().to_string().contains("Esc"),
+            "Error preview did not explain cancellation"
+        );
+        window.notify_key(PreviewKey::Confirm);
+        verify_pending()?;
+        window.notify_key(PreviewKey::Cancel);
+        Ok(())
+    }
+
     pub(crate) fn smoke_streaming(&mut self) -> Result<()> {
         {
             let window = self

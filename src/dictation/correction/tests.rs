@@ -858,6 +858,80 @@ fn complete_unchanged_names_anchor_their_final_spans() {
 }
 
 #[test]
+fn deleting_neighboring_repetitions_does_not_shorten_a_name() {
+    // Removing repeated prose can be aligned inside an unchanged name. Such an
+    // edit must not train a shortened name, even across segments or grapheme bytes.
+    let mut previews = Vec::new();
+    let mut expected = Vec::new();
+    for (before, edited, name, next, next_expected) in [
+        (
+            "请找张张山。",
+            "请找张山。",
+            "张山",
+            "联系张山。",
+            "联系张山。",
+        ),
+        (
+            "Use New New York.",
+            "Use New York.",
+            "New York",
+            "Visit New York.",
+            "Visit New York.",
+        ),
+        (
+            "今天找张山山。",
+            "明天找张山。",
+            "张山",
+            "联系张山。",
+            "联系张山。",
+        ),
+        (
+            "请去重庆重庆站。",
+            "请去重庆站。",
+            "重庆站",
+            "抵达重庆站。",
+            "抵达重庆站。",
+        ),
+        (
+            "Use Cafe\u{301} Cafe\u{301} Noir.",
+            "Use Cafe\u{301} Noir.",
+            "Cafe\u{301} Noir",
+            "Visit Cafe\u{301} Noir.",
+            "Visit Cafe\u{301} Noir.",
+        ),
+        // Repeated letters wholly inside the candidate still have a safe owner.
+        (
+            "Use Codexx.",
+            "Use Codex.",
+            "Codexx",
+            "Visit Codexx.",
+            "Visit Codex.",
+        ),
+    ] {
+        for segmented in [false, true] {
+            let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+            let raw = result(before, name, "项目");
+            assert_eq!(raw.memory_candidates.len(), 1, "{before}");
+            let sources = if segmented {
+                vec![result_with_candidates("🎙️ Ready.", &[], "旁白"), raw]
+            } else {
+                vec![raw]
+            };
+            let prepared = memory.prepare(sources, None);
+            let edited = if segmented {
+                format!("🎙️ Ready. {edited}")
+            } else {
+                edited.to_owned()
+            };
+            memory.confirm("deleted", &prepared, &edited, 100);
+            previews.push(memory.prepare(vec![result(next, name, "项目")], None).text);
+            expected.push(next_expected);
+        }
+    }
+    assert_eq!(previews, expected);
+}
+
+#[test]
 fn chinese_name_insertions_require_an_interior_position() {
     // Chinese letters obey the same ownership rule as Latin letters. A name's
     // edge cannot absorb a new character merely because Unicode splits words there.

@@ -14,6 +14,9 @@ use crate::prompt_lab::{DatasetStore, PromptLabCapture, SttSnapshot};
 mod event_loop;
 mod permission;
 
+#[cfg(feature = "integration")]
+pub(super) use event_loop::finish_transcription;
+
 fn platform_session_event(action: PlatformAction, state: &RecordingState) -> Option<SessionEvent> {
     match action {
         PlatformAction::HoldPressed if matches!(state, RecordingState::Idle) => {

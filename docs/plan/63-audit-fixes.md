@@ -1,7 +1,7 @@
 # 63 - 听写审查缺陷修复 — Feature record
 
-**Stage:** Planning；待明确批准，尚未修改业务代码或测试。
-**PR:** [#162](https://github.com/b1indsight/viberwhisper/pull/162)（草稿）；`fix/audit-findings` → `master`。
+**Stage:** Implementation；第 1、2、4、5 项已实现并完成本地验证，交由同一 PR 审查；未合并。
+**PR:** [#162](https://github.com/b1indsight/viberwhisper/pull/162)；`fix/audit-findings` → `master`。
 
 ## 1. Initial plan
 
@@ -175,3 +175,69 @@ Esc、退出、通道断开和 Ready 移交取消继续走已有恢复目标的�
 及第三方日志的全面隐私审计、预览外观重设计、真实模型质量评测和个人脚本迁移。
 
 ## 2. PR change timeline
+
+### 2026-11-04 — 实现四项修复及真实路径回归
+
+- **触发与证据：** 新增记忆闭环回归在原实现中把“联系张山。”变为“联系山。”、
+  `Visit New York.` 变为 `Visit York.`；候选内部 `Codexx → Codex` 对照仍正常。
+  无正文失败的 adapter 回归原先拿不到预览，worker 回归则能通过伪造 Confirm 投递文字。
+  真实 CLI 的正常、静音、失败场景原先均受到 stdout 日志污染；发送错误可附带 URL。
+- **实际变更：** `Alignment::deletion_escapes` 比较左右相邻重复字素，发现候选内外都有
+  等价删除位置时跳过学习；遇到其他编辑或不匹配即停止，不禁止正常名内删除。
+  启动日志复用 metadata 的脱敏 endpoint，reqwest 发送和读体错误显式 `without_url()`；
+  全局 tracing 指向 stderr。finalization 保留空失败的 warning，原生预览进入只读和
+  retry-blocked 状态，worker 根据初始正文固定交付能力，不接受后来的伪造文字。
+- **保留契约：** 正常请求仍发送原 query 和对应鉴权；有正文的部分失败可编辑，静音、
+  空成功和 NoChunks 不报错。错误提示不进入历史、注入或学习；没有修改录音断连协议、
+  配置 schema、请求预算或个人数据，不清理历史纠正规则。
+- **回归取舍：** 纠错沿用 `Memory::prepare → confirm → 下一次 prepare`，覆盖左右边界、
+  多字重复、组合重音字素和多段；确认测试扩展已有 worker 用例。CLI 使用公开 speech
+  fixture、合成静音及回环 stub，在独立进程捕获日志，避免共享 tracing subscriber 的并发
+  不稳定。不保留早期线程局部日志捕获测试。
+- **证据边界：** 锁定的 reqwest 在响应体截断场景原本就未带 URL，不能将该对照说成
+  先失败；保留其回归以保护发送和读体两条错误契约。provider 响应正文和第三方日志不在
+  本次脱敏承诺内。
+
+### 2026-11-04 — 原生失败呈现与配置隔离边界
+
+- **已执行：** `cargo run --offline --locked --features integration --bin viberwhisper-preview
+  -- --artifacts <artifact-dir>` 复用真实 finalization adapter 与等待线程，分别从生成中窗口
+  切换为失败、直接打开超时提示；检查正文为空、不可编辑、原生 Enter 不确认及 Esc 能结束
+  等待。普通确认、失败和超时截图均已检查，文案完整，无底层错误或错误的复制粘贴指引。
+  夹具不捕获投递目标、不发出系统按键、不注入文字或写个人历史。
+- **实现细节：** demo 的 progress 携带真实会话 ID；从普通确认进入后续失败场景前关闭
+  旧窗口，避免取消事件仍带上一会话 ID。新增的原生检查仅在 integration smoke 模块中。
+  失败文案复用 listener 的私有 adapter，没有新增生产窗口类型或状态字段。
+- **平台限制：** Windows 的 `dirs 5.0.1` 使用 `SHGetKnownFolderPath`，临时 HOME/APPDATA
+  无法安全隔离真实 CLI 配置。进程级 CLI fixture 限于非 Windows，且先以只读 `config path`
+  检查路径确在临时目录后才写入；不为测试扩大产品配置接口。平台无关 API、学习、确认和
+  listener 回归仍由 Windows CI 执行。本机原生呈现检查仅覆盖 macOS，不代表 Windows GUI
+  实机验收。
+- **发布隔离：** 从已发布的计划 bookmark 建立私有 JJ workspace，仅复制批准范围的实现
+  文件，沿用 `fix/audit-findings` 和 PR #162；两个 prompt 文件继续采用原 master 内容，
+  不吸收共享工作区的并行修改。
+
+### 2026-11-04 — 反向对照和完整快照验证
+
+- **比较方式：** 保持测试与其他修复不变，每次只临时移除一个机制；不保留实验变体。
+  移除 `deletion_escapes` 的调用后，邻接重复删除再次缩短中英文名字，合法名内删除仍
+  正常。移除 worker 的初始空正文守卫后，伪造 Confirm 再次实际投递提示文字。移除
+  stderr writer 后，正常、静音和失败 CLI 场景重新出现 stdout 日志污染。单独恢复
+  未脱敏的启动 URL 后，静音 CLI 回归检出虚构 `url-user`；无须发送 HTTP 请求即可复现。
+  原发送错误回归也检出所附 URL，修复后不再出现。
+- **结论与取舍：** 保留删除归属检查、初始交付守卫和诊断分流；它们各自保护独立的
+  可观察契约，不用全局拒绝删除、仅 UI 禁用按键或关闭日志的简化方案替代。读体截断
+  没有先失败的证据，按前述边界仅作为契约回归。
+- **最终验证：** 所有变体恢复后，从发布隔离 workspace 运行 `cargo fmt --check`、
+  `cargo build --offline --locked`、`cargo test --offline --locked`、
+  `cargo clippy --offline --locked --all-targets --features integration -- -D warnings`，
+  均通过。使用同一快照重新运行原生 artifacts 夹具并检查最终 PNG；固定 JJ 提交后对其
+  父子 Git 对象执行 `git diff --check`。私有 VAD 数据集与真实 Realtime 服务测试继续
+  按原设置忽略，未使用个人配置、录音、真实凭据或外部 STT/LLM 服务。
+- **证据：** [本线程](https://ampcode.com/threads/T-01a1a256-e775-7223-9064-e8e07dd649c2)
+  保留原实现失败、单机制反向对照、最终检查和原生截图。详细日志在
+  `.amp/in/artifacts/audit-fixes-*.log`、`audit-api-cli-*.log`，最终图片在
+  `.amp/in/artifacts/audit-fixes-preview/`；这些仅为本地审查材料，不提交仓库。
+- **剩余边界：** Windows 原生窗口与真实跨应用焦点未在本机执行；托管 Windows CI
+  的结果以 PR 检查为准。源码中既有 vendored rdev 警告未在本次修改。第 3 项录音断连
+  和已保存错误记忆仍明确排除。
