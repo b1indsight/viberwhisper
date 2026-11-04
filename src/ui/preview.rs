@@ -231,6 +231,7 @@ fn run_confirmation<T: DeliveryTarget>(
         warning,
         mut confirmation,
     } = transcription;
+    let can_confirm = !text.trim().is_empty();
     let anchor = target
         .as_ref()
         .ok()
@@ -242,7 +243,7 @@ fn run_confirmation<T: DeliveryTarget>(
         .as_ref()
         .err()
         .is_some_and(crate::platform::is_text_delivery_permission_error);
-    let warning = if target.is_err() {
+    let warning = if can_confirm && target.is_err() {
         let unavailable = "无法获取输入目标；可复制文字后手动粘贴。";
         Some(warning.map_or_else(
             || unavailable.into(),
@@ -271,6 +272,9 @@ fn run_confirmation<T: DeliveryTarget>(
         }
         match command {
             PreviewCommand::Cancel => return false,
+            // An error-only preview cannot acquire delivery capability from a
+            // queued native callback carrying arbitrary nonempty text.
+            PreviewCommand::Confirm(_) if !can_confirm => continue,
             PreviewCommand::Confirm(text) => {
                 if text.trim().is_empty() {
                     return false;
@@ -679,10 +683,18 @@ mod tests {
             }
         }
         // A corrected bubble must deliver and save the edit, never the original STT text.
-        for command in [
-            PreviewCommand::Cancel,
-            PreviewCommand::Confirm("修改后的文字 🎙️".into()),
-            PreviewCommand::Confirm(" \n".into()),
+        // An error-only bubble has no deliverable text, even if a stale or forged
+        // callback supplies a nonempty edit. Only cancellation may finish it.
+        for (candidate, command) in [
+            ("candidate", PreviewCommand::Cancel),
+            (
+                "candidate",
+                PreviewCommand::Confirm("修改后的文字 🎙️".into()),
+            ),
+            ("candidate", PreviewCommand::Confirm(" \n".into())),
+            ("", PreviewCommand::Cancel),
+            ("", PreviewCommand::Confirm("不能投递的提示".into())),
+            (" \n", PreviewCommand::Confirm("不能投递的提示".into())),
         ] {
             let directory = tempdir().unwrap();
             let history = HistoryStore::at(directory.path().join("history.jsonl"), 4096);
@@ -695,8 +707,8 @@ mod tests {
                 wait_for_confirmation(
                     SessionId(8),
                     PreviewTranscription {
-                        text: "candidate".into(),
-                        warning: None,
+                        text: candidate.into(),
+                        warning: candidate.trim().is_empty().then(|| "按 Esc 关闭。".into()),
                         confirmation: Some(confirmation),
                     },
                     worker_typer.as_ref(),
@@ -715,10 +727,17 @@ mod tests {
             assert!(typer.0.lock().unwrap().is_empty());
             assert!(history.load_recent().unwrap().is_empty());
             let expected = match &command {
-                PreviewCommand::Confirm(text) if !text.trim().is_empty() => vec![text.clone()],
+                PreviewCommand::Confirm(text)
+                    if !candidate.trim().is_empty() && !text.trim().is_empty() =>
+                {
+                    vec![text.clone()]
+                }
                 _ => Vec::new(),
             };
             commands.send(command).unwrap();
+            if candidate.trim().is_empty() {
+                let _ = commands.send(PreviewCommand::Cancel);
+            }
             let learned = feedback.blocking_recv().ok().inspect(|feedback| {
                 assert_eq!(
                     typer.0.lock().unwrap().as_slice(),

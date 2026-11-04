@@ -114,6 +114,7 @@ pub struct ApiTranscriber {
 
 impl ApiTranscriber {
     pub fn new(config: TranscriberConfig) -> Result<Self, reqwest::Error> {
+        let endpoint = config.metadata().endpoint;
         let transcriber = Self {
             auth: config.auth,
             api_url: config.endpoint,
@@ -127,7 +128,7 @@ impl ApiTranscriber {
         };
         info!(
             model = %transcriber.model,
-            api_url = %transcriber.api_url,
+            api_url = %endpoint,
             language = transcriber.language.as_deref().unwrap_or("auto"),
             max_retries = STT_MAX_RETRIES,
             "Using API transcriber for speech recognition"
@@ -164,12 +165,12 @@ impl ApiTranscriber {
         }
         let response = request
             .send()
-            .map_err(|e| TranscribeError::Network(e.to_string()))?;
+            .map_err(|e| TranscribeError::Network(e.without_url().to_string()))?;
 
         let status = response.status();
         let body = response
             .text()
-            .map_err(|e| TranscribeError::Network(e.to_string()))?;
+            .map_err(|e| TranscribeError::Network(e.without_url().to_string()))?;
 
         if !status.is_success() {
             return Err(TranscribeError::Api {
@@ -365,11 +366,26 @@ mod tests {
     }
 
     fn spawn_request_sequence(statuses: &'static [&'static str]) -> (u16, mpsc::Receiver<Vec<u8>>) {
+        let body = r#"{"text":"ok"}"#;
+        spawn_response_sequence(
+            statuses
+                .iter()
+                .map(|status| {
+                    format!(
+                        "HTTP/1.1 {status}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn spawn_response_sequence(responses: Vec<String>) -> (u16, mpsc::Receiver<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            for status in statuses {
+            for response in responses {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_millis(100)))
@@ -383,11 +399,6 @@ mod tests {
                     }
                 }
                 sender.send(request).unwrap();
-                let body = r#"{"text":"ok"}"#;
-                let response = format!(
-                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
                 stream.write_all(response.as_bytes()).unwrap();
             }
         });
@@ -507,6 +518,53 @@ mod tests {
         assert_eq!(result.unwrap(), "hello");
     }
 
+    fn assert_network_error_omits_request_url(response: &str) {
+        let (port, requests) = spawn_response_sequence(vec![response.to_string()]);
+        let endpoint = format!(
+            "http://url-user:url-password@127.0.0.1:{port}/v1/audio/transcriptions?token=url-token#url-fragment"
+        );
+        let transcriber = ApiTranscriber::new(test_config(&endpoint)).unwrap();
+
+        let error = transcriber.upload_chunk(&test_chunk()).unwrap_err();
+
+        requests.recv_timeout(Duration::from_secs(2)).unwrap();
+        let TranscribeError::Network(message) = &error else {
+            panic!("expected network error, got {error:?}");
+        };
+        assert!(
+            !message.is_empty(),
+            "the failure reason must remain available"
+        );
+        let diagnostics = format!("{error}\n{error:?}");
+        for private in [
+            "http://",
+            "/v1/audio/transcriptions",
+            "url-user",
+            "url-password",
+            "url-token",
+            "url-fragment",
+        ] {
+            assert!(
+                !diagnostics.contains(private),
+                "leaked {private}: {diagnostics}"
+            );
+        }
+    }
+
+    #[test]
+    fn send_error_omits_request_url() {
+        // A provider that disconnects before headers makes reqwest's send fail.
+        assert_network_error_omits_request_url("");
+    }
+
+    #[test]
+    fn truncated_response_error_omits_request_url() {
+        // A connection lost after headers fails while reading the response body instead.
+        assert_network_error_omits_request_url(
+            "HTTP/1.1 200 OK\r\ncontent-length: 128\r\nconnection: close\r\n\r\n{\"text\":",
+        );
+    }
+
     #[test]
     fn authorization_header_matches_typed_auth_mode() {
         for (auth, expected_header) in [
@@ -518,7 +576,9 @@ mod tests {
         ] {
             let (port, request) = spawn_request_stub();
             let config = test_config_with_auth(
-                &format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
+                &format!(
+                    "http://127.0.0.1:{port}/v1/audio/transcriptions?token=request-token&region=local#request-fragment"
+                ),
                 auth,
             );
             let transcriber = ApiTranscriber::new(config).unwrap();
@@ -531,6 +591,9 @@ mod tests {
                 .next()
                 .unwrap_or_default()
                 .to_ascii_lowercase();
+            assert!(headers.starts_with(
+                "post /v1/audio/transcriptions?token=request-token&region=local http/1.1\r\n"
+            ));
             match expected_header {
                 Some(expected) => assert!(headers.contains(expected)),
                 None => assert!(!headers.contains("authorization:")),

@@ -221,6 +221,10 @@ prefix/suffix extensions and multiword restorations outside the displayed candid
 Repeated graphemes can move an insertion through unchanged text without changing the output.
 If any such equivalent position reaches a candidate edge, learning is skipped even when another
 segment's edit made the global alignment place it inside. Shared segment edges use the same check.
+Pure deletions contained in a candidate also skip learning when an equivalent position crosses
+either candidate edge. Scanning stops at a mismatch or another edit; repetitions wholly inside
+the name still allow real spelling corrections such as `Codexx → Codex`. This prevents deleting
+neighboring repeated prose from training `张山 → 山` or `New York → York` without changing stored rules.
 An edit crossing a candidate or segment boundary skips the affected learning. Segment projection
 still accepts unshared edge insertions for confirmed context text. Before interpreting a name's
 grapheme edits, a retained complete name inside its

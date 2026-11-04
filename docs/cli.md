@@ -67,6 +67,11 @@ HTTP 路径按 `post_process.enabled` 决定是否整理文字；失败时回退
 离线转写不显示确认气泡、不输入活动窗口、不写普通识别历史，也不读取、上传或更新个人语境记忆。
 `--output` 写入指定文件并覆盖其原有内容。
 
+诊断日志写入 stderr，转写正文和其他命令结果保留在 stdout；可直接将
+`viberwhisper convert input.wav > output.txt` 的标准输出作为正文文件。
+分享日志前仍需检查内容；应用仅对 HTTP STT 的 endpoint 日志和网络错误移除 URL 凭据，
+不保证第三方响应正文或额外启用的依赖调试日志不含敏感信息。
+
 ## STT Prompt 数据集与回归
 
 ```bash

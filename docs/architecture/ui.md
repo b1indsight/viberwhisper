@@ -56,8 +56,16 @@ and pure additions append. Shared `platform::preview::TextPatch` uses Chinese se
 Unicode word/grapheme boundaries; native adapters convert byte offsets to UTF-16 (including
 Windows CRLF), preserve prefix selection and scroll, and clear programmatic undo/held-key state
 at the ready transition. Failure discards the current unvalidated tail; only validated partial
-results can enter the existing warning/confirmation path. HTTP and dataset capture keep their
+results can enter the editable warning/confirmation path. HTTP and dataset capture keep their
 existing finalization path.
+
+Recognition failure or convergence timeout with no usable text retains an empty, read-only preview
+and a distinct cancellation warning. Existing retry-blocked state rejects Enter but allows Esc;
+the worker keeps waiting until cancellation, then restores its saved destination. Its initial empty
+body cannot acquire delivery capability from later confirmation text, so error previews never inject,
+save history, or submit learning. Nonempty partial results remain editable with their warning;
+empty success, silence, and no-chunk results stay quiet. The integration render fixture uses the
+same finalization adapter and checks both replacing progress and opening a fresh error preview.
 
 The prepared preview also retains an optional opaque Realtime confirmation capability. History,
 native injection and feedback use the same edited text. Only successful injection consumes the

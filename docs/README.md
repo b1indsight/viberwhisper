@@ -56,3 +56,4 @@
 | [流式确认气泡](plan/60-streaming-confirmation-preview.md) | 只读正文增量、最终纠正与取消 |
 | [HTTP 整理与学习](plan/61-http-postprocess-correction.md) | 与 Realtime 共用改口规则、语境纠错和确认反馈 |
 | [听写响应简化](plan/62-simplified-dictation-response.md) | 话题字符串、有序专名候选、保守定位与评测迁移 |
+| [听写审查修复](plan/63-audit-fixes.md) | 重复删除学习、URL 日志脱敏、无文字失败提示与 CLI 输出分流（已实现） |

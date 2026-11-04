@@ -106,6 +106,7 @@ fn init_tracing() {
                 .unwrap_or_else(|_| EnvFilter::new("viberwhisper=info")),
         )
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
 }
 

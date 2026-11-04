@@ -106,11 +106,11 @@ impl<'a> Alignment<'a> {
 
     /// Project a complete source range; an edit crossing a boundary has no safe owner.
     pub fn project(&self, range: Range<usize>) -> Option<Range<usize>> {
-        if self
-            .edits
-            .iter()
-            .any(|edit| self.insertion_at(edit, range.start) || self.insertion_at(edit, range.end))
-        {
+        if self.edits.iter().any(|edit| {
+            self.insertion_at(edit, range.start)
+                || self.insertion_at(edit, range.end)
+                || self.deletion_escapes(edit, &range)
+        }) {
             return None;
         }
         self.project_range(range)
@@ -143,6 +143,59 @@ impl<'a> Alignment<'a> {
         } else {
             source.zip(inserted.cycle()).all(|(a, b)| a == b)
         }
+    }
+
+    /// A pure deletion can slide through repeated graphemes without changing the
+    /// output. Crossing either candidate edge makes its spelling ownership ambiguous.
+    fn deletion_escapes(&self, edit: &Edit, range: &Range<usize>) -> bool {
+        if !edit.after.is_empty()
+            || edit.before.is_empty()
+            || edit.before.start < range.start
+            || range.end < edit.before.end
+        {
+            return false;
+        }
+        // Only unchanged neighbors are evidence for an equivalent deletion; never
+        // slide through another replacement, insertion, or deletion.
+        let left = self
+            .edits
+            .iter()
+            .rfind(|other| other.before.end <= edit.before.start)
+            .map_or(0, |other| other.before.end);
+        let right = self
+            .edits
+            .iter()
+            .find(|other| edit.before.end <= other.before.start)
+            .map_or(self.before.len(), |other| other.before.start);
+        let deleted = &self.before[edit.before.clone()];
+        let mut start = edit.before.start;
+        for (neighbor, repeated) in self.before[left..edit.before.start]
+            .graphemes(true)
+            .rev()
+            .zip(deleted.graphemes(true).rev().cycle())
+        {
+            if neighbor != repeated {
+                break;
+            }
+            start -= neighbor.len();
+            if start < range.start {
+                return true;
+            }
+        }
+        let mut end = edit.before.end;
+        for (neighbor, repeated) in self.before[edit.before.end..right]
+            .graphemes(true)
+            .zip(deleted.graphemes(true).cycle())
+        {
+            if neighbor != repeated {
+                break;
+            }
+            end += neighbor.len();
+            if range.end < end {
+                return true;
+            }
+        }
+        false
     }
 
     fn project_range(&self, range: Range<usize>) -> Option<Range<usize>> {

@@ -288,18 +288,30 @@ impl ListenerApplication {
                     stream.progress.close();
                     stream.session_id == session_id && stream.shown
                 });
+                let can_confirm = !text.trim().is_empty();
                 let display = if shown {
-                    self.preview.update_text(&text, true, warning.as_deref())
-                } else {
+                    self.preview
+                        .update_text(&text, can_confirm, warning.as_deref())
+                } else if can_confirm {
                     self.preview
                         .show(session_id, &text, &destination, anchor, warning.as_deref())
+                } else {
+                    self.preview
+                        .show_streaming(session_id, &text, &destination, anchor, true)
                 };
                 if let Err(error) = display {
                     error!(%error, "Could not open confirmation preview");
                     let _ = commands.send(PreviewCommand::Cancel);
                     return;
                 }
-                self.pending_preview = Some(PendingPreview::new(session_id, commands));
+                let mut pending = PendingPreview::new(session_id, commands);
+                if !can_confirm {
+                    pending.failed(session_id, false);
+                    if let Some(warning) = warning.as_deref() {
+                        self.preview.show_error(warning, false);
+                    }
+                }
+                self.pending_preview = Some(pending);
             }
             PreviewUpdate::DeliveryFailed {
                 session_id,
@@ -811,7 +823,8 @@ impl ApplicationHandler<AppEvent> for ListenerApplication {
     }
 }
 
-fn finish_transcription(
+/// Prepare the shared desktop preview, retaining warnings when no text can be delivered.
+pub(in crate::ui) fn finish_transcription(
     result: Result<crate::dictation::Transcript, SessionError>,
     post_processor: &PostProcessor,
 ) -> Option<PreviewTranscription> {
@@ -857,26 +870,34 @@ fn finish_transcription(
                 failed_chunks = errors.len(),
                 "Partial transcription failure"
             );
-            Some((
-                partial_text,
-                Some("部分识别失败，请核对结果后输入。".into()),
-            ))
+            let warning = if partial_text.trim().is_empty() {
+                "识别失败，没有可输入的文字。\n按 Esc 关闭后重试。"
+            } else {
+                "部分识别失败，请核对结果后输入。"
+            };
+            Some((partial_text, Some(warning.into())))
         }
         Err(SessionError::ConvergenceTimeout {
             pending_count,
             partial_text,
         }) => {
             warn!(pending_count, "Convergence timeout");
-            Some((
-                partial_text,
-                Some("识别等待超时，结果可能不完整，请核对后输入。".into()),
-            ))
+            let warning = if partial_text.trim().is_empty() {
+                "识别等待超时，没有可输入的文字。\n按 Esc 关闭后重试。"
+            } else {
+                "识别等待超时，结果可能不完整，请核对后输入。"
+            };
+            Some((partial_text, Some(warning.into())))
         }
     };
     prepared
-        .filter(|(text, _)| !text.trim().is_empty())
+        .filter(|(text, warning)| !text.trim().is_empty() || warning.is_some())
         .map(|(text, warning)| PreviewTranscription {
-            text,
+            text: if text.trim().is_empty() {
+                String::new()
+            } else {
+                text
+            },
             warning,
             confirmation,
         })
@@ -1063,6 +1084,44 @@ mod tests {
         assert_eq!(stored["observations"].as_array().unwrap().len(), 1);
         assert_eq!(stored["observations"][0]["text"], "使用ViberWhisper。");
         assert_eq!(stored["corrections"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn empty_failures_keep_visible_warnings_but_empty_success_stays_quiet() {
+        use crate::core::orchestrator::SessionError;
+        use crate::postprocess::{PostProcessConfig, PostProcessor};
+
+        // A failed request with no usable prefix used to disappear alongside its
+        // empty text. Keep its warning without turning silence into a failure.
+        let processor = PostProcessor::new(PostProcessConfig::Disabled);
+        for partial in ["", " \n", "有效部分"] {
+            for failure in [
+                SessionError::PartialFailure {
+                    errors: vec![(0, TranscribeError::Network("private-provider-error".into()))],
+                    partial_text: partial.into(),
+                },
+                SessionError::ConvergenceTimeout {
+                    pending_count: 1,
+                    partial_text: partial.into(),
+                },
+            ] {
+                let prepared = super::finish_transcription(Err(failure), &processor)
+                    .expect("recognition failures must remain visible");
+                let empty = partial.trim().is_empty();
+                assert_eq!(prepared.text, if empty { "" } else { partial });
+                assert!(prepared.confirmation.is_none());
+                let warning = prepared.warning.expect("failure warning");
+                assert_eq!(warning.contains("Esc"), empty);
+                assert!(!warning.contains("private-provider-error"));
+            }
+        }
+        for result in [
+            Ok(String::new().into()),
+            Ok(" \n".to_owned().into()),
+            Err(SessionError::NoChunks),
+        ] {
+            assert!(super::finish_transcription(result, &processor).is_none());
+        }
     }
 
     #[test]

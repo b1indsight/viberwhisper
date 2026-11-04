@@ -37,6 +37,11 @@ the persisted config document is never mutated. `metadata()` returns endpoint/mo
 temperature for dataset and run JSON while removing endpoint userinfo, query, and fragment data and
 never exposing `ApiAuth`.
 
+Initialization diagnostics reuse that sanitized endpoint. Send and response-body network errors
+remove reqwest's attached URL before formatting; requests still use the original endpoint and
+authentication. Provider status/body errors remain available without attempting to redact arbitrary
+response content. The process tracing subscriber writes diagnostics to stderr, not command stdout.
+
 Each request builds a multipart form containing `model`, `temperature`,
 `response_format=verbose_json`, optional `language` and `prompt`, plus an `audio.wav` file part. The
 part reads from a new `Cursor<Arc<[u8]>>`; retries share the original bytes and only recreate the

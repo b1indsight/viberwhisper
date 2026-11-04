@@ -27,6 +27,7 @@ const SMOKE_TEXT: &str = "已编辑的文字：中文、English 和 emoji 🎙�
 enum DemoEvent {
     Update(PreviewUpdate),
     Progress {
+        session_id: SessionId,
         text: String,
         destination: String,
         anchor: Option<PreviewRect>,
@@ -39,8 +40,8 @@ enum DemoEvent {
 /// Gives the user three seconds to focus a destination, then opens the editable
 /// bubble. Enter really delivers the edited text. `smoke` uses the already focused
 /// destination and tests native editing, held Enter and production delivery.
-/// On macOS, `artifacts` instead runs a self-contained streaming/render fixture;
-/// it never captures a destination, injects text, or changes persistent history.
+/// On macOS, `artifacts` instead runs self-contained streaming and failure fixtures;
+/// they never capture a destination, inject text, or change persistent history.
 pub fn run_preview_demo(smoke: bool, artifacts: Option<PathBuf>) -> Result<()> {
     if let Some(directory) = &artifacts {
         std::fs::create_dir_all(directory)?;
@@ -84,6 +85,7 @@ pub fn run_preview_demo(smoke: bool, artifacts: Option<PathBuf>) -> Result<()> {
             let (applied, receiver) = mpsc::sync_channel(0);
             if proxy
                 .send_event(DemoEvent::Progress {
+                    session_id: SessionId(1),
                     text: text.into(),
                     destination: destination.clone(),
                     anchor,
@@ -112,6 +114,63 @@ pub fn run_preview_demo(smoke: bool, artifacts: Option<PathBuf>) -> Result<()> {
                 .is_ok()
             {
                 let _ = receiver.recv();
+            }
+            let processor = crate::postprocess::PostProcessor::new(
+                crate::postprocess::PostProcessConfig::Disabled,
+            );
+            for (session_id, failure) in [
+                (
+                    SessionId(2),
+                    crate::core::orchestrator::SessionError::PartialFailure {
+                        errors: vec![(
+                            0,
+                            crate::transcriber::TranscribeError::Network("fixture".into()),
+                        )],
+                        partial_text: String::new(),
+                    },
+                ),
+                (
+                    SessionId(3),
+                    crate::core::orchestrator::SessionError::ConvergenceTimeout {
+                        pending_count: 1,
+                        partial_text: String::new(),
+                    },
+                ),
+            ] {
+                if worker_gate.is_cancelled() {
+                    break;
+                }
+                // One failure replaces a streaming bubble; the timeout opens
+                // directly, covering both production presentation paths.
+                if session_id == SessionId(2) {
+                    let (applied, receiver) = mpsc::sync_channel(0);
+                    if proxy
+                        .send_event(DemoEvent::Progress {
+                            session_id,
+                            text: "".into(),
+                            destination: "原应用".into(),
+                            anchor: None,
+                            applied,
+                        })
+                        .is_err()
+                        || receiver.recv().is_err()
+                    {
+                        return;
+                    }
+                }
+                // Use the real finalization adapter and waiting worker, not a copy
+                // of their error messages or a renderer that immediately disconnects.
+                let transcription = super::listener::finish_transcription(Err(failure), &processor)
+                    .expect("Empty failures must produce a preview");
+                wait_for_confirmation(
+                    session_id,
+                    transcription,
+                    typer.as_ref(),
+                    None,
+                    &worker_gate,
+                    || Err::<NativeTarget, _>(anyhow!("Render fixture has no delivery target")),
+                    &|update| proxy.send_event(DemoEvent::Update(update)).is_ok(),
+                );
             }
         } else {
             wait_for_confirmation(
@@ -173,6 +232,7 @@ impl ApplicationHandler<DemoEvent> for Demo {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: DemoEvent) {
         match event {
             DemoEvent::Progress {
+                session_id,
                 text,
                 destination,
                 anchor,
@@ -182,7 +242,7 @@ impl ApplicationHandler<DemoEvent> for Demo {
                     self.preview.update_text(&text, false, None)
                 } else {
                     self.preview
-                        .show_streaming(SessionId(1), &text, &destination, anchor, true)
+                        .show_streaming(session_id, &text, &destination, anchor, true)
                 };
                 if let Err(error) = display.and_then(|_| {
                     if (self.smoke || self.artifacts.is_some()) && self.streaming {
@@ -217,6 +277,7 @@ impl ApplicationHandler<DemoEvent> for Demo {
                 commands,
             }) => {
                 self.pending = Some(PendingPreview::new(session_id, commands));
+                let can_confirm = !text.trim().is_empty();
                 if self.smoke {
                     println!("Preview destination: {destination}; captured anchor: {anchor:?}");
                     if let Some(warning) = warning.as_deref() {
@@ -224,25 +285,65 @@ impl ApplicationHandler<DemoEvent> for Demo {
                     }
                 }
                 let display = if self.streaming {
-                    self.preview.update_text(&text, true, warning.as_deref())
-                } else {
+                    self.preview
+                        .update_text(&text, can_confirm, warning.as_deref())
+                } else if can_confirm {
                     self.preview
                         .show(session_id, &text, &destination, anchor, warning.as_deref())
+                } else {
+                    self.preview
+                        .show_streaming(session_id, &text, &destination, anchor, true)
                 };
                 if let Err(error) = display {
                     self.error = Some(error.to_string());
                     event_loop.exit();
+                    return;
+                }
+                if !can_confirm {
+                    self.pending.as_mut().unwrap().failed(session_id, false);
+                    if let Some(warning) = warning.as_deref() {
+                        self.preview.show_error(warning, false);
+                    }
                 }
                 if self.artifacts.is_some() {
-                    if let Err(error) = self.capture("ready.png") {
+                    let name = if can_confirm {
+                        "ready.png"
+                    } else if session_id == SessionId(2) {
+                        "failed.png"
+                    } else {
+                        "timeout.png"
+                    };
+                    if let Err(error) = self.capture(name) {
                         self.error = Some(error.to_string());
+                        event_loop.exit();
+                        return;
                     }
-                    let _ = self
-                        .pending
-                        .as_ref()
-                        .unwrap()
-                        .commands
-                        .send(PreviewCommand::Cancel);
+                    if can_confirm {
+                        let _ = self
+                            .pending
+                            .as_ref()
+                            .unwrap()
+                            .commands
+                            .send(PreviewCommand::Cancel);
+                        self.pending = None;
+                        self.streaming = false;
+                        self.preview.close();
+                    } else {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let before = self.notifications.load(Ordering::Relaxed);
+                            if let Err(error) = self.preview.smoke_error(&|| {
+                                anyhow::ensure!(
+                                    self.notifications.load(Ordering::Relaxed) == before,
+                                    "Error preview accepted native Enter"
+                                );
+                                Ok(())
+                            }) {
+                                self.error = Some(error.to_string());
+                                event_loop.exit();
+                            }
+                        }
+                    }
                 }
             }
             DemoEvent::Input(event) => {
@@ -275,6 +376,11 @@ impl ApplicationHandler<DemoEvent> for Demo {
                     self.error = Some("Preview delivery worker disconnected".into());
                     event_loop.exit();
                 }
+                if self.artifacts.is_some() {
+                    self.pending = None;
+                    self.streaming = false;
+                    self.preview.close();
+                }
             }
             DemoEvent::Update(PreviewUpdate::DeliveryFailed {
                 session_id,
@@ -300,6 +406,9 @@ impl ApplicationHandler<DemoEvent> for Demo {
                 if self.smoke && self.notifications.load(Ordering::Relaxed) != 1 {
                     self.error = Some("Expected exactly one native confirmation".into());
                 }
+                if self.artifacts.is_some() && self.notifications.load(Ordering::Relaxed) != 2 {
+                    self.error = Some("Expected cancellation of both error previews".into());
+                }
                 self.preview.close();
                 event_loop.exit();
             }
@@ -312,7 +421,7 @@ impl ApplicationHandler<DemoEvent> for Demo {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if !self.smoke {
+        if !self.smoke && self.artifacts.is_none() {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
@@ -321,7 +430,7 @@ impl ApplicationHandler<DemoEvent> for Demo {
             event_loop.exit();
             return;
         }
-        if self.pending.is_some() && !self.sent {
+        if self.smoke && self.pending.is_some() && !self.sent {
             match self.preview.smoke_confirmation(SMOKE_TEXT, &|| {
                 anyhow::ensure!(
                     self.notifications.load(Ordering::Relaxed) == 0,
