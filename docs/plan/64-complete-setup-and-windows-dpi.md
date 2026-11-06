@@ -714,3 +714,24 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
 - **验证边界：** 失败 head 的 macOS job 通过，Windows 已执行的 DPI/编辑保留及滚动恢复检查通过，后续原生阶段被该断言阻断。
   当前仅有自有 HWND 的 `WM_PRINT` 捕获，实际显示 DPI=96；合成 DPI 不是真实高 DPI 显示。
   细滚动条仍未在产品中启用，屏幕剪裁、真实拖动、UIA、真实 4K、混合屏、输入法及系统文本放大尚未验证。
+
+### [016] — 2026-11-06 — 提示区与初步细滚动条原生验证通过，修正实验像素遍历 lint
+
+- **原生结果：** [f4e08942 的 Windows job](https://github.com/b1indsight/viberwhisper/actions/runs/42249800890/job/128001562295)
+  通过全量测试、原生设置/DPI、两模式 EXE smoke 和结果演示；macOS job 通过。
+  warning 在合成 96/144/192 DPI 的实测高为 30/50/64 px，控件分别完整容纳；三行 error 的文字及控件高均为 45/75/96 px，
+  保留间距与增长检查全部通过，关闭 [015] 的原生断言失败。局部系统配色回退也通过，不等于真实 OS 高对比度切换。
+- **细条初步门禁及图像：** 测试专用探针在原生首行 0/7/25 检查槽/滑块几何、约 6 DIP 宽度、槽外像素不变、
+  `WM_PRINT` 合成及实际 `WindowFromPoint` 槽边缘命中；短文隐藏和模拟系统色回退通过。
+  已直接查看探针首尾位置与原生条基线图；实验图不再有整列浅色轨道，滑块随原生位置变化。
+  正式窗口和演示仍使用原生条，屏幕真实剪裁、模态拖动重绘与 UIA 未验证前不启用覆盖层。
+- **实际 CI 失败与最小修正：** 最后 Clippy 1.99 的 `chunks_exact_to_as_chunks` 拒绝新增实验中两处固定四字节分块，
+  因此不能称整轮 Windows CI 通过。将像素对照循环改为 `as_chunks::<4>().0`，保留同一逐像素枚举、索引与槽外相等断言；
+  不添加 lint 例外、不改 CI 工具链、不改产品窗口或测试输入。没有新增机制，故无额外消融或永久测试。
+- **本机检查与证据：** 格式及 Windows GNU 的 `windows-app`、`windows-app,integration` 两组 all-targets 类型/lint 检查通过，
+  输出在 `.amp/in/artifacts/scrollbar-probe-chunks-validation.log`。本机 Clippy 为 1.94，没有该新增 lint，最终仍需 CI 1.99 复验；
+  GNU 检查使用 `DOCS_RS=1`，没有 Windows 链接/执行。原生日志在 `.amp/in/artifacts/ci-footer-fixture-f4e08942.log`，
+  同名目录保存本轮 PNG；全部图片结构检查通过，前一轮共有图逐字节一致，输出在 `scrollbar-probe-native-capture-validation.log`。
+  已核对默认短句、长文本警告、三行错误与局部系统色代表图；演示警告本来只有一行，未把错误的两行复核期望当成裁切缺陷。
+- **交付与边界：** 此批仅修正测试工具的 lint，待同一门禁审查后推送原 PR 并订阅精确 head。
+  全部图仍是自有 HWND 的原生 `WM_PRINT`，实际显示 DPI=96；真实 4K、物理缩放、混合屏、输入法与系统文本放大仍未验收。

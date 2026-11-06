@@ -383,8 +383,10 @@ pub(super) fn exercise(
                 "Scrollbar probe changed preview size"
             );
             for (index, (before, after)) in original_pixels
-                .chunks_exact(4)
-                .zip(pixels.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(pixels.as_chunks::<4>().0)
                 .enumerate()
             {
                 let x = window.left + (index as u32 % frame.width) as i32;
