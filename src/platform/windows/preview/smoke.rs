@@ -93,13 +93,16 @@ impl NativePreview {
         encoder.set_depth(png::BitDepth::Eight);
         encoder.write_header()?.write_image_data(&rgba)?;
         eprintln!(
-            "preview capture: {}; {width}x{height}; actual DPI={}; layout DPI={}; read-only={}; warning={}",
+            "preview capture: {}; {width}x{height}; actual DPI={}; layout DPI={}; read-only={}; warning={}; lines={}; vertical-scrollbar={}",
             path.display(),
             unsafe { GetDpiForWindow(window) },
             self.state.dpi.get(),
             unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) } & ES_READONLY as isize
                 != 0,
             self.state.message_visible.get(),
+            unsafe { SendMessageW(self.state.text.get(), EM_GETLINECOUNT, 0, 0) },
+            unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) } & WS_VSCROLL as isize
+                != 0,
         );
         Ok(())
     }
@@ -190,8 +193,12 @@ impl NativePreview {
             "Preview is not PMv2"
         );
         let text = "hello 😀 中文 line\n".repeat(40);
-        for (ready, warning) in [(false, None), (true, Some("测试提示"))] {
-            preview.update_text(&text, ready, warning)?;
+        for (text, ready, warning, scrollable) in [
+            ("hello 😀 中文", false, None, false),
+            (text.as_str(), false, None, true),
+            (text.as_str(), true, Some("测试提示"), true),
+        ] {
+            preview.update_text(text, ready, warning)?;
             let editor = preview.state.text.get();
             unsafe {
                 if ready {
@@ -205,8 +212,8 @@ impl NativePreview {
             let original = preview.state.normalized_text()?;
             let first = unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) };
             ensure!(
-                first > 0,
-                "DPI fixture did not scroll away from the first line"
+                (first > 0) == scrollable,
+                "DPI fixture did not keep the expected scroll state"
             );
             for (step, (dpi, reentrant)) in [
                 (96, false),
@@ -275,16 +282,31 @@ impl NativePreview {
                     "Could not read DPI-scaled bounds"
                 );
                 ensure!(
-                    bounds.bottom - bounds.top == pixels(if ready { 268 } else { 220 })
+                    bounds.bottom - bounds.top
+                        == pixels(if !scrollable {
+                            52
+                        } else if ready {
+                            268
+                        } else {
+                            220
+                        })
                         && bounds.right - bounds.left <= pixels(420)
                         && edit_bounds.left - bounds.left == pixels(16)
                         && edit_bounds.top - bounds.top == pixels(12)
-                        && edit_bounds.bottom - edit_bounds.top == pixels(196)
+                        && edit_bounds.bottom - edit_bounds.top
+                            == pixels(if scrollable { 196 } else { 28 })
                         && bounds.top == suggested.top
                         && ((bounds.left + bounds.right) - (suggested.left + suggested.right))
                             .abs()
                             <= 1,
                     "Preview did not apply {dpi}-DPI layout and suggested placement"
+                );
+                ensure!(
+                    (unsafe { GetWindowLongPtrW(editor, GWL_STYLE) } & WS_VSCROLL as isize != 0)
+                        == scrollable
+                        && (scrollable
+                            || unsafe { SendMessageW(editor, EM_GETLINECOUNT, 0, 0) } == 1),
+                    "DPI change wrapped short text or kept the wrong scrollbar state"
                 );
                 let mut expected = NONCLIENTMETRICSW {
                     cbSize: size_of::<NONCLIENTMETRICSW>() as u32,
@@ -335,10 +357,16 @@ impl NativePreview {
                     "DPI change lost text, selection, scroll, undo, or read-only state"
                 );
                 eprintln!(
-                    "native preview: synthetic {dpi} DPI; ready={ready}; reentrant={reentrant}; font/layout/editor state checked"
+                    "native preview: synthetic {dpi} DPI; ready={ready}; scrollable={scrollable}; reentrant={reentrant}; font/layout/editor state checked"
                 );
                 if let Some(directory) = &artifacts {
-                    let state = if ready { "ready-warning" } else { "streaming" };
+                    let state = if !scrollable {
+                        "short"
+                    } else if ready {
+                        "ready-warning"
+                    } else {
+                        "streaming"
+                    };
                     preview.smoke_capture(
                         &directory.join(format!("synthetic-{dpi}-{state}-step-{step}.png")),
                     )?;
@@ -436,16 +464,41 @@ impl NativePreview {
                 for y in [work.y + 8.0, work.y + work.height - 26.0] {
                     let anchor = PreviewRect::new(x, y, 1.0, 18.0).unwrap();
                     self.state.anchor.set(Some(anchor));
-                    for (text, ready, warning) in [
-                        ("短句", false, None),
-                        (long.as_str(), false, None),
-                        ("短句", true, None),
-                        (long.as_str(), true, Some("测试提示")),
+                    for (text, ready, warning, scrollable) in [
+                        ("我们明天上午去上海。", false, None, false),
+                        (long.as_str(), false, None, true),
+                        ("我们明天上午去上海。", true, None, false),
+                        (long.as_str(), true, Some("测试提示"), true),
+                        (
+                            "已编辑的文字：中文、English 和 emoji 🎙️。",
+                            true,
+                            None,
+                            false,
+                        ),
                     ] {
                         self.update_text(text, ready, warning)?;
+                        // The reported short sentence wrapped because a permanent scrollbar
+                        // consumed its measured width. Exercise growth and deletion too.
+                        ensure!(
+                            (unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) }
+                                & WS_VSCROLL as isize
+                                != 0)
+                                == scrollable
+                                && (scrollable
+                                    || unsafe {
+                                        SendMessageW(self.state.text.get(), EM_GETLINECOUNT, 0, 0)
+                                    } == 1),
+                            "Preview wrapped fitting text or kept the wrong scrollbar state"
+                        );
                         ensure!(
                             unsafe { GetWindowRect(self.state.window.get(), &mut bounds) } != 0,
                             "Could not read resized bubble bounds"
+                        );
+                        ensure!(
+                            scrollable
+                                || bounds.bottom - bounds.top
+                                    == self.state.pixels(28) + self.state.pixels(24),
+                            "Fitting text did not return to the single-line bubble height"
                         );
                         let expected = preview_origin(
                             anchor,
@@ -465,6 +518,24 @@ impl NativePreview {
                             "Resized preview escaped its work area"
                         );
                     }
+                }
+            }
+            let (_, line_height) = self.state.text_metrics()?;
+            let fitting_lines = self.state.pixels(196) / line_height;
+            for ready in [false, true] {
+                for lines in [fitting_lines, fitting_lines + 1, fitting_lines] {
+                    let text = "我们明天上午去上海。\n".repeat((lines - 1) as usize)
+                        + "我们明天上午去上海。";
+                    self.update_text(&text, ready, None)?;
+                    ensure!(
+                        unsafe { SendMessageW(self.state.text.get(), EM_GETLINECOUNT, 0, 0) }
+                            == lines as isize
+                            && (unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) }
+                                & WS_VSCROLL as isize
+                                != 0)
+                                == (lines > fitting_lines),
+                        "Scrollbar did not follow the fitting/overflowing line boundary"
+                    );
                 }
             }
             Ok(())

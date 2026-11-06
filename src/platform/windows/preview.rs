@@ -13,7 +13,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
     EM_EMPTYUNDOBUFFER, EM_GETFIRSTVISIBLELINE, EM_GETLINECOUNT, EM_GETMARGINS, EM_GETRECT,
     EM_GETSEL, EM_LINESCROLL, EM_REPLACESEL, EM_SCROLLCARET, EM_SETLIMITTEXT, EM_SETMODIFY,
-    EM_SETREADONLY, EM_SETRECTNP, EM_SETSEL,
+    EM_SETREADONLY, EM_SETRECTNP, EM_SETSEL, ShowScrollBar,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -342,7 +342,9 @@ impl WindowState {
         if self.laying_out.replace(true) {
             return Ok(());
         }
-        let mut first_visible_line = None;
+        // Measuring without a scrollbar can temporarily reflow and clamp the current scroll.
+        let first_visible_line =
+            unsafe { SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) };
         let result = (|| loop {
             let mut bounds = RECT::default();
             let window = self.window.get();
@@ -350,11 +352,6 @@ impl WindowState {
                 .pending_dpi
                 .take()
                 .unwrap_or_else(|| unsafe { GetDpiForWindow(window) });
-            if self.dpi.get() != dpi && self.font.borrow().is_some() {
-                first_visible_line.get_or_insert_with(|| unsafe {
-                    SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0)
-                });
-            }
             self.apply_dpi(dpi)?;
             let pixels = |logical| self.pixels(logical);
             ensure!(
@@ -379,7 +376,7 @@ impl WindowState {
             let (natural_width, line_height) = self.text_metrics()?;
             let margins = unsafe { SendMessageW(self.text.get(), EM_GETMARGINS, 0, 0) } as u32;
             let padding = pixels(34) + (margins & 0xffff) as i32 + (margins >> 16) as i32;
-            let width = if self.message_visible.get() {
+            let mut width = if self.message_visible.get() {
                 max_width
             } else {
                 natural_width
@@ -387,12 +384,17 @@ impl WindowState {
                     .clamp(pixels(96), max_width)
             };
             let mut viewport = RECT::default();
+            let mut editor_bounds = RECT::default();
             ensure!(
-                unsafe { GetClientRect(self.text.get(), &mut viewport) } != 0,
+                unsafe { GetClientRect(self.text.get(), &mut viewport) } != 0
+                    && unsafe { GetWindowRect(self.text.get(), &mut editor_bounds) } != 0,
                 "无法获取输入框尺寸"
             );
-            // Reflow at the new width before counting native wrapped lines.
-            if viewport.right != width - pixels(32) {
+            // Count lines at the no-scrollbar client width, without toggling the bar on
+            // every update. Use the actual non-client width, including its current DPI.
+            let measure_width =
+                width - pixels(32) + editor_bounds.right - editor_bounds.left - viewport.right;
+            if editor_bounds.right - editor_bounds.left != measure_width {
                 ensure!(
                     unsafe {
                         SetWindowPos(
@@ -400,7 +402,7 @@ impl WindowState {
                             null_mut(),
                             pixels(16),
                             pixels(12),
-                            width - pixels(32),
+                            measure_width,
                             viewport.bottom,
                             SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
                         )
@@ -413,6 +415,24 @@ impl WindowState {
             }
             let lines = unsafe { SendMessageW(self.text.get(), EM_GETLINECOUNT, 0, 0) } as i32;
             let content_height = lines.max(1).saturating_mul(line_height);
+            let overflow = content_height > pixels(196);
+            if (unsafe { GetWindowLongPtrW(self.text.get(), GWL_STYLE) } & WS_VSCROLL as isize != 0)
+                != overflow
+            {
+                ensure!(
+                    unsafe { ShowScrollBar(self.text.get(), SB_VERT, overflow as i32) } != 0,
+                    "无法调整预览滚动条"
+                );
+            }
+            if overflow {
+                ensure!(
+                    unsafe { GetClientRect(self.text.get(), &mut viewport) } != 0,
+                    "无法获取输入框尺寸"
+                );
+                // Keep the measured wrapping when the width cap leaves room for the bar.
+                // At the cap, extra wrapping cannot change the already capped height.
+                width = (width + measure_width - viewport.right).min(max_width);
+            }
             // Match the macOS viewport bounds; taller text stays scrollable.
             let editor_height = content_height.clamp(pixels(28), pixels(196));
             let height = editor_height
@@ -492,11 +512,16 @@ impl WindowState {
             // Moving to the caret's monitor can deliver WM_DPICHANGED synchronously. Its
             // pending DPI must be applied after this layout, rather than dropped by the guard.
             if self.pending_dpi.get().is_none() {
-                if let Some(first) = first_visible_line {
-                    let current =
-                        unsafe { SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) };
-                    unsafe { SendMessageW(self.text.get(), EM_LINESCROLL, 0, first - current) };
-                }
+                let current =
+                    unsafe { SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) };
+                unsafe {
+                    SendMessageW(
+                        self.text.get(),
+                        EM_LINESCROLL,
+                        0,
+                        first_visible_line - current,
+                    )
+                };
                 break Ok(());
             }
         })();
