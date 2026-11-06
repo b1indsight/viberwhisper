@@ -763,3 +763,34 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
 - **剩余边界：** 新增客户端尚未在 Windows 运行，必须经本次审查、授权推送后取回新 CI 日志和屏幕帧再判断。
   同级覆盖层若未通过原生门禁，按 [010] / [011] 保留系统条并报告，不自动扩展为自定义滚动系统。
   本阶段限定实际 96 DPI 的托管桌面；合成 DPI、管理型 UIA 客户端和注入的 OS 输入不证明真实 4K、混合屏、Narrator、输入法或物理鼠标手感。
+
+### [018] — 2026-11-06 — 系统条 UIA 基线失败与客户端代理初始化候选
+
+- **触发与已观察结果：** [a815cd23 的 CI](https://github.com/b1indsight/viberwhisper/actions/runs/42259974145)
+  macOS 通过，Windows 在首轮 Test 失败；后续设置/EXE smoke、演示与最终 Clippy 未执行。
+  setup/DPI、编辑状态及既有滚动/提示区检查完成。新的 `native-ready` 系统条阶段产生全部八个真实屏幕帧，
+  走完滚轮、PageDown、轨道点击、按住拖经中部和首尾、释放与移出，并检查文字、焦点和原生首行；
+  最后 UIA 要求失败：槽边缘/滑块虽归 EDIT 的 HWND，但类型为 Pane（50033），`Patterns=[]`，`AccessibleScrollbar=false`。
+  此阶段 9.59 秒正常报告失败，不是外层三十秒超时；不能归因于此前审查 medium，亦不能称覆盖层输入/UIA 已通过。
+  覆盖层桌面阶段和只读基线都尚未运行。
+- **图像和原始证据：** 日志为 `.amp/in/artifacts/ci-desktop-input-a815cd23.log`，同名目录取回 PNG。
+  全部图经 CRC/解压检查；共有图与前一 head 逐字节一致，新增八张 `probe-screen-native-ready-*` 为 `CopyFromScreen`。
+  已查看初始、中部、底部、回顶帧，系统条位置与预期相符，文字无重叠/裁切；重复文案不能单靠截图识别逻辑首行。
+  捕获检查输出在 `desktop-input-failure-capture-validation.log`，实际显示仍为 96 DPI，不是 4K。
+- **诊断与决策：** 核对 native 控件消息路径，未吞 `WM_GETOBJECT`。参考当前 dotnet/wpf 的
+  [ProxyManager](https://github.com/dotnet/wpf/blob/main/src/Microsoft.DotNet.Wpf/src/UIAutomation/UIAutomationClient/MS/Internal/Automation/ProxyManager.cs)
+  及 UiaCoreApi：默认代理加载先清除重试标志，发现调用程序集时未保护动态帧的 `ReflectedType`，提供者回调吞掉异常。
+  这可以产生所见的通用 HWND/Pane 回退；但未取得失败线程栈或本机 .NET Framework 4.8 对应实现，代理缺失/版本问题也尚未排除，
+  因而只记为代理初始化假说。固定 Opus 5.5、无工具/MCP 的只读咨询支持最小候选，不是运行证据。
+  不改 Rust COM 初始化、客户端 apartment 或产品可访问性实现，不假定多行 EDIT 必须报告 Edit 类型。
+- **候选改动与复杂度：** 只改现有 `scrollbar_probe.ps1`，在其 C# 适配器中用具名托管调用者显式注册匹配 UIA 客户端强名的
+  `UIAutomationClientsideProviders`，在任何 UIA 查询前执行，注册/加载异常直接失败；不在 PowerShell 动态帧内依赖隐式发现。
+  使用实际客户端 DLL 作为编译引用，输出实际加载的客户端/代理名称、PS/CLR、位数和 apartment，并为比较补充控件类、类型及 framework。
+  保留全部 UIA、屏幕、输入、负对照断言和原超时，不新增产品机制、库或配置。
+  原始无显式注册版本的失败已捕获；候选在真实 Windows 的效果和消融仍待后续 CI，不能预报根因已确认或门禁已清除。
+- **本机检查：** 格式、macOS integration 测试和 all-targets Clippy、Windows GNU integration all-targets 类型/lint 检查通过。
+  PowerShell 7 完整解析及提取 C# 编译通过；临时具名 stub 程序集检查了客户端/代理名称映射、具名调用帧，以及注册异常不会被吞掉。
+  初版 scratch 的 Add-Type 输出随机程序集名，导致假的加载失败，该次结果已作废；改为 Roslyn 显式命名 stub 后正负对照通过。
+  输出在 `uia-proxy-local-validation.log`，原无效夹具输出单独保留；此检查未使用真实 UIA DLL，未执行 Win32、屏幕或输入。
+- **边界与交付：** 本批是 CI 基线失败的最小客户端候选，仍需双独立审查、推送同一 PR 后读取 Windows 的实际程序集和 provider 结果。
+  此前外层超时清理 medium 与 macOS 长地址项均未返修；产品和演示保留系统条，真实 4K、混合屏、IME、Narrator 和物理鼠标仍未验收。

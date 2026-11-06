@@ -9,11 +9,20 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, WindowsBase, System.Drawing
-Add-Type -TypeDefinition @'
+Add-Type -ReferencedAssemblies ([Windows.Automation.AutomationElement].Assembly.Location) -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class ScrollbarInput {
+    // Use a named managed caller for proxy discovery, rather than a PowerShell dynamic frame.
+    // Registration/load errors must escape here, not disappear inside UIA's provider callback.
+    public static string InitializeAutomationClient() {
+        var client = typeof(System.Windows.Automation.AutomationElement).Assembly;
+        var name = client.GetName();
+        name.Name = "UIAutomationClientsideProviders";
+        System.Windows.Automation.ClientSettings.RegisterClientSideProviderAssembly(name);
+        return client.FullName + " | " + System.Reflection.Assembly.Load(name).FullName;
+    }
     public struct Point { public int X, Y; }
     public struct Rect { public int Left, Top, Right, Bottom; }
     public struct Scrollbar {
@@ -98,6 +107,10 @@ public static class ScrollbarInput {
     }
 }
 '@
+
+# Initialize before the first UIA query; the native baseline must expose real control providers.
+$uiaAssemblies = [ScrollbarInput]::InitializeAutomationClient()
+Write-Output ("scrollbar UIA client $Case : PS=$($PSVersionTable.PSVersion); CLR=$([Environment]::Version); x64=$([Environment]::Is64BitProcess); apartment=$([Threading.Thread]::CurrentThread.GetApartmentState()); assemblies=$uiaAssemblies")
 
 $windowHandle = [IntPtr]::new($Window)
 $editorHandle = [IntPtr]::new($Editor)
@@ -266,6 +279,9 @@ try {
     $outside = Get-Uia ($script:bounds.Left + 20) ($script:bounds.Top + 2)
     if ($outside.OwnedByEdit) { throw 'Negative control: UIA accepted a point outside EDIT' }
     $element = [Windows.Automation.AutomationElement]::FromHandle($editorHandle)
+    $metrics.EditorClass = $element.Current.ClassName
+    $metrics.EditorType = $element.Current.ControlType.Id
+    $metrics.Framework = $element.Current.FrameworkId
     $condition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::ScrollBar)
     $accessibleBar = $element.FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)
     $metrics.AccessibleScrollbar = $null -ne $accessibleBar -and !$accessibleBar.Current.IsOffscreen
