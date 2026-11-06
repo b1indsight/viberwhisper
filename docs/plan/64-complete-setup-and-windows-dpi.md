@@ -1,7 +1,7 @@
 # 64 - 完整配置向导与 Windows 高 DPI 窗口
 
 **阶段：** 方案待明确批准；尚未修改产品代码或测试。
-**PR：** 待创建的 docs-only draft PR，批准后在同一个 PR 实现。
+**PR：** [#165（docs-only draft）](https://github.com/b1indsight/viberwhisper/pull/165)，批准后在同一个 PR 实现。
 **Bookmark：** `feat/complete-setup-windows-dpi`。
 **基线：** 最新 fetch 后的 `origin/master`，即 [v0.5.0 发布准备提交 e18be032](https://github.com/b1indsight/viberwhisper/commit/e18be032950c03bc7bf40153e028e12193cccacc)。
 **工作区：** 独立 JJ workspace `setup-realtime-dpi-20261106`；不修改源主工作区、发布准备工作区、个人配置或个人记忆。
