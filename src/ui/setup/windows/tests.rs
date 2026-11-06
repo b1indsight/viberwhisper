@@ -26,9 +26,10 @@ fn native_setup_dialogs_show_and_return() {
     if std::env::var_os(CHILD_ENV).is_some() {
         crate::platform::initialize_dpi_awareness().unwrap();
         crate::platform::initialize_dpi_awareness().unwrap(); // An existing PMv2 context is valid.
-        exercise_message(Some(true));
-        exercise_message(Some(false));
-        exercise_message(None);
+        exercise_message(Some(true), false);
+        exercise_message(Some(false), false);
+        exercise_message(None, false);
+        exercise_message(None, true);
         for (default, entered, accept) in [
             (Some("默认值 \"中文\" 🦀"), "输入 \"中文\" 🦀", true),
             (None, "测试密钥", true),
@@ -63,6 +64,8 @@ fn native_setup_dialogs_show_and_return() {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
             break;
         }
         if Instant::now() >= deadline {
@@ -78,8 +81,8 @@ fn native_setup_dialogs_show_and_return() {
     }
 }
 
-fn exercise_message(answer: Option<bool>) {
-    eprintln!("opening native message: {answer:?}");
+fn exercise_message(answer: Option<bool>, close: bool) {
+    eprintln!("opening native message: {answer:?}; close={close}");
     // SAFETY: GetCurrentThreadId has no preconditions.
     let ui_thread = unsafe { GetCurrentThreadId() };
     let driver = thread::spawn(move || {
@@ -97,12 +100,32 @@ fn exercise_message(answer: Option<bool>) {
                     eprintln!("native message visible; reading controls");
                     let checks = std::panic::catch_unwind(|| {
                         assert_eq!(read_text(dialog).unwrap(), TITLE);
-                        assert_eq!(read_text(GetDlgItem(dialog, 0xffff)).unwrap(), PROMPT);
+                        assert_eq!(
+                            read_text(GetDlgItem(dialog, PROMPT_ID as i32)).unwrap(),
+                            PROMPT
+                        );
                         assert!(
                             GetWindow(dialog, GW_OWNER).is_null(),
                             "setup must not borrow another application's window"
                         );
                         assert_per_monitor_v2(dialog);
+                        let default_button = match answer {
+                            Some(true) => IDYES,
+                            Some(false) => IDNO,
+                            None => IDOK,
+                        };
+                        assert_eq!(
+                            SendMessageW(dialog, DM_GETDEFID, 0, 0) & 0xffff,
+                            default_button as isize,
+                            "Enter must use the configured default answer"
+                        );
+                        if answer.is_some() {
+                            // A yes/no question must not gain an implicit Cancel answer when
+                            // replacing MessageBoxW. Both Alt+F4 and Esc leave it open.
+                            SendMessageW(dialog, WM_CLOSE, 0, 0);
+                            SendMessageW(dialog, WM_COMMAND, IDCANCEL as WPARAM, 0);
+                            assert_ne!(IsWindow(dialog), 0);
+                        }
                     });
                     // A failed check must still answer the modal dialog, otherwise the parent
                     // reports only its timeout instead of returning the actual assertion.
@@ -118,11 +141,12 @@ fn exercise_message(answer: Option<bool>) {
                             ),
                             0
                         );
-                    } else {
-                        // Dismiss the informational message through its normal Close action.
-                        // A synthetic IDOK command was ignored by the hosted Windows dialog.
+                    } else if close {
                         eprintln!("closing native informational message");
                         assert_ne!(PostMessageW(dialog, WM_CLOSE, 0, 0), 0);
+                    } else {
+                        eprintln!("dismissing native informational message with Esc");
+                        assert_ne!(PostMessageW(dialog, WM_COMMAND, IDCANCEL as WPARAM, 0), 0);
                     }
                     if let Err(panic) = checks {
                         std::panic::resume_unwind(panic);
@@ -187,7 +211,10 @@ fn assert_per_monitor_v2(window: HWND) {
 unsafe extern "system" fn find_message(window: HWND, data: LPARAM) -> i32 {
     // SAFETY: EnumThreadWindows supplies a live window; data points to a live local HWND.
     unsafe {
-        if IsWindowVisible(window) != 0 && !GetDlgItem(window, 0xffff).is_null() {
+        if IsWindowVisible(window) != 0
+            && !GetDlgItem(window, PROMPT_ID as i32).is_null()
+            && GetDlgItem(window, INPUT_ID as i32).is_null()
+        {
             *(data as *mut HWND) = window;
             return 0;
         }

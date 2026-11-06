@@ -414,3 +414,30 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
 - **本机验证：** `cargo fmt --check`、`cargo test --locked --lib ui::setup::tests` 与
   `DOCS_RS=1 cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets --features windows-app,integration -- -D warnings`
   通过；后者仅证明 Windows 目标的类型/lint，不包含原生链接或执行。
+
+### [005] — 2026-11-06 — 设置确认与提示复用原生模板
+
+- **诊断结果与触发：** [诊断提交的 Windows CI](https://github.com/b1indsight/viberwhisper/actions/runs/42195829987/job/127818743053)
+  确认调用线程为 PMv2，而同一进程/线程、标题和正文匹配的 `#32770` 确认框为 system-aware；
+  PMv1/PMv2 比较均为假，system 比较为真，有效 DPI 为 96。检查失败后仍成功回答弹框，子进程正常报告断言，
+  不再由父进程超时掩盖。排除了错误 HWND、无效句柄和早期初始化失败；Windows 内部选择该模式的原因仍未证实。
+- **决定与状态：** 在已批准的 DPI 范围内，用 `DialogBoxIndirectParamW` 替换设置确认/提示的 `MessageBoxW` 路径，
+  复用现有输入框的对齐模板、9pt Segoe UI、DLU 和 PMv2 自动缩放；严格窗口断言保持不变，原生结果仍待新 head 的 CI。
+  这条决定细化 [002] 的设置窗口实现，不改变识别、保存、个人配置或记忆。
+  [微软的 PMv2 文档](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows)
+  支持模板对话框自动缩放；只读、无工具/MCP 的 Claude Opus 5.5 咨询指出，隐藏 owner 或 v6 manifest
+  是否改变本例 `MessageBoxW` 行为尚无证据。因此不增加隐藏 HWND、跨应用 owner 或资源构建依赖，也不把咨询当作运行证明。
+- **交互与取舍：** 确认保留默认 Yes/No，不增加 Esc/关闭的隐式答案；提示可由确定、Esc 或关闭结束。
+  创建/初始化错误仍传播，不变成 No。确认和提示使用与输入框一致的中文按钮、可滚动正文，不再显示系统问号/信息图标，
+  按钮也不再跟随 Windows 的界面语言。输入/密码的模板和编辑协议不变，没有重写向导流程。
+- **回归与可观测性：** 扩展既有有界原生测试，保留标题、正文、所有权与严格 PMv2 检查，
+  同时检查默认按钮、确认不接受 Esc/关闭、提示接受 Esc/关闭；成功路径也输出实际 HWND/DPI 和气泡检查记录。
+  EXE smoke 增加空必填项的提示与恢复，继续覆盖两条识别路径、两种 EXE、direct/ShellExecute、SSH 环境及取消不保存。
+  CI 请求隔离账号的非密码窗口截图并上传；截图只来自测试进程，临时切换截图线程至 PMv2 后恢复，避免虚拟化尺寸。
+  截图须取回并实际检查后才算视觉检查，不能把上传步骤或 96-DPI 图像当成真实 4K 清晰度证明。
+- **本机验证与比较：** 格式、macOS 向导回归、Windows GNU 目标的 all-targets/integration lint 通过，
+  后者仍仅为 `DOCS_RS=1` 的类型/lint 检查。临时程序在 macOS 编译并执行修改前后的纯 Rust 模板构建函数，
+  比较同样的普通/密码输入，两个 `DLGTEMPLATE` 均与父提交逐字节一致；确认/提示的控件数、DLU 矩形和 9pt 声明符合预期。
+  比较源码与结果保留于本线程工作区 `.amp/in/artifacts/dialog-template-data-comparison.log`，临时程序随后删除；
+  此项只保护模板数据，不验证 Win32 渲染。原生替换前后、字体/布局消融、截图和气泡结果等待 Windows CI，
+  真实 4K/混合 DPI 清晰度继续待实机。此前长地址审查项未获新的返修要求，未混入此修复。

@@ -102,8 +102,12 @@ Windows text and password input use in-process Win32 dialogs in `ui/setup/window
 Unicode controls and a native modal message loop. They do not launch VBScript/HTA input scripts
 or poll for another process's window. Text/password methods distinguish an accepted value,
 cancellation, and a native error; failures propagate without saving the candidate configuration.
-Windows confirmations and informational messages also call `MessageBoxW` directly, using no
-external owner window. They never select console input based on `SSH_CLIENT`/`DISPLAY`.
+Windows confirmations and informational messages reuse the input dialog's aligned Win32
+template, bypassing `MessageBoxW`'s observed system-aware window creation on a PMv2 thread.
+They use no external owner and never select console input based on `SSH_CLIENT`/`DISPLAY`.
+Their scrollable text and Chinese buttons match the input dialogs, without system message-box
+icons. Yes/no questions honor the configured default and ignore Esc/Close; informational
+messages accept OK, Esc, or Close.
 Confirmation/message creation errors abort the current workflow instead of becoming a No
 answer; failure of the final saved notification does not undo an already completed save.
 The CLI reports errors through its existing error return and the desktop launcher shows its
@@ -117,9 +121,11 @@ check actual HWND DPI contexts and fonts, then inject synthetic 96/144/192 DPI n
 including a notification re-entering layout, without claiming a physical high-DPI display test.
 CI and release packaging run `scripts/test-windows-setup.ps1` against both executables on a clean
 runner account, checking the initial confirmation, both recognition paths, text/password
-windows, PMv2 contexts, and cancellation without writing config. It covers explicit setup,
-both first-run entries, and direct/ShellExecute GUI launches with and without the environment
-that previously selected console-only confirmations.
+windows, PMv2 contexts, required-input messages, and cancellation without writing config. It
+covers explicit setup, both first-run entries, and direct/ShellExecute GUI launches with and
+without the environment that previously selected console-only confirmations. CI also requests non-password window
+captures from that isolated account for visual inspection; hosted-display images do not prove
+real 4K or mixed-monitor clarity.
 
 The process entry points check for helper mode before tracing and CLI initialization. Normal
 listener startup and the explicit setup command use the same wizard. CLI-only workflows run

@@ -103,7 +103,18 @@ jobs:
 
       - name: Native Windows setup and DPI smoke
         shell: pwsh
-        run: ./scripts/test-windows-setup.ps1 -BinaryDirectory target/debug
+        run: |
+          cargo test --locked --features windows-app,integration native_setup_dialogs_show_and_return -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/test-windows-setup.ps1 -BinaryDirectory target/debug -ScreenshotDirectory "$env:RUNNER_TEMP/windows-setup-captures"
+
+      - name: Upload Windows setup captures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-setup-captures
+          path: ${{ runner.temp }}/windows-setup-captures/*.png
+          if-no-files-found: ignore
 
       - name: Clippy
         run: cargo clippy --locked --all-targets --features windows-app -- -D warnings
