@@ -255,16 +255,29 @@ impl WindowState {
         }
     }
 
-    fn at_scroll_tail(&self) -> Result<bool> {
-        let first = unsafe { SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) } as i32;
+    fn max_first_visible_line(&self) -> Result<i32> {
         let lines = unsafe { SendMessageW(self.text.get(), EM_GETLINECOUNT, 0, 0) } as i32;
         let mut viewport = RECT::default();
-        ensure!(
-            unsafe { GetClientRect(self.text.get(), &mut viewport) } != 0,
-            "无法获取输入框尺寸"
-        );
+        // Layout centers fitting text by insetting the edit control's formatting rectangle.
+        unsafe { SendMessageW(self.text.get(), EM_GETRECT, 0, (&raw mut viewport) as isize) };
         let (_, line_height) = self.text_metrics()?;
-        Ok(first + (viewport.bottom / line_height.max(1)) >= lines)
+        let visible_lines = ((viewport.bottom - viewport.top) / line_height).max(1);
+        Ok((lines - visible_lines).max(0))
+    }
+
+    fn restore_first_visible_line(&self, first: i32) -> Result<()> {
+        // Retraction can invalidate a saved first line even when its scrollbar disappears.
+        let target = first.min(self.max_first_visible_line()?);
+        let current = unsafe { SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) } as i32;
+        unsafe {
+            SendMessageW(
+                self.text.get(),
+                EM_LINESCROLL,
+                0,
+                (target - current) as isize,
+            );
+        }
+        Ok(())
     }
 
     fn scroll_to_tail(&self) {
@@ -344,7 +357,7 @@ impl WindowState {
         }
         // Measuring without a scrollbar can temporarily reflow and clamp the current scroll.
         let first_visible_line =
-            unsafe { SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) };
+            unsafe { SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) } as i32;
         let result = (|| loop {
             let mut bounds = RECT::default();
             let window = self.window.get();
@@ -512,16 +525,7 @@ impl WindowState {
             // Moving to the caret's monitor can deliver WM_DPICHANGED synchronously. Its
             // pending DPI must be applied after this layout, rather than dropped by the guard.
             if self.pending_dpi.get().is_none() {
-                let current =
-                    unsafe { SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) };
-                unsafe {
-                    SendMessageW(
-                        self.text.get(),
-                        EM_LINESCROLL,
-                        0,
-                        first_visible_line - current,
-                    )
-                };
+                self.restore_first_visible_line(first_visible_line)?;
                 break Ok(());
             }
         })();
@@ -982,7 +986,7 @@ impl NativePreview {
             }
             let first =
                 unsafe { SendMessageW(self.state.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) } as i32;
-            follow_tail = self.state.at_scroll_tail()?;
+            follow_tail = first >= self.state.max_first_visible_line()?;
             if !follow_tail {
                 first_visible_line = Some(first);
             }
@@ -1015,17 +1019,7 @@ impl NativePreview {
             if follow_tail {
                 self.state.scroll_to_tail();
             } else if let Some(first) = first_visible_line {
-                let current =
-                    unsafe { SendMessageW(self.state.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) }
-                        as i32;
-                unsafe {
-                    SendMessageW(
-                        self.state.text.get(),
-                        EM_LINESCROLL,
-                        0,
-                        (first - current) as isize,
-                    );
-                }
+                self.state.restore_first_visible_line(first)?;
             }
             unsafe {
                 SendMessageW(self.state.text.get(), EM_SETSEL, start, end as isize);
