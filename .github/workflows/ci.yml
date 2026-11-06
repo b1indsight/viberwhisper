@@ -99,6 +99,9 @@ jobs:
         run: cargo build --locked --features windows-app
 
       - name: Test
+        # The runner context is step-scoped here; keep the native smoke path below in sync.
+        env:
+          VIBERWHISPER_PREVIEW_ARTIFACTS: ${{ runner.temp }}/windows-preview-captures
         run: cargo test --locked --features windows-app,integration
 
       - name: Native Windows setup and DPI smoke

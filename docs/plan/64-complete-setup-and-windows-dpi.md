@@ -661,3 +661,38 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   尚不能进行 Windows 原生的单字体/双字体、原生条/覆盖层同条件消融；复杂的覆盖层明确留在测试夹具，未因类型检查通过就进入产品。
   仅保留准备好的原生对照输入，待实际 Windows 结果决定是否保留/简化该机制，移除一次性实验后才能完成此批功能。
   新外观 PNG 尚未产生或查看；已有 HTML 图仍只是目标稿。真实 4K、物理缩放、混合屏、输入法、系统文本放大及真实高对比度均未验证。
+
+### [013] — 2026-11-06 — 原生提示区失败诊断与首轮测试截图保留
+
+- **触发与已知事实：** 用户授权审查后更新同一 PR 并继续 Windows 原生验证。
+  [67467d12](https://github.com/b1indsight/viberwhisper/commit/67467d1235cfc4f1e4c74253c398037a1c907fd7)
+  的两个独立只读审查均完成、无新发现；[该轮 CI](https://github.com/b1indsight/viberwhisper/actions/runs/42244262500)
+  的 macOS 通过，Windows 构建通过，既有 DPI/编辑保留及十个滚动案例通过，随后新增提示区断言在 96 DPI 失败。
+  原日志未记录具体场景、控件尺寸或哪一项条件失败，尚不能把它称为真实文字裁切或错误测试预期。
+- **实现与取舍：** `preview/smoke.rs` 保持相同输入和全部条件，补记场景、系统色模式、测量高度、控件高度、
+  正文/底部间隔、左右留白和最小高度；在几何断言前保存原生帧，避免失败现场丢失。
+  `.github/workflows/ci.yml` 将既有捕获路径从单一 smoke step 提到 Windows job，让首轮 `Test` 失败时也能由既有 `always()` 上传步骤保留 PNG。
+  不跳过测试、不放宽断言、不延长超时；不更改产品布局、颜色、滚动条或其他平台。没有增加诊断框架，故无新增机制消融。
+- **边界与证据：** 此批只补足缺失证据，尚未验证根因或关闭原失败；需要新的 Windows 原生结果确认。
+  第一轮完整日志在本 workspace `.amp/in/artifacts/ci-windows-macos-aligned-67467d12.log`。
+  本机格式、共享预览协议测试、CI YAML 解析与 Windows GNU integration 类型/lint 检查的命令输出记录在
+  `.amp/in/artifacts/footer-diagnostic-local-validation.log`；交叉检查仍没有 Windows 链接/运行。
+  真实 4K、物理缩放、混合屏、输入法、系统文本放大和真实高对比度限制不变，覆盖层仍限测试。
+
+### [014] — 2026-11-06 — 捕获路径保留在 step 作用域并验证 Actions 上下文
+
+- **触发与决策：** [013] 本地诊断提交的双独立审查均完成，功能/安全报告一项 high：
+  `jobs.<job_id>.env` 不支持 `runner` 上下文，移动后的 `${{ runner.temp }}` 将使工作流无效；复杂度无发现。
+  此提交未推送。核对 [GitHub 官方可用性表](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability) 后，
+  用户明确要求修复该项，采用两个现有测试 step 各自声明环境变量的最小方案，不新增全局初始化 step、脚本或 YAML 锚点。
+- **实际实现：** `.github/workflows/ci.yml` 不再声明 job 级捕获变量；保留原 smoke step 的 `env`，在首轮 `Test` 同样设置路径并标注同步关系。
+  两处都写入 Windows CI 的 `${{ runner.temp }}/windows-preview-captures/`，由既有 `windows-preview-captures` artifact 上传步骤收集。
+  [013] 的原生尺寸日志、失败帧保存、全部输入及断言不变；没有修改产品窗口或正式启用细滚动条。
+- **本机验证与复杂度比较：** 临时下载 actionlint 1.7.12 并核对发行版 SHA-256。
+  同一 `actionlint -shellcheck= -pyflakes= -oneline <workflow>` 检查中，[013] 原稿在 job env 明确报 `context "runner" is not allowed here`、退出 1，
+  修正后的完整工作流退出 0；此项验证 Actions 表达式作用域，超出先前 Ruby YAML 仅解析语法的范围。
+  仅关闭未使用的外部 shellcheck/pyflakes 集成，不关闭 Actions 语法或表达式检查。
+  格式检查通过；未改动的 Rust 诊断代码沿用 [013] 的共享预览协议与 Windows GNU integration 类型/lint 通过结果。
+  日志在本 workspace `.amp/in/artifacts/footer-workflow-actionlint.log`；临时工具及输入在检查后清理，不安装到用户全局环境。
+- **边界：** 本机确认了工作流作用域缺陷的前后差异；96-DPI 提示区原失败仍需 Windows 原生尺寸和截图确定原因。
+  待按返修授权完成本次审查，再更新同一 PR 和精确 head 的 CI 订阅；不手动触发工作流，不将此检查称为 Windows 界面通过。

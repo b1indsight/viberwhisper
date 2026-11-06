@@ -582,6 +582,22 @@ impl NativePreview {
                             self.state.status.get(),
                             Some(status.right - status.left),
                         )?;
+                        eprintln!(
+                            "native preview footer: case={case}; DPI={dpi}; system-colors={system_colors}; measured-height={}; status-height={}; body-gap={}; bottom-gap={}; side-insets=({}, {}); minimum-height={}",
+                            measured.bottom,
+                            status.bottom - status.top,
+                            status.top - body.bottom,
+                            window.bottom - status.bottom,
+                            status.left - window.left,
+                            window.right - status.right,
+                            self.state.pixels(32),
+                        );
+                        // Preserve the failing frame too; geometry assertions must not erase evidence.
+                        if let Some(directory) = artifacts {
+                            self.smoke_capture(&directory.join(format!(
+                                "appearance-{case}-{dpi}-system-colors-{system_colors}.png"
+                            )))?;
+                        }
                         ensure!(
                             status.bottom - status.top >= measured.bottom
                                 && status.top - body.bottom >= self.state.pixels(12)
@@ -589,13 +605,8 @@ impl NativePreview {
                                 && status.left - window.left == self.state.pixels(20)
                                 && window.right - status.right == self.state.pixels(20)
                                 && (case != "warning" || measured.bottom > self.state.pixels(32)),
-                            "Warning/error footer clipped text or changed its insets at {dpi} DPI"
+                            "Warning/error footer assertion failed: case={case}; DPI={dpi}; system-colors={system_colors}"
                         );
-                        if let Some(directory) = artifacts {
-                            self.smoke_capture(&directory.join(format!(
-                                "appearance-{case}-{dpi}-system-colors-{system_colors}.png"
-                            )))?;
-                        }
                     }
                 }
             }
