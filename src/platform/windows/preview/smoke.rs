@@ -598,13 +598,14 @@ impl NativePreview {
                                 "appearance-{case}-{dpi}-system-colors-{system_colors}.png"
                             )))?;
                         }
+                        // Two warning lines fit the minimum; the three-line error must grow it.
                         ensure!(
                             status.bottom - status.top >= measured.bottom
                                 && status.top - body.bottom >= self.state.pixels(12)
                                 && window.bottom - status.bottom >= self.state.pixels(12)
                                 && status.left - window.left == self.state.pixels(20)
                                 && window.right - status.right == self.state.pixels(20)
-                                && (case != "warning" || measured.bottom > self.state.pixels(32)),
+                                && (case != "error" || measured.bottom > self.state.pixels(32)),
                             "Warning/error footer assertion failed: case={case}; DPI={dpi}; system-colors={system_colors}"
                         );
                     }

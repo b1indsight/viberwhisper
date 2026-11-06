@@ -696,3 +696,21 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   日志在本 workspace `.amp/in/artifacts/footer-workflow-actionlint.log`；临时工具及输入在检查后清理，不安装到用户全局环境。
 - **边界：** 本机确认了工作流作用域缺陷的前后差异；96-DPI 提示区原失败仍需 Windows 原生尺寸和截图确定原因。
   待按返修授权完成本次审查，再更新同一 PR 和精确 head 的 CI 订阅；不手动触发工作流，不将此检查称为 Windows 界面通过。
+
+### [015] — 2026-11-06 — 原生证据确认提示区测试的增高前提错误
+
+- **实际失败与证据：** [09486c68 的 Windows job](https://github.com/b1indsight/viberwhisper/actions/runs/42248010081/job/127995248827)
+  在同一两行 warning 场景失败；新增日志确认实际 DPI=96，文字测量高 30 px、提示控件高 32 px，
+  正文间隔和底部留白均为 12 px、左右留白均为 20 px。全部防裁切和间距条件成立，唯一不成立的是要求 warning 测量高度大于 32 px。
+  取回并直接查看失败帧，正文与两行警告完整、互不覆盖，深色底和细圆角描边均存在；不能将此失败称为窗口文字裁切。
+  原始输出在本 workspace `.amp/in/artifacts/ci-step-captures-09486c68.log`，原生 PNG 在同名目录。
+- **最小修正与对照：** 保留全部四类输入、三档合成 DPI、局部系统配色覆盖，以及文字高度、间距和左右留白断言。
+  只把“必须超过最小提示高度”的前提从两行 warning 改到已有三行 error 场景，并说明各自作用；不删除增长验证，
+  不更改测量方式、固定期望像素、超时或产品布局。将三行文字错误地固定在 32 DIP 高度的实现仍会被现有防裁切断言拒绝。
+  没有新增状态、辅助层或产品机制，故不另做机制消融；本次是修正已被原生证据推翻的测试前提，不把修改预期描述为产品修复。
+- **本机检查：** 格式、共享预览协议回归及 Windows GNU integration 的 all-targets 类型/lint 检查通过；原始命令输出在
+  `.amp/in/artifacts/footer-fixture-correction-validation.log`。GNU 检查仍用 `DOCS_RS=1`，没有 Windows 链接或执行。
+  同一场景修正后的 Windows 原生执行、后续三行错误场景和测试专用滚动条实验尚待新 CI，不以本机通过代替。
+- **验证边界：** 失败 head 的 macOS job 通过，Windows 已执行的 DPI/编辑保留及滚动恢复检查通过，后续原生阶段被该断言阻断。
+  当前仅有自有 HWND 的 `WM_PRINT` 捕获，实际显示 DPI=96；合成 DPI 不是真实高 DPI 显示。
+  细滚动条仍未在产品中启用，屏幕剪裁、真实拖动、UIA、真实 4K、混合屏、输入法及系统文本放大尚未验证。
