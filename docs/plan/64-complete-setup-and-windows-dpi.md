@@ -1,6 +1,6 @@
 # 64 - 识别模式二选一配置与 Windows 高 DPI 窗口
 
-**阶段：** 简化实现与 Windows 原生 CI 已通过；设置截图已检查，气泡视觉效果和真实 4K 清晰度仍待实机验收。
+**阶段：** 简化实现与 Windows 原生窗口检查已通过，设置/气泡图像已检查；捕获工具的新版 Clippy 修正待 CI，真实 4K 仍待实机。
 **PR：** [#165](https://github.com/b1indsight/viberwhisper/pull/165)，沿用同一 draft PR 交付实现。
 **Bookmark：** `feat/complete-setup-windows-dpi`。
 **基线：** 最新 fetch 后的 `origin/master`，即 [v0.5.0 发布准备提交 e18be032](https://github.com/b1indsight/viberwhisper/commit/e18be032950c03bc7bf40153e028e12193cccacc)。
@@ -470,3 +470,15 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   Windows GNU 目标带 `windows-app,integration` 的 all-targets Clippy 通过，仍使用 `DOCS_RS=1`，不含原生链接或执行。
   macOS 实际运行同一 `--artifacts` 命令正常退出并生成各状态图，作为共享演示路径的相邻对照；不能据此推断 Windows 效果。
   新增的捕获代码只在测试/integration 功能中编译；不捕获其他应用，也不修改既有原生断言。
+- **首轮 Windows 执行：** [捕获提交的 Windows job](https://github.com/b1indsight/viberwhisper/actions/runs/42205815584/job/127852037150)
+  的构建、全量测试、原生/DPI smoke、两模式 EXE smoke 与气泡演示均通过，生成 19 个 PNG；macOS job 也通过。
+  最后的 Windows Clippy 1.99 因 `chunks_exact_to_as_chunks` 新 lint 失败；本机为 1.94，未触发该 lint。
+  将捕获工具的四通道遍历改为 `as_chunks_mut::<4>().0`，不压制 lint 或改变像素转换；本机两种 Windows feature 组合检查通过，CI 回归待新 head。
+- **已检查的图像：** 默认短句、流式前缀/修订/撤回、中英混合/emoji、长文本、警告、空失败与超时均已查看。
+  正文和提示可读、没有相互覆盖；两种空错误的提示完整，Enter 不确认及 Esc 各取消一次由实际演示断言通过。
+  合成布局的生成中/警告气泡已查看，实际窗口 DPI 均为 96；警告气泡分别为 420×268、630×402、840×536。
+  19 张 PNG 的 CRC/解压长度有效，回到 96 DPI 和重入 144 DPI 的四对 PNG 均逐字节相同。
+  图像是自有 HWND/子控件的 `WM_PRINT` 原生渲染，不包含桌面合成器阴影等效果，不代表物理高 DPI 显示的清晰度。
+- **效果观察与范围：** 短句“我们明天上午去上海。”也会拆为两行，右侧始终显示竖向滚动条；
+  基线已有同一自动宽度 padding 和 `WS_VSCROLL` 组合，本轮如实展示，不因效果测试顺手改生产布局。
+  长文本处于有界滚动视口，不把不可见的上方内容称为数据丢失；真实跨屏、输入法、麦克风/服务与 4K 仍未验证。

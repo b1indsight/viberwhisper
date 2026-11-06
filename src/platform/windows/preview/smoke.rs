@@ -73,7 +73,7 @@ impl NativePreview {
                 std::slice::from_raw_parts(pixels.cast::<u8>(), (width * height * 4) as usize)
             }
             .to_vec();
-            for pixel in rgba.chunks_exact_mut(4) {
+            for pixel in rgba.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2); // GDI BGRA to PNG RGBA; GDI does not set alpha.
                 pixel[3] = 255;
             }
