@@ -794,3 +794,24 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   输出在 `uia-proxy-local-validation.log`，原无效夹具输出单独保留；此检查未使用真实 UIA DLL，未执行 Win32、屏幕或输入。
 - **边界与交付：** 本批是 CI 基线失败的最小客户端候选，仍需双独立审查、推送同一 PR 后读取 Windows 的实际程序集和 provider 结果。
   此前外层超时清理 medium 与 macOS 长地址项均未返修；产品和演示保留系统条，真实 4K、混合屏、IME、Narrator 和物理鼠标仍未验收。
+
+### [019] — 2026-11-06 — 首个客户端超时的阶段诊断
+
+- **新证据：** [e6c7b0ba 的 CI](https://github.com/b1indsight/viberwhisper/actions/runs/42263748418)
+  macOS 通过、Windows 构建通过，首轮 Test 在首个 `native-ready` 桌面客户端的十秒期限失败；scrollbar 子阶段共 12.66 秒，
+  未触发外层三十秒期限，后续 smoke、演示及最终 Clippy 未执行。Rust 已收集并打印子进程两个输出流，但没有初始化结果、UIA 指标或异常。
+  取回的 53 张 PNG 均经 CRC/解压检查，与前轮共有图逐字节一致；没有真实屏幕帧，覆盖层桌面和只读案例未运行。
+  原生日志为 `ci-uia-proxy-e6c7b0ba.log`，图片在同名目录，检查记录为 `uia-proxy-failure-capture-validation.log`。
+- **决策与范围：** 尚不能区分 PowerShell 启动、程序集加载、C# 编译、代理注册或 UIA 查询的耗时/阻塞，不能确认 [018] 的假说或宣布修复。
+  固定 Opus 5.5、无工具/MCP 的只读诊断也指出现有证据没有具体的注册挂起机制；其建议仅作为诊断参考，不是 Windows 执行。
+  保留当前候选、全部断言、输入顺序、十秒客户端和三十秒阶段期限，不凭猜测延长期限、改 apartment、COM 或产品可访问性。
+- **诊断改动：** 在原 `scrollbar_probe.ps1` 加直接写入并刷新 stderr 的阶段标记，绕过 PowerShell host 输出路径；
+  包括首行到进程启动的耗时、脚本单调计时与 UTC，以及程序集加载、适配器编译、代理注册前后、第一次 UIA 查询、滚动条搜索和屏幕捕获前的边界。
+  C# 注册前后使用同一进程 UTC，可与脚本时间关联；注册后的程序集加载以方法返回标记界定。不新增产品状态、依赖、配置、输入或等待。
+- **本机验证：** 格式、macOS integration 全量测试及 all-targets Clippy 通过。PowerShell 7 完整解析、C# 5 语法编译通过；
+  具名 stub 程序集的注册成功、故意异常与故意阻塞/终止对照通过：阻塞前的阶段行在重定向 stderr 中已可读，终止后没有伪造完成行。
+  首两次临时夹具分别因根路径和引用数组类型错误作废，修正夹具后正负对照通过，产品候选未因此修改；输出分别保留在本机检查日志旁。
+  记录为 `uia-stage-local-validation.log` 和 `uia-stage-macos-validation.log`；临时运行时、stub 与脚本随后清理。
+  此检查未执行 Windows PowerShell 5.1、真实 UIA DLL、Win32、输入或屏幕，不证明下一轮一定能捕获标记或清除失败。
+- **交付边界：** 这是定位 CI 失败所需的诊断改动，须双独立审查后沿用原 PR 推送，并读取新原生阶段证据再修正已验证的问题。
+  正式预览与演示继续使用系统条；已有外层超时清理 medium 与 macOS 长地址项未返修，真实 4K、混合屏、IME、Narrator 和物理鼠标仍未验收。

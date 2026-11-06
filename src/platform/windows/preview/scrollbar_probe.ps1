@@ -8,7 +8,15 @@ param(
     [Parameter(Mandatory)][int]$ThumbWidth
 )
 $ErrorActionPreference = 'Stop'
+$script:stageTimer = [Diagnostics.Stopwatch]::StartNew()
+function Write-Stage([string]$Stage) {
+    # Bypass host output buffering so a killed client still reports its last stage.
+    [Console]::Error.WriteLine(("scrollbar stage {0} : {1:O}; script-ms={2}; {3}" -f $Case, [DateTime]::UtcNow, $script:stageTimer.ElapsedMilliseconds, $Stage))
+    [Console]::Error.Flush()
+}
+Write-Stage ("loading assemblies; process-ms={0:F0}" -f ([DateTime]::Now - (Get-Process -Id $PID).StartTime).TotalMilliseconds)
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, WindowsBase, System.Drawing
+Write-Stage 'assemblies loaded; compiling adapter'
 Add-Type -ReferencedAssemblies ([Windows.Automation.AutomationElement].Assembly.Location) -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -20,7 +28,11 @@ public static class ScrollbarInput {
         var client = typeof(System.Windows.Automation.AutomationElement).Assembly;
         var name = client.GetName();
         name.Name = "UIAutomationClientsideProviders";
+        Console.Error.WriteLine("scrollbar stage {0:O}: registering {1}", DateTime.UtcNow, name.FullName);
+        Console.Error.Flush();
         System.Windows.Automation.ClientSettings.RegisterClientSideProviderAssembly(name);
+        Console.Error.WriteLine("scrollbar stage {0:O}: provider registration returned", DateTime.UtcNow);
+        Console.Error.Flush();
         return client.FullName + " | " + System.Reflection.Assembly.Load(name).FullName;
     }
     public struct Point { public int X, Y; }
@@ -109,7 +121,9 @@ public static class ScrollbarInput {
 '@
 
 # Initialize before the first UIA query; the native baseline must expose real control providers.
+Write-Stage 'adapter compiled; initializing providers'
 $uiaAssemblies = [ScrollbarInput]::InitializeAutomationClient()
+Write-Stage 'providers initialized; validating native window and focus'
 Write-Output ("scrollbar UIA client $Case : PS=$($PSVersionTable.PSVersion); CLR=$([Environment]::Version); x64=$([Environment]::Is64BitProcess); apartment=$([Threading.Thread]::CurrentThread.GetApartmentState()); assemblies=$uiaAssemblies")
 
 $windowHandle = [IntPtr]::new($Window)
@@ -274,7 +288,9 @@ try {
     Reset-Scroll
     $bar = Get-Scrollbar
     $middle = $bar.Bounds.Top + [int](($bar.ThumbTop + $bar.ThumbBottom) / 2)
+    Write-Stage 'native window and focus validated; querying UIA edge'
     $metrics.UiaEdge = Get-Uia ($bar.Bounds.Left + 1) $middle
+    Write-Stage 'UIA edge returned; querying remaining native elements'
     $metrics.UiaThumb = Get-Uia ([int](($bar.Bounds.Left + $bar.Bounds.Right) / 2)) $middle
     $outside = Get-Uia ($script:bounds.Left + 20) ($script:bounds.Top + 2)
     if ($outside.OwnedByEdit) { throw 'Negative control: UIA accepted a point outside EDIT' }
@@ -283,7 +299,9 @@ try {
     $metrics.EditorType = $element.Current.ControlType.Id
     $metrics.Framework = $element.Current.FrameworkId
     $condition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::ScrollBar)
+    Write-Stage 'UIA elements returned; finding native scrollbar'
     $accessibleBar = $element.FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)
+    Write-Stage 'UIA scrollbar search returned; reading patterns and children'
     $metrics.AccessibleScrollbar = $null -ne $accessibleBar -and !$accessibleBar.Current.IsOffscreen
     $metrics.Patterns = @($element.GetSupportedPatterns() | ForEach-Object { $_.Id } | Sort-Object)
     $children = @()
@@ -295,6 +313,7 @@ try {
     }
     $metrics.ControlChildren = @($children | Sort-Object)
     Write-Output ("scrollbar UIA $Case : " + ($metrics | ConvertTo-Json -Depth 4 -Compress))
+    Write-Stage 'initial UIA queries completed; capturing desktop'
     Capture-Screen 'idle' 0x929292
 
     # Compare exact native responses, not merely nonzero motion (which can hide double scrolling).
