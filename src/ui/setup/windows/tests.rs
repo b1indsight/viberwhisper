@@ -26,6 +26,10 @@ fn native_setup_dialogs_show_and_return() {
     if std::env::var_os(CHILD_ENV).is_some() {
         crate::platform::initialize_dpi_awareness().unwrap();
         crate::platform::initialize_dpi_awareness().unwrap(); // An existing PMv2 context is valid.
+        if std::env::var(CHILD_ENV).as_deref() == Ok("scrollbar") {
+            crate::platform::NativePreview::smoke_scrollbar().unwrap();
+            return;
+        }
         exercise_message(Some(true), false);
         exercise_message(Some(false), false);
         exercise_message(None, false);
@@ -42,42 +46,46 @@ fn native_setup_dialogs_show_and_return() {
         return;
     }
 
-    let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", TEST_NAME, "--nocapture"])
-        .env(CHILD_ENV, "1")
-        // This environment used to select a console-only confirmation even in a GUI process.
-        .env("SSH_CLIENT", "127.0.0.1 12345 22")
-        .env_remove("DISPLAY")
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                output.status.success(),
-                "native setup test failed: {}\n{}\n{}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            print!("{}", String::from_utf8_lossy(&output.stdout));
-            eprint!("{}", String::from_utf8_lossy(&output.stderr));
-            break;
+    // Real desktop input must not compete with the modal setup/DPI fixture. Each phase keeps
+    // its original bounded child instead of spending the setup deadline on new experiments.
+    for phase in ["setup", "scrollbar"] {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ENV, phase)
+            // This environment used to select a console-only confirmation even in a GUI process.
+            .env("SSH_CLIENT", "127.0.0.1 12345 22")
+            .env_remove("DISPLAY")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                let output = child.wait_with_output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "native {phase} test failed: {}\n{}\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                print!("{}", String::from_utf8_lossy(&output.stdout));
+                eprint!("{}", String::from_utf8_lossy(&output.stderr));
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "native {phase} did not finish within 30 seconds\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            thread::sleep(Duration::from_millis(20));
         }
-        if Instant::now() >= deadline {
-            child.kill().unwrap();
-            let output = child.wait_with_output().unwrap();
-            panic!(
-                "native setup did not finish within 30 seconds\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        thread::sleep(Duration::from_millis(20));
     }
 }
 

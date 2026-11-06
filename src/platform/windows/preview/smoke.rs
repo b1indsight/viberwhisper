@@ -405,6 +405,27 @@ impl NativePreview {
         // Keep the full scroll regression suite in this once-per-run native fixture.
         preview.smoke_scrolling(artifacts.as_deref())?;
         preview.smoke_appearance(artifacts.as_deref())?;
+        Ok(())
+    }
+
+    /// Run the experimental desktop-input gates separately from setup and synthetic DPI work.
+    #[cfg(test)]
+    pub(crate) fn smoke_scrollbar() -> Result<()> {
+        let artifacts =
+            std::env::var_os("VIBERWHISPER_PREVIEW_ARTIFACTS").map(std::path::PathBuf::from);
+        if let Some(directory) = &artifacts {
+            std::fs::create_dir_all(directory)?;
+        }
+        let mut preview = Self::new(Box::new(|_| {
+            panic!("Scrollbar input submitted or cancelled text")
+        }));
+        preview.show(
+            SessionId(902),
+            "scrollbar fixture",
+            "Scrollbar fixture",
+            None,
+            None,
+        )?;
         scrollbar_probe::exercise(&mut preview, artifacts.as_deref())
     }
 
