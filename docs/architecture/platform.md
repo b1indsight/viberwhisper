@@ -300,3 +300,8 @@ mode edits the native control, sends held-Enter events and verifies zero callbac
 one confirmation with edited text after release, and successful delivery to the selected target.
 The native editing checks live in each platform's `preview/smoke.rs`, behind the same feature.
 They extend the private preview implementation without exposing native UI state to the demo.
+On macOS and Windows, `--artifacts DIRECTORY` instead captures the native streaming, editable,
+long-text, warning, empty-failure, and timeout fixtures without a destination or injection.
+Windows CI also sets the test-only `VIBERWHISPER_PREVIEW_ARTIFACTS` directory to capture the
+existing synthetic-DPI checks. Each capture logs actual window DPI separately from layout DPI;
+these native-control renders do not establish physical 4K or mixed-monitor clarity.

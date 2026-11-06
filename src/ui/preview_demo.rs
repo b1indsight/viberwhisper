@@ -40,7 +40,7 @@ enum DemoEvent {
 /// Gives the user three seconds to focus a destination, then opens the editable
 /// bubble. Enter really delivers the edited text. `smoke` uses the already focused
 /// destination and tests native editing, held Enter and production delivery.
-/// On macOS, `artifacts` instead runs self-contained streaming and failure fixtures;
+/// On macOS and Windows, `artifacts` runs self-contained streaming and failure fixtures;
 /// they never capture a destination, inject text, or change persistent history.
 pub fn run_preview_demo(smoke: bool, artifacts: Option<PathBuf>) -> Result<()> {
     crate::platform::initialize_dpi_awareness()?;
@@ -314,7 +314,28 @@ impl ApplicationHandler<DemoEvent> for Demo {
                     } else {
                         "timeout.png"
                     };
-                    if let Err(error) = self.capture(name) {
+                    let captured = (|| -> Result<()> {
+                        self.capture(name)?;
+                        if can_confirm {
+                            let long = "明天下午三点开会，讨论 Windows 高分屏显示和 Realtime 识别结果。\nEnglish and emoji 🎙️ should remain readable.\n".repeat(12);
+                            for (name, text, warning) in [
+                                ("ready-edited.png", SMOKE_TEXT, None),
+                                ("ready-long.png", long.as_str(), None),
+                                (
+                                    "ready-warning.png",
+                                    long.as_str(),
+                                    Some(
+                                        "部分音频识别失败，请检查文字后按 Enter 确认，或按 Esc 取消。",
+                                    ),
+                                ),
+                            ] {
+                                self.preview.update_text(text, true, warning)?;
+                                self.capture(name)?;
+                            }
+                        }
+                        Ok(())
+                    })();
+                    if let Err(error) = captured {
                         self.error = Some(error.to_string());
                         event_loop.exit();
                         return;
@@ -330,7 +351,7 @@ impl ApplicationHandler<DemoEvent> for Demo {
                         self.streaming = false;
                         self.preview.close();
                     } else {
-                        #[cfg(target_os = "macos")]
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
                         {
                             let before = self.notifications.load(Ordering::Relaxed);
                             if let Err(error) = self.preview.smoke_error(&|| {
@@ -464,12 +485,12 @@ impl ApplicationHandler<DemoEvent> for Demo {
 impl Demo {
     fn capture(&self, name: &str) -> Result<()> {
         if let Some(directory) = &self.artifacts {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             self.preview.smoke_capture(&directory.join(name))?;
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 let _ = (directory, name);
-                anyhow::bail!("Preview artifact capture currently requires macOS");
+                anyhow::bail!("Preview artifact capture requires macOS or Windows");
             }
         }
         Ok(())

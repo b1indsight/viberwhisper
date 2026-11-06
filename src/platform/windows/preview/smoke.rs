@@ -5,6 +5,142 @@ use super::*;
 use windows_sys::Win32::UI::Controls::{EM_CANUNDO, EM_GETSEL, EM_REPLACESEL};
 
 impl NativePreview {
+    /// Ask only this fixture's HWND and native children to render into a PNG.
+    pub(crate) fn smoke_capture(&self, path: &std::path::Path) -> Result<()> {
+        use windows_sys::Win32::Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+            DIB_RGB_COLORS, DeleteDC, GdiFlush,
+        };
+
+        let window = self.state.window.get();
+        let mut bounds = RECT::default();
+        ensure!(
+            unsafe { GetWindowRect(window, &mut bounds) } != 0,
+            "Could not measure preview capture"
+        );
+        let width = bounds.right - bounds.left;
+        let height = bounds.bottom - bounds.top;
+        ensure!(width > 0 && height > 0, "Preview capture has no area");
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height, // Top-down rows, matching the PNG order.
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let context = unsafe { CreateCompatibleDC(null_mut()) };
+        ensure!(
+            !context.is_null(),
+            "Could not create preview capture context"
+        );
+        let mut pixels = null_mut();
+        let bitmap =
+            unsafe { CreateDIBSection(context, &info, DIB_RGB_COLORS, &mut pixels, null_mut(), 0) };
+        if bitmap.is_null() {
+            unsafe { DeleteDC(context) };
+            anyhow::bail!("Could not create preview capture bitmap");
+        }
+        let previous = unsafe { SelectObject(context, bitmap) };
+        let captured = (|| -> Result<Vec<u8>> {
+            ensure!(
+                !previous.is_null(),
+                "Could not select preview capture bitmap"
+            );
+            // SAFETY: The selected 32-bit DIB owns width * height writable pixels until
+            // cleanup below. WM_PRINT paints our own controls, never another application.
+            unsafe {
+                std::slice::from_raw_parts_mut(pixels.cast::<u8>(), (width * height * 4) as usize)
+            }
+            .fill(255);
+            unsafe {
+                SendMessageW(
+                    window,
+                    WM_PRINT,
+                    context as usize,
+                    (PRF_CLIENT | PRF_NONCLIENT | PRF_CHILDREN | PRF_ERASEBKGND) as isize,
+                );
+            }
+            ensure!(
+                unsafe { GdiFlush() } != 0,
+                "Could not flush preview capture"
+            );
+            let mut rgba = unsafe {
+                std::slice::from_raw_parts(pixels.cast::<u8>(), (width * height * 4) as usize)
+            }
+            .to_vec();
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel.swap(0, 2); // GDI BGRA to PNG RGBA; GDI does not set alpha.
+                pixel[3] = 255;
+            }
+            Ok(rgba)
+        })();
+        unsafe {
+            if !previous.is_null() {
+                SelectObject(context, previous);
+            }
+            DeleteObject(bitmap);
+            DeleteDC(context);
+        }
+        let rgba = captured?;
+        let mut encoder =
+            png::Encoder::new(std::fs::File::create(path)?, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header()?.write_image_data(&rgba)?;
+        eprintln!(
+            "preview capture: {}; {width}x{height}; actual DPI={}; layout DPI={}; read-only={}; warning={}",
+            path.display(),
+            unsafe { GetDpiForWindow(window) },
+            self.state.dpi.get(),
+            unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) } & ES_READONLY as isize
+                != 0,
+            self.state.message_visible.get(),
+        );
+        Ok(())
+    }
+
+    /// Empty errors cannot submit text; exercise the same native key subclass as users.
+    #[cfg(feature = "integration")]
+    pub(crate) fn smoke_error(&self, verify_pending: &dyn Fn() -> Result<()>) -> Result<()> {
+        ensure!(
+            self.state.normalized_text()?.is_empty()
+                && !self.state.retry_allowed.get()
+                && unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) }
+                    & ES_READONLY as isize
+                    != 0,
+            "Error preview retained text, accepted edits, or enabled confirmation"
+        );
+        let mut message =
+            vec![0u16; unsafe { GetWindowTextLengthW(self.state.status.get()) } as usize + 1];
+        let count = unsafe {
+            GetWindowTextW(
+                self.state.status.get(),
+                message.as_mut_ptr(),
+                message.len() as i32,
+            )
+        };
+        ensure!(
+            unsafe { IsWindowVisible(self.state.status.get()) } != 0
+                && String::from_utf16_lossy(&message[..count as usize]).contains("Esc"),
+            "Error preview did not explain cancellation"
+        );
+        for key in [VK_RETURN, VK_ESCAPE] {
+            unsafe {
+                SendMessageW(self.state.text.get(), WM_KEYDOWN, key as usize, 0);
+                SendMessageW(self.state.text.get(), WM_KEYUP, key as usize, 0);
+            }
+            if key == VK_RETURN {
+                verify_pending()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Exercise real HWNDs with synthetic DPI notifications; this is not a high-DPI display test.
     #[cfg(test)]
     pub(crate) fn smoke_dpi() -> Result<()> {
@@ -13,6 +149,12 @@ impl NativePreview {
             AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
             GetWindowDpiAwarenessContext, SystemParametersInfoForDpi,
         };
+
+        let artifacts =
+            std::env::var_os("VIBERWHISPER_PREVIEW_ARTIFACTS").map(std::path::PathBuf::from);
+        if let Some(directory) = &artifacts {
+            std::fs::create_dir_all(directory)?;
+        }
 
         unsafe extern "system" fn dpi_during_resize(
             window: HWND,
@@ -66,13 +208,16 @@ impl NativePreview {
                 first > 0,
                 "DPI fixture did not scroll away from the first line"
             );
-            for (dpi, reentrant) in [
+            for (step, (dpi, reentrant)) in [
                 (96, false),
                 (144, false),
                 (192, false),
                 (96, false),
                 (144, true),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let pixels = |logical: i32| (logical * dpi + 48) / 96;
                 let suggested = RECT {
                     left: 41,
@@ -192,6 +337,12 @@ impl NativePreview {
                 eprintln!(
                     "native preview: synthetic {dpi} DPI; ready={ready}; reentrant={reentrant}; font/layout/editor state checked"
                 );
+                if let Some(directory) = &artifacts {
+                    let state = if ready { "ready-warning" } else { "streaming" };
+                    preview.smoke_capture(
+                        &directory.join(format!("synthetic-{dpi}-{state}-step-{step}.png")),
+                    )?;
+                }
             }
         }
         preview.smoke_streaming()
