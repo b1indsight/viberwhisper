@@ -43,6 +43,7 @@ enum DemoEvent {
 /// On macOS, `artifacts` instead runs self-contained streaming and failure fixtures;
 /// they never capture a destination, inject text, or change persistent history.
 pub fn run_preview_demo(smoke: bool, artifacts: Option<PathBuf>) -> Result<()> {
+    crate::platform::initialize_dpi_awareness()?;
     if let Some(directory) = &artifacts {
         std::fs::create_dir_all(directory)?;
     }

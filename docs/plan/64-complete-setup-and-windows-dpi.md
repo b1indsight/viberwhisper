@@ -1,7 +1,7 @@
 # 64 - 识别模式二选一配置与 Windows 高 DPI 窗口
 
-**阶段：** 方案待明确批准；尚未修改产品代码或测试。
-**PR：** [#165（docs-only draft）](https://github.com/b1indsight/viberwhisper/pull/165)，批准后在同一个 PR 实现。
+**阶段：** 简化范围已本地实现；验证与代码审查中，真实 Windows 4K 清晰度仍待实机验收。
+**PR：** [#165](https://github.com/b1indsight/viberwhisper/pull/165)，沿用同一 draft PR 交付实现。
 **Bookmark：** `feat/complete-setup-windows-dpi`。
 **基线：** 最新 fetch 后的 `origin/master`，即 [v0.5.0 发布准备提交 e18be032](https://github.com/b1indsight/viberwhisper/commit/e18be032950c03bc7bf40153e028e12193cccacc)。
 **工作区：** 独立 JJ workspace `setup-realtime-dpi-20261106`；不修改源主工作区、发布准备工作区、个人配置或个人记忆。
@@ -333,3 +333,65 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
 原来的“JSON 高级编辑还是逐项表单”审批问题已撤回。当前只需批准这个简化后的整体方案；
 真实 Windows 4K 清晰度仍需实机验收，当前 macOS 与普通托管 CI 不能替代。
 本次仅更新方案文档和审批摘要，未新增实现或测试。
+
+### [002] — 2026-11-06 — 二选一向导与 Windows DPI 候选修复
+
+- **背景与范围：** 按 [001] 的简化范围实现；完整模型审计用于保护未编辑值，不恢复高级编辑入口。
+- **已实现的向导：**
+  - `ui/setup.rs::configure_recognition` 在现有 `SetupUi` 边界选择普通识别或 Realtime，默认当前模式；
+    Realtime 只问地址、模型和鉴权变量名，普通识别保留原 STT/可选 LLM 流程。两条路径互不改写连接参数。
+  - LLM 开关默认当前值；断开的设备作为可保留选项，枚举失败保留原设备。未编辑连接保留原始空白和字符；
+    tinyfiledialogs 的安全展示值原样接受时映射回原始值，不把截断或引号替换后的展示文本写盘。
+  - 继续只在最终确认后原子保存一次；密码框为空、空输入保留磁盘密钥、环境值优先且不落盘。
+    Realtime 只编辑变量名称；不更改运行时记忆、提示词或产品默认服务。
+- **DPI 决策与实现：**
+  - 在 CLI、GUI 和预览 demo 的首个 HWND 前设置并检查进程/线程 PMv2；已有 PMv2 可重复进入，
+    不兼容的外部 DPI 上下文明确报错。源码确认 winit 只在创建事件循环时设置 DPI，无法覆盖更早的设置对话框。
+  - 设置窗口保留标准 DLU、9pt Segoe UI 和 PMv2 自动缩放，避免同时手工放大模板。
+    气泡改用对应窗口 DPI 的系统消息字体，由窗口拥有并在两个控件换字体后释放旧资源。
+  - 只缩放 96-DPI 布局常量；原生测得的字形、边距、光标和工作区不二次放大。移除主屏宽度缓存，
+    按当前工作区计算。`WM_DPICHANGED` 应用建议矩形并重新排版，保留文字、选区、滚动和 undo。
+  - 同步原生调用可能在布局中递送 DPI 通知，故记录待处理 DPI 并在当前排版后处理；不递归借用状态、
+    不任意限制重试次数。临时零尺寸子控件由唯一布局函数确定几何，创建失败时销毁窗口并释放字体。
+- **测试与使用说明：** 扩展现有向导回归和 Windows 有界原生子进程，覆盖两方向切换、休眠连接无效、
+  高级值/密钥/不可用设备保留、无效 Realtime 参数和取消/错误/最终拒绝保存。原生子进程检查 setup/preview
+  的 PMv2 与字体，向真实 HWND 注入 96/144/192/96 DPI 和布局重入通知，检查布局和编辑状态。
+  PowerShell smoke 更新为两种路径并加入普通 Windows CI；没有手动触发 release。
+  README、配置/Realtime/CLI 指南、UI/平台架构与 changelog 同步更新。
+- **证据边界：** 本机 macOS 的 build/test/clippy 和 Windows 目标类型/lint 检查通过。
+  交叉检查设置 `DOCS_RS=1`，仅跳过 `ort-sys` 不提供的 GNU ONNX 原生产物准备，不代表 Windows 链接、运行或真实 4K 验收。
+  新增 Windows 原生检查等待该实现提交的 Windows CI；此前 docs-only 绿色检查不证明新增功能。
+  正常监听气泡可能已由 winit 设为 DPI-aware，用户报告机器的模糊根因仍未复现，不能据此宣称该机器清晰度已修复。
+
+### [003] — 2026-11-06 — 保留契约消融与分层验证
+
+- **消融设置：** 在同一独立工作区对 `switching_recognition_keeps_unedited_configuration_and_disk_keys`
+  使用相同代表输入：双向切换、非默认且带空白/引号的模型、长 Unicode/空/组件提示词、长期词条、
+  磁盘密钥和不可用设备。每次只撤去一项机制，执行
+  `cargo test --locked --lib ui::setup::tests::switching_recognition_keeps_unedited_configuration_and_disk_keys -- --exact`，
+  观察失败后恢复，再测试下一项；临时变体不保留。
+
+| 对比 | 实际结果 | 决定 |
+|---|---|---|
+| 改动前基线运行新增保留回归 | 失败，识别路径、LLM 开关、设备和模型空白被改写 | 接入模式选择，并保护读入文档 |
+| LLM 确认默认值恢复为写死 `false` | 失败，保留操作将已启用的整理关闭 | 沿用当前开关，不引入额外状态 |
+| 必填输入统一 `trim()`，不区分原样接受 | 失败，未编辑值不再与原始文档相等 | 仅清理确实编辑的输入 |
+| 不提供暂时断开设备的保留选项 | 失败，原设备被系统默认取代 | 使用现有编号选择追加原设备，不新增设备管理层 |
+| 恢复完整实现后的相同回归与全量测试 | 通过 | 保留上述最小机制 |
+
+- **实际验证：** macOS 的 `cargo fmt --check`、`cargo build --locked`、`cargo test --locked`、
+  `cargo clippy --locked -- -D warnings` 通过；原有私有数据集/外部实时服务测试保持忽略，没有将其算作实机验证。
+  Windows GNU 目标的 `cargo check` 和两套 `cargo clippy --all-targets`（`windows-app` 与
+  `windows-app,integration`）通过，均使用 `DOCS_RS=1` 跳过依赖原生产物准备，不包含链接和执行。
+- **macOS 原生输入的执行与限制：** 完整 `setup` 在显示向导前阻塞于 CoreAudio 设备枚举，采样栈定位到
+  `cpal::supported_input_configs → AudioUnitSetProperty → mach_msg`；本次不修改该既有音频路径。
+  临时测试通过既有 `run_wizard` 边界注入设备列表和临时配置路径，用真实 `NativeSetupUi` 打开识别方式、
+  普通 STT 地址、Realtime 地址/模型/鉴权名五种对话框；前序步骤由测试适配器响应，每个目标原生窗口
+  五秒自动结束后返回取消，全部退出且未创建配置，没有访问个人记忆或远端服务。
+  仅针对该测试进程树的窗口截图返回 `could not create image from window`；当前无桌面控制工具，
+  因此没有可审阅截图，不能宣称已完成 macOS 视觉检查。临时源码夹具和辅助脚本在验证后删除。
+- **Windows 消融与待验：** 本机没有 Windows 执行环境，无法运行移除 DPI 初始化、改回 stock 字体、
+  移除缩放或丢弃重入通知的原生对比。最小候选修复及对应真实 HWND 检查已落入代码，
+  原生结果等待实现提交的 Windows CI；这些比较和真实跨屏/4K 视觉验收均延后，未以数学模拟或类型检查替代。
+  后续实机应覆盖设置窗口、生成中只读气泡、可编辑气泡、长文本与警告、100/150/200% 缩放及混合 DPI 跨屏，
+  并检查字体清晰度、输入法、选区、滚动和撤销。发布流程、个人设置和共享工作区保持不变。

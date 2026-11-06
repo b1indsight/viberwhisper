@@ -3,7 +3,12 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use windows_sys::Win32::Graphics::Gdi::{GetObjectW, LOGFONTW};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::UI::HiDpi::{
+    AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow,
+    GetWindowDpiAwarenessContext,
+};
 
 use super::*;
 use crate::ui::setup::{NativeSetupUi, SetupUi, TITLE};
@@ -17,6 +22,8 @@ fn native_setup_dialogs_show_and_return() {
     // The old script adapter spins forever if its Chinese input window never appears. A child
     // process bounds this regression test even if either the UI or its driver stops responding.
     if std::env::var_os(CHILD_ENV).is_some() {
+        crate::platform::initialize_dpi_awareness().unwrap();
+        crate::platform::initialize_dpi_awareness().unwrap(); // An existing PMv2 context is valid.
         exercise_message(Some(true));
         exercise_message(Some(false));
         exercise_message(None);
@@ -28,6 +35,7 @@ fn native_setup_dialogs_show_and_return() {
         ] {
             exercise_input(default, entered, accept);
         }
+        crate::platform::NativePreview::smoke_dpi().unwrap();
         return;
     }
 
@@ -85,6 +93,7 @@ fn exercise_message(answer: Option<bool>) {
                 );
                 if !dialog.is_null() {
                     eprintln!("native message visible; reading controls");
+                    assert_per_monitor_v2(dialog);
                     assert_eq!(read_text(dialog).unwrap(), TITLE);
                     assert_eq!(read_text(GetDlgItem(dialog, 0xffff)).unwrap(), PROMPT);
                     assert!(
@@ -128,6 +137,23 @@ fn exercise_message(answer: Option<bool>) {
     driver.join().unwrap();
 }
 
+fn assert_per_monitor_v2(window: HWND) {
+    // SAFETY: The driver keeps this dialog open until after checking its native context.
+    unsafe {
+        assert_ne!(
+            AreDpiAwarenessContextsEqual(
+                GetWindowDpiAwarenessContext(window),
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            ),
+            0,
+            "setup window must be PMv2 before winit starts"
+        );
+        let dpi = GetDpiForWindow(window);
+        assert!(dpi > 0);
+        eprintln!("native setup window DPI: {dpi}; PMv2");
+    }
+}
+
 unsafe extern "system" fn find_message(window: HWND, data: LPARAM) -> i32 {
     // SAFETY: EnumThreadWindows supplies a live window; data points to a live local HWND.
     unsafe {
@@ -165,7 +191,22 @@ fn exercise_input(default: Option<&'static str>, entered: &'static str, accept: 
         };
         // SAFETY: The modal dialog stays alive until this driver sends its completion command.
         unsafe {
+            assert_per_monitor_v2(dialog);
             let input = GetDlgItem(dialog, INPUT_ID as i32);
+            let dpi = GetDpiForWindow(dialog);
+            assert_eq!(GetDpiForWindow(input), dpi);
+            let font = SendMessageW(input, WM_GETFONT, 0, 0) as _;
+            let mut description = LOGFONTW::default();
+            assert_eq!(
+                GetObjectW(
+                    font,
+                    size_of::<LOGFONTW>() as i32,
+                    (&raw mut description).cast()
+                ),
+                size_of::<LOGFONTW>() as i32
+            );
+            // DS_SETFONT is 9pt; Windows scales DLU and the font once, not twice.
+            assert!((description.lfHeight.abs() * 72 - 9 * dpi as i32).abs() <= 72);
             assert_eq!(read_text(dialog).unwrap(), TITLE);
             assert_eq!(
                 read_text(GetDlgItem(dialog, PROMPT_ID as i32)).unwrap(),

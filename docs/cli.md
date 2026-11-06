@@ -47,7 +47,8 @@ viberwhisper config check
 `check` 构建并检查当前桌面配置，不录音、不发起 API 验证请求；需要实际语音验证时用 `setup`。
 
 `schema_version` 和 API secret 字段只读，密钥可通过向导或[环境变量](configuration.md#配置文件与首次设置)配置。
-`dictation.*` 仅通过配置文件编辑，不属于 `list/get/set` 的字段目录。
+`setup` 提供普通识别 / Realtime 二选一，并配置所选路径的连接。Realtime 鉴权只填写环境变量名，不录入密钥值。
+`dictation.*` 不属于 `list/get/set` 的字段目录；提示词、组件和记忆等高级字段仍通过配置文件编辑，向导保留已有值。
 修改后需重新启动已运行的应用。
 
 ## 离线 WAV 转写

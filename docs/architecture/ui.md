@@ -86,8 +86,17 @@ own hotkey mapping, tray components, clipboard operations, and native text injec
 
 The wizard stays together with its existing `SetupUi` and `SetupVerifier` boundaries and test
 doubles. `NativeVerifier` handles one complete hotkey-driven recording and verifies it through
-the existing audio, STT, and post-processing interfaces. `core::config` owns configuration
+the selected Realtime or HTTP recognition path without reading or updating personal memory.
+`configure_recognition` first selects ordinary HTTP STT or Realtime, defaulting to the loaded
+mode. Only the selected connection is edited: HTTP retains optional LLM setup, while Realtime
+asks for URL, model, and an environment-variable name (empty disables authentication).
+Inactive connections and all advanced prompt, temperature, preheat, and memory fields stay
+unchanged. Existing LLM enablement and unavailable microphone names remain the defaults.
+Unchanged input retains the exact original value even when tinyfiledialogs needs a sanitized
+display default. HTTP password inputs start empty; environment secrets never enter saved JSON.
+`core::config` owns configuration
 loading and atomic persistence; the wizard selects when to load, retry, cancel, or save.
+Cancelling an input, declining the final save, or a UI error before that save leaves the file intact.
 
 Windows text and password input use in-process Win32 dialogs in `ui/setup/windows.rs`, with
 Unicode controls and a native modal message loop. They do not launch VBScript/HTA input scripts
@@ -100,11 +109,17 @@ answer; failure of the final saved notification does not undo an already complet
 The CLI reports errors through its existing error return and the desktop launcher shows its
 existing startup-error dialog. Other platforms keep their existing tinyfiledialogs inputs.
 
-Windows tests drive real native inputs in a bounded child process. Release packaging also runs
-`scripts/test-windows-setup.ps1` against both release executables on a clean runner account,
-checking the initial confirmation, text/password windows, and cancellation without writing
-config. It covers explicit setup, both first-run entries, and direct/ShellExecute GUI launches
-with and without the environment that previously selected console-only confirmations.
+Both Windows process entries establish and check Per-Monitor V2 DPI awareness before the first
+dialog or hotkey helper, rather than waiting for winit's event-loop construction. Standard
+9pt Segoe UI setup dialogs retain dialog units and Windows' automatic PMv2 scaling.
+Windows tests drive real native inputs and preview controls in a bounded child process. They
+check actual HWND DPI contexts and fonts, then inject synthetic 96/144/192 DPI notifications,
+including a notification re-entering layout, without claiming a physical high-DPI display test.
+CI and release packaging run `scripts/test-windows-setup.ps1` against both executables on a clean
+runner account, checking the initial confirmation, both recognition paths, text/password
+windows, PMv2 contexts, and cancellation without writing config. It covers explicit setup,
+both first-run entries, and direct/ShellExecute GUI launches with and without the environment
+that previously selected console-only confirmations.
 
 The process entry points check for helper mode before tracing and CLI initialization. Normal
 listener startup and the explicit setup command use the same wizard. CLI-only workflows run

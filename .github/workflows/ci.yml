@@ -99,7 +99,11 @@ jobs:
         run: cargo build --locked --features windows-app
 
       - name: Test
-        run: cargo test --locked --features windows-app
+        run: cargo test --locked --features windows-app,integration
+
+      - name: Native Windows setup and DPI smoke
+        shell: pwsh
+        run: ./scripts/test-windows-setup.ps1 -BinaryDirectory target/debug
 
       - name: Clippy
         run: cargo clippy --locked --all-targets --features windows-app -- -D warnings

@@ -5,6 +5,198 @@ use super::*;
 use windows_sys::Win32::UI::Controls::{EM_CANUNDO, EM_GETSEL, EM_REPLACESEL};
 
 impl NativePreview {
+    /// Exercise real HWNDs with synthetic DPI notifications; this is not a high-DPI display test.
+    #[cfg(test)]
+    pub(crate) fn smoke_dpi() -> Result<()> {
+        use windows_sys::Win32::Graphics::Gdi::{GetObjectW, LOGFONTW};
+        use windows_sys::Win32::UI::HiDpi::{
+            AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            GetWindowDpiAwarenessContext, SystemParametersInfoForDpi,
+        };
+
+        unsafe extern "system" fn dpi_during_resize(
+            window: HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+            subclass: usize,
+            reference: usize,
+        ) -> LRESULT {
+            if message == WM_WINDOWPOSCHANGED {
+                // A monitor transition can notify DPI inside SetWindowPos. Remove the fixture
+                // first so applying its suggested rectangle cannot inject another notification.
+                unsafe {
+                    RemoveWindowSubclass(window, Some(dpi_during_resize), subclass);
+                    SendMessageW(window, WM_DPICHANGED, 144 | (144 << 16), reference as isize);
+                }
+            }
+            unsafe { DefSubclassProc(window, message, wparam, lparam) }
+        }
+
+        let mut preview = Self::new(Box::new(|_| {
+            panic!("DPI change submitted or cancelled text")
+        }));
+        preview.show_streaming(SessionId(901), "hello 😀", "DPI fixture", None, false)?;
+        let window = preview.state.window.get();
+        ensure!(
+            unsafe {
+                AreDpiAwarenessContextsEqual(
+                    GetWindowDpiAwarenessContext(window),
+                    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                )
+            } != 0,
+            "Preview is not PMv2"
+        );
+        let text = "hello 😀 中文 line\n".repeat(40);
+        for (ready, warning) in [(false, None), (true, Some("测试提示"))] {
+            preview.update_text(&text, ready, warning)?;
+            let editor = preview.state.text.get();
+            unsafe {
+                if ready {
+                    let suffix = nul_terminated_utf16("user edit");
+                    SendMessageW(editor, EM_SETSEL, usize::MAX, -1);
+                    SendMessageW(editor, EM_REPLACESEL, 1, suffix.as_ptr() as isize);
+                }
+                SendMessageW(editor, EM_SETSEL, 6, 8); // Select an entire surrogate pair.
+                SendMessageW(editor, EM_LINESCROLL, 0, 5);
+            }
+            let original = preview.state.normalized_text()?;
+            let first = unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) };
+            ensure!(
+                first > 0,
+                "DPI fixture did not scroll away from the first line"
+            );
+            for (dpi, reentrant) in [
+                (96, false),
+                (144, false),
+                (192, false),
+                (96, false),
+                (144, true),
+            ] {
+                let pixels = |logical: i32| (logical * dpi + 48) / 96;
+                let suggested = RECT {
+                    left: 41,
+                    top: 67,
+                    right: 1079,
+                    bottom: 679,
+                };
+                // Dispatch through the real window procedure, not directly to the layout helper.
+                if reentrant {
+                    // Ensure the next layout really resizes; a no-op position need not notify.
+                    ensure!(
+                        unsafe {
+                            SetWindowPos(
+                                window,
+                                null_mut(),
+                                0,
+                                0,
+                                1,
+                                1,
+                                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                            )
+                        } != 0,
+                        "Could not prepare reentrant DPI resize"
+                    );
+                    // SAFETY: The RECT stays alive until the synchronous layout returns.
+                    ensure!(
+                        unsafe {
+                            SetWindowSubclass(
+                                window,
+                                Some(dpi_during_resize),
+                                2,
+                                (&raw const suggested) as usize,
+                            )
+                        } != 0,
+                        "Could not install reentrant DPI fixture"
+                    );
+                    let result = preview.state.layout();
+                    unsafe { RemoveWindowSubclass(window, Some(dpi_during_resize), 2) };
+                    result?;
+                } else {
+                    unsafe {
+                        SendMessageW(
+                            window,
+                            WM_DPICHANGED,
+                            dpi as usize | ((dpi as usize) << 16),
+                            (&raw const suggested) as isize,
+                        );
+                    }
+                }
+                let mut bounds = RECT::default();
+                let mut edit_bounds = RECT::default();
+                ensure!(
+                    unsafe { GetWindowRect(window, &mut bounds) } != 0
+                        && unsafe { GetWindowRect(editor, &mut edit_bounds) } != 0,
+                    "Could not read DPI-scaled bounds"
+                );
+                ensure!(
+                    bounds.bottom - bounds.top == pixels(if ready { 268 } else { 220 })
+                        && bounds.right - bounds.left <= pixels(420)
+                        && edit_bounds.left - bounds.left == pixels(16)
+                        && edit_bounds.top - bounds.top == pixels(12)
+                        && edit_bounds.bottom - edit_bounds.top == pixels(196)
+                        && bounds.top == suggested.top
+                        && ((bounds.left + bounds.right) - (suggested.left + suggested.right))
+                            .abs()
+                            <= 1,
+                    "Preview did not apply {dpi}-DPI layout and suggested placement"
+                );
+                let mut expected = NONCLIENTMETRICSW {
+                    cbSize: size_of::<NONCLIENTMETRICSW>() as u32,
+                    ..Default::default()
+                };
+                ensure!(
+                    unsafe {
+                        SystemParametersInfoForDpi(
+                            SPI_GETNONCLIENTMETRICS,
+                            expected.cbSize,
+                            (&raw mut expected).cast(),
+                            0,
+                            dpi as u32,
+                        )
+                    } != 0,
+                    "Could not read system font for DPI fixture"
+                );
+                for control in [editor, preview.state.status.get()] {
+                    let font = unsafe { SendMessageW(control, WM_GETFONT, 0, 0) } as _;
+                    let mut actual = LOGFONTW::default();
+                    ensure!(
+                        unsafe {
+                            GetObjectW(font, size_of::<LOGFONTW>() as i32, (&raw mut actual).cast())
+                        } == size_of::<LOGFONTW>() as i32
+                            && actual.lfHeight == expected.lfMessageFont.lfHeight
+                            && actual.lfFaceName == expected.lfMessageFont.lfFaceName,
+                        "Preview control kept an unscaled font at {dpi} DPI"
+                    );
+                }
+                let mut start = 0u32;
+                let mut end = 0u32;
+                unsafe {
+                    SendMessageW(
+                        editor,
+                        EM_GETSEL,
+                        (&raw mut start) as usize,
+                        (&raw mut end) as isize,
+                    );
+                }
+                ensure!(
+                    preview.state.normalized_text()? == original
+                        && (start, end) == (6, 8)
+                        && unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) } == first
+                        && (unsafe { SendMessageW(editor, EM_CANUNDO, 0, 0) } != 0) == ready
+                        && (unsafe { GetWindowLongPtrW(editor, GWL_STYLE) } & ES_READONLY as isize
+                            != 0)
+                            != ready,
+                    "DPI change lost text, selection, scroll, undo, or read-only state"
+                );
+                eprintln!(
+                    "native preview: synthetic {dpi} DPI; ready={ready}; reentrant={reentrant}; font/layout/editor state checked"
+                );
+            }
+        }
+        preview.smoke_streaming()
+    }
+
     pub(crate) fn smoke_streaming(&mut self) -> Result<()> {
         // These checks address our own controls directly and need no foreground activation.
         ensure!(
@@ -130,6 +322,7 @@ impl NativePreview {
         result
     }
 
+    #[cfg(feature = "integration")]
     pub(crate) fn smoke_confirmation(
         &self,
         edited_text: &str,
@@ -138,6 +331,9 @@ impl NativePreview {
         if unsafe { GetForegroundWindow() } != self.state.window.get() {
             return Ok(false);
         }
+        let dpi = unsafe { GetDpiForWindow(self.state.window.get()) };
+        ensure!(dpi > 0, "Could not read preview DPI");
+        let pixels = |logical: i32| ((i64::from(logical) * i64::from(dpi) + 48) / 96) as i32;
         let replace = |value: &str| unsafe {
             let value = nul_terminated_utf16(value);
             SendMessageW(self.state.text.get(), EM_SETSEL, 0, -1);
@@ -167,7 +363,8 @@ impl NativePreview {
             "Bubble did not grow after editing"
         );
         ensure!(
-            grown.right - grown.left > short.right - short.left && grown.right - grown.left <= 420,
+            grown.right - grown.left > short.right - short.left
+                && grown.right - grown.left <= pixels(420),
             "Short candidate did not shrink below the wrapping width"
         );
         if let Some(anchor) = self.state.anchor.get() {
@@ -195,7 +392,7 @@ impl NativePreview {
         replace(&"中文 English 🎙️ 自动换行。".repeat(200));
         let capped = bounds()?;
         ensure!(
-            capped.bottom - capped.top <= 220,
+            capped.bottom - capped.top <= pixels(220),
             "Long text exceeded the bubble height limit"
         );
         replace("短句\r\n");
@@ -220,7 +417,9 @@ impl NativePreview {
             "Could not read the native caret"
         );
         ensure!(
-            (info.rcCaret.top + info.rcCaret.bottom - (short.bottom - short.top - 24)).abs() <= 2,
+            (info.rcCaret.top + info.rcCaret.bottom - (short.bottom - short.top - pixels(24)))
+                .abs()
+                <= pixels(2),
             "Short candidate is not vertically centered"
         );
         replace("iiiiiiiiiiiiiiii");
@@ -242,7 +441,7 @@ impl NativePreview {
         replace("短句");
         let footer = bounds()?;
         ensure!(
-            footer.bottom - footer.top == short.bottom - short.top + 48,
+            footer.bottom - footer.top == short.bottom - short.top + pixels(48),
             "Message footer overlapped the resized editor"
         );
         let mut viewport = RECT::default();
@@ -251,7 +450,7 @@ impl NativePreview {
             "Could not read editor bounds"
         );
         ensure!(
-            viewport.bottom == short.bottom - short.top - 24,
+            viewport.bottom == short.bottom - short.top - pixels(24),
             "Editor did not shrink with its bubble"
         );
         self.state.set_message(None)?;

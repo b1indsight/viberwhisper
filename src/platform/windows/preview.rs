@@ -5,9 +5,9 @@ use std::sync::OnceLock;
 use anyhow::{Result, anyhow, ensure};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, CreateRoundRectRgn, DEFAULT_GUI_FONT, DT_CALCRECT, DT_EDITCONTROL, DT_EXPANDTABS,
-    DT_NOPREFIX, DeleteObject, DrawTextW, GetDC, GetStockObject, GetTextMetricsW, InvalidateRect,
-    ReleaseDC, SelectObject, SetWindowRgn, TEXTMETRICW,
+    COLOR_WINDOW, CreateFontIndirectW, CreateRoundRectRgn, DT_CALCRECT, DT_EDITCONTROL,
+    DT_EXPANDTABS, DT_NOPREFIX, DeleteObject, DrawTextW, GetDC, GetTextMetricsW, HFONT,
+    InvalidateRect, ReleaseDC, SelectObject, SetWindowRgn, TEXTMETRICW,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
@@ -15,6 +15,7 @@ use windows_sys::Win32::UI::Controls::{
     EM_GETSEL, EM_LINESCROLL, EM_REPLACESEL, EM_SCROLLCARET, EM_SETLIMITTEXT, EM_SETMODIFY,
     EM_SETREADONLY, EM_SETRECTNP, EM_SETSEL,
 };
+use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT,
 };
@@ -30,7 +31,7 @@ use crate::session::SessionId;
 #[path = "preview/position.rs"]
 mod position;
 
-#[cfg(feature = "integration")]
+#[cfg(any(test, feature = "integration"))]
 #[path = "preview/smoke.rs"]
 mod smoke;
 
@@ -153,6 +154,47 @@ impl DeliveryTarget for NativeTarget {
     }
 }
 
+/// Owned by the preview, not by its controls. Replace it only after both controls switch fonts.
+struct PreviewFont(HFONT);
+
+impl PreviewFont {
+    fn new(dpi: u32) -> Result<Self> {
+        ensure!(dpi > 0, "无法获取预览窗口 DPI");
+        let mut metrics = NONCLIENTMETRICSW {
+            cbSize: size_of::<NONCLIENTMETRICSW>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: The struct is correctly sized; Win32 supplies the system UI font at this DPI.
+        ensure!(
+            unsafe {
+                SystemParametersInfoForDpi(
+                    SPI_GETNONCLIENTMETRICS,
+                    metrics.cbSize,
+                    (&raw mut metrics).cast(),
+                    0,
+                    dpi,
+                )
+            } != 0,
+            "无法获取预览字体：{}",
+            std::io::Error::last_os_error()
+        );
+        let font = unsafe { CreateFontIndirectW(&metrics.lfMessageFont) };
+        ensure!(
+            !font.is_null(),
+            "无法创建预览字体：{}",
+            std::io::Error::last_os_error()
+        );
+        Ok(Self(font))
+    }
+}
+
+impl Drop for PreviewFont {
+    fn drop(&mut self) {
+        // SAFETY: All controls have switched to a replacement or have already been destroyed.
+        unsafe { DeleteObject(self.0) };
+    }
+}
+
 struct WindowState {
     notify: PreviewNotify,
     session_id: Cell<Option<SessionId>>,
@@ -165,11 +207,32 @@ struct WindowState {
     retry_allowed: Cell<bool>,
     message_visible: Cell<bool>,
     laying_out: Cell<bool>,
-    max_width: Cell<i32>,
+    dpi: Cell<u32>,
+    pending_dpi: Cell<Option<u32>>,
+    font: RefCell<Option<PreviewFont>>,
     anchor: Cell<Option<PreviewRect>>,
 }
 
 impl WindowState {
+    fn pixels(&self, logical: i32) -> i32 {
+        ((i64::from(logical) * i64::from(self.dpi.get()) + 48) / 96) as i32
+    }
+
+    fn apply_dpi(&self, dpi: u32) -> Result<()> {
+        if self.dpi.get() == dpi && self.font.borrow().is_some() {
+            return Ok(());
+        }
+        let font = PreviewFont::new(dpi)?;
+        self.dpi.set(dpi);
+        // SendMessage can re-enter layout. Keep the old font alive without a RefCell borrow
+        // until neither native control refers to it anymore.
+        for control in [self.text.get(), self.status.get()] {
+            unsafe { SendMessageW(control, WM_SETFONT, font.0 as usize, 1) };
+        }
+        self.font.replace(Some(font));
+        Ok(())
+    }
+
     fn normalized_text(&self) -> Result<String> {
         let length = unsafe { GetWindowTextLengthW(self.text.get()) };
         let mut text = vec![0u16; length as usize + 1];
@@ -279,24 +342,49 @@ impl WindowState {
         if self.laying_out.replace(true) {
             return Ok(());
         }
-        let result = (|| {
+        let mut first_visible_line = None;
+        let result = (|| loop {
             let mut bounds = RECT::default();
             let window = self.window.get();
+            let dpi = self
+                .pending_dpi
+                .take()
+                .unwrap_or_else(|| unsafe { GetDpiForWindow(window) });
+            if self.dpi.get() != dpi && self.font.borrow().is_some() {
+                first_visible_line.get_or_insert_with(|| unsafe {
+                    SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0)
+                });
+            }
+            self.apply_dpi(dpi)?;
+            let pixels = |logical| self.pixels(logical);
             ensure!(
                 unsafe { GetWindowRect(window, &mut bounds) } != 0,
                 "无法获取预览尺寸"
             );
-            let work = self.anchor.get().and_then(position::work_area);
-            let max_width = work.map_or(self.max_width.get(), |work| {
-                420.min((work.width as i32 - 16).max(96))
+            let work = self
+                .anchor
+                .get()
+                .or_else(|| {
+                    PreviewRect::new(
+                        bounds.left as f64,
+                        bounds.top as f64,
+                        (bounds.right - bounds.left) as f64,
+                        (bounds.bottom - bounds.top) as f64,
+                    )
+                })
+                .and_then(position::work_area);
+            let max_width = work.map_or(pixels(420), |work| {
+                pixels(420).min((work.width as i32 - 16).max(pixels(96)))
             });
             let (natural_width, line_height) = self.text_metrics()?;
             let margins = unsafe { SendMessageW(self.text.get(), EM_GETMARGINS, 0, 0) } as u32;
-            let padding = 34 + (margins & 0xffff) as i32 + (margins >> 16) as i32;
+            let padding = pixels(34) + (margins & 0xffff) as i32 + (margins >> 16) as i32;
             let width = if self.message_visible.get() {
                 max_width
             } else {
-                natural_width.saturating_add(padding).clamp(96, max_width)
+                natural_width
+                    .saturating_add(padding)
+                    .clamp(pixels(96), max_width)
             };
             let mut viewport = RECT::default();
             ensure!(
@@ -304,15 +392,15 @@ impl WindowState {
                 "无法获取输入框尺寸"
             );
             // Reflow at the new width before counting native wrapped lines.
-            if viewport.right != width - 32 {
+            if viewport.right != width - pixels(32) {
                 ensure!(
                     unsafe {
                         SetWindowPos(
                             self.text.get(),
                             null_mut(),
-                            16,
-                            12,
-                            width - 32,
+                            pixels(16),
+                            pixels(12),
+                            width - pixels(32),
                             viewport.bottom,
                             SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
                         )
@@ -326,8 +414,14 @@ impl WindowState {
             let lines = unsafe { SendMessageW(self.text.get(), EM_GETLINECOUNT, 0, 0) } as i32;
             let content_height = lines.max(1).saturating_mul(line_height);
             // Match the macOS viewport bounds; taller text stays scrollable.
-            let editor_height = content_height.clamp(28, 196);
-            let height = editor_height + 24 + if self.message_visible.get() { 48 } else { 0 };
+            let editor_height = content_height.clamp(pixels(28), pixels(196));
+            let height = editor_height
+                + pixels(24)
+                + if self.message_visible.get() {
+                    pixels(48)
+                } else {
+                    0
+                };
             // Re-evaluate placement at the new size, including the warning footer.
             let origin =
                 self.anchor.get().zip(work).map(|(anchor, work)| {
@@ -353,9 +447,9 @@ impl WindowState {
                     SetWindowPos(
                         self.text.get(),
                         null_mut(),
-                        16,
-                        12,
-                        width - 32,
+                        pixels(16),
+                        pixels(12),
+                        width - pixels(32),
                         editor_height,
                         SWP_NOZORDER | SWP_NOACTIVATE
                     ) != 0,
@@ -378,15 +472,16 @@ impl WindowState {
                     SetWindowPos(
                         self.status.get(),
                         null_mut(),
-                        16,
-                        editor_height + 24,
-                        width - 32,
-                        36,
+                        pixels(16),
+                        editor_height + pixels(24),
+                        width - pixels(32),
+                        pixels(36),
                         SWP_NOZORDER | SWP_NOACTIVATE
                     ) != 0,
                     "无法调整预览提示"
                 );
-                let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 28, 28);
+                let region =
+                    CreateRoundRectRgn(0, 0, width + 1, height + 1, pixels(28), pixels(28));
                 ensure!(!region.is_null(), "无法创建气泡边缘");
                 if SetWindowRgn(window, region, 1) == 0 {
                     DeleteObject(region);
@@ -394,7 +489,16 @@ impl WindowState {
                 }
                 // Windows owns the region after successful SetWindowRgn.
             }
-            Ok(())
+            // Moving to the caret's monitor can deliver WM_DPICHANGED synchronously. Its
+            // pending DPI must be applied after this layout, rather than dropped by the guard.
+            if self.pending_dpi.get().is_none() {
+                if let Some(first) = first_visible_line {
+                    let current =
+                        unsafe { SendMessageW(self.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) };
+                    unsafe { SendMessageW(self.text.get(), EM_LINESCROLL, 0, first - current) };
+                }
+                break Ok(());
+            }
         })();
         self.laying_out.set(false);
         result
@@ -523,6 +627,32 @@ unsafe extern "system" fn window_proc(
     if !state.is_null() {
         let state = unsafe { &*state };
         match message {
+            WM_DPICHANGED => {
+                state.pending_dpi.set(Some((wparam & 0xffff) as u32));
+                // SAFETY: WM_DPICHANGED supplies a RECT valid for this synchronous callback.
+                let suggested = unsafe { &*(lparam as *const RECT) };
+                let resized = unsafe {
+                    SetWindowPos(
+                        window,
+                        null_mut(),
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                };
+                if resized == 0 {
+                    tracing::error!(error = %std::io::Error::last_os_error(), "Could not apply suggested DPI bounds");
+                }
+                if !state.text.get().is_null()
+                    && !state.status.get().is_null()
+                    && let Err(error) = state.layout()
+                {
+                    tracing::error!(%error, "Could not rescale preview for DPI change");
+                }
+                return 0;
+            }
             WM_COMMAND
                 if (wparam >> 16) as u16 == EN_CHANGE as u16
                     && lparam as HWND == state.text.get() =>
@@ -574,7 +704,9 @@ impl NativePreview {
                 retry_allowed: Cell::new(true),
                 message_visible: Cell::new(false),
                 laying_out: Cell::new(false),
-                max_width: Cell::new(420),
+                dpi: Cell::new(96),
+                pending_dpi: Cell::new(None),
+                font: RefCell::new(None),
                 anchor: Cell::new(None),
             }),
         }
@@ -614,7 +746,6 @@ impl NativePreview {
             SystemParametersInfoW(SPI_GETWORKAREA, 0, (&raw mut work).cast(), 0);
         }
         let width = 420.min((work.right - work.left - 20).max(240));
-        self.state.max_width.set(width);
         let height = 104;
         let x = work.left + (work.right - work.left - width) / 2;
         let y = work.top + (work.bottom - work.top - height) / 2;
@@ -642,57 +773,43 @@ impl NativePreview {
             std::io::Error::last_os_error()
         );
         let setup = (|| {
-            let control =
-                |class: &str, text: &str, style, id: u16, x, y, width, height| -> Result<HWND> {
-                    let class = super::nul_terminated_utf16(class);
-                    let text = super::nul_terminated_utf16(text);
-                    let handle = unsafe {
-                        CreateWindowExW(
-                            0,
-                            class.as_ptr(),
-                            text.as_ptr(),
-                            WS_CHILD | WS_VISIBLE | style,
-                            x,
-                            y,
-                            width,
-                            height,
-                            window,
-                            id as usize as _,
-                            instance,
-                            null(),
-                        )
-                    };
-                    ensure!(
-                        !handle.is_null(),
-                        "无法创建预览控件：{}",
-                        std::io::Error::last_os_error()
-                    );
-                    unsafe {
-                        SendMessageW(
-                            handle,
-                            WM_SETFONT,
-                            GetStockObject(DEFAULT_GUI_FONT) as usize,
-                            1,
-                        );
-                        ensure!(
-                            SetWindowSubclass(handle, Some(control_proc), 1, state as usize) != 0,
-                            "无法处理预览确认按键"
-                        );
-                    }
-                    Ok(handle)
+            let control = |class: &str, style, id: u16| -> Result<HWND> {
+                let class = super::nul_terminated_utf16(class);
+                let text = [0u16];
+                let handle = unsafe {
+                    CreateWindowExW(
+                        0,
+                        class.as_ptr(),
+                        text.as_ptr(),
+                        WS_CHILD | WS_VISIBLE | style,
+                        0,
+                        0,
+                        0,
+                        0,
+                        window,
+                        id as usize as _,
+                        instance,
+                        null(),
+                    )
                 };
-            self.state
-                .status
-                .set(control("STATIC", "", 0, 4, 16, height - 4, width - 32, 44)?);
+                ensure!(
+                    !handle.is_null(),
+                    "无法创建预览控件：{}",
+                    std::io::Error::last_os_error()
+                );
+                unsafe {
+                    ensure!(
+                        SetWindowSubclass(handle, Some(control_proc), 1, state as usize) != 0,
+                        "无法处理预览确认按键"
+                    );
+                }
+                Ok(handle)
+            };
+            self.state.status.set(control("STATIC", 0, 4)?);
             self.state.text.set(control(
                 "EDIT",
-                "",
                 WS_TABSTOP | WS_VSCROLL | (ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL) as u32,
                 5,
-                16,
-                12,
-                width - 32,
-                height - 24,
             )?);
             unsafe {
                 SendMessageW(self.state.text.get(), EM_SETLIMITTEXT, 0x7ffffffe, 0);
@@ -706,6 +823,10 @@ impl NativePreview {
                 DestroyWindow(window);
             }
             self.state.window.set(null_mut());
+            self.state.text.set(null_mut());
+            self.state.status.set(null_mut());
+            self.state.font.borrow_mut().take();
+            self.state.pending_dpi.set(None);
         }
         setup
     }

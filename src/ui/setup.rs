@@ -180,11 +180,20 @@ impl SetupUi for NativeSetupUi {
         #[cfg(target_os = "windows")]
         return windows::input_box(TITLE, message, Some(default));
         #[cfg(not(target_os = "windows"))]
-        Ok(tinyfiledialogs::input_box(
-            TITLE,
-            message,
-            &safe_dialog_text(default),
-        ))
+        {
+            // The script adapter needs safe display text. Accepting that unchanged preview
+            // must retain the original value, including quotes, whitespace and long defaults.
+            let displayed = safe_dialog_text(default).replace('\\', "＼");
+            Ok(
+                tinyfiledialogs::input_box(TITLE, message, &displayed).map(|value| {
+                    if value == displayed {
+                        default.to_string()
+                    } else {
+                        value
+                    }
+                }),
+            )
+        }
     }
 
     fn password(&mut self, message: &str) -> AnyhowResult<Option<String>> {
@@ -378,20 +387,65 @@ impl SetupVerifier for NativeVerifier {
     }
 }
 
-fn run_wizard(
-    store: &ConfigStore,
-    mut document: ConfigDocument,
-    device_names: Result<Vec<String>, String>,
+/// Edits only the chosen transport; the caller owns the draft and the single save boundary.
+fn configure_recognition(
+    document: &mut ConfigDocument,
     ui: &mut dyn SetupUi,
-    verifier: &mut dyn SetupVerifier,
-) -> AnyhowResult<WizardOutcome> {
+) -> AnyhowResult<bool> {
+    let default_mode = if document.dictation.enabled { "2" } else { "1" };
+    loop {
+        let Some(mode) = ui.input(
+            "请选择识别方式：\n1 = 普通识别（HTTP STT，可选 LLM 整理）\n2 = Realtime（实时识别）\n\n仅配置所选方式，另一方式的设置会保留。",
+            default_mode,
+        )? else {
+            return Ok(false);
+        };
+        match mode.trim() {
+            "1" => document.dictation.enabled = false,
+            "2" => document.dictation.enabled = true,
+            _ => {
+                ui.message("请输入 1（普通识别）或 2（Realtime）。")?;
+                continue;
+            }
+        }
+        break;
+    }
+
+    if document.dictation.enabled {
+        let Some(url) = required_input(
+            ui,
+            "请输入 Realtime 服务地址（ws:// 或 wss://）",
+            &document.dictation.url,
+        )?
+        else {
+            return Ok(false);
+        };
+        document.dictation.url = url;
+        let Some(model) =
+            required_input(ui, "请输入 Realtime 模型名称", &document.dictation.model)?
+        else {
+            return Ok(false);
+        };
+        document.dictation.model = model;
+        let Some(key_env) = ui.input(
+            "请输入保存 Realtime API Key 的环境变量名（不是密钥本身）。\n无需鉴权时请清空；密钥值不会写入配置文件。",
+            &document.dictation.api_key_env,
+        )? else {
+            return Ok(false);
+        };
+        if key_env != document.dictation.api_key_env {
+            document.dictation.api_key_env = key_env.trim().to_string();
+        }
+        return Ok(true);
+    }
+
     let Some(url) = required_input(
         ui,
         "请输入 OpenAI 兼容的 STT API 地址",
         &document.inference.api.transcription.api_url,
     )?
     else {
-        return Ok(WizardOutcome::Cancelled);
+        return Ok(false);
     };
     document.inference.api.transcription.api_url = url;
 
@@ -401,7 +455,7 @@ fn run_wizard(
         &document.inference.api.transcription.model,
     )?
     else {
-        return Ok(WizardOutcome::Cancelled);
+        return Ok(false);
     };
     document.inference.api.transcription.model = model;
 
@@ -416,13 +470,14 @@ fn run_wizard(
         "请输入 STT API Key。留空会保留已有磁盘密钥，也可使用 TRANSCRIPTION_API_KEY 环境变量。"
     };
     let Some(key) = ui.password(stt_key_message)? else {
-        return Ok(WizardOutcome::Cancelled);
+        return Ok(false);
     };
     if !key.is_empty() {
         document.set_transcription_api_key(Some(key));
     }
 
-    document.post_process.enabled = ui.confirm("是否启用 LLM 文本整理？", false)?;
+    document.post_process.enabled =
+        ui.confirm("是否启用 LLM 文本整理？", document.post_process.enabled)?;
     if document.post_process.enabled {
         let current_url = document
             .inference
@@ -433,7 +488,7 @@ fn run_wizard(
             .unwrap_or(DEFAULT_POST_PROCESS_URL);
         let Some(url) = required_input(ui, "请输入 LLM Chat Completions API 地址", current_url)?
         else {
-            return Ok(WizardOutcome::Cancelled);
+            return Ok(false);
         };
         document.inference.api.post_process.api_url = Some(url);
 
@@ -445,7 +500,7 @@ fn run_wizard(
             .as_deref()
             .unwrap_or(DEFAULT_POST_PROCESS_MODEL);
         let Some(model) = required_input(ui, "请输入 LLM 模型名称", current_model)? else {
-            return Ok(WizardOutcome::Cancelled);
+            return Ok(false);
         };
         document.inference.api.post_process.model = Some(model);
         let post_key_message = if document.select(fields::ApiPostProcessKey, |key| {
@@ -459,13 +514,25 @@ fn run_wizard(
             "请输入 LLM API Key。留空会保留已有磁盘密钥，也可使用 POST_PROCESS_API_KEY 环境变量。"
         };
         let Some(key) = ui.password(post_key_message)? else {
-            return Ok(WizardOutcome::Cancelled);
+            return Ok(false);
         };
         if !key.is_empty() {
             document.set_post_process_api_key(Some(key));
         }
     }
+    Ok(true)
+}
 
+fn run_wizard(
+    store: &ConfigStore,
+    mut document: ConfigDocument,
+    device_names: Result<Vec<String>, String>,
+    ui: &mut dyn SetupUi,
+    verifier: &mut dyn SetupVerifier,
+) -> AnyhowResult<WizardOutcome> {
+    if !configure_recognition(&mut document, ui)? {
+        return Ok(WizardOutcome::Cancelled);
+    }
     if !configure_hotkeys(&mut document, ui)? {
         return Ok(WizardOutcome::Cancelled);
     }
@@ -540,7 +607,11 @@ fn required_input(
             return Ok(None);
         };
         if !value.trim().is_empty() {
-            return Ok(Some(value.trim().to_string()));
+            return Ok(Some(if value == default {
+                value
+            } else {
+                value.trim().to_string()
+            }));
         }
         ui.message("该项不能为空。")?;
     }
@@ -633,19 +704,29 @@ fn choose_input_device(
     current: Option<&str>,
     device_names: Result<Vec<String>, String>,
 ) -> AnyhowResult<DeviceChoice> {
-    let names = match device_names {
+    let mut names = match device_names {
         Ok(names) => names,
         Err(error) => {
             ui.message(&format!(
-                "无法列出麦克风，将使用系统默认设备：\n{}",
+                "无法列出麦克风，将保留当前设备设置：\n{}",
                 safe_dialog_text(&error)
             ))?;
-            return Ok(DeviceChoice::Use(None));
+            return Ok(DeviceChoice::Use(current.map(str::to_string)));
         }
     };
     let mut prompt = String::from("请选择麦克风编号：\n0 = 系统默认");
     for (index, name) in names.iter().enumerate() {
         prompt.push_str(&format!("\n{} = {}", index + 1, safe_dialog_text(name)));
+    }
+    if let Some(current) = current
+        && !names.iter().any(|name| name == current)
+    {
+        names.push(current.to_string());
+        prompt.push_str(&format!(
+            "\n{} = {}（当前配置，暂未检测到；选择此项保留）",
+            names.len(),
+            safe_dialog_text(current)
+        ));
     }
     if names
         .iter()
@@ -846,6 +927,312 @@ mod tests {
         }
     }
 
+    struct KeepCurrentUi {
+        mode: &'static str,
+    }
+
+    impl SetupUi for KeepCurrentUi {
+        fn confirm(&mut self, message: &str, default_yes: bool) -> AnyhowResult<bool> {
+            Ok(!message.starts_with("是否现在使用热键") && default_yes)
+        }
+
+        fn input(&mut self, message: &str, default: &str) -> AnyhowResult<Option<String>> {
+            Ok(Some(
+                if message.starts_with("请选择识别方式") {
+                    self.mode
+                } else {
+                    default
+                }
+                .to_string(),
+            ))
+        }
+
+        fn password(&mut self, _message: &str) -> AnyhowResult<Option<String>> {
+            Ok(Some(String::new()))
+        }
+
+        fn capture_hotkey(&mut self, _message: &str) -> Result<Option<String>, String> {
+            panic!("valid hotkeys should be kept")
+        }
+
+        fn message(&mut self, _message: &str) -> AnyhowResult<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn switching_recognition_keeps_unedited_configuration_and_disk_keys() {
+        // Re-running setup must not reset custom rules, dormant connections, optional LLM
+        // defaults, or a microphone that is temporarily disconnected or cannot be enumerated.
+        for realtime in [true, false] {
+            for prompt in [
+                Some(format!(
+                    "  自定义 '提示'\n\"原文\" \\path 🎙️ {}  ",
+                    "字".repeat(2100)
+                )),
+                Some(String::new()),
+                None,
+            ] {
+                for devices in [Ok(vec!["Built-in Mic".to_string()]), Err("offline".into())] {
+                    let temp = tempfile::tempdir().unwrap();
+                    let store = ConfigStore::at(temp.path().join("config.json"));
+                    let mut document = ConfigDocument::default();
+                    document.dictation.enabled = !realtime;
+                    document.dictation.url = if realtime {
+                        "ws://example.com/custom/realtime"
+                    } else {
+                        "invalid dormant Realtime URL"
+                    }
+                    .into();
+                    document.dictation.model = "  custom 'model'  ".into();
+                    document.dictation.api_key_env = if prompt.as_deref() == Some("") {
+                        ""
+                    } else {
+                        "SETUP_REALTIME_TOKEN"
+                    }
+                    .into();
+                    document.dictation.prompt = prompt.clone();
+                    if prompt.is_none() {
+                        document.dictation.prompt_components = Some(
+                            serde_json::from_value(serde_json::json!({
+                                "task": "自定义任务\n{literal}", "language": "中文",
+                                "numbers": "", "cleanup": "  整理  ",
+                                "output_format": "{\"text\":\"原文\"}",
+                                "context": "个人语境", "memory": "保留词表"
+                            }))
+                            .unwrap(),
+                        );
+                    }
+                    document.dictation.memory.enabled = false;
+                    document.dictation.memory.long_term =
+                        vec![crate::dictation::config::LongTerm {
+                            context: "开发".into(),
+                            kind: crate::dictation::config::TermKind::ProperNoun,
+                            text: "ViberWhisper".into(),
+                        }];
+                    document.transcription.language = Some("en".into());
+                    document.transcription.prompt = Some("  保留 'STT'\n提示  ".into());
+                    document.transcription.temperature = 0.25;
+                    document.post_process.enabled = true;
+                    document.post_process.preheat_enabled = false;
+                    document.post_process.prompt = Some(String::new());
+                    document.post_process.temperature = 0.4;
+                    document.inference.api.transcription.model = "  whisper 'custom'  ".into();
+                    document.inference.api.post_process.api_url =
+                        (!realtime).then(|| "https://example.com/custom/chat/completions".into());
+                    document.inference.api.post_process.model =
+                        (!realtime).then(|| "  cleanup 'custom'  ".into());
+                    document.set_transcription_api_key(Some("stt-disk-backup".into()));
+                    document.set_post_process_api_key(Some("llm-disk-backup".into()));
+                    document.audio.mic_gain = 1.75;
+                    document.audio.input_device = Some("Disconnected 'USB' Mic".into());
+                    let mut expected = document.clone();
+                    expected.dictation.enabled = realtime;
+                    let mut ui = KeepCurrentUi {
+                        mode: if realtime { "2" } else { "1" },
+                    };
+
+                    let outcome =
+                        run_wizard(&store, document, devices, &mut ui, &mut UnexpectedVerifier)
+                            .unwrap();
+
+                    assert!(matches!(outcome, WizardOutcome::Saved(_)));
+                    assert_eq!(store.load().unwrap(), Some(expected));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn realtime_setup_uses_only_its_connection_and_never_persists_environment_secrets() {
+        struct RealtimeSecrets;
+        impl crate::core::config::SecretSource for RealtimeSecrets {
+            fn get(&self, _name: &str) -> Option<String> {
+                Some("environment-only-token".into())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let store = ConfigStore::at(path.clone());
+        let mut document = ConfigDocument::new(RealtimeSecrets);
+        document.inference.api.transcription.api_url = "invalid dormant HTTP URL".into();
+        document.inference.api.post_process.api_url = Some("invalid dormant LLM URL".into());
+        document.post_process.enabled = true;
+        let mut ui = ScriptedUi {
+            inputs: VecDeque::from([
+                Ok(Some("invalid mode".into())),
+                Ok(Some("2".into())),
+                Ok(Some("wss://example.com/v1/realtime".into())),
+                Ok(Some("custom-realtime".into())),
+                Ok(Some("CUSTOM_REALTIME_KEY".into())),
+                Ok(Some("0".into())),
+            ]),
+            confirms: VecDeque::from([Ok(true), Ok(false), Ok(true)]),
+            ..Default::default()
+        };
+        let mut expected = document.clone();
+        expected.dictation.enabled = true;
+        expected.dictation.url = "wss://example.com/v1/realtime".into();
+        expected.dictation.model = "custom-realtime".into();
+        expected.dictation.api_key_env = "CUSTOM_REALTIME_KEY".into();
+
+        let outcome = run_wizard(
+            &store,
+            document,
+            Ok(Vec::new()),
+            &mut ui,
+            &mut UnexpectedVerifier,
+        )
+        .unwrap();
+
+        let WizardOutcome::Saved(saved) = outcome else {
+            panic!("valid Realtime configuration should save")
+        };
+        assert_eq!(*saved, expected);
+        assert!(
+            saved.dictation_key().is_some(),
+            "keep the injected secret source"
+        );
+        assert_eq!(store.load().unwrap(), Some(expected));
+        assert!(
+            !std::fs::read_to_string(path)
+                .unwrap()
+                .contains("environment-only-token")
+        );
+    }
+
+    #[test]
+    fn realtime_setup_rejects_invalid_connections_or_hidden_prompt_conflicts_without_saving() {
+        for (url, model, key_env, conflict, expected_error) in [
+            (
+                "https://example.com/realtime",
+                "model".into(),
+                "",
+                false,
+                "ws://",
+            ),
+            (
+                "ws://example.com/realtime?key=secret",
+                "model".into(),
+                "",
+                false,
+                "query",
+            ),
+            (
+                "ws://example.com/realtime",
+                "m".repeat(257),
+                "",
+                false,
+                "model",
+            ),
+            (
+                "ws://example.com/realtime",
+                "model".into(),
+                "BAD-NAME",
+                false,
+                "api_key_env",
+            ),
+            (
+                "ws://example.com/realtime",
+                "model".into(),
+                "",
+                true,
+                "both",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.json");
+            std::fs::write(&path, "original configuration").unwrap();
+            let mut document = ConfigDocument::default();
+            if conflict {
+                document.dictation.prompt = Some(String::new());
+                document.dictation.prompt_components = Some(Default::default());
+            }
+            let mut ui = ScriptedUi {
+                inputs: VecDeque::from([
+                    Ok(Some("2".into())),
+                    Ok(Some(url.into())),
+                    Ok(Some(model)),
+                    Ok(Some(key_env.into())),
+                    Ok(Some("0".into())),
+                ]),
+                confirms: VecDeque::from([Ok(true)]),
+                ..Default::default()
+            };
+            let outcome = run_wizard(
+                &ConfigStore::at(path.clone()),
+                document,
+                Ok(Vec::new()),
+                &mut ui,
+                &mut UnexpectedVerifier,
+            )
+            .unwrap();
+
+            assert!(matches!(outcome, WizardOutcome::Cancelled));
+            assert!(
+                ui.messages
+                    .iter()
+                    .any(|message| message.contains(expected_error))
+            );
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                "original configuration"
+            );
+        }
+    }
+
+    #[test]
+    fn cancelling_or_failing_realtime_setup_and_declining_save_preserves_the_file() {
+        // Every new input can be cancelled or fail; the final No must also discard the draft.
+        for stop_at in 0..=5 {
+            for fail in [false, true] {
+                if fail && stop_at == 5 {
+                    continue;
+                }
+                let temp = tempfile::tempdir().unwrap();
+                let path = temp.path().join("config.json");
+                std::fs::write(&path, "original configuration").unwrap();
+                let mut ui = ScriptedUi {
+                    inputs: ["2", "ws://example.com/realtime", "model", "", "0"]
+                        .into_iter()
+                        .map(|value| Ok(Some(value.to_string())))
+                        .collect(),
+                    confirms: VecDeque::from([Ok(true), Ok(false), Ok(false)]),
+                    ..Default::default()
+                };
+                if stop_at < 5 {
+                    ui.inputs[stop_at] = if fail {
+                        Err(anyhow!("dialog creation failed"))
+                    } else {
+                        Ok(None)
+                    };
+                }
+                let result = run_wizard(
+                    &ConfigStore::at(path.clone()),
+                    ConfigDocument::default(),
+                    Ok(Vec::new()),
+                    &mut ui,
+                    &mut UnexpectedVerifier,
+                );
+                if fail {
+                    assert!(
+                        result
+                            .err()
+                            .unwrap()
+                            .to_string()
+                            .contains("dialog creation failed")
+                    );
+                } else {
+                    assert!(matches!(result.unwrap(), WizardOutcome::Cancelled));
+                }
+                assert_eq!(
+                    std::fs::read_to_string(path).unwrap(),
+                    "original configuration"
+                );
+            }
+        }
+    }
+
     #[test]
     fn verification_prompt_explains_the_window_transition() {
         let temp = tempfile::tempdir().unwrap();
@@ -853,6 +1240,7 @@ mod tests {
         let mut ui = ScriptedUi {
             confirms: VecDeque::from([Ok(false), Ok(true), Ok(true), Ok(true)]),
             inputs: VecDeque::from([
+                Ok(Some("1".into())),
                 Ok(Some(
                     "https://example.com/v1/audio/transcriptions".to_string(),
                 )),
@@ -898,6 +1286,7 @@ mod tests {
         let mut ui = ScriptedUi {
             confirms: VecDeque::from([Ok(true), Ok(true), Ok(false), Ok(true)]),
             inputs: VecDeque::from([
+                Ok(Some("1".into())),
                 Ok(Some(
                     "https://example.com/v1/audio/transcriptions".to_string(),
                 )),
@@ -981,6 +1370,7 @@ mod tests {
             let mut ui = ScriptedUi::default();
             if fail_password {
                 ui.inputs = VecDeque::from([
+                    Ok(Some("1".into())),
                     Ok(Some(
                         "https://example.com/v1/audio/transcriptions".to_string(),
                     )),
@@ -1018,6 +1408,7 @@ mod tests {
             let mut ui = ScriptedUi::default();
             if fail_confirmation {
                 ui.inputs = VecDeque::from([
+                    Ok(Some("1".into())),
                     Ok(Some("https://example.com/transcribe".to_string())),
                     Ok(Some("whisper-test".to_string())),
                 ]);
