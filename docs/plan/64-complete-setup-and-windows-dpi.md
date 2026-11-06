@@ -1,6 +1,6 @@
 # 64 - 识别模式二选一配置与 Windows 高 DPI 窗口
 
-**阶段：** 简化实现已推送；Windows 原生 CI 未通过，正在定位，真实 4K 清晰度仍待实机验收。
+**阶段：** 简化实现与 Windows 原生 CI 已通过；设置截图已检查，气泡视觉效果和真实 4K 清晰度仍待实机验收。
 **PR：** [#165](https://github.com/b1indsight/viberwhisper/pull/165)，沿用同一 draft PR 交付实现。
 **Bookmark：** `feat/complete-setup-windows-dpi`。
 **基线：** 最新 fetch 后的 `origin/master`，即 [v0.5.0 发布准备提交 e18be032](https://github.com/b1indsight/viberwhisper/commit/e18be032950c03bc7bf40153e028e12193cccacc)。
@@ -441,3 +441,15 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   比较源码与结果保留于本线程工作区 `.amp/in/artifacts/dialog-template-data-comparison.log`，临时程序随后删除；
   此项只保护模板数据，不验证 Win32 渲染。原生替换前后、字体/布局消融、截图和气泡结果等待 Windows CI，
   真实 4K/混合 DPI 清晰度继续待实机。此前长地址审查项未获新的返修要求，未混入此修复。
+- **CI 返回后的验证结果：** [修复提交 9c8997d7 的 CI](https://github.com/b1indsight/viberwhisper/actions/runs/42199751516)
+  在 macOS 和 Windows 均通过。Windows 的构建、全量测试、原生/DPI smoke 和 Clippy 完成；
+  [原生日志](https://github.com/b1indsight/viberwhisper/actions/runs/42199751516/job/127831820751)
+  确认实际确认、提示和输入窗口均为 PMv2、system=false、DPI=96，原来的系统确认框断言失败已关闭。
+  气泡的生成中只读、可编辑警告两种状态通过合成 96/144/192/96 DPI 及同步重入检查，核对字体、布局、
+  文本、Unicode 选区、滚动、撤销及只读状态。CLI/GUI、direct/ShellExecute、SSH 环境、两种识别模式、
+  必填提示/恢复及取消不保存 smoke 全部通过。
+  下载本次 `windows-setup-captures` 并实际检查模式选择、普通地址、Realtime 地址/模型/鉴权名、
+  首次确认和必填提示：中文与按钮完整，未见裁切、缺字、重叠或空白捕获。
+  截图只来自 96-DPI 托管显示上的非密码夹具窗口；气泡没有截图，合成通知也不是实际跨屏。
+  设置窗口的感知模式已有前后原生证据，字体/布局机制的消融、气泡视觉效果及真实 4K/混合 DPI 清晰度仍待实机；
+  未改动或关闭此前 macOS 长地址审查项，PR 继续保持 draft，未合并或发布。
