@@ -1,10 +1,14 @@
-# 64 - 完整配置向导与 Windows 高 DPI 窗口
+# 64 - 识别模式二选一配置与 Windows 高 DPI 窗口
 
 **阶段：** 方案待明确批准；尚未修改产品代码或测试。
 **PR：** [#165（docs-only draft）](https://github.com/b1indsight/viberwhisper/pull/165)，批准后在同一个 PR 实现。
 **Bookmark：** `feat/complete-setup-windows-dpi`。
 **基线：** 最新 fetch 后的 `origin/master`，即 [v0.5.0 发布准备提交 e18be032](https://github.com/b1indsight/viberwhisper/commit/e18be032950c03bc7bf40153e028e12193cccacc)。
 **工作区：** 独立 JJ workspace `setup-realtime-dpi-20261106`；不修改源主工作区、发布准备工作区、个人配置或个人记忆。
+
+**当前范围：** 以时间线 [001](#001--2026-11-06--向导收缩为-realtime--普通识别二选一) 为准：
+向导主要提供 Realtime / 普通识别二选一及所选路径的必要连接配置，撤回提示词、温度、预热、记忆和其他高级编辑页。
+Windows DPI 调查与候选修复保持原范围。下方初始方案保留为历史；不再按其高级配置覆盖承诺实施。
 
 ## 1. 初始方案
 
@@ -269,4 +273,63 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
 
 ## 2. PR 变更时间线
 
-<!-- 初始方案分享后保留不改；仅在发生实质需求、设计或实现变化时按时间追加。当前无条目。 -->
+### [001] — 2026-11-06 — 向导收缩为 Realtime / 普通识别二选一
+
+- **背景与需求更新：**
+  - [用户在本线程明确要求](https://ampcode.com/threads/T-01a1afc5-c7d0-7125-a67a-a98e48fad7aa)：下列高级字段不加入向导，
+    主要提供 Realtime 和普通识别二选一配置。
+  - 已完成的完整模型核对继续作为配置保留的依据；不再以“向导覆盖所有用户字段”作为本次验收目标。
+- **决定与状态：** 用户已要求收缩范围；下述修订方案待明确批准，实现仍未开始。
+  此条取代初始方案中的高级分组、多行/JSON 编辑、相关新接口和相关编辑测试，Windows DPI 方案及验收边界不变。
+
+#### 修订后的向导范围
+
+| 入口 | 提供的配置 |
+|---|---|
+| 识别方式 | Realtime / 普通识别（HTTP STT）二选一，默认当前 `dictation.enabled` 对应路径；支持取消 |
+| Realtime | `dictation.url`、`dictation.model`、`dictation.api_key_env`；沿用现有默认值与 ws/wss/模型/变量名校验，环境变量名可为空表示无鉴权 |
+| 普通识别 | 沿用 STT 地址、模型、API Key，以及可选 LLM 整理开关、地址、模型、API Key；不增加新的高级项 |
+| 共用步骤 | 沿用热键、麦克风选择、可选录音验证及最终确认保存；修正当前开关默认值和设备不可用时的原值保留 |
+
+选 Realtime 时不询问或重置 HTTP STT/LLM 参数，包括已存的 `post_process.enabled`；运行时是否禁用独立整理仍由现有识别路径决定。
+选普通识别时不询问或重置 Realtime 连接和全部高级配置。保留连接与保留单个字段时，直接沿用读入值，不能通过净化过的默认输入回写改变它。
+普通识别的 LLM 开关默认当前值；暂时断开的麦克风或枚举失败时，默认保留已有设备名称，只在明确选择后替换。
+相关现有行为见 [向导](../../src/ui/setup.rs#L381-L485) 与 [所选路径解析](../../src/core/listener.rs#L52-L64)。
+
+下列字段**全部不新增向导入口**，保留读入值，也不通过向导恢复为内置默认值：
+
+- `transcription.prompt`、`transcription.temperature`。
+- `post_process.preheat_enabled`、`post_process.prompt`、`post_process.temperature`。
+- `dictation.prompt`、`dictation.prompt_components`，以及组件的 `task`、`language`、`numbers`、`cleanup`、`output_format`、`context`、`memory`。
+- `dictation.memory.enabled`、`dictation.memory.long_term[]`，包括条目的 `context`、`kind`、`text`。
+
+为落实“主要提供二选一”的目标，`transcription.language` 和 `audio.mic_gain` 本次也不增加入口；这两项已有值同样保留。
+以上均是 UI 范围收缩，不删除配置字段，不改变运行时对提示词、温度、预热、语言、增益或记忆的使用，不改模型或产品默认地址。
+若所选路径的既有高级值不合法，沿用领域校验并明确报告，不通过清空这些值自动修复或保存。
+
+#### 对技术设计、复杂度和验证的影响
+
+- 保留初始方案的 `configure_recognition(document: &mut ConfigDocument, ui: &mut dyn SetupUi) -> anyhow::Result<bool>`：
+  在现有 `SetupUi` 输入/确认能力上选择两种模式，编辑所选路径连接；`false` 表示取消。继续由 `run_wizard` 拥有候选文档和唯一保存时机。
+- 撤回 `SetupUi::multiline`、`configure_advanced`、`configure_dictation_prompt`、`configure_memory`、`edit_optional_text`，
+  不新增 macOS AppKit 输入模块，不扩展 Windows 多行 EDIT，不引入 JSON 编辑器或其专用状态/校验流程。
+- 复用现有单行/密码框；连接保留选择不重新赋值。若活动连接的单行输入存在无损保留问题，只做满足该契约的局部修正，
+  不借此恢复全文编辑器或重写所有平台对话框。HTTP 密钥仍为空白初始、空输入保留磁盘、环境值优先且永不写盘；Realtime 只配置环境变量名。
+- 用户未修改的所有高级字段和非活动路径配置，分别用含自定义提示词、空字符串、非默认数字、组件和词表的文档验证保存前后结构相等。
+  这些是“未编辑值不被改写”的回归，不测试已撤回的高级编辑交互。
+- 保留模式选择、Realtime 连接校验、两方向切换、现有 LLM/设备值保留、取消/UI 错误/拒绝保存不写盘、密码处理和验证器隔离个人记忆的检查。
+  对模式选择及 Realtime 新增各类输入分别验证取消行为；休眠路径的无关参数不应阻塞当前路径配置。
+- 不再为多行/JSON/高级参数编辑新增测试或截图；修订 `scripts/test-windows-setup.ps1` 的首步预期，macOS 和 Windows 沿用各自原生输入，
+  运行/截图检查二选一及所选连接、取消等受影响界面。Windows DPI 的字体、布局、跨屏通知、原生 smoke 与真实 4K 待验边界全部保留。
+- 文档只宣称向导新增识别方式选择和对应连接配置；提示词/记忆等仍保留现有配置文件入口，不再承诺向导可编辑全部 `dictation.*`。
+
+#### 实施次序与待批准事项
+
+1. 扩展现有向导回归：两模式、活动连接、未编辑配置保留、密钥与取消边界。
+2. 接入二选一和 Realtime 必要连接，复用普通识别既有流程，修正默认选择和设备保留。
+3. 按初始方案处理 Windows 早期 DPI 初始化、气泡字体/布局/跨屏更新，分别运行可执行的验证与消融。
+4. 更新既有 Windows setup smoke 和相关使用文档，沿用同一 bookmark/PR 与代码审阅门禁，不触发发布。
+
+原来的“JSON 高级编辑还是逐项表单”审批问题已撤回。当前只需批准这个简化后的整体方案；
+真实 Windows 4K 清晰度仍需实机验收，当前 macOS 与普通托管 CI 不能替代。
+本次仅更新方案文档和审批摘要，未新增实现或测试。
