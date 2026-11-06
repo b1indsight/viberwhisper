@@ -374,7 +374,75 @@ impl NativePreview {
                 }
             }
         }
-        preview.smoke_streaming()
+        preview.smoke_streaming()?;
+        // The demo calls smoke_streaming for each revision under one delivery deadline.
+        // Keep the full scroll regression suite in this once-per-run native fixture.
+        preview.smoke_scrolling(artifacts.as_deref())
+    }
+
+    #[cfg(test)]
+    fn smoke_scrolling(&mut self, artifacts: Option<&std::path::Path>) -> Result<()> {
+        let (_, line_height) = self.state.text_metrics()?;
+        let fitting_lines = self.state.pixels(196) / line_height;
+        let numbered: Vec<_> = (1..=41)
+            .map(|line| format!("第{line:02}行：hello 😀 中文"))
+            .collect();
+        let scrolled = numbered[..40].join("\n");
+        for ready in [false, true] {
+            // A Realtime retraction can remove the scrollbar from an already-scrolled
+            // multiline draft. Keep all fitting text visible without stealing valid scroll.
+            let tail = 40 - fitting_lines;
+            for (case, lines, first, expected_first) in [
+                ("shrink-fit", 8, 5, 0),
+                ("shrink-clamp", fitting_lines + 3, 5, 3),
+                ("shrink-preserve", fitting_lines + 8, 5, 5),
+                ("append-tail", 41, tail, tail + 1),
+                ("append-before-tail", 41, tail - 1, tail - 1),
+            ] {
+                self.update_text(&scrolled, ready, None)?;
+                let editor = self.state.text.get();
+                unsafe { SendMessageW(editor, EM_SETSEL, 11, 13) }; // A whole surrogate pair.
+                let current = unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) };
+                unsafe { SendMessageW(editor, EM_LINESCROLL, 0, first as isize - current) };
+                ensure!(
+                    unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) } == first as isize,
+                    "Could not prepare scrolled preview for {case}"
+                );
+                let text = numbered[..lines as usize].join("\n");
+                self.update_text(&text, ready, None)?;
+                let actual_first = unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) };
+                eprintln!(
+                    "native preview scroll: {case}; ready={ready}; lines={lines}; first={first}->{actual_first}; expected={expected_first}"
+                );
+                if let Some(directory) = artifacts {
+                    self.smoke_capture(
+                        &directory.join(format!("scroll-{case}-ready-{ready}.png")),
+                    )?;
+                }
+                let mut start = 0u32;
+                let mut end = 0u32;
+                unsafe {
+                    SendMessageW(
+                        editor,
+                        EM_GETSEL,
+                        (&raw mut start) as usize,
+                        (&raw mut end) as isize,
+                    );
+                }
+                let style = unsafe { GetWindowLongPtrW(editor, GWL_STYLE) };
+                ensure!(
+                    self.state.normalized_text()? == text
+                        && unsafe { SendMessageW(editor, EM_GETLINECOUNT, 0, 0) } == lines as isize
+                        && actual_first == expected_first as isize
+                        && (style & WS_VSCROLL as isize != 0) == (lines > fitting_lines)
+                        && (style & ES_READONLY as isize != 0) != ready
+                        && (start, end) == (11, 13)
+                        && unsafe { SendMessageW(editor, EM_CANUNDO, 0, 0) } == 0,
+                    "Scrolled preview lost viewport or editor state for {case}; ready={ready}"
+                );
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn smoke_streaming(&mut self) -> Result<()> {
@@ -523,13 +591,6 @@ impl NativePreview {
             }
             let (_, line_height) = self.state.text_metrics()?;
             let fitting_lines = self.state.pixels(196) / line_height;
-            let numbered: Vec<_> = (1..=41)
-                .map(|line| format!("第{line:02}行：hello 😀 中文"))
-                .collect();
-            let scrolled = numbered[..40].join("\n");
-            // smoke_dpi creates this optional CI capture directory before these checks.
-            let artifacts =
-                std::env::var_os("VIBERWHISPER_PREVIEW_ARTIFACTS").map(std::path::PathBuf::from);
             for ready in [false, true] {
                 for lines in [fitting_lines, fitting_lines + 1, fitting_lines] {
                     let text = "我们明天上午去上海。\n".repeat((lines - 1) as usize)
@@ -543,61 +604,6 @@ impl NativePreview {
                                 != 0)
                                 == (lines > fitting_lines),
                         "Scrollbar did not follow the fitting/overflowing line boundary"
-                    );
-                }
-                // A Realtime retraction can remove the scrollbar from an already-scrolled
-                // multiline draft. Keep all fitting text visible without stealing valid scroll.
-                let tail = 40 - fitting_lines;
-                for (case, lines, first, expected_first) in [
-                    ("shrink-fit", 8, 5, 0),
-                    ("shrink-clamp", fitting_lines + 3, 5, 3),
-                    ("shrink-preserve", fitting_lines + 8, 5, 5),
-                    ("append-tail", 41, tail, tail + 1),
-                    ("append-before-tail", 41, tail - 1, tail - 1),
-                ] {
-                    self.update_text(&scrolled, ready, None)?;
-                    let editor = self.state.text.get();
-                    unsafe { SendMessageW(editor, EM_SETSEL, 11, 13) }; // A whole surrogate pair.
-                    let current = unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) };
-                    unsafe { SendMessageW(editor, EM_LINESCROLL, 0, first as isize - current) };
-                    ensure!(
-                        unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) }
-                            == first as isize,
-                        "Could not prepare scrolled preview for {case}"
-                    );
-                    let text = numbered[..lines as usize].join("\n");
-                    self.update_text(&text, ready, None)?;
-                    let actual_first =
-                        unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) };
-                    eprintln!(
-                        "native preview scroll: {case}; ready={ready}; lines={lines}; first={first}->{actual_first}; expected={expected_first}"
-                    );
-                    if let Some(directory) = &artifacts {
-                        self.smoke_capture(
-                            &directory.join(format!("scroll-{case}-ready-{ready}.png")),
-                        )?;
-                    }
-                    let mut start = 0u32;
-                    let mut end = 0u32;
-                    unsafe {
-                        SendMessageW(
-                            editor,
-                            EM_GETSEL,
-                            (&raw mut start) as usize,
-                            (&raw mut end) as isize,
-                        );
-                    }
-                    let style = unsafe { GetWindowLongPtrW(editor, GWL_STYLE) };
-                    ensure!(
-                        self.state.normalized_text()? == text
-                            && unsafe { SendMessageW(editor, EM_GETLINECOUNT, 0, 0) }
-                                == lines as isize
-                            && actual_first == expected_first as isize
-                            && (style & WS_VSCROLL as isize != 0) == (lines > fitting_lines)
-                            && (style & ES_READONLY as isize != 0) != ready
-                            && (start, end) == (11, 13)
-                            && unsafe { SendMessageW(editor, EM_CANUNDO, 0, 0) } == 0,
-                        "Scrolled preview lost viewport or editor state for {case}; ready={ready}"
                     );
                 }
             }

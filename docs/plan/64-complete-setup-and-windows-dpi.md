@@ -543,3 +543,22 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
 - **验证边界：** 本机仍只有 macOS。新增断言尚未在 Windows 运行，同一新增场景的修改前后原生对照及消融尚未完成；
   本机交叉检查只证明类型/lint。原生 CI 将验证候选的结果，不能单凭修改后的通过声称旧程序一定出现该问题。
   真实 4K、物理显示缩放、跨屏及输入法仍待实机验证。
+
+### [009] — 2026-11-06 — 原生滚动回归通过，修复演示中的重复执行
+
+- **实际结果与触发：** [008] 候选的 [Windows CI](https://github.com/b1indsight/viberwhisper/actions/runs/42216619935/job/127888139564)
+  通过新增的五组只读/可编辑滚动案例及原有字体、DPI 重入和编辑状态断言；原生测试正常返回。
+  后续演示每次流式修订又调用同一布局夹具，新增整组案例重复三遍；演示源码保留十秒总时限，
+  日志显示进程约二十秒后以 `Native preview delivery timed out` 退出。最终 Clippy 未执行，不能称整轮 Windows CI 通过；macOS job 通过。
+  完整输出在工作区 `.amp/in/artifacts/ci-windows-preview-scroll-395d02b1.log`。
+- **决策及实现：** 将新增的收缩、保留和追加案例从逐次执行的 `smoke_placement` 移到测试专用 `smoke_scrolling`，
+  由既有 `smoke_dpi` 在恢复实际窗口 DPI 并完成流式检查后调用一次。保留同一批输入、期望值、状态断言及可选 PNG；
+  原有逐次流式、定位、换行和滚动条边界检查继续执行。不延长演示期限，不放宽断言，不修改生产布局、向导或 macOS 路径。
+  本轮只调整验证职责，没有新增运行时机制；不另加测试计数器、计时宽限或重复运行开关。
+- **已检查的原生图像：** 十张新增滚动图按预期首末行逐项核对：归零、末页限制、有效位置保留、末尾跟随及末尾前位置保留均符合断言。
+  尾随图证明最后一行可见，不将滚动条外观当成原生 range/page 数据。全部 PNG 的 CRC 和解压长度有效，
+  既有图像与 [007] 候选逐字节相同；比较输出在 `.amp/in/artifacts/windows-preview-scroll-image-validation.log`。
+- **本机检查及原生边界：** 格式、构建、macOS integration 测试与 all-targets Clippy，以及 Windows GNU 两组 feature 的 all-targets Clippy 均通过，
+  输出在 `.amp/in/artifacts/preview-scroll-fixture-validation.log`。GNU 检查继续用 `DOCS_RS=1`，没有 Windows 链接或执行。
+  调整后的同命令 Windows 原生测试及演示仍待新 CI，不能由本机检查推定超时已消除。
+  旧程序同一收缩场景与移除上限的原生消融仍未运行；实际 DPI=96 的捕获及合成通知仍不替代真实 4K、混合屏或输入法验收。
