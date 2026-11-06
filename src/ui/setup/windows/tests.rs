@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::Graphics::Gdi::{GetObjectW, LOGFONTW};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::HiDpi::{
-    AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow,
+    AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_CONTEXT_SYSTEM_AWARE,
+    GetAwarenessFromDpiAwarenessContext, GetDpiForWindow, GetThreadDpiAwarenessContext,
     GetWindowDpiAwarenessContext,
 };
 
@@ -93,13 +95,17 @@ fn exercise_message(answer: Option<bool>) {
                 );
                 if !dialog.is_null() {
                     eprintln!("native message visible; reading controls");
-                    assert_per_monitor_v2(dialog);
-                    assert_eq!(read_text(dialog).unwrap(), TITLE);
-                    assert_eq!(read_text(GetDlgItem(dialog, 0xffff)).unwrap(), PROMPT);
-                    assert!(
-                        GetWindow(dialog, GW_OWNER).is_null(),
-                        "setup must not borrow another application's window"
-                    );
+                    let checks = std::panic::catch_unwind(|| {
+                        assert_eq!(read_text(dialog).unwrap(), TITLE);
+                        assert_eq!(read_text(GetDlgItem(dialog, 0xffff)).unwrap(), PROMPT);
+                        assert!(
+                            GetWindow(dialog, GW_OWNER).is_null(),
+                            "setup must not borrow another application's window"
+                        );
+                        assert_per_monitor_v2(dialog);
+                    });
+                    // A failed check must still answer the modal dialog, otherwise the parent
+                    // reports only its timeout instead of returning the actual assertion.
                     if let Some(answer) = answer {
                         let button = if answer { IDYES } else { IDNO };
                         eprintln!("completing native confirmation with button {button}");
@@ -118,6 +124,9 @@ fn exercise_message(answer: Option<bool>) {
                         eprintln!("closing native informational message");
                         assert_ne!(PostMessageW(dialog, WM_CLOSE, 0, 0), 0);
                     }
+                    if let Err(panic) = checks {
+                        std::panic::resume_unwind(panic);
+                    }
                     break;
                 }
             }
@@ -129,6 +138,14 @@ fn exercise_message(answer: Option<bool>) {
         }
     });
     let mut ui = NativeSetupUi;
+    // SAFETY: Reading this thread's current context has no preconditions.
+    unsafe {
+        let context = GetThreadDpiAwarenessContext();
+        eprintln!(
+            "native message caller: thread={ui_thread}; context={context:p}; PMv2={}",
+            AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        );
+    }
     match answer {
         Some(answer) => assert_eq!(ui.confirm(PROMPT, answer).unwrap(), answer),
         None => ui.message(PROMPT).unwrap(),
@@ -140,17 +157,30 @@ fn exercise_message(answer: Option<bool>) {
 fn assert_per_monitor_v2(window: HWND) {
     // SAFETY: The driver keeps this dialog open until after checking its native context.
     unsafe {
+        let mut process = 0;
+        let thread = GetWindowThreadProcessId(window, &raw mut process);
+        let mut class = [0; 64];
+        let length = GetClassNameW(window, class.as_mut_ptr(), class.len() as i32);
+        SetLastError(0);
+        let context = GetWindowDpiAwarenessContext(window);
+        let error = GetLastError();
+        let dpi = GetDpiForWindow(window);
+        eprintln!(
+            "native setup HWND={window:p}; class={}; title={:?}; process={process}; thread={thread}; \
+             context={context:p}; error={error}; awareness={}; PMv1={}; PMv2={}; system={}; DPI={dpi}",
+            String::from_utf16_lossy(&class[..length as usize]),
+            read_text(window),
+            GetAwarenessFromDpiAwarenessContext(context),
+            AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE),
+            AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2),
+            AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_SYSTEM_AWARE),
+        );
         assert_ne!(
-            AreDpiAwarenessContextsEqual(
-                GetWindowDpiAwarenessContext(window),
-                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-            ),
+            AreDpiAwarenessContextsEqual(context, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,),
             0,
             "setup window must be PMv2 before winit starts"
         );
-        let dpi = GetDpiForWindow(window);
         assert!(dpi > 0);
-        eprintln!("native setup window DPI: {dpi}; PMv2");
     }
 }
 
@@ -190,7 +220,7 @@ fn exercise_input(default: Option<&'static str>, entered: &'static str, accept: 
             thread::sleep(Duration::from_millis(10));
         };
         // SAFETY: The modal dialog stays alive until this driver sends its completion command.
-        unsafe {
+        let checks = std::panic::catch_unwind(|| unsafe {
             assert_per_monitor_v2(dialog);
             let input = GetDlgItem(dialog, INPUT_ID as i32);
             let dpi = GetDpiForWindow(dialog);
@@ -218,6 +248,10 @@ fn exercise_input(default: Option<&'static str>, entered: &'static str, accept: 
                 default.is_none()
             );
             set_text(input, &wide(entered).unwrap()).unwrap();
+        });
+        // As with messages above, dismiss even on a failed check before resuming its panic.
+        // SAFETY: The modal dialog is still alive; only this command completes it.
+        unsafe {
             assert_ne!(
                 PostMessageW(
                     dialog,
@@ -227,6 +261,9 @@ fn exercise_input(default: Option<&'static str>, entered: &'static str, accept: 
                 ),
                 0
             );
+        }
+        if let Err(panic) = checks {
+            std::panic::resume_unwind(panic);
         }
     });
 

@@ -1,6 +1,6 @@
 # 64 - 识别模式二选一配置与 Windows 高 DPI 窗口
 
-**阶段：** 简化范围已本地实现；验证与代码审查中，真实 Windows 4K 清晰度仍待实机验收。
+**阶段：** 简化实现已推送；Windows 原生 CI 未通过，正在定位，真实 4K 清晰度仍待实机验收。
 **PR：** [#165](https://github.com/b1indsight/viberwhisper/pull/165)，沿用同一 draft PR 交付实现。
 **Bookmark：** `feat/complete-setup-windows-dpi`。
 **基线：** 最新 fetch 后的 `origin/master`，即 [v0.5.0 发布准备提交 e18be032](https://github.com/b1indsight/viberwhisper/commit/e18be032950c03bc7bf40153e028e12193cccacc)。
@@ -395,3 +395,22 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   原生结果等待实现提交的 Windows CI；这些比较和真实跨屏/4K 视觉验收均延后，未以数学模拟或类型检查替代。
   后续实机应覆盖设置窗口、生成中只读气泡、可编辑气泡、长文本与警告、100/150/200% 缩放及混合 DPI 跨屏，
   并检查字体清晰度、输入法、选区、滚动和撤销。发布流程、个人设置和共享工作区保持不变。
+
+### [004] — 2026-11-06 — Windows 系统弹框 DPI 诊断
+
+- **触发与证据：** [实现提交的 Windows CI](https://github.com/b1indsight/viberwhisper/actions/runs/42194060211/job/127812796156)
+  编译成功，原生测试在首个 `MessageBoxW` 确认框的窗口 PMv2 断言失败；此前进程和 UI 线程的 PMv2
+  初始化检查已连续通过两次。驱动线程在发送完成命令前 panic，留下模态弹框，随后父进程的 30 秒时限终止子进程。
+  macOS CI 通过。原日志没有窗口实际上下文，不能据此称为初始化失败或 4K 模糊根因已确认。
+- **诊断决策：** 保留严格的窗口 PMv2 断言，不先放宽测试或改写系统弹框。扩展既有原生测试，
+  记录 HWND、类名、标题、所属进程/线程、实际 DPI 上下文及 PMv1/PMv2/system 比较；在调用弹框前记录 UI 线程上下文。
+  先检查标题/正文/所有权，再检查 DPI，避免把未确认身份的窗口当成产品弹框。
+  只读 Claude Opus 5.5 咨询也建议先区分错误 HWND、PMv1 与 system/unaware；咨询不算 Windows 运行证据。
+- **失败处理：** 消息与输入驱动捕获检查 panic，仍按原命令完成自己拥有的模态弹框，再恢复原 panic；
+  不忽略失败，不更改最终断言，不让真实断言被父进程超时掩盖。
+- **边界与待验：** 本轮仅补足测试诊断和失败退出，不宣称系统弹框 DPI 问题已修复。
+  本机只有 macOS，原生上下文及提前退出效果仍须该诊断提交的 Windows CI 确认；不把交叉编译当作运行或 4K 验收。
+  不新增产品分支或缩放机制，故不引入产品消融变体。此前 macOS 长地址审查项仍待单独返修授权，未混入本次改动。
+- **本机验证：** `cargo fmt --check`、`cargo test --locked --lib ui::setup::tests` 与
+  `DOCS_RS=1 cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets --features windows-app,integration -- -D warnings`
+  通过；后者仅证明 Windows 目标的类型/lint，不包含原生链接或执行。
