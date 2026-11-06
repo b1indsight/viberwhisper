@@ -5,11 +5,15 @@ use std::sync::OnceLock;
 use anyhow::{Result, anyhow, ensure};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, CreateFontIndirectW, CreateRoundRectRgn, DT_CALCRECT, DT_EDITCONTROL,
-    DT_EXPANDTABS, DT_NOPREFIX, DeleteObject, DrawTextW, GetDC, GetTextMetricsW, HFONT,
-    InvalidateRect, ReleaseDC, SelectObject, SetWindowRgn, TEXTMETRICW,
+    BeginPaint, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, CreateRoundRectRgn, DC_BRUSH,
+    DC_PEN, DT_CALCRECT, DT_EDITCONTROL, DT_EXPANDTABS, DT_NOPREFIX, DT_WORDBREAK, DeleteObject,
+    DrawTextW, EndPaint, FillRect, GetDC, GetStockObject, GetSysColor, GetTextMetricsW, HDC, HFONT,
+    InvalidateRect, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
+    RedrawWindow, ReleaseDC, RestoreDC, RoundRect, SaveDC, SelectObject, SetBkColor,
+    SetDCBrushColor, SetDCPenColor, SetTextColor, SetWindowRgn, TEXTMETRICW,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows_sys::Win32::UI::Controls::{
     EM_EMPTYUNDOBUFFER, EM_GETFIRSTVISIBLELINE, EM_GETLINECOUNT, EM_GETMARGINS, EM_GETRECT,
     EM_GETSEL, EM_LINESCROLL, EM_REPLACESEL, EM_SCROLLCARET, EM_SETLIMITTEXT, EM_SETMODIFY,
@@ -154,8 +158,11 @@ impl DeliveryTarget for NativeTarget {
     }
 }
 
-/// Owned by the preview, not by its controls. Replace it only after both controls switch fonts.
-struct PreviewFont(HFONT);
+/// Owned by the preview, not by its controls. Replace only after both controls switch fonts.
+struct PreviewFont {
+    body: HFONT,
+    status: HFONT,
+}
 
 impl PreviewFont {
     fn new(dpi: u32) -> Result<Self> {
@@ -178,20 +185,87 @@ impl PreviewFont {
             "无法获取预览字体：{}",
             std::io::Error::last_os_error()
         );
-        let font = unsafe { CreateFontIndirectW(&metrics.lfMessageFont) };
+        let status = unsafe { CreateFontIndirectW(&metrics.lfMessageFont) };
         ensure!(
-            !font.is_null(),
+            !status.is_null(),
             "无法创建预览字体：{}",
             std::io::Error::last_os_error()
         );
-        Ok(Self(font))
+        // Match the 15/12 body/status proportions without converting macOS points to Windows pt.
+        let height = metrics.lfMessageFont.lfHeight;
+        metrics.lfMessageFont.lfHeight = (height * 15 + height.signum() * 6) / 12;
+        let body = unsafe { CreateFontIndirectW(&metrics.lfMessageFont) };
+        if body.is_null() {
+            let error = std::io::Error::last_os_error();
+            unsafe { DeleteObject(status) };
+            anyhow::bail!("无法创建预览正文字体：{error}");
+        }
+        Ok(Self { body, status })
     }
 }
 
 impl Drop for PreviewFont {
     fn drop(&mut self) {
         // SAFETY: All controls have switched to a replacement or have already been destroyed.
-        unsafe { DeleteObject(self.0) };
+        unsafe {
+            DeleteObject(self.body);
+            DeleteObject(self.status);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PreviewStyle {
+    background: u32,
+    foreground: u32,
+    secondary: u32,
+    border: u32,
+    high_contrast: bool,
+}
+
+impl PreviewStyle {
+    fn system() -> Self {
+        // Use readable system text for both controls in the accessibility fallback.
+        let background = unsafe { GetSysColor(COLOR_WINDOW) };
+        let foreground = unsafe { GetSysColor(COLOR_WINDOWTEXT) };
+        Self {
+            background,
+            foreground,
+            secondary: foreground,
+            border: foreground,
+            high_contrast: true,
+        }
+    }
+
+    fn current() -> Self {
+        let mut contrast = HIGHCONTRASTW {
+            cbSize: size_of::<HIGHCONTRASTW>() as u32,
+            ..Default::default()
+        };
+        // Query only; never change the user's global appearance or scrollbar metrics.
+        if unsafe {
+            SystemParametersInfoW(
+                SPI_GETHIGHCONTRAST,
+                contrast.cbSize,
+                (&raw mut contrast).cast(),
+                0,
+            )
+        } == 0
+        {
+            tracing::warn!(error = %std::io::Error::last_os_error(), "Could not query high contrast; using system colors");
+            return Self::system();
+        }
+        if contrast.dwFlags & HCF_HIGHCONTRASTON != 0 {
+            return Self::system();
+        }
+        // Approximate the supplied macOS dark screenshot, not universal AppKit color constants.
+        Self {
+            background: 0x001e1e1e,
+            foreground: 0x00ffffff,
+            secondary: 0x00a4a4a4,
+            border: 0x00343434,
+            high_contrast: false,
+        }
     }
 }
 
@@ -210,10 +284,36 @@ struct WindowState {
     dpi: Cell<u32>,
     pending_dpi: Cell<Option<u32>>,
     font: RefCell<Option<PreviewFont>>,
+    style: Cell<PreviewStyle>,
     anchor: Cell<Option<PreviewRect>>,
 }
 
 impl WindowState {
+    fn paint(&self, dc: HDC) {
+        let style = self.style.get();
+        let mut bounds = RECT::default();
+        // Stock DC objects belong to Windows; the callback's DC state is restored afterwards.
+        unsafe {
+            let saved = SaveDC(dc);
+            GetClientRect(self.window.get(), &mut bounds);
+            SetDCBrushColor(dc, style.background);
+            FillRect(dc, &bounds, GetStockObject(DC_BRUSH));
+            SelectObject(dc, GetStockObject(DC_BRUSH));
+            SelectObject(dc, GetStockObject(DC_PEN));
+            SetDCPenColor(dc, style.border);
+            RoundRect(
+                dc,
+                0,
+                0,
+                bounds.right,
+                bounds.bottom,
+                self.pixels(28),
+                self.pixels(28),
+            );
+            RestoreDC(dc, saved);
+        }
+    }
+
     fn pixels(&self, logical: i32) -> i32 {
         ((i64::from(logical) * i64::from(self.dpi.get()) + 48) / 96) as i32
     }
@@ -226,8 +326,11 @@ impl WindowState {
         self.dpi.set(dpi);
         // SendMessage can re-enter layout. Keep the old font alive without a RefCell borrow
         // until neither native control refers to it anymore.
-        for control in [self.text.get(), self.status.get()] {
-            unsafe { SendMessageW(control, WM_SETFONT, font.0 as usize, 1) };
+        for (control, handle) in [
+            (self.text.get(), font.body),
+            (self.status.get(), font.status),
+        ] {
+            unsafe { SendMessageW(control, WM_SETFONT, handle as usize, 1) };
         }
         self.font.replace(Some(font));
         Ok(())
@@ -260,7 +363,7 @@ impl WindowState {
         let mut viewport = RECT::default();
         // Layout centers fitting text by insetting the edit control's formatting rectangle.
         unsafe { SendMessageW(self.text.get(), EM_GETRECT, 0, (&raw mut viewport) as isize) };
-        let (_, line_height) = self.text_metrics()?;
+        let (_, line_height) = self.measure_text(self.text.get(), None)?;
         let visible_lines = ((viewport.bottom - viewport.top) / line_height).max(1);
         Ok((lines - visible_lines).max(0))
     }
@@ -309,20 +412,23 @@ impl WindowState {
         self.layout()
     }
 
-    fn text_metrics(&self) -> Result<(i32, i32)> {
-        let length = unsafe { GetWindowTextLengthW(self.text.get()) };
+    /// Measure the control's actual font, optionally wrapping status text to its final width.
+    fn measure_text(&self, control: HWND, width: Option<i32>) -> Result<(RECT, i32)> {
+        let length = unsafe { GetWindowTextLengthW(control) };
         let mut text = vec![0u16; length as usize + 1];
-        let count =
-            unsafe { GetWindowTextW(self.text.get(), text.as_mut_ptr(), text.len() as i32) };
+        let count = unsafe { GetWindowTextW(control, text.as_mut_ptr(), text.len() as i32) };
         ensure!(length == 0 || count > 0, "无法测量预览文字");
         // Match the edit control's actual font; the screen DC's default font can differ.
-        let font = unsafe { SendMessageW(self.text.get(), WM_GETFONT, 0, 0) } as _;
-        let dc = unsafe { GetDC(self.text.get()) };
+        let font = unsafe { SendMessageW(control, WM_GETFONT, 0, 0) } as _;
+        let dc = unsafe { GetDC(control) };
         ensure!(!dc.is_null(), "无法测量预览文字");
         let previous = unsafe { SelectObject(dc, font) };
         let mut metrics = TEXTMETRICW::default();
         let measured = !previous.is_null() && unsafe { GetTextMetricsW(dc, &mut metrics) } != 0;
-        let mut bounds = RECT::default();
+        let mut bounds = RECT {
+            right: width.unwrap_or(0),
+            ..Default::default()
+        };
         let drawn = if measured && count > 0 {
             unsafe {
                 DrawTextW(
@@ -330,7 +436,11 @@ impl WindowState {
                     text.as_ptr(),
                     count,
                     &mut bounds,
-                    DT_CALCRECT | DT_NOPREFIX | DT_EXPANDTABS | DT_EDITCONTROL,
+                    DT_CALCRECT
+                        | DT_NOPREFIX
+                        | DT_EXPANDTABS
+                        | DT_EDITCONTROL
+                        | if width.is_some() { DT_WORDBREAK } else { 0 },
                 )
             }
         } else {
@@ -340,13 +450,13 @@ impl WindowState {
             if !previous.is_null() {
                 SelectObject(dc, previous);
             }
-            ReleaseDC(self.text.get(), dc);
+            ReleaseDC(control, dc);
         }
         ensure!(
             measured && metrics.tmHeight > 0 && (count == 0 || drawn > 0),
             "无法测量预览字体"
         );
-        Ok((bounds.right, metrics.tmHeight))
+        Ok((bounds, metrics.tmHeight))
     }
 
     /// Fit short candidates and center their input line, wrapping at the width limit.
@@ -386,13 +496,14 @@ impl WindowState {
             let max_width = work.map_or(pixels(420), |work| {
                 pixels(420).min((work.width as i32 - 16).max(pixels(96)))
             });
-            let (natural_width, line_height) = self.text_metrics()?;
+            let (natural, line_height) = self.measure_text(self.text.get(), None)?;
             let margins = unsafe { SendMessageW(self.text.get(), EM_GETMARGINS, 0, 0) } as u32;
             let padding = pixels(34) + (margins & 0xffff) as i32 + (margins >> 16) as i32;
             let mut width = if self.message_visible.get() {
                 max_width
             } else {
-                natural_width
+                natural
+                    .right
                     .saturating_add(padding)
                     .clamp(pixels(96), max_width)
             };
@@ -448,10 +559,17 @@ impl WindowState {
             }
             // Match the macOS viewport bounds; taller text stays scrollable.
             let editor_height = content_height.clamp(pixels(28), pixels(196));
+            let message_height = if self.message_visible.get() {
+                let (message, _) =
+                    self.measure_text(self.status.get(), Some(width - pixels(40)))?;
+                message.bottom.max(pixels(32))
+            } else {
+                0
+            };
             let height = editor_height
                 + pixels(24)
                 + if self.message_visible.get() {
-                    pixels(48)
+                    message_height + pixels(12)
                 } else {
                     0
                 };
@@ -505,10 +623,10 @@ impl WindowState {
                     SetWindowPos(
                         self.status.get(),
                         null_mut(),
-                        pixels(16),
+                        pixels(20),
                         editor_height + pixels(24),
-                        width - pixels(32),
-                        pixels(36),
+                        width - pixels(40),
+                        message_height,
                         SWP_NOZORDER | SWP_NOACTIVATE
                     ) != 0,
                     "无法调整预览提示"
@@ -656,6 +774,48 @@ unsafe extern "system" fn window_proc(
     if !state.is_null() {
         let state = unsafe { &*state };
         match message {
+            WM_ERASEBKGND | WM_PRINTCLIENT => {
+                state.paint(wparam as HDC);
+                return 1;
+            }
+            WM_PAINT => {
+                let mut paint = PAINTSTRUCT::default();
+                let dc = unsafe { BeginPaint(window, &mut paint) };
+                state.paint(dc);
+                unsafe { EndPaint(window, &paint) };
+                return 0;
+            }
+            WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC
+                if lparam as HWND == state.text.get() || lparam as HWND == state.status.get() =>
+            {
+                let style = state.style.get();
+                let dc = wparam as HDC;
+                // A read-only EDIT sends WM_CTLCOLORSTATIC too; distinguish it by HWND.
+                unsafe {
+                    SetTextColor(
+                        dc,
+                        if lparam as HWND == state.text.get() {
+                            style.foreground
+                        } else {
+                            style.secondary
+                        },
+                    );
+                    SetBkColor(dc, style.background);
+                    SetDCBrushColor(dc, style.background);
+                    return GetStockObject(DC_BRUSH) as isize;
+                }
+            }
+            WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED => {
+                state.style.set(PreviewStyle::current());
+                unsafe {
+                    RedrawWindow(
+                        window,
+                        null(),
+                        null_mut(),
+                        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
+                    );
+                }
+            }
             WM_DPICHANGED => {
                 state.pending_dpi.set(Some((wparam & 0xffff) as u32));
                 // SAFETY: WM_DPICHANGED supplies a RECT valid for this synchronous callback.
@@ -736,6 +896,7 @@ impl NativePreview {
                 dpi: Cell::new(96),
                 pending_dpi: Cell::new(None),
                 font: RefCell::new(None),
+                style: Cell::new(PreviewStyle::system()),
                 anchor: Cell::new(None),
             }),
         }
@@ -743,6 +904,11 @@ impl NativePreview {
 
     fn create(&mut self) -> Result<()> {
         static CLASS: OnceLock<Result<u16, String>> = OnceLock::new();
+        self.state.style.set(PreviewStyle::current());
+        tracing::debug!(
+            system_colors = self.state.style.get().high_contrast,
+            "Configured Windows preview appearance"
+        );
         let class_name = super::nul_terminated_utf16("ViberWhisperConfirmationPreview");
         let instance = unsafe { GetModuleHandleW(null()) };
         let registered = CLASS.get_or_init(|| {
@@ -750,7 +916,6 @@ impl NativePreview {
                 lpfnWndProc: Some(window_proc),
                 hInstance: instance,
                 hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
-                hbrBackground: (COLOR_WINDOW + 1) as _,
                 lpszClassName: class_name.as_ptr(),
                 ..Default::default()
             };

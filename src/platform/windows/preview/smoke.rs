@@ -4,6 +4,10 @@ use super::super::nul_terminated_utf16;
 use super::*;
 use windows_sys::Win32::UI::Controls::{EM_CANUNDO, EM_GETSEL, EM_REPLACESEL};
 
+#[cfg(test)]
+#[path = "scrollbar_probe.rs"]
+mod scrollbar_probe;
+
 impl NativePreview {
     /// Ask only this fixture's HWND and native children to render into a PNG.
     pub(crate) fn smoke_capture(&self, path: &std::path::Path) -> Result<()> {
@@ -92,8 +96,24 @@ impl NativePreview {
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         encoder.write_header()?.write_image_data(&rgba)?;
+        let pixel = |x: i32, y: i32| {
+            let offset = ((y * width + x) * 4) as usize;
+            u32::from(rgba[offset])
+                | (u32::from(rgba[offset + 1]) << 8)
+                | (u32::from(rgba[offset + 2]) << 16)
+        };
+        let (background, border) = if self.state.style.get().high_contrast {
+            unsafe { (GetSysColor(COLOR_WINDOW), GetSysColor(COLOR_WINDOWTEXT)) }
+        } else {
+            (0x001e1e1e, 0x00343434)
+        };
+        ensure!(
+            pixel(2, height / 2) == background && pixel(width / 2, 0) == border,
+            "Preview capture lost its background or thin outline: {}",
+            path.display()
+        );
         eprintln!(
-            "preview capture: {}; {width}x{height}; actual DPI={}; layout DPI={}; read-only={}; warning={}; lines={}; first-visible-line={}; vertical-scrollbar={}",
+            "preview capture: {}; {width}x{height}; actual DPI={}; layout DPI={}; read-only={}; warning={}; lines={}; first-visible-line={}; vertical-scrollbar={}; system-colors={}",
             path.display(),
             unsafe { GetDpiForWindow(window) },
             self.state.dpi.get(),
@@ -104,6 +124,7 @@ impl NativePreview {
             unsafe { SendMessageW(self.state.text.get(), EM_GETFIRSTVISIBLELINE, 0, 0) },
             unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) } & WS_VSCROLL as isize
                 != 0,
+            self.state.style.get().high_contrast,
         );
         Ok(())
     }
@@ -287,7 +308,7 @@ impl NativePreview {
                         == pixels(if !scrollable {
                             52
                         } else if ready {
-                            268
+                            264
                         } else {
                             220
                         })
@@ -328,13 +349,18 @@ impl NativePreview {
                 for control in [editor, preview.state.status.get()] {
                     let font = unsafe { SendMessageW(control, WM_GETFONT, 0, 0) } as _;
                     let mut actual = LOGFONTW::default();
+                    let expected_height = if control == editor {
+                        (f64::from(expected.lfMessageFont.lfHeight) * 1.25).round() as i32
+                    } else {
+                        expected.lfMessageFont.lfHeight
+                    };
                     ensure!(
                         unsafe {
                             GetObjectW(font, size_of::<LOGFONTW>() as i32, (&raw mut actual).cast())
                         } == size_of::<LOGFONTW>() as i32
-                            && actual.lfHeight == expected.lfMessageFont.lfHeight
+                            && actual.lfHeight == expected_height
                             && actual.lfFaceName == expected.lfMessageFont.lfFaceName,
-                        "Preview control kept an unscaled font at {dpi} DPI"
+                        "Preview lost the body/status font proportions or system family at {dpi} DPI"
                     );
                 }
                 let mut start = 0u32;
@@ -377,23 +403,33 @@ impl NativePreview {
         preview.smoke_streaming()?;
         // The demo calls smoke_streaming for each revision under one delivery deadline.
         // Keep the full scroll regression suite in this once-per-run native fixture.
-        preview.smoke_scrolling(artifacts.as_deref())
+        preview.smoke_scrolling(artifacts.as_deref())?;
+        preview.smoke_appearance(artifacts.as_deref())?;
+        scrollbar_probe::exercise(&mut preview, artifacts.as_deref())
     }
 
     #[cfg(test)]
     fn smoke_scrolling(&mut self, artifacts: Option<&std::path::Path>) -> Result<()> {
-        let (_, line_height) = self.state.text_metrics()?;
-        let fitting_lines = self.state.pixels(196) / line_height;
         let numbered: Vec<_> = (1..=41)
             .map(|line| format!("第{line:02}行：hello 😀 中文"))
             .collect();
         let scrolled = numbered[..40].join("\n");
+        self.update_text(&scrolled, false, None)?;
+        let editor = self.state.text.get();
+        let mut viewport = RECT::default();
+        unsafe { SendMessageW(editor, EM_GETRECT, 0, (&raw mut viewport) as isize) };
+        let (_, line_height) = self.state.measure_text(editor, None)?;
+        let fitting_lines = (viewport.bottom - viewport.top) / line_height;
+        ensure!(
+            fitting_lines > 5 && fitting_lines + 8 < 40,
+            "Scroll fixture does not have enough lines for its native viewport"
+        );
         for ready in [false, true] {
             // A Realtime retraction can remove the scrollbar from an already-scrolled
             // multiline draft. Keep all fitting text visible without stealing valid scroll.
             let tail = 40 - fitting_lines;
             for (case, lines, first, expected_first) in [
-                ("shrink-fit", 8, 5, 0),
+                ("shrink-fit", fitting_lines, 5, 0),
                 ("shrink-clamp", fitting_lines + 3, 5, 3),
                 ("shrink-preserve", fitting_lines + 8, 5, 5),
                 ("append-tail", 41, tail, tail + 1),
@@ -443,6 +479,133 @@ impl NativePreview {
             }
         }
         Ok(())
+    }
+
+    /// Exercise actual control colors, wrapped warnings and a local system-color override.
+    /// The override never changes the OS high-contrast setting or proves that OS transition.
+    #[cfg(test)]
+    fn smoke_appearance(&mut self, artifacts: Option<&std::path::Path>) -> Result<()> {
+        use windows_sys::Win32::Graphics::Gdi::{GetBkColor, GetDCBrushColor, GetTextColor};
+
+        let original = self.state.style.get();
+        let result = (|| {
+            for system_colors in [false, true] {
+                if system_colors {
+                    self.state.style.set(PreviewStyle::system());
+                }
+                for (case, text, ready, message) in [
+                    ("short", "我们明天上午去上海。", true, "测试提示"),
+                    (
+                        "streaming",
+                        "hello 😀 中文",
+                        false,
+                        "正在识别，请稍候；按 Esc 取消。",
+                    ),
+                    (
+                        "warning",
+                        "hello 😀 中文",
+                        true,
+                        "部分音频识别失败，请检查文字后按 Enter 确认，或按 Esc 取消。\n无法获取输入目标；可复制文字后手动粘贴。",
+                    ),
+                    (
+                        "error",
+                        "",
+                        false,
+                        "识别服务暂时不可用。\n请检查连接配置，然后重试。\n按 Esc 关闭。",
+                    ),
+                ] {
+                    self.update_text(text, ready, Some(message))?;
+                    for dpi in [96, 144, 192] {
+                        let mut suggested = RECT::default();
+                        ensure!(
+                            unsafe { GetWindowRect(self.state.window.get(), &mut suggested) } != 0,
+                            "Could not read appearance fixture bounds"
+                        );
+                        unsafe {
+                            SendMessageW(
+                                self.state.window.get(),
+                                WM_DPICHANGED,
+                                dpi | (dpi << 16),
+                                (&raw const suggested) as isize,
+                            );
+                        }
+                        for control in [self.state.text.get(), self.state.status.get()] {
+                            let dc = unsafe { GetDC(control) };
+                            ensure!(!dc.is_null(), "Could not read native control colors");
+                            let saved = unsafe { SaveDC(dc) };
+                            let colors = unsafe {
+                                SetTextColor(dc, 0x00123456);
+                                SetBkColor(dc, 0x00654321);
+                                SendMessageW(
+                                    self.state.window.get(),
+                                    if control == self.state.text.get() && ready {
+                                        WM_CTLCOLOREDIT
+                                    } else {
+                                        WM_CTLCOLORSTATIC
+                                    },
+                                    dc as usize,
+                                    control as isize,
+                                );
+                                (GetTextColor(dc), GetBkColor(dc), GetDCBrushColor(dc))
+                            };
+                            unsafe {
+                                RestoreDC(dc, saved);
+                                ReleaseDC(control, dc);
+                            }
+                            let (foreground, background) = if self.state.style.get().high_contrast {
+                                unsafe {
+                                    (GetSysColor(COLOR_WINDOWTEXT), GetSysColor(COLOR_WINDOW))
+                                }
+                            } else if control == self.state.text.get() {
+                                (0x00ffffff, 0x001e1e1e)
+                            } else {
+                                (0x00a4a4a4, 0x001e1e1e)
+                            };
+                            ensure!(
+                                colors == (foreground, background, background),
+                                "Wrong native body/status colors for {case}; ready={ready}; DPI={dpi}"
+                            );
+                        }
+                        let mut body = RECT::default();
+                        let mut status = RECT::default();
+                        let mut window = RECT::default();
+                        ensure!(
+                            unsafe { GetWindowRect(self.state.text.get(), &mut body) } != 0
+                                && unsafe { GetWindowRect(self.state.status.get(), &mut status) }
+                                    != 0
+                                && unsafe { GetWindowRect(self.state.window.get(), &mut window) }
+                                    != 0,
+                            "Could not read native body/status bounds"
+                        );
+                        // Use the STATIC's own font and final width, not a fixed two-line footer.
+                        let (measured, _) = self.state.measure_text(
+                            self.state.status.get(),
+                            Some(status.right - status.left),
+                        )?;
+                        ensure!(
+                            status.bottom - status.top >= measured.bottom
+                                && status.top - body.bottom >= self.state.pixels(12)
+                                && window.bottom - status.bottom >= self.state.pixels(12)
+                                && status.left - window.left == self.state.pixels(20)
+                                && window.right - status.right == self.state.pixels(20)
+                                && (case != "warning" || measured.bottom > self.state.pixels(32)),
+                            "Warning/error footer clipped text or changed its insets at {dpi} DPI"
+                        );
+                        if let Some(directory) = artifacts {
+                            self.smoke_capture(&directory.join(format!(
+                                "appearance-{case}-{dpi}-system-colors-{system_colors}.png"
+                            )))?;
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "native preview appearance: colors, footer and simulated system-color fallback checked"
+            );
+            Ok(())
+        })();
+        self.state.style.set(original);
+        result
     }
 
     pub(crate) fn smoke_streaming(&mut self) -> Result<()> {
@@ -589,8 +752,18 @@ impl NativePreview {
                     }
                 }
             }
-            let (_, line_height) = self.state.text_metrics()?;
-            let fitting_lines = self.state.pixels(196) / line_height;
+            self.update_text(&long, false, None)?;
+            let mut viewport = RECT::default();
+            unsafe {
+                SendMessageW(
+                    self.state.text.get(),
+                    EM_GETRECT,
+                    0,
+                    (&raw mut viewport) as isize,
+                )
+            };
+            let (_, line_height) = self.state.measure_text(self.state.text.get(), None)?;
+            let fitting_lines = (viewport.bottom - viewport.top) / line_height;
             for ready in [false, true] {
                 for lines in [fitting_lines, fitting_lines + 1, fitting_lines] {
                     let text = "我们明天上午去上海。\n".repeat((lines - 1) as usize)
@@ -732,7 +905,7 @@ impl NativePreview {
         replace("短句");
         let footer = bounds()?;
         ensure!(
-            footer.bottom - footer.top == short.bottom - short.top + pixels(48),
+            footer.bottom - footer.top == short.bottom - short.top + pixels(44),
             "Message footer overlapped the resized editor"
         );
         let mut viewport = RECT::default();
