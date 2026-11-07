@@ -410,7 +410,7 @@ impl NativePreview {
 
     /// Run the experimental desktop-input gates separately from setup and synthetic DPI work.
     #[cfg(test)]
-    pub(crate) fn smoke_scrollbar() -> Result<()> {
+    pub(crate) fn smoke_scrollbar(cleanup_fault: bool) -> Result<()> {
         let artifacts =
             std::env::var_os("VIBERWHISPER_PREVIEW_ARTIFACTS").map(std::path::PathBuf::from);
         if let Some(directory) = &artifacts {
@@ -426,7 +426,7 @@ impl NativePreview {
             None,
             None,
         )?;
-        scrollbar_probe::exercise(&mut preview, artifacts.as_deref())
+        scrollbar_probe::exercise(&mut preview, artifacts.as_deref(), cleanup_fault)
     }
 
     #[cfg(test)]

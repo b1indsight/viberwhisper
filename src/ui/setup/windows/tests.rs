@@ -1,5 +1,4 @@
-use std::os::windows::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::io::Read;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,19 +14,26 @@ use windows_sys::Win32::UI::HiDpi::{
 use super::*;
 use crate::ui::setup::{NativeSetupUi, SetupUi, TITLE};
 
+mod process;
+
 const CHILD_ENV: &str = "VIBERWHISPER_NATIVE_INPUT_TEST_CHILD";
 const TEST_NAME: &str = "ui::setup::windows::tests::native_setup_dialogs_show_and_return";
 const PROMPT: &str = "请输入中文、引号 \" 和密码 🦀";
 
 #[test]
 fn native_setup_dialogs_show_and_return() {
-    // The old script adapter spins forever if its Chinese input window never appears. A child
-    // process bounds this regression test even if either the UI or its driver stops responding.
-    if std::env::var_os(CHILD_ENV).is_some() {
+    if let Ok(phase) = std::env::var(CHILD_ENV) {
+        // No window, driver or input may exist before the parent contains this process. EOF
+        // also stops a child whose parent disappears before assigning it to the job.
+        let mut admission = [0];
+        std::io::stdin()
+            .read_exact(&mut admission)
+            .expect("native fixture admission was denied");
+        assert_eq!(admission, [b'G'], "invalid native fixture admission");
         crate::platform::initialize_dpi_awareness().unwrap();
         crate::platform::initialize_dpi_awareness().unwrap(); // An existing PMv2 context is valid.
-        if std::env::var(CHILD_ENV).as_deref() == Ok("scrollbar") {
-            crate::platform::NativePreview::smoke_scrollbar().unwrap();
+        if phase == "scrollbar" || phase == "input-cleanup" {
+            crate::platform::NativePreview::smoke_scrollbar(phase == "input-cleanup").unwrap();
             return;
         }
         exercise_message(Some(true), false);
@@ -46,46 +52,16 @@ fn native_setup_dialogs_show_and_return() {
         return;
     }
 
-    // Real desktop input must not compete with the modal setup/DPI fixture. Each phase keeps
-    // its original bounded child instead of spending the setup deadline on new experiments.
-    for phase in ["setup", "scrollbar"] {
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST_NAME, "--nocapture"])
-            .env(CHILD_ENV, phase)
-            // This environment used to select a console-only confirmation even in a GUI process.
-            .env("SSH_CLIENT", "127.0.0.1 12345 22")
-            .env_remove("DISPLAY")
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if child.try_wait().unwrap().is_some() {
-                let output = child.wait_with_output().unwrap();
-                assert!(
-                    output.status.success(),
-                    "native {phase} test failed: {}\n{}\n{}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                print!("{}", String::from_utf8_lossy(&output.stdout));
-                eprint!("{}", String::from_utf8_lossy(&output.stderr));
-                break;
-            }
-            if Instant::now() >= deadline {
-                child.kill().unwrap();
-                let output = child.wait_with_output().unwrap();
-                panic!(
-                    "native {phase} did not finish within 30 seconds\n{}\n{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
+    // Serialize actual desktop input. The scrollbar's single budget includes all four cold
+    // clients; cleanup remains reachable even when the native window thread stops pumping.
+    for (phase, seconds) in [
+        ("gate-denied", 30),
+        ("setup", 30),
+        ("input-cleanup", 30),
+        ("scrollbar", 90),
+    ] {
+        process::run(phase, Duration::from_secs(seconds))
+            .unwrap_or_else(|error| panic!("native {phase}: {error:#}"));
     }
 }
 

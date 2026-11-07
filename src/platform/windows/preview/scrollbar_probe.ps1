@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory)][long]$Editor,
     [Parameter(Mandatory)][int]$OwnerProcess,
     [Parameter(Mandatory)][string]$Directory,
-    [Parameter(Mandatory)][ValidateSet('native-ready', 'native-readonly', 'ready', 'readonly')][string]$Case,
+    [Parameter(Mandatory)][ValidateSet('native-ready', 'native-readonly', 'ready', 'readonly', 'input-cleanup')][string]$Case,
     [Parameter(Mandatory)][int]$ThumbWidth
 )
 $ErrorActionPreference = 'Stop'
@@ -105,6 +105,14 @@ public static class ScrollbarInput {
     public static void MouseEvent(uint flags, int data) {
         var inputs = new[] { new Input { Type=0, Data=new Union { Mouse=new Mouse { Flags=flags, Data=unchecked((uint)data) } } } };
         if (SendInput(1, inputs, Marshal.SizeOf(typeof(Input))) != 1) throw new Exception("Mouse SendInput failed");
+    }
+    public static void HoldInputForCleanup() {
+        var inputs = new[] {
+            new Input { Type=1, Data=new Union { Key=new Key { Code=0x11 } } },
+            new Input { Type=0, Data=new Union { Mouse=new Mouse { Flags=2 } } }
+        };
+        if (SendInput(2, inputs, Marshal.SizeOf(typeof(Input))) != 2)
+            throw new Exception("Cleanup fault could not hold Ctrl/left");
     }
     public static void Keys(ushort code, bool control) {
         uint extended = code == 0x24 || code == 0x22 ? 1u : 0u;
@@ -288,6 +296,16 @@ try {
     Reset-Scroll
     $bar = Get-Scrollbar
     $middle = $bar.Bounds.Top + [int](($bar.ThumbTop + $bar.ThumbBottom) / 2)
+    if ($Case -eq 'input-cleanup') {
+        Move-Pointer ([int](($bar.Bounds.Left + $bar.Bounds.Right) / 2)) $middle
+        Write-Stage 'cleanup fault: holding native thumb and Ctrl until the parent terminates the job'
+        # Repeated future presses make release-before-termination unsafe. The parent must
+        # observe real capture/input and kill both this driver and the blocked GUI first.
+        while ($true) {
+            [ScrollbarInput]::HoldInputForCleanup()
+            Start-Sleep -Milliseconds 100
+        }
+    }
     Write-Stage 'native window and focus validated; querying UIA edge'
     $metrics.UiaEdge = Get-Uia ($bar.Bounds.Left + 1) $middle
     Write-Stage 'UIA edge returned; querying remaining native elements'
@@ -379,7 +397,8 @@ try {
     }
     Write-Output ("scrollbar desktop $Case passed (actual DPI=96, no 4K claim): " + ($metrics | ConvertTo-Json -Depth 4 -Compress))
 } finally {
-    # Every operation after LEFTDOWN is bounded and no UIA request runs with a held button.
+    # Normal cases issue no UIA request with a held button. The deliberate cleanup fault is
+    # bounded by the parent's job/deadline and cannot rely on this finally block being run.
     try { [ScrollbarInput]::MouseEvent(4, 0) }
     finally {
         [void][ScrollbarInput]::SetCursorPos($cursor.X, $cursor.Y)
