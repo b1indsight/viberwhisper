@@ -1,8 +1,13 @@
 use std::sync::Arc;
 use std::{fs::OpenOptions, io, os::windows::io::AsRawHandle};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use rdev::Key;
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::UI::HiDpi::{
+    AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiAwarenessContextForProcess, GetThreadDpiAwarenessContext, SetProcessDpiAwarenessContext,
+};
 
 use super::backend::{HotkeyFilter, PlatformBackend};
 use crate::input::hotkey::HotkeyPolicy;
@@ -18,6 +23,32 @@ pub(crate) struct WindowsHotkeys;
 pub(crate) struct WindowsTray;
 
 struct WindowsTyper;
+
+pub(super) fn initialize_dpi_awareness() -> Result<()> {
+    // winit initializes DPI only when its event loop is built; first-run and explicit setup
+    // create HWNDs earlier. Accept an already-established PMv2 context, but never silently
+    // continue with an incompatible manifest/host context and bitmap-scaled native dialogs.
+    // SAFETY: The context is a documented constant and GetCurrentProcess returns a valid handle.
+    unsafe {
+        let initialized = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let error = io::Error::last_os_error();
+        ensure!(
+            AreDpiAwarenessContextsEqual(
+                GetDpiAwarenessContextForProcess(GetCurrentProcess()),
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            ) != 0,
+            "Windows Per-Monitor V2 DPI initialization failed (result {initialized}): {error}"
+        );
+        ensure!(
+            AreDpiAwarenessContextsEqual(
+                GetThreadDpiAwarenessContext(),
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            ) != 0,
+            "Windows UI thread does not use Per-Monitor V2 DPI awareness"
+        );
+    }
+    Ok(())
+}
 
 pub(super) fn prepare_desktop_output() -> io::Result<()> {
     redirect_standard_handle(ffi::STD_OUTPUT_HANDLE)?;

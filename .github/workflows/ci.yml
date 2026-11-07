@@ -99,7 +99,41 @@ jobs:
         run: cargo build --locked --features windows-app
 
       - name: Test
-        run: cargo test --locked --features windows-app
+        # The runner context is step-scoped here; keep the native smoke path below in sync.
+        env:
+          VIBERWHISPER_PREVIEW_ARTIFACTS: ${{ runner.temp }}/windows-preview-captures
+        run: cargo test --locked --features windows-app,integration
+
+      - name: Native Windows setup and DPI smoke
+        shell: pwsh
+        env:
+          VIBERWHISPER_PREVIEW_ARTIFACTS: ${{ runner.temp }}/windows-preview-captures
+        run: |
+          cargo test --locked --features windows-app,integration native_setup_dialogs_show_and_return -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/test-windows-setup.ps1 -BinaryDirectory target/debug -ScreenshotDirectory "$env:RUNNER_TEMP/windows-setup-captures"
+
+      - name: Native Windows result preview captures
+        shell: pwsh
+        run: |
+          cargo run --locked --features integration --bin viberwhisper-preview -- --artifacts "$env:RUNNER_TEMP/windows-preview-captures"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows setup captures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-setup-captures
+          path: ${{ runner.temp }}/windows-setup-captures/*.png
+          if-no-files-found: ignore
+
+      - name: Upload Windows result preview captures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-preview-captures
+          path: ${{ runner.temp }}/windows-preview-captures/*.png
+          if-no-files-found: error
 
       - name: Clippy
         run: cargo clippy --locked --all-targets --features windows-app -- -D warnings

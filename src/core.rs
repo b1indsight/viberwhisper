@@ -40,6 +40,7 @@ impl ConvertConfig {
 
 /// Initializes process-wide services, parses the CLI, and runs the selected workflow.
 pub fn run() -> Result<()> {
+    crate::platform::initialize_dpi_awareness()?;
     if setup::run_hotkey_capture_helper_if_requested()? {
         return Ok(());
     }
@@ -70,6 +71,10 @@ pub fn run() -> Result<()> {
 
 /// Starts the desktop listener directly and presents fatal startup errors without a console.
 pub fn run_desktop() -> ExitCode {
+    if let Err(error) = crate::platform::initialize_dpi_awareness() {
+        crate::platform::report_desktop_startup_error(&error);
+        return ExitCode::FAILURE;
+    }
     match setup::run_hotkey_capture_helper_if_requested() {
         Ok(true) => return ExitCode::SUCCESS,
         Ok(false) => {}
