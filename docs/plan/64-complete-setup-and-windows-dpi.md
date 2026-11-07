@@ -1,6 +1,6 @@
 # 64 - 识别模式二选一配置与 Windows 高 DPI 窗口
 
-**阶段：** 向导、DPI 与基础布局已实现；滚动条覆盖窗在原生验证中失败，同一 EDIT HWND 自绘修订 [022] 待批准，尚未新增实现。真实 4K 仍待实机。
+**阶段：** 向导、DPI 与基础布局已实现；[022] 已批准，同一 EDIT HWND 自绘探针已替换覆盖窗，等待原生门禁。产品/演示仍使用系统滚动条；真实 4K 仍待实机。
 **PR：** [#165](https://github.com/b1indsight/viberwhisper/pull/165)，沿用同一 draft PR 交付实现。
 **Bookmark：** `feat/complete-setup-windows-dpi`。
 **基线：** 最新 fetch 后的 `origin/master`，即 [v0.5.0 发布准备提交 e18be032](https://github.com/b1indsight/viberwhisper/commit/e18be032950c03bc7bf40153e028e12193cccacc)。
@@ -929,3 +929,29 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   首轮原生证据仍只覆盖 hosted 96 DPI；真实 4K、物理 150/200% 缩放、混合屏、IME、Narrator、系统文字缩放和物理鼠标手感保留未验收标记。
   方案咨询的初始化与回复已核对为 Opus 5.5、tools/MCP 均为空；只采纳可行性前置与共享表面边界，不采纳逐消息像素追踪、
   用采样推断“全部写入已抑制”或任意固定重跑次数。咨询不是 Win32 运行证据，草稿位于工作区 `.amp/in/artifacts/scrollbar-same-window-plan-advice.md`。
+
+### [023] — 2026-11-07 — 同一 EDIT 非客户区绘制探针与箭头输入对照
+
+- **触发与范围：** 用户明确要求“实现”，按 [022] 执行。同窗口候选先落在现有测试专用 `scrollbar_probe.rs`，
+  不提前修改 `preview.rs`、产品或演示；原覆盖窗的失败证据和 [022] 的停止条件继续保留。
+- **实际实现：** 删除覆盖窗类、额外 HWND、z 序定位、`WS_CLIPSIBLINGS` 修改和父窗口 `WM_PRINT` 手动合成。
+  现有 EDIT 的局部 subclass 仅在 `WM_NCPAINT` 内用 `GetDCEx` 绘制原生槽位，使用窗口坐标转换、显式裁剪及成对的
+  `SaveDC`/`RestoreDC`、`ReleaseDC`；`WM_PRINT` 把原生客户区和本方非客户区分开绘制。
+  保留原生 `WS_VSCROLL`、命中、capture/tracking、所有滚动/编辑消息和完整 UIA；不处理第二套滚动或选区模型。
+  安装、悬停边界和按下/释放的视觉状态变化才请求重绘，不在滚动/绘制消息默认处理后追加补画，不设置重绘定时器。
+  EDIT/父窗口的相关消息进入/退出、原生 capture、物理槽位/滑块几何及本方绘制计数缓存在测试局部，案例结束或失败时经原通道输出。
+  轨迹不包含逐消息像素读回，也不能证明不存在未采样的瞬时帧或定位具体原生绘制调用。
+- **先固定案例再实现：** 工作区 `scrollbar-drag-composition-cases.md` 在代码修改前追加 [022] 的案例。
+  保留四个系统条/候选、可编辑/只读客户端及既有真实屏幕、槽外像素、首行、文本、选区、焦点和完整 ControlView 比较。
+  旧覆盖窗定位/`HTTRANSPARENT` 断言由无新增 child/线程顶层 HWND、EDIT style 不变及 EDIT 原生 `HTVSCROLL`/`WindowFromPoint` 替代。
+  增加上下箭头区域的真实单击、按住自动重复、内部位置释放后停止和近末端按住夹取；重复次数仅记录，单击必须精确一行。
+  末端按住/释放的实际屏幕继续按相同颜色、宽度和槽外像素验收，不比较不同时刻的重复次数或中途正文位置。
+  原有 `WM_PRINT`、系统色分支、短文本隐藏与父进程准入/故障清理仍在；不延长九十秒或五秒期限。
+- **本机检查：** `cargo fmt --check`、macOS integration 构建/测试/全目标 Clippy、Windows GNU 的 `windows-app` 和
+  `windows-app,integration` 两组全目标 Clippy 通过。GNU 使用 `DOCS_RS=1`，不含 Windows 链接或运行。
+  从官方归档校验 SHA-256 后临时运行 PowerShell 7.6.9，完整驱动脚本解析通过；这不是 Windows PowerShell 5.1、Win32 ABI、输入或 UIA 执行。
+  原始输出在工作区 `.amp/in/artifacts/same-edit-macos-checks.log`、`same-edit-windows-cross.log` 和 `same-edit-powershell-parse.log`。
+- **消融与未验收：** 去掉候选绘制的原生系统条继续作为同输入负对照，保留像素门禁必须拒绝原生外观的要求。
+  本机不能执行该 Windows 对照，尚无同窗口运行证据；因此候选仅作为测试探针提交，不把未经比较的机制接入产品。
+  仍需审查后推送同一 PR，由 Windows CI 执行实际屏幕和输入门禁并取回截图；任一关键门禁失败就保留产品系统条并报告。
+  真实 4K、物理缩放、混合屏、IME、Narrator、系统文字缩放及物理鼠标边界不变。

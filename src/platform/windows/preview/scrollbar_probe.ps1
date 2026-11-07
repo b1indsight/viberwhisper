@@ -115,7 +115,7 @@ public static class ScrollbarInput {
             throw new Exception("Cleanup fault could not hold Ctrl/left");
     }
     public static void Keys(ushort code, bool control) {
-        uint extended = code == 0x24 || code == 0x22 ? 1u : 0u;
+        uint extended = code == 0x24 || code == 0x23 || code == 0x22 ? 1u : 0u;
         var down = new Input { Type=1, Data=new Union { Key=new Key { Code=code, Flags=extended } } };
         var up = new Input { Type=1, Data=new Union { Key=new Key { Code=code, Flags=extended|2 } } };
         var inputs = control ? new[] {
@@ -222,7 +222,7 @@ function Compare-OutsideSlot($Bitmap, $Info, [string]$Label, $Caret) {
     $original = [Drawing.Bitmap]::new($path)
     try {
         $oldCaret = Get-Content -Raw "$path.caret.json" | ConvertFrom-Json
-        if ($original.Width -ne $Bitmap.Width -or $original.Height -ne $Bitmap.Height) { throw 'Overlay changed screen bounds' }
+        if ($original.Width -ne $Bitmap.Width -or $original.Height -ne $Bitmap.Height) { throw 'Candidate changed screen bounds' }
         for ($y = 0; $y -lt $Bitmap.Height; $y++) {
             for ($x = 0; $x -lt $Bitmap.Width; $x++) {
                 if (![ScrollbarInput]::PtInRegion($region, $x, $y)) { continue }
@@ -237,6 +237,7 @@ function Compare-OutsideSlot($Bitmap, $Info, [string]$Label, $Caret) {
     } finally { $original.Dispose() }
 }
 function Capture-Screen([string]$Label, [int]$Color) {
+    Write-Stage ("capture $Label; first-line={0}; capture={1}" -f [ScrollbarInput]::FirstLine($editorHandle), (Get-Focus).Capture)
     $deadline = [DateTime]::UtcNow.AddSeconds(2)
     $previous = $null
     do {
@@ -287,7 +288,7 @@ try {
     if (![ScrollbarInput]::GetScrollInfo($editorHandle, 1, [ref]$scroll) -or $scroll.Page -eq 0) { throw 'Cannot read native scroll range/page' }
     # Expected endpoint comes from Win32, independently of the product's viewport helper.
     $maximumFirstLine = $scroll.Maximum - $scroll.Page + 1
-    # A client click establishes real focus; the overlay must never acquire it.
+    # A client click establishes real focus; decorating the bar must not move that focus.
     $bar = Get-Scrollbar
     Move-Pointer ($bar.Bounds.Left - 30) ($bar.Bounds.Top + 10)
     [ScrollbarInput]::MouseEvent(2, 0)
@@ -382,6 +383,63 @@ try {
     Capture-Screen 'released' 0xb0b0b0
     Move-Pointer ($bar.Bounds.Left - 30) ($bar.Bounds.Top + 100)
     Capture-Screen 'leave' 0x929292
+
+    # Visually hidden arrows retain their original hit area and native repeat/capture behavior.
+    foreach ($direction in @(-1, 1)) {
+        $name = if ($direction -lt 0) { 'up' } else { 'down' }
+        Reset-Scroll
+        [ScrollbarInput]::Keys(0x22, $false)
+        Wait-Until { [ScrollbarInput]::FirstLine($editorHandle) -gt 1 -and [ScrollbarInput]::FirstLine($editorHandle) -lt $maximumFirstLine - 1 } 'arrow interior'
+        $bar = Get-Scrollbar
+        $x = $bar.Bounds.Left + 1
+        $y = if ($direction -lt 0) { $bar.Bounds.Top + [int]($bar.ArrowSize / 2) } else { $bar.Bounds.Bottom - 1 - [int]($bar.ArrowSize / 2) }
+        Move-Pointer $x $y
+        $first = [ScrollbarInput]::FirstLine($editorHandle)
+        [ScrollbarInput]::MouseEvent(2, 0)
+        [ScrollbarInput]::MouseEvent(4, 0)
+        Wait-Until { (Get-Focus).Capture -eq [IntPtr]::Zero -and [ScrollbarInput]::FirstLine($editorHandle) -eq $first + $direction } "arrow $name click"
+        $metrics["Arrow-$name-click"] = [ScrollbarInput]::FirstLine($editorHandle) - $first
+
+        # Observe repeat in the interior, then release where a stale repeat would still move.
+        Start-Sleep -Milliseconds ([ScrollbarInput]::GetDoubleClickTime() + 1)
+        $first = [ScrollbarInput]::FirstLine($editorHandle)
+        [ScrollbarInput]::MouseEvent(2, 0)
+        Wait-Until { (Get-Focus).Capture -eq $editorHandle } "arrow $name capture"
+        Wait-Until { ([ScrollbarInput]::FirstLine($editorHandle) - $first) * $direction -ge 2 } "arrow $name repeat"
+        [ScrollbarInput]::MouseEvent(4, 0)
+        Wait-Until { (Get-Focus).Capture -eq [IntPtr]::Zero } "arrow $name release"
+        $stopped = [ScrollbarInput]::FirstLine($editorHandle)
+        if ($stopped -le 0 -or $stopped -ge $maximumFirstLine) { throw "Arrow $name release control reached an endpoint" }
+        Start-Sleep -Milliseconds 120
+        if ([ScrollbarInput]::FirstLine($editorHandle) -ne $stopped) { throw "Arrow $name continued after release" }
+        Write-Stage ("arrow $name repeated {0} lines; stopped in interior at {1}" -f (($stopped - $first) * $direction), $stopped)
+
+        # Start near the endpoint, so native auto-repeat reaches its clamp within the existing
+        # budget. Compare endpoint pixels, not differently timed repeat counts/text positions.
+        Reset-Scroll
+        if ($direction -gt 0) {
+            [ScrollbarInput]::Keys(0x23, $true) # Real Ctrl+End.
+            Wait-Until { [ScrollbarInput]::FirstLine($editorHandle) -eq $maximumFirstLine } 'arrow tail'
+        }
+        Move-Pointer ($bar.Bounds.Left - 30) ($bar.Bounds.Top + 100)
+        [ScrollbarInput]::MouseEvent(0x800, (120 * $direction))
+        Wait-Until { [ScrollbarInput]::FirstLine($editorHandle) -gt 0 -and [ScrollbarInput]::FirstLine($editorHandle) -lt $maximumFirstLine } 'arrow near endpoint'
+        Move-Pointer $x $y
+        Start-Sleep -Milliseconds ([ScrollbarInput]::GetDoubleClickTime() + 1)
+        $first = [ScrollbarInput]::FirstLine($editorHandle)
+        $endpoint = if ($direction -lt 0) { 0 } else { $maximumFirstLine }
+        [ScrollbarInput]::MouseEvent(2, 0)
+        Wait-Until { (Get-Focus).Capture -eq $editorHandle } "arrow $name endpoint capture"
+        Wait-Until { [ScrollbarInput]::FirstLine($editorHandle) -eq $endpoint } "arrow $name endpoint"
+        Capture-Screen "arrow-$name-held" 0xc7c7c7
+        Start-Sleep -Milliseconds 120
+        if ([ScrollbarInput]::FirstLine($editorHandle) -ne $endpoint -or (Get-Focus).Capture -ne $editorHandle) { throw "Arrow $name lost endpoint clamp/capture" }
+        [ScrollbarInput]::MouseEvent(4, 0)
+        Wait-Until { (Get-Focus).Capture -eq [IntPtr]::Zero } "arrow $name endpoint release"
+        Capture-Screen "arrow-$name-released" 0xb0b0b0
+        Write-Stage ("arrow $name clamped after {0} lines; endpoint={1}" -f (($endpoint - $first) * $direction), $endpoint)
+    }
+    Reset-Scroll
     $bar = Get-Scrollbar
     $metrics.UiaAfter = Get-Uia ($bar.Bounds.Left + 1) ($bar.Bounds.Top + [int](($bar.ThumbTop + $bar.ThumbBottom) / 2))
     $metrics.Selection = [ScrollbarInput]::Selection($editorHandle)
@@ -392,7 +450,7 @@ try {
     } else {
         $baseline = Get-Content -Raw $baselinePath | ConvertFrom-Json
         foreach ($key in $metrics.Keys) {
-            if (($metrics[$key] | ConvertTo-Json -Depth 4 -Compress) -cne ($baseline.$key | ConvertTo-Json -Depth 4 -Compress)) { throw "Overlay changed native input/UIA result: $key" }
+            if (($metrics[$key] | ConvertTo-Json -Depth 4 -Compress) -cne ($baseline.$key | ConvertTo-Json -Depth 4 -Compress)) { throw "Candidate changed native input/UIA result: $key" }
         }
     }
     Write-Output ("scrollbar desktop $Case passed (actual DPI=96, no 4K claim): " + ($metrics | ConvertTo-Json -Depth 4 -Compress))
