@@ -14,14 +14,21 @@ viberwhisper config path
 - Windows：`%APPDATA%\ViberWhisper\config.json`
 
 正常监听启动时，如果配置文件不存在、无法读取或不能通过运行时校验，程序会显示跨平台的首次配置向导。
-向导依次收集 STT、可选 LLM、热键和麦克风设置，并可录制一段真实语音验证转写。热键步骤先显示当前值；
+向导首先选择识别方式，默认当前配置：`1` 为普通识别（HTTP STT，可选 LLM 整理），`2` 为 Realtime。
+普通识别收集 STT 和可选 LLM 的连接与密钥；Realtime 只收集 WebSocket 地址、模型和鉴权环境变量名，
+环境变量名留空表示不鉴权，不能在这里填密钥值。另一条路径的配置保留，不会被询问或重置。
+随后设置热键和麦克风，并可录制一段真实语音验证转写。热键步骤先显示当前值；
 需要修改时依次记录 Hold 和 Toggle 按键，最终确认后才应用。验证录音也使用这两个候选热键的正常语义，
 验证确认窗口会说明关闭后如何说“测试”并结束录音，不通过对话框点击开始或停止。完成向导后才会原子
-写入 `config.json`。选择跳过只会让本次启动使用内置默认值，不创建或覆盖文件。以后可随时重新运行：
+写入 `config.json`。输入步骤取消、最终拒绝保存或保存前发生 UI 错误时，不创建或覆盖文件。
+选择跳过只会让本次启动使用内置默认值，不创建或覆盖文件。以后可随时重新运行：
 
 ```bash
 viberwhisper setup
 ```
+
+重新设置时，LLM 开关默认沿用当前值；麦克风暂时断开或枚举失败时默认保留原设备设置，可明确改选系统默认或其他设备。
+向导不编辑提示词、提示词组件、温度、预热、记忆开关或长期词表，也不增加语言和增益页面；这些已有值和自定义内容保持原样。
 
 也可将 [`config.example.json`](../config.example.json) 复制到上述路径，或使用 `config set` 修改普通字段。
 已有文件必须包含 `schema_version: 3` 和当前结构；`audio.input_device` 缺失时使用系统默认设备，`dictation` 及其可选字段缺失时使用内置默认值。
@@ -49,11 +56,11 @@ secret key 也不能通过 `config set` 修改。向导密码框输入的密钥�
 
 ## 修改方式
 
-- `viberwhisper setup`：交互设置 API、热键和麦克风，并验证录音。
+- `viberwhisper setup`：选择普通识别或 Realtime，设置所选连接、热键和麦克风，并可验证录音。
 - `viberwhisper config set <key> <value>`：修改下表中的普通字段。只做类型解析和保存，修改后用 `viberwhisper config check` 检查组合配置。
-- 手动编辑 `viberwhisper config path` 指向的文件：包括仅文件支持的整个 `dictation` 对象。`config list/get/set` 不提供 `dictation.*` 键。
+- 手动编辑 `viberwhisper config path` 指向的文件：包括 Realtime 提示词、组件和记忆等高级字段。`config list/get/set` 仍不提供 `dictation.*` 键。
 
-修改配置或环境变量后重新启动桌面应用。图形入口需要从它实际继承的环境中取得变量；首次使用可直接在向导密码框中输入密钥。
+修改配置或环境变量后重新启动桌面应用。图形入口需要从它实际继承的环境中取得变量；普通识别也可直接在向导密码框中输入密钥，Realtime 仅使用环境变量。
 
 CLI 只接受下表中的 canonical dotted key；`hotkey`、`model`、`local_mode` 等旧别名不再支持。
 可空字段使用字面值 `null` 清空，例如 `viberwhisper config set audio.input_device null`。

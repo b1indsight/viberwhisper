@@ -33,6 +33,15 @@ pub(crate) fn preview_typer() -> std::sync::Arc<dyn crate::input::typer::TextTyp
 
 pub(crate) type NativePlatform = runtime::PlatformRuntime<SelectedBackend>;
 
+/// Establishes native DPI scaling before setup, startup-error dialogs, or the event loop.
+pub(crate) fn initialize_dpi_awareness() -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    return windows::initialize_dpi_awareness();
+
+    #[cfg(not(target_os = "windows"))]
+    Ok(())
+}
+
 /// Gives the desktop process valid output handles without requiring a visible console.
 pub(crate) fn prepare_desktop_output() -> std::io::Result<()> {
     #[cfg(target_os = "windows")]

@@ -252,9 +252,18 @@ macOS listens to the text delegate, measures unwrapped lines using the editor fo
 out the wrapped native text at the resulting width. Windows handles the edit control's
 `EN_CHANGE` notification, measures native glyph widths and wrapped lines with the actual font,
 and centers short text using the edit control's formatting rectangle.
-The editor viewport ranges from 28 to 196 native units; longer content scrolls inside it.
+The editor viewport ranges from 28 to 196 points on macOS and 96-DPI logical units on Windows;
+longer content scrolls inside it.
 Message visibility survives edits and contributes a separate footer to the bubble height;
 messages use the maximum bubble width to remain readable.
+
+Windows creates an owned system message font for the current HWND DPI, assigning it to both
+controls before releasing the previous font. Logical padding, viewport bounds, corner radii,
+and width limits scale once; measured glyphs, control margins, caret rectangles, and monitor
+work areas already use physical pixels. `WM_DPICHANGED` applies the suggested rectangle and
+reflows both controls without rewriting text or clearing selection/undo. A notification sent
+synchronously during layout is retained for the next layout pass; the first visible line is
+restored after the font change. The window is destroyed before its final font is released.
 
 The worker captures plain caret geometry before publishing the preview. macOS queries the selected
 range's AX bounds; Windows reads GUITHREADINFO's native caret and converts its client coordinates.
@@ -291,3 +300,8 @@ mode edits the native control, sends held-Enter events and verifies zero callbac
 one confirmation with edited text after release, and successful delivery to the selected target.
 The native editing checks live in each platform's `preview/smoke.rs`, behind the same feature.
 They extend the private preview implementation without exposing native UI state to the demo.
+On macOS and Windows, `--artifacts DIRECTORY` instead captures the native streaming, editable,
+long-text, warning, empty-failure, and timeout fixtures without a destination or injection.
+Windows CI also sets the test-only `VIBERWHISPER_PREVIEW_ARTIFACTS` directory to capture the
+existing synthetic-DPI checks. Each capture logs actual window DPI separately from layout DPI;
+these native-control renders do not establish physical 4K or mixed-monitor clarity.

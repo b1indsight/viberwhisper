@@ -13,7 +13,13 @@
 
 ## 启用 Realtime
 
-在配置文件中修改，重新启动应用后生效；`config set` 不支持这些字段。
+运行 `viberwhisper setup`，在识别方式中选择 `2`（Realtime），填写 WebSocket 服务地址、模型及鉴权环境变量名，
+再完成共用的热键、麦克风与保存步骤。无需鉴权时清空变量名；需要鉴权时填写变量名称，密钥值由应用启动环境提供，
+不会写入配置文件。服务地址和模型沿用已有配置或内置默认值，应用不会安装或启动服务。
+需要切回普通识别时选择 `1`；两种模式互相保留连接设置，提示词、记忆和长期词表等高级值也不因切换而重置。
+
+高级设置仍在配置文件中修改，向导不增加提示词或记忆编辑页；`config set` 不支持 `dictation.*`。
+修改配置或环境变量后重新启动应用。
 升级后，桌面应用成功验证现有配置时会自动补齐并保存缺失的 Realtime 字段，包括 `memory` 的子字段；已有开关、地址、模型和自定义提示词保持原样。缺少整个 `dictation` 时补入默认配置，`enabled` 仍为 `false`。完整配置不会重复写入，`config get/list/check` 等检查命令不会触发补齐。
 缺失的 `prompt` 和 `prompt_components` 保存为 `null`，继续使用内置默认提示词；不会将默认提示词正文写入配置。`prompt: ""` 仍表示不使用提示词。
 在 `viberwhisper config path` 显示的文件中合并以下 `dictation` 对象，保留其余 v3 配置字段（完整示例见 [`config.example.json`](../config.example.json)）：
