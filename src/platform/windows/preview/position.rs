@@ -9,11 +9,14 @@ use windows_sys::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GUITHREADINFO, GetClassNameW, GetGUIThreadInfo, GetWindowRect, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetWindowPos,
+    GA_ROOT, GUITHREADINFO, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
+    GetWindowRect, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
 };
 
 use crate::platform::preview::PreviewRect;
+
+#[path = "position/automation.rs"]
+mod automation;
 
 /// A DPI override belongs to this thread and must be restored even on conversion failure.
 struct ThreadDpiContext(DPI_AWARENESS_CONTEXT);
@@ -83,12 +86,24 @@ pub(super) fn capture_anchor(thread: u32, focus: HWND) -> Option<PreviewRect> {
         ..Default::default()
     };
     // SAFETY: Win32 receives correctly sized live structs and validates HWNDs.
-    if unsafe { GetGUIThreadInfo(thread, &mut info) } != 0
-        && info.hwndFocus == focus
-        && !info.hwndCaret.is_null()
+    if unsafe { GetGUIThreadInfo(thread, &mut info) } == 0 || info.hwndFocus != focus {
+        return None;
+    }
+    if !info.hwndCaret.is_null()
         && let Some(rect) = caret_bounds(info.hwndCaret, info.rcCaret)
     {
         return Some(rect);
+    }
+    match automation::capture_anchor(focus) {
+        Ok(Some(rect)) => return Some(rect),
+        Ok(None) => {}
+        Err(error) => tracing::debug!(%error, "UIA preview anchor unavailable"),
+    }
+    // A provider query can outlive a focus change; do not reuse the old native fallback.
+    if super::thread_focus(thread).ok() != Some(focus)
+        || unsafe { GetForegroundWindow() } != unsafe { GetAncestor(focus, GA_ROOT) }
+    {
+        return None;
     }
     // As with the parent's password check, limit control-specific assumptions
     // to native text controls; a browser renderer HWND is not an input rectangle.

@@ -8,9 +8,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, CreateRoundRectRgn, DC_BRUSH,
     DC_PEN, DT_CALCRECT, DT_EDITCONTROL, DT_EXPANDTABS, DT_NOPREFIX, DT_WORDBREAK, DeleteObject,
     DrawTextW, EndPaint, FillRect, GetDC, GetStockObject, GetSysColor, GetTextMetricsW, HDC, HFONT,
-    InvalidateRect, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
-    RedrawWindow, ReleaseDC, RestoreDC, RoundRect, SaveDC, SelectObject, SetBkColor,
-    SetDCBrushColor, SetDCPenColor, SetTextColor, SetWindowRgn, TEXTMETRICW,
+    PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RedrawWindow, ReleaseDC,
+    RestoreDC, RoundRect, SaveDC, SelectObject, SetBkColor, SetDCBrushColor, SetDCPenColor,
+    SetTextColor, SetWindowRgn, TEXTMETRICW,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
@@ -41,6 +41,10 @@ mod scrollbar;
 #[cfg(any(test, feature = "integration"))]
 #[path = "preview/smoke.rs"]
 mod smoke;
+
+#[cfg(test)]
+#[path = "preview/geometry_probe.rs"]
+mod geometry_probe;
 
 pub(crate) struct NativeTarget {
     window: HWND,
@@ -621,7 +625,6 @@ impl WindowState {
                     0,
                     (&raw const format) as isize,
                 );
-                InvalidateRect(self.text.get(), null(), 1);
                 ensure!(
                     SetWindowPos(
                         self.status.get(),
@@ -647,6 +650,19 @@ impl WindowState {
             // pending DPI must be applied after this layout, rather than dropped by the guard.
             if self.pending_dpi.get().is_none() {
                 self.restore_first_visible_line(first_visible_line)?;
+                // Size changes can preserve the old rounded outline in the parent's client
+                // pixels. Repaint the final region and children, not just the resized EDIT.
+                ensure!(
+                    unsafe {
+                        RedrawWindow(
+                            window,
+                            null(),
+                            null_mut(),
+                            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
+                        )
+                    } != 0,
+                    "无法重绘预览窗口"
+                );
                 break Ok(());
             }
         })();
