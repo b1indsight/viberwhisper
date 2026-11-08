@@ -1,6 +1,6 @@
 # 64 - 识别模式二选一配置与 Windows 高 DPI 窗口
 
-**阶段：** 向导、DPI 与基础布局已实现；同一 EDIT HWND 自绘探针已在真实屏幕门禁失败。[025] 修订为测试专用 DirectComposition 有界实验，实施待批准。产品/演示仍使用系统滚动条；真实 4K 仍待实机。
+**阶段：** 向导、DPI 与基础布局已实现；同一 EDIT HWND 自绘探针已在真实屏幕门禁失败。[025] 的测试专用 DirectComposition 实验已按批准实施，本机检查通过，原生屏幕/拖动门禁待执行，见 [026]。产品/演示仍使用系统滚动条；真实 4K 仍待实机。
 **PR：** [#165](https://github.com/b1indsight/viberwhisper/pull/165)，沿用同一 draft PR 交付实现。
 **Bookmark：** `feat/complete-setup-windows-dpi`。
 **基线：** 最新 fetch 后的 `origin/master`，即 [v0.5.0 发布准备提交 e18be032](https://github.com/b1indsight/viberwhisper/commit/e18be032950c03bc7bf40153e028e12193cccacc)。
@@ -1028,3 +1028,34 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   仅采纳有界实验和双前置门禁，不把模型建议当作 API 或运行保证；实际顺序编号按现有记录续为 [025]。
   脱敏草稿与边界检查位于工作区 `.amp/in/artifacts/scrollbar-dcomp-revised-plan-advice.md` 和同前缀的 `validation.json`，
   原始事件流已清理。当前只有方案/结果记录变化，未新增实现或原生运行；沿用同一草稿 PR，不新增 PR 或合并。
+
+### [026] — 2026-11-08 — 父 HWND 合成槽位实验实现，原生可行性待验证
+
+- **触发与范围：** 用户要求“先实现”后，按 [025] 仅替换 `preview/scrollbar_probe.rs` 的测试候选绘制，
+  并扩展现有 `scrollbar_probe.ps1` 的证据；普通预览、演示、设置、macOS、工作流与进程监督未改动。
+  保留 [024] 和方案提交两次重试的 GDI 按下态失败，不把本机编译或 API 文档当作修复证明。
+- **绘制取舍：** 使用锁文件已有的官方 `windows = 0.54.0` 绑定，仅增加 Windows target dev-dependency 的实际图形 feature，
+  不升级依赖或手写 COM。WARP D3D11 经 DXGI / D2D 设备创建 DComp，视觉层绑定已有气泡父 HWND、置于子控件上方，
+  surface 与裁剪只覆盖映射到父客户区的原生槽位。`BeginDraw<ID2D1DeviceContext>` 尊重返回的绘制偏移，
+  仅调用 surface 的 `EndDraw`，不假定 surface 支持 GDI `GetDC`。
+  几何使用物理像素，只缩放六 DIP 外观宽度；沿用三态颜色，不增加输入或 UIA 模型。
+- **同步与生命周期：** 原生 EDIT 的所有屏幕绘制和输入照常执行；以包括嵌套 `WM_VSCROLL/SB_THUMBTRACK` 在内的
+  公开滚动、布局和状态通知读取 `GetScrollBarInfo`，不从消息的十六位位置推算。缓存几何/颜色，相同帧不提交，
+  不增加轮询或事后反复补画。回调中的设备/提交错误记录为实验失败；显式关闭在 HWND 销毁前移除观察器、
+  解绑 root、提交并等待完成，Drop 保留失败清理。guard 保持装箱地址稳定，避免移除 subclass 前移动其回调引用。
+  `WM_PRINT` 仍手动 GDI 绘入相同几何，明确只是离屏检查，不是合成器读回。
+- **固定门禁与消融控制：** 原生/候选 × 可编辑/只读四案及既有输入、完整 UIA、命中、HWND/style、槽外像素、
+  隐藏/系统色和清理断言保留，期限不变；新增滚轮、PageDown 和轨道后的真实屏幕帧。
+  候选空闲后，客户端先通过自有 EDIT 的 DC 写入品红并逐像素读回，证明下层写入发生，再不给补画请求检查合成屏幕。
+  读回有歧义直接失败。每次移除合成层后，额外捕获恢复帧，要求细条门禁拒绝并与原生基线逐像素相同，
+  不能把品红残留或未捕获到合成内容当作恢复成功。只忽略原有光标闪烁区域。
+- **本机执行：** `cargo fmt --check`、macOS integration 构建/测试/all-targets Clippy，以及
+  `DOCS_RS=1` 的 Windows GNU `windows-app` / `windows-app,integration` all-targets Clippy 通过。
+  normal 依赖树中 `windows` 仍仅来自已有 `cpal` 路径；实验模块仍仅由 `smoke.rs` 的 `cfg(test)` 加载。
+  PowerShell 7.6.9 完整解析驱动、编译不含 Windows UIA 初始化的 C# 适配器，并验证三态纯像素正负对照；
+  未执行任何 Win32、DComp、UIA、真实屏幕或鼠标调用，也未验证 Windows PowerShell 5.1。
+- **未决证据与交付：** 本机没有 Windows 图形环境，无法在审查前完成候选/无合成/移除合成的真实比较；
+  这些对照仍是同一既有 CI 的前置验收，设备路径、层叠保护和模态同步尚未证实。
+  因而实现只保留为测试实验，未接入产品；任一关键门禁失败仍按 [025] 停止，不更换架构、放宽断言或延长期限。
+  本机输出位于 `.amp/in/artifacts/dcomp-{macos,windows}-*.log` 与 `dcomp-powershell-validation.log`，
+  固定验收记录为 `scrollbar-drag-composition-cases.md`。真实 4K、物理缩放、混合屏、IME、Narrator、文字缩放和物理鼠标仍待实机。

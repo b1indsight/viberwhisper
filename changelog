@@ -1,3 +1,4 @@
+2026-11-08: Implement a test-only DirectComposition scrollbar on the existing preview parent HWND, retaining native EDIT input/UIA and adding owned-DC overwrite and restored-native screen controls; product and demo keep the system scrollbar pending native acceptance
 2026-11-07: Replace the test-only Windows scrollbar overlay with same-EDIT non-client drawing, retain native input/UIA gates, and add held-arrow controls; product and demo keep the system scrollbar pending native acceptance
 2026-11-06: Give the Windows result bubble a dark background, subtle outline, distinct body/status system fonts and text-measured warning footers while retaining native editing and system-color accessibility fallback
 2026-11-06: Clamp Windows preview scroll restoration to the final text viewport so fitting multiline results return to the top while valid manual scrolling and tail-following are preserved

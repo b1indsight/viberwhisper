@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory)][long]$Editor,
     [Parameter(Mandatory)][int]$OwnerProcess,
     [Parameter(Mandatory)][string]$Directory,
-    [Parameter(Mandatory)][ValidateSet('native-ready', 'native-readonly', 'ready', 'readonly', 'input-cleanup')][string]$Case,
+    [Parameter(Mandatory)][ValidateSet('native-ready', 'native-readonly', 'ready', 'readonly', 'restored-ready', 'restored-readonly', 'input-cleanup')][string]$Case,
     [Parameter(Mandatory)][int]$ThumbWidth
 )
 $ErrorActionPreference = 'Stop'
@@ -79,10 +79,48 @@ public static class ScrollbarInput {
     [DllImport("user32.dll")] public static extern bool GetScrollInfo(IntPtr window, int kind, ref ScrollInfo info);
     [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint thread, ref GuiThread info);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern IntPtr GetDCEx(IntPtr window, IntPtr region, uint flags);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr window, IntPtr context);
+    [DllImport("user32.dll")] private static extern int FillRect(IntPtr context, ref Rect bounds, IntPtr brush);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateSolidBrush(uint color);
+    [DllImport("gdi32.dll")] private static extern bool GdiFlush();
+    [DllImport("gdi32.dll")] private static extern uint GetPixel(IntPtr context, int x, int y);
     [DllImport("user32.dll")] private static extern uint SendInput(uint count, Input[] inputs, int size);
     [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", CharSet=CharSet.Unicode)]
     private static extern IntPtr ReadMessage(IntPtr window, uint message, UIntPtr argument, StringBuilder text, uint flags, uint timeout, out UIntPtr result);
     [DllImport("dwmapi.dll")] public static extern int DwmFlush();
+    public static int OverwriteUnderlay(IntPtr editor, Scrollbar info) {
+        Rect window;
+        if (!GetWindowRect(editor, out window)) throw new Exception("Cannot map owned DC write");
+        var slot = new Rect {
+            Left=info.Bounds.Left-window.Left, Top=info.Bounds.Top-window.Top,
+            Right=info.Bounds.Right-window.Left, Bottom=info.Bounds.Bottom-window.Top
+        };
+        var dc = GetDCEx(editor, IntPtr.Zero, 0x13); // WINDOW | CACHE | CLIPSIBLINGS
+        if (dc == IntPtr.Zero) throw new Exception("Cannot acquire owned EDIT window DC");
+        try {
+            var brush = CreateSolidBrush(0xff00ff);
+            if (brush == IntPtr.Zero) throw new Exception("Cannot create underlay control brush");
+            try {
+                if (FillRect(dc, ref slot, brush) == 0 || !GdiFlush())
+                    throw new Exception("Owned underlay write failed");
+                int count = 0;
+                for (int y=slot.Top; y<slot.Bottom; y++) {
+                    for (int x=slot.Left; x<slot.Right; x++) {
+                        if (GetPixel(dc, x, y) != 0xff00ff)
+                            throw new Exception("Owned DC readback did not prove the underlay write");
+                        count++;
+                    }
+                }
+                if (count == 0) throw new Exception("Underlay control wrote no pixels");
+                return count;
+            } finally {
+                if (!DeleteObject(brush)) throw new Exception("Could not release underlay brush");
+            }
+        } finally {
+            if (ReleaseDC(editor, dc) == 0) throw new Exception("Could not release owned EDIT DC");
+        }
+    }
     public static int FirstLine(IntPtr window) {
         UIntPtr result;
         if (ReadMessage(window, 0x00CE, UIntPtr.Zero, null, 2, 500, out result) == IntPtr.Zero)
@@ -217,7 +255,7 @@ function Get-CaretBounds {
         Bottom=$gui.CaretBounds.Bottom + $point.Y - $script:bounds.Top + 1
     }
 }
-function Compare-OutsideSlot($Bitmap, $Info, [string]$Label, $Caret) {
+function Compare-NativeFrame($Bitmap, $Info, [string]$Label, $Caret, [bool]$IncludeSlot = $false) {
     $path = Join-Path $Directory "probe-screen-$baseCase-$Label.png"
     $original = [Drawing.Bitmap]::new($path)
     try {
@@ -226,17 +264,17 @@ function Compare-OutsideSlot($Bitmap, $Info, [string]$Label, $Caret) {
         for ($y = 0; $y -lt $Bitmap.Height; $y++) {
             for ($x = 0; $x -lt $Bitmap.Width; $x++) {
                 if (![ScrollbarInput]::PtInRegion($region, $x, $y)) { continue }
-                if ($x + $script:bounds.Left -ge $Info.Bounds.Left -and $x + $script:bounds.Left -lt $Info.Bounds.Right -and
+                if (!$IncludeSlot -and $x + $script:bounds.Left -ge $Info.Bounds.Left -and $x + $script:bounds.Left -lt $Info.Bounds.Right -and
                     $y + $script:bounds.Top -ge $Info.Bounds.Top -and $y + $script:bounds.Top -lt $Info.Bounds.Bottom) { continue }
                 # A blinking caret is the only permitted difference inside the owned window.
                 if (($x -ge $Caret.Left -and $x -lt $Caret.Right -and $y -ge $Caret.Top -and $y -lt $Caret.Bottom) -or
                     ($x -ge $oldCaret.Left -and $x -lt $oldCaret.Right -and $y -ge $oldCaret.Top -and $y -lt $oldCaret.Bottom)) { continue }
-                if ($original.GetPixel($x, $y).ToArgb() -ne $Bitmap.GetPixel($x, $y).ToArgb()) { throw "Screen changed outside the slot at $x,$y ($Label)" }
+                if ($original.GetPixel($x, $y).ToArgb() -ne $Bitmap.GetPixel($x, $y).ToArgb()) { throw "Screen changed outside the permitted area at $x,$y ($Label)" }
             }
         }
     } finally { $original.Dispose() }
 }
-function Capture-Screen([string]$Label, [int]$Color) {
+function Capture-Screen([string]$Label, [int]$Color, [string]$Baseline = $Label) {
     Write-Stage ("capture $Label; first-line={0}; capture={1}" -f [ScrollbarInput]::FirstLine($editorHandle), (Get-Focus).Capture)
     $deadline = [DateTime]::UtcNow.AddSeconds(2)
     $previous = $null
@@ -254,13 +292,14 @@ function Capture-Screen([string]$Label, [int]$Color) {
             $caret = Get-CaretBounds
             if ($native) {
                 if ($matches) { throw 'Negative control: native scrollbar unexpectedly passed the custom screen gate' }
+                if ($restored) { Compare-NativeFrame $bitmap $info $Baseline $caret $true }
                 $caret | ConvertTo-Json | Set-Content -Encoding UTF8 "$path.caret.json"
                 return
             }
             # Require two consecutive matching rail/thumb captures without forcing any repaint.
             $state = "${matches}:$($info.ThumbTop):$($info.ThumbBottom)"
             if ($matches -and $state -eq $previous) {
-                Compare-OutsideSlot $bitmap $info $Label $caret
+                Compare-NativeFrame $bitmap $info $Baseline $caret
                 return
             }
             $previous = $state
@@ -276,7 +315,8 @@ $cursor = [ScrollbarInput+Point]::new()
 if (![ScrollbarInput]::GetCursorPos([ref]$cursor)) { throw 'Cannot save pointer position' }
 $originalText = [ScrollbarInput]::Text($editorHandle)
 $metrics = [ordered]@{}
-$native = $Case.StartsWith('native-')
+$restored = $Case.StartsWith('restored-')
+$native = $Case.StartsWith('native-') -or $restored
 $baseCase = if ($Case.EndsWith('readonly')) { 'native-readonly' } else { 'native-ready' }
 $baselinePath = Join-Path $Directory "probe-input-$baseCase.json"
 $region = [ScrollbarInput]::CreateRectRgn(0, 0, 0, 0)
@@ -307,6 +347,11 @@ try {
             Start-Sleep -Milliseconds 100
         }
     }
+    if ($restored) {
+        Capture-Screen 'idle' 0x929292
+        Write-Stage 'composition removed; actual system scrollbar rejected by custom pixel gate'
+        return
+    }
     Write-Stage 'native window and focus validated; querying UIA edge'
     $metrics.UiaEdge = Get-Uia ($bar.Bounds.Left + 1) $middle
     Write-Stage 'UIA edge returned; querying remaining native elements'
@@ -334,6 +379,12 @@ try {
     Write-Output ("scrollbar UIA $Case : " + ($metrics | ConvertTo-Json -Depth 4 -Compress))
     Write-Stage 'initial UIA queries completed; capturing desktop'
     Capture-Screen 'idle' 0x929292
+    if (!$native) {
+        Write-Stage 'underlay control: writing owned EDIT DC without a repair request'
+        $written = [ScrollbarInput]::OverwriteUnderlay($editorHandle, (Get-Scrollbar))
+        Write-Stage ("underlay control: independently read back {0} magenta pixels; capturing composition" -f $written)
+        Capture-Screen 'underlay' 0x929292 'idle'
+    }
 
     # Compare exact native responses, not merely nonzero motion (which can hide double scrolling).
     foreach ($location in @('client', 'slot')) {
@@ -344,11 +395,14 @@ try {
         [ScrollbarInput]::MouseEvent(0x800, -120)
         Wait-Until { [ScrollbarInput]::FirstLine($editorHandle) -gt 0 } "wheel $location"
         $metrics["Wheel-$location"] = [ScrollbarInput]::FirstLine($editorHandle)
+        $color = if ($location -eq 'slot') { 0xb0b0b0 } else { 0x929292 }
+        Capture-Screen "wheel-$location" $color
     }
     Reset-Scroll
     [ScrollbarInput]::Keys(0x22, $false)
     Wait-Until { [ScrollbarInput]::FirstLine($editorHandle) -gt 0 } 'PageDown'
     $metrics.PageDown = [ScrollbarInput]::FirstLine($editorHandle)
+    Capture-Screen 'page-down' 0xb0b0b0
     Reset-Scroll
     $bar = Get-Scrollbar
     Move-Pointer ($bar.Bounds.Left + 1) ($bar.Bounds.Top + $bar.ThumbBottom + 8)
@@ -356,6 +410,7 @@ try {
     [ScrollbarInput]::MouseEvent(4, 0)
     Wait-Until { (Get-Focus).Capture -eq [IntPtr]::Zero -and [ScrollbarInput]::FirstLine($editorHandle) -gt 0 } 'native track click'
     $metrics.TrackClick = [ScrollbarInput]::FirstLine($editorHandle)
+    Capture-Screen 'track' 0xb0b0b0
     Reset-Scroll
 
     # Native tracking runs inside DefSubclassProc's modal loop while this external client moves
