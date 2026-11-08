@@ -36,6 +36,10 @@ fn native_setup_dialogs_show_and_return() {
             crate::platform::NativePreview::smoke_scrollbar(phase == "input-cleanup").unwrap();
             return;
         }
+        if phase == "geometry" {
+            crate::platform::NativePreview::smoke_geometry().unwrap();
+            return;
+        }
         exercise_message(Some(true), false);
         exercise_message(Some(false), false);
         exercise_message(None, false);
@@ -59,6 +63,7 @@ fn native_setup_dialogs_show_and_return() {
         ("setup", 30),
         ("input-cleanup", 30),
         ("scrollbar", 90),
+        ("geometry", 30),
     ] {
         process::run(phase, Duration::from_secs(seconds))
             .unwrap_or_else(|error| panic!("native {phase}: {error:#}"));

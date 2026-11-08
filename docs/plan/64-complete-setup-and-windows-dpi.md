@@ -1185,3 +1185,128 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   这些是修正前的手动离屏证据，不证明实际合成屏幕、拖动或本修正成功。
   完整桌面可编辑/只读、拖动/UIA、移除和运行错误回退及演示尚未执行到；修正后的原生验收
   待同一 Windows 工作流，交叉检查不链接或运行 Windows。真实 4K/混合屏等实机限制不变。
+
+### [032] — 2026-11-08 — Windows 光标定位与缩放残影修复提案（待批准）
+
+#### 请求、基线与证据
+
+- 用户报告结果窗口出现在屏幕中间，大小变化时出现多层圆角残影，要求参考 macOS 的效果修改。
+  [本次讨论与截图](https://ampcode.com/threads/T-01a1bbd1-24d8-74c0-bbb4-dab887a9561c)。
+- 本次已 fetch，基于 `origin/master` 的 [v0.5.1 发布准备提交](https://github.com/b1indsight/viberwhisper/commit/240b1c20)。
+  原 [PR #165](https://github.com/b1indsight/viberwhisper/pull/165) 已合并；本提案作为新的修复跟进，
+  保留此前方案和失败记录，不再向已合并 PR 追加实现。本轮未获推送授权，不创建或修改远端 PR。
+- **源码确认的缺口：** [Windows 锚点捕获](../../src/platform/windows/preview/position.rs#L92-L128)
+  只读取 `GetGUIThreadInfo` 的原生插入符，再回退到 Edit/RichEdit 控件矩形；没有 UI Automation 捕获。
+  无锚点时 [show/show_streaming](../../src/platform/windows/preview.rs#L1042-L1133) 明确居中。
+  因而未暴露原生插入符且不是上述窗口类的输入目标会进入居中路径；用户实际目标应用尚不明确。
+- **重绘假设：** [layout](../../src/platform/windows/preview.rs#L584-L650) 先修改窗口尺寸，
+  再更新圆角 region，显式失效的只有 EDIT；窗口类未设置全尺寸重绘样式。
+  旧边框像素被保留且未整窗重绘，与截图现象相符，但尚未在 Windows 复现，不能称为已验证根因。
+  [DComp](../../src/platform/windows/preview/scrollbar.rs#L90-L169) 只负责滚动条槽，暂不归因或改动它。
+- **既有证据的边界：** [artifacts 演示](../../src/ui/preview_demo.rs#L43-L79) 故意没有目标或锚点；
+  [WM_PRINT 捕获](../../src/platform/windows/preview/smoke.rs#L8-L125) 会重新绘制当前窗口，
+  不能证明真实光标捕获或桌面旧像素清除。此次需要补充实际屏幕的前后对照。
+
+#### 拟采用的行为与改动面
+
+1. **沿用 macOS 的定位语义。** 在气泡取得焦点前捕获目标的文字插入点，同一会话复用；
+   每次增大、缩小或增删提示区后，都按新尺寸使用既有 `preview_origin`：优先下方，底部不足翻到上方，
+   并限制在目标显示器工作区内。此处的“光标”是文字插入符，不是鼠标，不增加轮询或实时追踪定时器。
+   参考 [macOS AX 捕获](../../src/platform/macos/preview/position.rs#L26-L131) 与
+   [窗口调整](../../src/platform/macos/preview.rs#L313-L395)，不改 macOS 或共享放置算法。
+2. **补齐 Windows 辅助功能锚点。** 在 `preview/position.rs` 保持
+   `capture_anchor(thread: u32, focus: HWND) -> Option<PreviewRect>` 的调用契约，
+   原生插入符不可用时尝试 UIA 插入点，再尝试焦点可编辑控件边界，最后保留原生 Edit/RichEdit 边界和居中回退。
+   拟新增私有 `automation_anchor(focus: HWND) -> anyhow::Result<Option<PreviewRect>>`，
+   只返回几何，不读取识别目标的正文或值，不新增跨平台接口或领域状态。
+   UIA 查询必须限定在已捕获目标窗口的可访问性子树内，结束后复核前台窗口与原生焦点；
+   只比较 PID 不足以区分同进程的不同窗口。密码、失效元素、非编辑页面和整个浏览器渲染窗口
+   不作为锚点；插入点矩形不可用时退到可靠的输入框边界，不用邻字右边缘猜测 RTL/换行光标。
+   UIA 几何按其物理屏幕坐标处理，不套用原生 client-to-screen 转换或重复缩放。
+   COM 初始化、接口和 SAFEARRAY 的释放在捕获线程作用域内完成；使用平台可用的连接/事务超时，
+   不在 UI 线程等待提供者，不将这些超时误称为所有调用的硬性总期限。
+   `Cargo.toml` 仅启用已锁定 `windows = 0.54.0` 所需的 Windows 目标 feature，不升级绑定或新增框架。
+3. **先修最终布局的重绘，保留现有尺寸算法。** 在 `WindowState::layout(&self) -> Result<()>`
+   的最终 DPI/几何稳定后，对父窗口、正文、提示和边框统一失效，确保下一次绘制覆盖当前圆角区域。
+   保留 `laying_out`、pending DPI、首个可见行和原生控件状态，不通过重建 HWND 清除残影。
+   优先比较“最终整窗失效”与“整窗失效加 `SWP_NOCOPYBITS`”，只保留实测必要的措施；
+   不默认增加每次按键的同步强制绘制，不把中间测量宽度当最终外观提交。
+4. **保持现有交互。** 沿用深色背景、字号、圆角、宽高上限和细滚动条；保留生成中不抢焦点、
+   最终编辑、选区、撤销、IME、滚动、确认/取消、关闭重开和图形失败回退。无需配置迁移。
+
+#### 实施顺序、取舍与验收
+
+- 批准后先扩展既有 `preview/smoke.rs` 与受监督的 Windows 测试驱动，在未改产品代码时固定并运行
+  光标捕获和增缩窗口场景；再分别实施锚点和重绘修复，重跑相同场景。
+  沿用现有进程监督和截图通路，不新增通用驱动框架、装饰 HWND、WebView 或输入法组件。
+- **定位验证：** 自有独立进程的原生 EDIT 和 UIA 编辑目标；插入点位于不同文本行、鼠标在远处，
+  断言气泡对应文字插入点而不是鼠标或整个应用窗口。覆盖只有输入框边界、完全无几何、焦点切换、
+  失效元素和密码目标；不将注入合成 anchor 的测试当成真实捕获测试。
+  浏览器/Electron 的具体提供者行为在可用 Windows 环境中确认，失败时如实记录支持边界。
+- **残影验证：** 自有纯色背景板后方不包含用户数据；使用实际 `CopyFromScreen`/DWM 同步，
+  捕获旧窗口与新窗口的联合区域及小范围外边距，不能只裁当前 region。
+  用中文短句逐步增长、长文收缩、流式撤回至空、提示页脚增删及生成中转可编辑驱动同一个 HWND，
+  检查旧边框/旧滑块消失、新边框完整、窗口外旧区域恢复背景。保留并查看原始前后截图或录屏，
+  不以 WM_PRINT 重画、修图或延长现有超时来制造通过。
+- **边界与回归：** 左上/右下和负坐标工作区，增长后向上翻转、缩小后回到下方，
+  变宽限位后变窄回到锚点；覆盖有/无锚点及警告状态。沿用滚动、选区、撤销、DPI 重入、
+  不激活和关闭复用检查。原生几何与 UIA 几何的 DPI 转换分别验证，避免只测 96 DPI 掩盖二次缩放。
+- **比较与成本：** 禁用新增 UIA 应恢复原来的无光标目标回退，已有原生光标路径不应变化；
+  逐项去掉整窗失效或禁用旧像素复制，比较同一增缩序列，以实际结果选择最小重绘修复。
+  优于重写布局/改用分层窗或 DComp 外框：不扩大渲染和输入职责，不增加窗口/图形资源所有者。
+  若基线未复现残影，先记录当前结果并继续收集报告环境，不将某个候选措施写成已证实修复。
+- **检查及交付：** 批准后运行格式、共享/平台回归、macOS 构建与 Clippy、Windows 目标类型/lint；
+  获推送授权并通过既有审查门禁后，在一个新的修复 bookmark/PR 中交付，由既有 CI 执行 Windows 原生案例，
+  不手动 dispatch 或触发发布。物理 4K、混合 DPI、IME 与用户实际应用需适当实机，不由交叉检查代替。
+
+#### 当前状态与待定项
+
+- 本轮仅追加本提案；产品和测试代码未改，未提交、推送或打开新 PR。
+- 待用户批准上述方案。UIA 提供者范围、所需 feature 和最小重绘组合在实施时确定；
+  不以这些实现问题额外阻止方案审阅。用户目标应用、Windows 版本及显示缩放有助于复现，
+  当前缺失不妨碍修补已确认的定位缺口，但会限制“用户报告已修复”的结论。
+- 已执行源码、历史实现和验证通路核对，并取得固定 Opus 5.5、tools/MCP 均为空的只读方案咨询。
+  咨询中的“已判定根因”、按字符右边缘猜光标和仅按 PID 识别目标未被采纳；咨询不算运行证据。
+  本机仍只有 macOS，未执行本提案的 Windows 原生测试或前后对照，也未生成修改后的效果截图。
+
+### [033] — 2026-11-08 — Windows UIA 锚点与最终布局整窗重绘（本地实现，原生验收待运行）
+
+- **触发与范围：** 依据 [032] 的方案及用户随后要求“修复”，实现定位回退和最终重绘。
+  保留 [032] 为方案基线；本条记录实际变更，不将方案批准或交叉检查视为 Windows 原生验收。
+- **锚点实现：** [position.rs](../../src/platform/windows/preview/position.rs) 保留 Win32 插入符的
+  优先级与 DPI 转换，缺失时调用私有 [position/automation.rs](../../src/platform/windows/preview/position/automation.rs)。
+  UIA 取当前焦点元素，先沿父链确认属于捕获的顶层窗口，再读取几何；查询后同时复核前台、
+  原生焦点和 UIA 焦点。直接取焦点避免枚举整个窗口子树，也不把声明焦点的祖先容器当成输入框。
+  密码、只读和非编辑元素不提供新增 UIA 锚点，不读取正文或值。
+- **坐标与回退取舍：** 优先活动的 TextPattern2 插入点；旧 TextPattern 只在单一选区上折叠到末端。
+  提供者可能不给退化范围返回矩形，此时仅回退到 Edit/ComboBox 的输入边界，不猜相邻字符边缘，
+  不把 Document/浏览器渲染窗口的整页边界用于回退。UIA 物理屏幕像素不再缩放；无可靠几何仍保留
+  原有居中行为。COM 的成功/S_FALSE 初始化配平、接口和 SAFEARRAY 释放都在捕获工作线程内完成；
+  连接/事务各设 500 ms，不声称有全查询硬期限。[Cargo.toml](../../Cargo.toml) 只启用已锁定
+  windows 0.54.0 的 Com/Ole/Variant/Accessibility feature，没有升级绑定或增加 UI 框架。
+- **重绘实现与最小选择：** [layout](../../src/platform/windows/preview.rs#L649-L666) 在 pending DPI
+  清空并恢复首个可见行后，统一安排父窗口、子控件及边框完整重绘，替换仅正文失效的做法。
+  保留尺寸、换行、滚动、窗口复用和共享放置算法；不改 macOS、投递或滚动条合成所有权。
+  未增加同步 UPDATENOW、NOCOPYBITS、窗口重建或跟随定时器。
+- **先写回归，再改产品：** 新增仅测试使用的 [geometry_probe.rs](../../src/platform/windows/preview/geometry_probe.rs)
+  和 [geometry_probe.ps1](../../src/platform/windows/preview/geometry_probe.ps1)，接入既有
+  [受监督原生测试](../../src/ui/setup/windows/tests.rs) 的独立 geometry 阶段，不延长原有阶段预算。
+  自有 WPF 输入框的首/末行提供独立几何期望，主动移除 Win32 caret 并检查确实没有原生插入符，
+  防止误测已有快路径；鼠标移到自有背景远端，另覆盖只读、按钮和密码元素。相同 HWND 在自有纯色背景上完成短句增长、
+  长文收缩、撤回到空、提示增删及生成中转可编辑，检查不抢焦点。
+  DWM 同步的 CopyFromScreen 原图覆盖旧/新窗口联合区域；用离屏参考只比对当前父窗口边框/背景，
+  旧窗口外区域必须恢复纯色，并保存连续匹配的实际帧。此用例已通过交叉类型检查，尚未在 Windows 执行。
+- **已执行检查：** `cargo fmt --check`、`git diff --check`，macOS 上的
+  `cargo test --locked --features integration`、`cargo build --locked --features integration`、
+  `cargo clippy --locked --all-targets --features integration -- -D warnings` 通过。
+  Windows GNU 的 all-targets Clippy 在 `windows-app` 和 `windows-app,integration` 两组 feature 下通过，
+  使用 `DOCS_RS=1` 跳过本机无法链接的 ort 原生包；这不链接或执行 Windows。
+  临时 PowerShell 7.4.6 的实际 AST 解析与内嵌 C# 编译通过，但没有执行 WPF、UIA 或屏幕捕获。
+  日志保存在本线程 `.amp/in/artifacts/preview-geometry-{macos-*,windows-*,powershell-parse}.log`；
+  既有 vendor/rdev 警告未改。
+- **消融与证据边界：** 原实现遇到“无 Win32 caret、非 Edit/RichEdit 窗口类”必然无锚点的源码路径
+  已确认，但新增用例未能在本机取得原生红/绿对照。整窗失效与 NOCOPYBITS 的桌面对比同样无法执行；
+  因此只保留必要的最终失效请求，不引入第二项未证实措施，也不把残影原因写成已验证根因。
+  浏览器/Electron 提供者、查询中途失焦/失效、真实混合 DPI/4K/IME 和用户实际应用仍待 Windows 验收。
+- **交付状态：** 产品、原生用例和 changelog 已在本地修改；未提交、推送或创建新 PR。
+  后续需获推送/建 PR 授权并通过既有审查门禁，再让正常 Windows CI 运行上述原生场景、下载并检查截图。
