@@ -1257,6 +1257,10 @@ impl NativePreview {
                 SetWindowTextW(self.state.status.get(), empty.as_ptr());
             }
         }
+        // Closing an already hidden window need not produce another native repaint.
+        if let Some(scrollbar) = &self.scrollbar {
+            scrollbar.sync();
+        }
     }
 }
 

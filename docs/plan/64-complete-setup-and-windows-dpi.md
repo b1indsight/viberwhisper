@@ -1160,3 +1160,28 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   修正前固定了加载、清理及原生滚动验收案例，日志为 `.amp/in/artifacts/loader-repair-*-validation.log`。
   下一步仍按同一 PR 的审查门禁交付，再检查 Windows 测试实际启动和完整原生截图/滚动/UIA/回退；
   尚未执行的案例不记通过。九十秒阶段与五秒清理预算不变，真实 4K、混合屏等实机边界继续保留。
+
+### [031] — 2026-11-08 — 关闭会话时清空复用窗口的合成滚动条帧
+
+- **触发与已验证的失败：** [兼容性修正 030](https://github.com/b1indsight/viberwhisper/commit/5d51976d37041bb2aadc0ce2594ac4de0a539892)
+  的 [Windows 作业](https://github.com/b1indsight/viberwhisper/actions/runs/42468013105/job/128691932413)
+  已正常启动测试、通过设置/DPI 和输入故障清理阶段，支持加载修正；随后既有原生回归在
+  `Closing a session retained its scrollbar frame` 断言失败，未触发九十秒期限。
+  关闭后的轨迹仍有原生滚动条几何；`close()` 已清空会话并隐藏/清空 EDIT，但绘制器只检查
+  原生 style/几何，不检查活动会话，也没有由关闭所有者保证一次同步。
+- **实现及取舍：** `preview/scrollbar.rs` 读取已有 `session_id`，无活动会话即无可绘制帧；
+  `NativePreview::close()` 调用同一 `sync()` 清空合成内容，不依赖已隐藏窗口再产生绘制通知。
+  保留 HWND、guard 和图形资源供下次会话复用；随后原生通知也不能从旧几何恢复已关闭帧。
+  不增加可见性/会话副本、窗口、轮询、重建机制或自定义滚动状态，不修改原生输入、UIA、
+  style、颜色接受范围、依赖、manifest、工作流或阶段/清理期限。
+- **测试与复杂度：** 保留已经在修正前实际失败的关闭/复用回归及全部断言，不增加重复测试。
+  既有后续案例要求 streaming/可编辑重开沿用同一 HWND/guard、恢复帧，以及短文隐藏和系统色回退。
+  本次只补既有状态约束和所有者同步，没有新机制需要消融；Windows 后续原生结果仍须实测。
+- **本机检查及原生边界：** 格式、macOS integration 构建/测试/all-targets Clippy，以及 Windows GNU
+  非测试 lib/bins 和两组 feature 的 all-targets Clippy 通过；既有 rdev 警告未改。
+  执行前固定案例和输出分别为 `.amp/in/artifacts/scrollbar-drag-composition-cases.md`、
+  `scrollbar-close-macos-validation.log`、`scrollbar-close-windows-cross-validation.log`。
+  已检查本轮 CI 的默认/滚动位置 WM_PRINT 及 warning PNG：细条无可见箭头，警告未截断；
+  这些是修正前的手动离屏证据，不证明实际合成屏幕、拖动或本修正成功。
+  完整桌面可编辑/只读、拖动/UIA、移除和运行错误回退及演示尚未执行到；修正后的原生验收
+  待同一 Windows 工作流，交叉检查不链接或运行 Windows。真实 4K/混合屏等实机限制不变。

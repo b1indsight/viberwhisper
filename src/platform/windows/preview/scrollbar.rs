@@ -215,7 +215,9 @@ impl Scrollbar {
             cbSize: size_of::<SCROLLBARINFO>() as u32,
             ..Default::default()
         };
-        if !state.style.get().high_contrast
+        // A hidden EDIT can retain geometry after its session has ended.
+        if state.session_id.get().is_some()
+            && !state.style.get().high_contrast
             && unsafe { GetWindowLongPtrW(state.text.get(), GWL_STYLE) } & WS_VSCROLL as isize != 0
             && unsafe { GetScrollBarInfo(state.text.get(), OBJID_VSCROLL, &mut info) } != 0
             && info.rgstate[0] & STATE_SYSTEM_INVISIBLE == 0
@@ -270,7 +272,7 @@ impl Scrollbar {
         }))
     }
 
-    fn sync(&self) {
+    pub(super) fn sync(&self) {
         if self.failure.borrow().is_some() {
             return;
         }
