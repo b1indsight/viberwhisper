@@ -1138,3 +1138,25 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   两种完整按住色分别通过，混色、缺条、宽条、错位和浅色槽均拒绝，交替颜色不能匹配同一连续帧标识。
   这些仅是 macOS 上的解析/内存像素检查，未执行 Windows PowerShell 5.1、DComp、屏幕输入或 UIA。
   本机日志和后续原生证据维护在[持续验证记录](https://ampcode.com/artifacts/windows-dpi-b8d76e0c-091e-4333-88d5-ba67d9cb623e)。
+
+### [030] — 2026-11-08 — 修正正式接入测试新增的 Comctl32 导入要求
+
+- **失败证据与诊断边界：** [正式接入提交](https://github.com/b1indsight/viberwhisper/commit/0cbdbd6f3d958b071c9e3b97e4a678f04a082466)
+  的 [Windows 作业](https://github.com/b1indsight/viberwhisper/actions/runs/42467077728/job/128688953553)
+  构建及测试编译成功，测试 EXE 在任何测试执行前以 `0xc0000139 / STATUS_ENTRYPOINT_NOT_FOUND` 退出。
+  后续原生 smoke、演示及 Clippy 跳过，没有生成 PNG，Artifacts API 返回零项；不能沿用 [027] 的截图
+  作为本轮验证。macOS 作业通过。失败日志未输出具体 DLL/入口名，未取到该 EXE 的实际导入表。
+- **已核对的不兼容导入：** 本轮仅在 guard 清理断言新增 `GetWindowSubclass`，绑定按名称静态导入
+  Comctl32；[官方要求](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-getwindowsubclass)
+  使用 v6 manifest，而当前测试程序没有该声明。它是与加载失败高度吻合的诊断，仍须以修正后的同一
+  Windows 工作流确认，不把文档或 GNU 交叉检查写成失败进程已报告该入口。
+- **最小修正及取舍：** 保留正式 Drop 后对父 HWND/EDIT 的回调清理断言，改用生产路径已有的
+  [RemoveWindowSubclass](https://learn.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-removewindowsubclass)
+  再次移除同一回调/ID，并要求返回 false；若仍能移除即断言失败。该 API 支持 Comctl32 5.8，
+  不为测试引入 v6 主题、序号/私有 API、动态加载适配器或新的状态。没有预先替生产 Drop 移除回调，
+  不删除清理检查，不改生产渲染器、依赖、manifest、工作流、接受的颜色或既有输入/UIA/像素断言。
+- **本机复验及剩余范围：** 格式、macOS integration 构建/测试/all-targets Clippy 和 Windows GNU
+  非测试 lib/bins、两组 feature 的 all-targets Clippy 通过；既有 rdev 警告保持不动。
+  修正前固定了加载、清理及原生滚动验收案例，日志为 `.amp/in/artifacts/loader-repair-*-validation.log`。
+  下一步仍按同一 PR 的审查门禁交付，再检查 Windows 测试实际启动和完整原生截图/滚动/UIA/回退；
+  尚未执行的案例不记通过。九十秒阶段与五秒清理预算不变，真实 4K、混合屏等实机边界继续保留。

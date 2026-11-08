@@ -3,7 +3,6 @@
 use super::*;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetCapture;
-use windows_sys::Win32::UI::Shell::GetWindowSubclass;
 
 impl Scrollbar {
     pub(super) fn record(&self, window: HWND, message: u32, wparam: WPARAM, phase: &str) {
@@ -110,10 +109,11 @@ impl NativePreview {
             .ok_or_else(|| anyhow!("No production scrollbar to remove"))?;
         let checked = scrollbar.check();
         drop(scrollbar);
+        // GetWindowSubclass needs a v6 manifest; re-removal checks the same leaked observer
+        // using the v5-compatible API already used by the production guard.
         for control in [self.state.window.get(), self.state.text.get()] {
-            let mut reference = 0;
             ensure!(
-                unsafe { GetWindowSubclass(control, Some(observe), 71, &mut reference) } == 0,
+                unsafe { RemoveWindowSubclass(control, Some(observe), 71) } == 0,
                 "Scrollbar observer outlived its guard"
             );
         }
