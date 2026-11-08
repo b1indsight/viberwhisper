@@ -4,10 +4,6 @@ use super::super::nul_terminated_utf16;
 use super::*;
 use windows_sys::Win32::UI::Controls::{EM_CANUNDO, EM_GETSEL, EM_REPLACESEL};
 
-#[cfg(test)]
-#[path = "scrollbar_probe.rs"]
-mod scrollbar_probe;
-
 impl NativePreview {
     /// Ask only this fixture's HWND and native children to render into a PNG.
     pub(crate) fn smoke_capture(&self, path: &std::path::Path) -> Result<()> {
@@ -406,27 +402,6 @@ impl NativePreview {
         preview.smoke_scrolling(artifacts.as_deref())?;
         preview.smoke_appearance(artifacts.as_deref())?;
         Ok(())
-    }
-
-    /// Run the experimental desktop-input gates separately from setup and synthetic DPI work.
-    #[cfg(test)]
-    pub(crate) fn smoke_scrollbar(cleanup_fault: bool) -> Result<()> {
-        let artifacts =
-            std::env::var_os("VIBERWHISPER_PREVIEW_ARTIFACTS").map(std::path::PathBuf::from);
-        if let Some(directory) = &artifacts {
-            std::fs::create_dir_all(directory)?;
-        }
-        let mut preview = Self::new(Box::new(|_| {
-            panic!("Scrollbar input submitted or cancelled text")
-        }));
-        preview.show(
-            SessionId(902),
-            "scrollbar fixture",
-            "Scrollbar fixture",
-            None,
-            None,
-        )?;
-        scrollbar_probe::exercise(&mut preview, artifacts.as_deref(), cleanup_fault)
     }
 
     #[cfg(test)]

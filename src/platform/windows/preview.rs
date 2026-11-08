@@ -35,6 +35,9 @@ use crate::session::SessionId;
 #[path = "preview/position.rs"]
 mod position;
 
+#[path = "preview/scrollbar.rs"]
+mod scrollbar;
+
 #[cfg(any(test, feature = "integration"))]
 #[path = "preview/smoke.rs"]
 mod smoke;
@@ -875,12 +878,14 @@ unsafe extern "system" fn window_proc(
 }
 
 pub(crate) struct NativePreview {
+    scrollbar: Option<Box<scrollbar::Scrollbar>>,
     state: Box<WindowState>,
 }
 
 impl NativePreview {
     pub(crate) fn new(notify: PreviewNotify) -> Self {
         Self {
+            scrollbar: None,
             state: Box::new(WindowState {
                 notify,
                 session_id: Cell::new(None),
@@ -1021,6 +1026,15 @@ impl NativePreview {
             self.state.status.set(null_mut());
             self.state.font.borrow_mut().take();
             self.state.pending_dpi.set(None);
+        } else {
+            // SAFETY: State is boxed, both HWNDs are live on this thread, and Drop removes
+            // this sole decoration before destroying them. Preview notifications only queue events.
+            match unsafe { scrollbar::Scrollbar::new(&self.state) } {
+                Ok(scrollbar) => self.scrollbar = Some(scrollbar),
+                Err(error) => {
+                    tracing::warn!(%error, "Could not decorate preview; using native scrollbar");
+                }
+            }
         }
         setup
     }
@@ -1249,6 +1263,8 @@ impl NativePreview {
 impl Drop for NativePreview {
     fn drop(&mut self) {
         self.state.session_id.set(None);
+        // Subclasses and the composition target borrow the HWNDs and the boxed state.
+        drop(self.scrollbar.take());
         if !self.state.window.get().is_null() {
             unsafe {
                 DestroyWindow(self.state.window.get());

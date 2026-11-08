@@ -1,10 +1,10 @@
-# Private feasibility driver, only launched by the isolated native test child. No product UI.
+# Private verification driver, only launched by the isolated native test child. No product UI.
 param(
     [Parameter(Mandatory)][long]$Window,
     [Parameter(Mandatory)][long]$Editor,
     [Parameter(Mandatory)][int]$OwnerProcess,
     [Parameter(Mandatory)][string]$Directory,
-    [Parameter(Mandatory)][ValidateSet('native-ready', 'native-readonly', 'ready', 'readonly', 'restored-ready', 'restored-readonly', 'input-cleanup')][string]$Case,
+    [Parameter(Mandatory)][ValidateSet('native-ready', 'native-readonly', 'ready', 'readonly', 'restored-ready', 'restored-readonly', 'failed-readonly', 'input-cleanup')][string]$Case,
     [Parameter(Mandatory)][int]$ThumbWidth
 )
 $ErrorActionPreference = 'Stop'
@@ -274,7 +274,7 @@ function Compare-NativeFrame($Bitmap, $Info, [string]$Label, $Caret, [bool]$Incl
         }
     } finally { $original.Dispose() }
 }
-function Capture-Screen([string]$Label, [int]$Color, [string]$Baseline = $Label) {
+function Capture-Screen([string]$Label, [int[]]$Colors, [string]$Baseline = $Label) {
     Write-Stage ("capture $Label; first-line={0}; capture={1}" -f [ScrollbarInput]::FirstLine($editorHandle), (Get-Focus).Capture)
     $deadline = [DateTime]::UtcNow.AddSeconds(2)
     $previous = $null
@@ -286,7 +286,15 @@ function Capture-Screen([string]$Label, [int]$Color, [string]$Baseline = $Label)
             try { $graphics.CopyFromScreen($script:bounds.Left, $script:bounds.Top, 0, 0, $bitmap.Size) }
             finally { $graphics.Dispose() }
             $info = Get-Scrollbar
-            $matches = Test-Slot $bitmap $info $Color
+            $matches = $false
+            $matchedColor = 0
+            foreach ($color in $Colors) {
+                if (Test-Slot $bitmap $info $color) {
+                    $matches = $true
+                    $matchedColor = $color
+                    break
+                }
+            }
             $path = Join-Path $Directory "probe-screen-$Case-$Label.png"
             $bitmap.Save($path, [Drawing.Imaging.ImageFormat]::Png)
             $caret = Get-CaretBounds
@@ -297,7 +305,7 @@ function Capture-Screen([string]$Label, [int]$Color, [string]$Baseline = $Label)
                 return
             }
             # Require two consecutive matching rail/thumb captures without forcing any repaint.
-            $state = "${matches}:$($info.ThumbTop):$($info.ThumbBottom)"
+            $state = "${matches}:${matchedColor}:$($info.ThumbTop):$($info.ThumbBottom)"
             if ($matches -and $state -eq $previous) {
                 Compare-NativeFrame $bitmap $info $Baseline $caret
                 return
@@ -315,7 +323,7 @@ $cursor = [ScrollbarInput+Point]::new()
 if (![ScrollbarInput]::GetCursorPos([ref]$cursor)) { throw 'Cannot save pointer position' }
 $originalText = [ScrollbarInput]::Text($editorHandle)
 $metrics = [ordered]@{}
-$restored = $Case.StartsWith('restored-')
+$restored = $Case.StartsWith('restored-') -or $Case.StartsWith('failed-')
 $native = $Case.StartsWith('native-') -or $restored
 $baseCase = if ($Case.EndsWith('readonly')) { 'native-readonly' } else { 'native-ready' }
 $baselinePath = Join-Path $Directory "probe-input-$baseCase.json"
@@ -349,7 +357,7 @@ try {
     }
     if ($restored) {
         Capture-Screen 'idle' 0x929292
-        Write-Stage 'composition removed; actual system scrollbar rejected by custom pixel gate'
+        Write-Stage 'composition inactive; actual system scrollbar rejected by custom pixel gate'
         return
     }
     Write-Stage 'native window and focus validated; querying UIA edge'
@@ -422,17 +430,19 @@ try {
     Capture-Screen 'hover' 0xb0b0b0
     [ScrollbarInput]::MouseEvent(2, 0)
     Wait-Until { (Get-Focus).Capture -eq $editorHandle } 'native thumb capture'
-    Capture-Screen 'pressed' 0xc7c7c7
+    # Accepted appearance: a held thumb may retain hover gray. Each entire thumb must still
+    # have one allowed color; mixing the two colors or exposing native pixels fails Test-Slot.
+    Capture-Screen 'pressed' @(0xb0b0b0, 0xc7c7c7)
     Move-Pointer $x ([int](($bar.Bounds.Top + $bar.Bounds.Bottom) / 2))
     Wait-Until { [ScrollbarInput]::FirstLine($editorHandle) -gt 0 -and [ScrollbarInput]::FirstLine($editorHandle) -lt $maximumFirstLine } 'drag through middle'
-    Capture-Screen 'drag-middle' 0xc7c7c7
+    Capture-Screen 'drag-middle' @(0xb0b0b0, 0xc7c7c7)
     Move-Pointer $x ($bar.Bounds.Bottom - 1)
     Wait-Until { [ScrollbarInput]::FirstLine($editorHandle) -eq $maximumFirstLine } 'drag to bottom'
-    Capture-Screen 'drag-bottom' 0xc7c7c7
+    Capture-Screen 'drag-bottom' @(0xb0b0b0, 0xc7c7c7)
     $metrics.DragBottom = [ScrollbarInput]::FirstLine($editorHandle)
     Move-Pointer $x ($bar.Bounds.Top + 1)
     Wait-Until { [ScrollbarInput]::FirstLine($editorHandle) -eq 0 } 'drag to top'
-    Capture-Screen 'drag-top' 0xc7c7c7
+    Capture-Screen 'drag-top' @(0xb0b0b0, 0xc7c7c7)
     [ScrollbarInput]::MouseEvent(4, 0)
     Wait-Until { (Get-Focus).Capture -eq [IntPtr]::Zero } 'native thumb release'
     Capture-Screen 'released' 0xb0b0b0
@@ -486,7 +496,7 @@ try {
         [ScrollbarInput]::MouseEvent(2, 0)
         Wait-Until { (Get-Focus).Capture -eq $editorHandle } "arrow $name endpoint capture"
         Wait-Until { [ScrollbarInput]::FirstLine($editorHandle) -eq $endpoint } "arrow $name endpoint"
-        Capture-Screen "arrow-$name-held" 0xc7c7c7
+        Capture-Screen "arrow-$name-held" @(0xb0b0b0, 0xc7c7c7)
         Start-Sleep -Milliseconds 120
         if ([ScrollbarInput]::FirstLine($editorHandle) -ne $endpoint -or (Get-Focus).Capture -ne $editorHandle) { throw "Arrow $name lost endpoint clamp/capture" }
         [ScrollbarInput]::MouseEvent(4, 0)

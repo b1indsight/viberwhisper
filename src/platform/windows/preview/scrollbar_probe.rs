@@ -1,361 +1,12 @@
-//! Test-only feasibility probe. Never enabled in the shipped preview before native validation.
+//! Native controls, screen captures and UIA checks for the production scrollbar renderer.
 
 use super::*;
-use windows::Win32::Foundation::{
-    HMODULE, HWND as CompositionWindow, POINT as DrawOffset, RECT as CompositionRect,
-};
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ROUNDED_RECT, D2D1CreateDevice, ID2D1DeviceContext,
-};
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-};
-use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionSurface,
-    IDCompositionTarget, IDCompositionVisual, IDCompositionVisual2,
-};
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM};
-use windows::Win32::Graphics::Dxgi::IDXGIDevice;
-use windows::core::Interface;
-use windows_sys::Win32::Foundation::POINT;
-use windows_sys::Win32::Graphics::Gdi::{
-    IntersectClipRect, RDW_NOCHILDREN, RDW_UPDATENOW, ScreenToClient,
-};
-use windows_sys::Win32::UI::Controls::{STATE_SYSTEM_INVISIBLE, WM_MOUSELEAVE};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
-};
-
-/// Native screen slot and slot-local thumb, shared by screen composition and manual printing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Frame {
-    slot: CompositionRect,
-    thumb: CompositionRect,
-    background: u32,
-    color: u32,
-}
-
-/// Owns only pixels: no HWND, input routing, accessibility provider or scroll-position model.
-struct Composition {
-    device: IDCompositionDesktopDevice,
-    target: IDCompositionTarget,
-    visual: IDCompositionVisual2,
-    surface: Option<(i32, i32, IDCompositionSurface)>,
-    frame: Option<Frame>,
-    detached: Cell<bool>,
-}
-
-impl Composition {
-    fn new(window: HWND) -> Result<Self> {
-        // WARP is sufficient for this small test surface and does not require a hardware GPU.
-        // The D2D-backed device makes BeginDraw<ID2D1DeviceContext> a documented drawing path.
-        let mut d3d: Option<ID3D11Device> = None;
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_WARP,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut d3d),
-                None,
-                None,
-            )?;
-            let dxgi: IDXGIDevice = d3d
-                .ok_or_else(|| anyhow!("D3D11 returned no drawing device"))?
-                .cast()?;
-            let d2d = D2D1CreateDevice(&dxgi, None)?;
-            let device: IDCompositionDesktopDevice = DCompositionCreateDevice2(&d2d)?;
-            let target = device.CreateTargetForHwnd(CompositionWindow(window as isize), true)?;
-            let visual = device.CreateVisual()?;
-            target.SetRoot(&visual)?;
-            Ok(Self {
-                device,
-                target,
-                visual,
-                surface: None,
-                frame: None,
-                detached: Cell::new(false),
-            })
-        }
-    }
-
-    /// Geometry and colors are the cache key: an unrelated native paint cannot request repair.
-    fn update(&mut self, frame: Option<Frame>, origin: POINT) -> Result<bool> {
-        if frame == self.frame {
-            return Ok(false);
-        }
-        unsafe {
-            if let Some(frame) = frame {
-                let width = frame.slot.right - frame.slot.left;
-                let height = frame.slot.bottom - frame.slot.top;
-                ensure!(width > 0 && height > 0, "Composition slot has no area");
-                if self.surface.as_ref().map(|(w, h, _)| (*w, *h)) != Some((width, height)) {
-                    self.surface = Some((
-                        width,
-                        height,
-                        self.device.CreateSurface(
-                            width as u32,
-                            height as u32,
-                            DXGI_FORMAT_B8G8R8A8_UNORM,
-                            DXGI_ALPHA_MODE_IGNORE,
-                        )?,
-                    ));
-                }
-                let surface = &self.surface.as_ref().unwrap().2;
-                let mut offset = DrawOffset::default();
-                let context: ID2D1DeviceContext = surface.BeginDraw(None, &mut offset)?;
-                let drawing = (|| -> Result<()> {
-                    // Native geometry is already physical. Only the thumb width was DPI-scaled.
-                    context.SetDpi(96.0, 96.0);
-                    context.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-                    let clip = D2D_RECT_F {
-                        left: offset.x as f32,
-                        top: offset.y as f32,
-                        right: (offset.x + width) as f32,
-                        bottom: (offset.y + height) as f32,
-                    };
-                    let background =
-                        context.CreateSolidColorBrush(&draw_color(frame.background), None)?;
-                    let thumb = context.CreateSolidColorBrush(&draw_color(frame.color), None)?;
-                    context.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
-                    context.FillRectangle(&clip, &background);
-                    let radius = (frame.thumb.right - frame.thumb.left) as f32 / 2.0;
-                    context.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: (offset.x + frame.thumb.left) as f32,
-                                top: (offset.y + frame.thumb.top) as f32,
-                                right: (offset.x + frame.thumb.right) as f32,
-                                bottom: (offset.y + frame.thumb.bottom) as f32,
-                            },
-                            radiusX: radius,
-                            radiusY: radius,
-                        },
-                        &thumb,
-                    );
-                    context.PopAxisAlignedClip();
-                    Ok(())
-                })();
-                // EndDraw belongs to the composition surface, not the returned D2D context.
-                // Close the update on a brush/drawing failure too, before releasing resources.
-                let ended = surface.EndDraw();
-                drop(context);
-                drawing?;
-                ended?;
-                self.visual.SetOffsetX2(origin.x as f32)?;
-                self.visual.SetOffsetY2(origin.y as f32)?;
-                self.visual.SetClip2(&D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: width as f32,
-                    bottom: height as f32,
-                })?;
-                self.visual.SetContent(surface)?;
-            } else {
-                self.visual.SetContent(None::<&windows::core::IUnknown>)?;
-            }
-            self.device.Commit()?;
-        }
-        self.frame = frame;
-        Ok(true)
-    }
-
-    fn detach(&self) -> Result<()> {
-        if !self.detached.get() {
-            unsafe {
-                self.target.SetRoot(None::<&IDCompositionVisual>)?;
-                self.device.Commit()?;
-                self.device.WaitForCommitCompletion()?;
-            }
-            self.detached.set(true);
-        }
-        Ok(())
-    }
-}
-
-fn draw_color(color: u32) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        r: (color & 0xff) as f32 / 255.0,
-        g: ((color >> 8) & 0xff) as f32 / 255.0,
-        b: ((color >> 16) & 0xff) as f32 / 255.0,
-        a: 1.0,
-    }
-}
-
-/// Composite only the native slot; EDIT input, screen painting and geometry remain untouched.
-/// The probe guard must be dropped before its preview; it borrows the stable boxed state by HWND.
-struct Scrollbar {
-    state: *const WindowState,
-    composition: RefCell<Composition>,
-    pressed: Cell<bool>,
-    hovered: Cell<bool>,
-    paints: Cell<u64>,
-    commits: Cell<u64>,
-    failure: RefCell<Option<String>>,
-    trace: RefCell<Vec<String>>,
-}
+use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetCapture;
+use windows_sys::Win32::UI::Shell::GetWindowSubclass;
 
 impl Scrollbar {
-    fn state(&self) -> &WindowState {
-        // SAFETY: `exercise` keeps its preview alive until after this guard is dropped.
-        unsafe { &*self.state }
-    }
-
-    fn info(&self) -> Option<SCROLLBARINFO> {
-        let state = self.state();
-        let mut info = SCROLLBARINFO {
-            cbSize: size_of::<SCROLLBARINFO>() as u32,
-            ..Default::default()
-        };
-        if !state.style.get().high_contrast
-            && unsafe { GetWindowLongPtrW(state.text.get(), GWL_STYLE) } & WS_VSCROLL as isize != 0
-            && unsafe { GetScrollBarInfo(state.text.get(), OBJID_VSCROLL, &mut info) } != 0
-            && info.rgstate[0] & STATE_SYSTEM_INVISIBLE == 0
-        {
-            Some(info)
-        } else {
-            None
-        }
-    }
-
-    fn frame(&self) -> Result<Option<Frame>> {
-        let Some(info) = self.info() else {
-            return Ok(None);
-        };
-        let mut cursor = POINT::default();
-        ensure!(
-            unsafe { GetCursorPos(&mut cursor) } != 0,
-            "Could not read native scrollbar hover"
-        );
-        let bounds = info.rcScrollBar;
-        let width = self
-            .state()
-            .pixels(6)
-            .min(bounds.right - bounds.left - 2)
-            .max(1);
-        let left = (bounds.right - bounds.left - width) / 2;
-        let hover = cursor.x >= bounds.left
-            && cursor.x < bounds.right
-            && cursor.y >= bounds.top
-            && cursor.y < bounds.bottom;
-        Ok(Some(Frame {
-            slot: CompositionRect {
-                left: bounds.left,
-                top: bounds.top,
-                right: bounds.right,
-                bottom: bounds.bottom,
-            },
-            thumb: CompositionRect {
-                left,
-                top: info.xyThumbTop,
-                right: left + width,
-                bottom: info.xyThumbBottom,
-            },
-            background: self.state().style.get().background,
-            color: if self.pressed.get() {
-                0x00c7c7c7
-            } else if hover {
-                0x00b0b0b0
-            } else {
-                0x00929292
-            },
-        }))
-    }
-
-    fn sync(&self) {
-        if self.failure.borrow().is_some() {
-            return;
-        }
-        let result = (|| -> Result<()> {
-            let frame = self.frame()?;
-            let mut origin = POINT::default();
-            if let Some(frame) = frame {
-                origin.x = frame.slot.left;
-                origin.y = frame.slot.top;
-                ensure!(
-                    unsafe { ScreenToClient(self.state().window.get(), &mut origin) } != 0,
-                    "Could not map native slot to composition target"
-                );
-            }
-            // Query native state before borrowing graphics: queries may re-enter subclasses.
-            if self.composition.borrow_mut().update(frame, origin)? {
-                self.commits.set(self.commits.get() + 1);
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            self.fail(error);
-        }
-    }
-
-    fn fail(&self, error: anyhow::Error) {
-        eprintln!("scrollbar composition failed: {error:#}");
-        self.failure
-            .borrow_mut()
-            .get_or_insert_with(|| format!("{error:#}"));
-    }
-
-    fn check(&self) -> Result<()> {
-        if let Some(error) = &*self.failure.borrow() {
-            anyhow::bail!("Scrollbar composition failed: {error}");
-        }
-        Ok(())
-    }
-
-    /// Manual WM_PRINT evidence only; this GDI path never paints the actual screen.
-    fn print(&self, dc: HDC) -> Result<()> {
-        let Some(frame) = self.frame()? else {
-            return Ok(());
-        };
-        let mut window = RECT::default();
-        ensure!(
-            !dc.is_null() && unsafe { GetWindowRect(self.state().text.get(), &mut window) } != 0,
-            "Could not map the scrollbar print context"
-        );
-        let bounds = RECT {
-            left: frame.slot.left - window.left,
-            top: frame.slot.top - window.top,
-            right: frame.slot.right - window.left,
-            bottom: frame.slot.bottom - window.top,
-        };
-        unsafe {
-            let saved = SaveDC(dc);
-            ensure!(saved != 0, "Could not save the scrollbar print context");
-            if IntersectClipRect(dc, bounds.left, bounds.top, bounds.right, bounds.bottom) == 0 {
-                RestoreDC(dc, saved);
-                anyhow::bail!("Could not clip the scrollbar print context");
-            }
-            SetDCBrushColor(dc, frame.background);
-            let filled = FillRect(dc, &bounds, GetStockObject(DC_BRUSH));
-            SelectObject(dc, GetStockObject(DC_BRUSH));
-            SelectObject(dc, GetStockObject(DC_PEN));
-            SetDCBrushColor(dc, frame.color);
-            SetDCPenColor(dc, frame.color);
-            let width = frame.thumb.right - frame.thumb.left;
-            let drawn = RoundRect(
-                dc,
-                bounds.left + frame.thumb.left,
-                bounds.top + frame.thumb.top,
-                bounds.left + frame.thumb.right,
-                bounds.top + frame.thumb.bottom,
-                width,
-                width,
-            );
-            let restored = RestoreDC(dc, saved);
-            ensure!(
-                filled != 0 && drawn != 0 && restored != 0,
-                "Could not print the scrollbar"
-            );
-        }
-        self.paints.set(self.paints.get() + 1);
-        Ok(())
-    }
-
-    fn record(&self, window: HWND, message: u32, wparam: WPARAM, phase: &str) {
+    pub(super) fn record(&self, window: HWND, message: u32, wparam: WPARAM, phase: &str) {
         if !matches!(
             message,
             WM_NCPAINT
@@ -405,160 +56,69 @@ impl Scrollbar {
             self.commits.get(),
         ));
     }
+}
 
-    fn new(state: &WindowState) -> Result<Box<Self>> {
-        let windows = window_handles(state)?;
-        let styles = [GWL_STYLE, GWL_EXSTYLE]
-            .map(|index| unsafe { GetWindowLongPtrW(state.text.get(), index) });
-        let scrollbar = Box::new(Self {
-            state,
-            composition: RefCell::new(Composition::new(state.window.get())?),
-            pressed: Cell::new(false),
-            hovered: Cell::new(false),
-            paints: Cell::new(0),
-            commits: Cell::new(0),
-            failure: RefCell::new(None),
-            trace: RefCell::new(Vec::new()),
-        });
-        let reference = (&*scrollbar as *const Self) as usize;
-        for control in [state.window.get(), state.text.get()] {
-            ensure!(
-                unsafe { SetWindowSubclass(control, Some(observe), 71, reference) } != 0,
-                "Could not observe native scrollbar repaint"
-            );
+impl NativePreview {
+    /// Run production rendering against undecorated controls on the hosted 96-DPI desktop.
+    pub(crate) fn smoke_scrollbar(cleanup_fault: bool) -> Result<()> {
+        let artifacts =
+            std::env::var_os("VIBERWHISPER_PREVIEW_ARTIFACTS").map(std::path::PathBuf::from);
+        if let Some(directory) = &artifacts {
+            std::fs::create_dir_all(directory)?;
         }
-        scrollbar.sync();
-        scrollbar.check()?;
+        let mut preview = Self::new(Box::new(|_| {
+            panic!("Scrollbar input submitted or cancelled text")
+        }));
+        preview.show(
+            SessionId(902),
+            "scrollbar fixture",
+            "Scrollbar fixture",
+            None,
+            None,
+        )?;
         ensure!(
-            window_handles(state)? == windows,
+            preview.scrollbar.is_some(),
+            "Production preview did not automatically attach its scrollbar"
+        );
+        exercise(&mut preview, artifacts.as_deref(), cleanup_fault)
+    }
+
+    fn attach_scrollbar(&mut self) -> Result<()> {
+        ensure!(self.scrollbar.is_none(), "Scrollbar is already attached");
+        let windows = window_handles(&self.state)?;
+        let styles = [GWL_STYLE, GWL_EXSTYLE]
+            .map(|index| unsafe { GetWindowLongPtrW(self.state.text.get(), index) });
+        // SAFETY: This fixture owns the same stable state/HWND lifetime as production.
+        self.scrollbar = Some(unsafe { Scrollbar::new(&self.state)? });
+        ensure!(
+            window_handles(&self.state)? == windows,
             "Composition created a child or thread-top-level HWND"
         );
         ensure!(
             [GWL_STYLE, GWL_EXSTYLE]
-                .map(|index| unsafe { GetWindowLongPtrW(state.text.get(), index) })
+                .map(|index| unsafe { GetWindowLongPtrW(self.state.text.get(), index) })
                 == styles,
             "Composition changed native EDIT styles"
         );
-        Ok(scrollbar)
+        Ok(())
     }
 
-    // Subclasses retain this address until removal; consuming an unboxed Self would move it.
-    #[allow(clippy::boxed_local)]
-    fn close(self: Box<Self>) -> Result<()> {
-        self.check()?;
-        for control in [self.state().window.get(), self.state().text.get()] {
+    fn remove_scrollbar(&mut self) -> Result<()> {
+        let scrollbar = self
+            .scrollbar
+            .take()
+            .ok_or_else(|| anyhow!("No production scrollbar to remove"))?;
+        let checked = scrollbar.check();
+        drop(scrollbar);
+        for control in [self.state.window.get(), self.state.text.get()] {
+            let mut reference = 0;
             ensure!(
-                unsafe { RemoveWindowSubclass(control, Some(observe), 71) } != 0,
-                "Could not remove the scrollbar observer"
+                unsafe { GetWindowSubclass(control, Some(observe), 71, &mut reference) } == 0,
+                "Scrollbar observer outlived its guard"
             );
         }
-        self.composition.borrow().detach()
+        checked
     }
-}
-
-impl Drop for Scrollbar {
-    fn drop(&mut self) {
-        let state = self.state();
-        unsafe {
-            for control in [state.window.get(), state.text.get()] {
-                RemoveWindowSubclass(control, Some(observe), 71);
-            }
-        }
-        if let Err(error) = self.composition.borrow().detach() {
-            eprintln!("scrollbar composition cleanup failed: {error:#}");
-        }
-        unsafe {
-            RedrawWindow(
-                state.text.get(),
-                null(),
-                null_mut(),
-                RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOCHILDREN,
-            );
-        }
-        for line in self.trace.get_mut() {
-            eprintln!("{line}");
-        }
-    }
-}
-
-// SAFETY: The boxed probe outlives these same-thread callbacks and removes both subclasses on drop.
-unsafe extern "system" fn observe(
-    window: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-    _subclass: usize,
-    reference: usize,
-) -> LRESULT {
-    let scrollbar = unsafe { &*(reference as *const Scrollbar) };
-    scrollbar.record(window, message, wparam, "enter");
-    let editor = window == scrollbar.state().text.get();
-    let tracking = editor
-        && matches!(message, WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK)
-        && wparam == HTVSCROLL as usize;
-    if tracking {
-        scrollbar.pressed.set(true);
-        scrollbar.sync();
-    }
-    if editor && message == WM_NCMOUSEMOVE {
-        let mut tracking = TRACKMOUSEEVENT {
-            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-            dwFlags: TME_LEAVE | TME_NONCLIENT,
-            hwndTrack: window,
-            dwHoverTime: 0,
-        };
-        unsafe { TrackMouseEvent(&mut tracking) };
-        if !scrollbar.hovered.replace(true) {
-            scrollbar.sync();
-        }
-    }
-    if editor && message == WM_NCMOUSELEAVE && scrollbar.hovered.replace(false) {
-        scrollbar.sync();
-    }
-    let result = if editor
-        && message == WM_PRINT
-        && lparam & PRF_NONCLIENT as isize != 0
-        && scrollbar.info().is_some()
-    {
-        // WM_PRINT does not capture DComp. Explicitly print matching geometry into the DIB;
-        // only the separate CopyFromScreen driver can validate visible composition.
-        let result =
-            unsafe { DefSubclassProc(window, message, wparam, lparam & !(PRF_NONCLIENT as isize)) };
-        if let Err(error) = scrollbar.print(wparam as HDC) {
-            scrollbar.fail(error);
-        }
-        result
-    } else {
-        // In particular, native non-client painting and all modal tracking still execute.
-        unsafe { DefSubclassProc(window, message, wparam, lparam) }
-    };
-    if tracking || (editor && message == WM_CAPTURECHANGED) {
-        scrollbar.pressed.set(false);
-        scrollbar.sync();
-    }
-    if (editor
-        && matches!(
-            message,
-            WM_VSCROLL
-                | WM_MOUSEWHEEL
-                | EM_LINESCROLL
-                | EM_SCROLLCARET
-                | WM_PAINT
-                | WM_NCPAINT
-                | WM_WINDOWPOSCHANGED
-                | WM_STYLECHANGED
-        ))
-        || (!editor
-            && (matches!(message, WM_DPICHANGED | WM_WINDOWPOSCHANGED | WM_PAINT)
-                || (message == WM_COMMAND && lparam as HWND == scrollbar.state().text.get())))
-    {
-        // Nested WM_VSCROLL/SB_THUMBTRACK is observed while DefSubclassProc is still inside
-        // its native modal loop. Never infer a thumb position from the 16-bit message value.
-        // Unchanged geometry/colors are a no-op, including unrelated WM_PAINT notifications.
-        scrollbar.sync();
-    }
-    scrollbar.record(window, message, wparam, "exit");
-    result
 }
 
 fn window_handles(state: &WindowState) -> Result<[Vec<usize>; 2]> {
@@ -593,7 +153,7 @@ unsafe extern "system" fn collect_window(window: HWND, data: LPARAM) -> i32 {
 }
 
 /// Exercise both the print-only checks and separate real desktop input/UIA gates.
-pub(super) fn exercise(
+fn exercise(
     preview: &mut NativePreview,
     artifacts: Option<&std::path::Path>,
     cleanup_fault: bool,
@@ -602,17 +162,19 @@ pub(super) fn exercise(
     let directory = artifacts.unwrap_or_else(|| temporary.path());
     preview.update_text(&"第01行 hello 😀 中文\n".repeat(40), true, None)?;
     if cleanup_fault {
+        // Deliberately exercise the real production renderer during native input cleanup.
         return desktop_driver(preview, directory, "input-cleanup");
     }
     let editor = preview.state.text.get();
     let current = unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) };
     unsafe { SendMessageW(editor, EM_LINESCROLL, 0, -current) };
+    preview.remove_scrollbar()?;
     let baseline = directory.join("probe-scrollbar-native-baseline.png");
     preview.smoke_capture(&baseline)?;
-    let scrollbar = Scrollbar::new(&preview.state)?;
+    preview.attach_scrollbar()?;
     if preview.state.style.get().high_contrast {
         ensure!(
-            scrollbar.info().is_none(),
+            preview.scrollbar.as_ref().unwrap().info().is_none(),
             "System colors enabled custom scrollbar drawing"
         );
         eprintln!(
@@ -620,7 +182,24 @@ pub(super) fn exercise(
         );
         anyhow::bail!("Desktop scrollbar gates require a non-high-contrast test desktop");
     }
+    {
+        let scrollbar = preview.scrollbar.as_ref().unwrap();
+        let commits = scrollbar.commits.get();
+        {
+            let _drawing = scrollbar.composition.borrow_mut();
+            // A nested repaint must not abort the process through RefCell::borrow_mut.
+            unsafe { SendMessageW(editor, WM_NCPAINT, 1, 0) };
+        }
+        scrollbar.check()?;
+        ensure!(
+            scrollbar.commits.get() == commits,
+            "Nested repaint committed during a draw"
+        );
+        scrollbar.sync();
+        scrollbar.check()?;
+    }
     for first in [0, 7, 25] {
+        let scrollbar = preview.scrollbar.as_ref().unwrap();
         let current = unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) };
         unsafe { SendMessageW(editor, EM_LINESCROLL, 0, first - current) };
         ensure!(
@@ -703,29 +282,88 @@ pub(super) fn exercise(
         );
     }
     let original = preview.state.style.replace(PreviewStyle::system());
-    let paints = scrollbar.paints.get();
-    scrollbar.sync();
-    scrollbar.check()?;
-    let native_fallback = scrollbar.info().is_none()
-        && scrollbar.composition.borrow().frame.is_none()
-        && scrollbar.paints.get() == paints
-        && unsafe { GetWindowLongPtrW(editor, GWL_STYLE) } & WS_VSCROLL as isize != 0;
+    let native_fallback = {
+        let scrollbar = preview.scrollbar.as_ref().unwrap();
+        let paints = scrollbar.paints.get();
+        scrollbar.sync();
+        scrollbar.check()?;
+        scrollbar.info().is_none()
+            && scrollbar
+                .composition
+                .borrow()
+                .as_ref()
+                .is_some_and(|c| c.frame.is_none())
+            && scrollbar.paints.get() == paints
+            && unsafe { GetWindowLongPtrW(editor, GWL_STYLE) } & WS_VSCROLL as isize != 0
+    };
     preview.state.style.set(original);
     ensure!(
         native_fallback,
         "System-color fallback lost the native scrollbar"
     );
-    preview.update_text("短句", true, None)?;
-    scrollbar.sync();
-    scrollbar.check()?;
+    let window = preview.state.window.get();
+    let guard = &**preview.scrollbar.as_ref().unwrap() as *const Scrollbar;
+    preview.close();
     ensure!(
-        scrollbar.info().is_none()
-            && scrollbar.composition.borrow().frame.is_none()
-            && unsafe { GetWindowLongPtrW(editor, GWL_STYLE) } & WS_VSCROLL as isize == 0,
-        "Short text kept its scrollbar drawing or native slot"
+        preview
+            .scrollbar
+            .as_ref()
+            .unwrap()
+            .composition
+            .borrow()
+            .as_ref()
+            .is_some_and(|c| c.frame.is_none()),
+        "Closing a session retained its scrollbar frame"
     );
+    for ready in [false, true] {
+        if ready {
+            preview.show(
+                SessionId(903),
+                "重新打开\n".repeat(40).as_str(),
+                "Reopened",
+                None,
+                None,
+            )?;
+        } else {
+            preview.show_streaming(
+                SessionId(903),
+                "重新打开\n".repeat(40).as_str(),
+                "Reopened",
+                None,
+                true,
+            )?;
+        }
+        let scrollbar = preview.scrollbar.as_ref().unwrap();
+        scrollbar.check()?;
+        ensure!(
+            preview.state.window.get() == window
+                && std::ptr::eq(&**scrollbar, guard)
+                && scrollbar
+                    .composition
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|c| c.frame.is_some()),
+            "Reopening replaced the HWND/renderer or lost its scrollable frame"
+        );
+    }
+    preview.update_text("短句", true, None)?;
+    {
+        let scrollbar = preview.scrollbar.as_ref().unwrap();
+        scrollbar.sync();
+        scrollbar.check()?;
+        ensure!(
+            scrollbar.info().is_none()
+                && scrollbar
+                    .composition
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|c| c.frame.is_none())
+                && unsafe { GetWindowLongPtrW(editor, GWL_STYLE) } & WS_VSCROLL as isize == 0,
+            "Short text kept its scrollbar drawing or native slot"
+        );
+    }
     let windows = window_handles(&preview.state)?;
-    scrollbar.close()?;
+    preview.remove_scrollbar()?;
     ensure!(
         window_handles(&preview.state)? == windows,
         "Removing composition changed native HWNDs"
@@ -736,9 +374,9 @@ pub(super) fn exercise(
         let windows = window_handles(&preview.state)?;
         let styles =
             [GWL_STYLE, GWL_EXSTYLE].map(|index| unsafe { GetWindowLongPtrW(editor, index) });
-        let scrollbar = Scrollbar::new(&preview.state)?;
+        preview.attach_scrollbar()?;
         let result = desktop_driver(preview, directory, case);
-        let closed = scrollbar.close(); // Flush traces and detach even when the driver failed.
+        let closed = preview.remove_scrollbar(); // Flush traces and detach even if the driver failed.
         ensure!(
             window_handles(&preview.state)? == windows
                 && [GWL_STYLE, GWL_EXSTYLE]
@@ -750,8 +388,25 @@ pub(super) fn exercise(
         closed?;
         desktop_driver(preview, directory, &format!("restored-{case}"))?;
     }
+    preview.attach_scrollbar()?;
+    let scrollbar = preview.scrollbar.as_ref().unwrap();
+    let windows = window_handles(&preview.state)?;
+    let styles = [GWL_STYLE, GWL_EXSTYLE].map(|index| unsafe { GetWindowLongPtrW(editor, index) });
+    scrollbar.fail(anyhow!("Injected runtime drawing error"));
+    let commits = scrollbar.commits.get();
+    scrollbar.sync();
+    ensure!(
+        scrollbar.check().is_err()
+            && scrollbar.composition.borrow().is_none()
+            && scrollbar.commits.get() == commits
+            && window_handles(&preview.state)? == windows
+            && [GWL_STYLE, GWL_EXSTYLE].map(|index| unsafe { GetWindowLongPtrW(editor, index) })
+                == styles,
+        "Runtime failure retained composition, retried or changed native windows/styles"
+    );
+    desktop_driver(preview, directory, "failed-readonly")?;
     eprintln!(
-        "scrollbar probe: print, actual screen, native input/drag and managed UIA gates checked at actual 96 DPI; NOT enabled in production"
+        "scrollbar production: reuse, print, actual screen, native input/drag, managed UIA and injected-error fallback checked at actual 96 DPI; no 4K claim"
     );
     Ok(())
 }
