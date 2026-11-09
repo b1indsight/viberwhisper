@@ -499,7 +499,8 @@ impl NativePreview {
         }
         preview.smoke_streaming()?;
         // The demo calls smoke_streaming for each revision under one delivery deadline.
-        // Keep the full scroll regression suite in this once-per-run native fixture.
+        // Keep relocation and the full scroll suite in this once-per-run native fixture.
+        preview.smoke_relocation()?;
         preview.smoke_scrolling(artifacts.as_deref())?;
         preview.smoke_appearance(artifacts.as_deref())?;
         Ok(())
@@ -786,12 +787,12 @@ impl NativePreview {
                 == 0,
             "Final preview did not become editable"
         );
-        self.smoke_relocation()?;
         Ok(())
     }
 
     /// A destination can arrive after a user has edited and scrolled the centered bubble.
     /// Exercise native undo as well as text/selection, so reopening the editor cannot pass.
+    #[cfg(test)]
     fn smoke_relocation(&mut self) -> Result<()> {
         let read = |window| {
             let mut value = vec![0u16; unsafe { GetWindowTextLengthW(window) } as usize + 1];

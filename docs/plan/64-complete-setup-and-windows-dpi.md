@@ -1580,3 +1580,26 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   日志在本线程 `.amp/in/artifacts/three-stage-error-width-{before,native,tests,macos-clippy,windows-clippy,dimensions,format,native-padding}.log`；
   最终截图在 `.amp/in/artifacts/three-stage-error-width-native/`。
 - **交付与限制：** 当前未提交、未推送、未发布。Windows 仅通过交叉类型/lint 检查，仍待原生显示、按键及 Chrome/托盘实机验收。
+
+### [040] — 2026-11-09 — Windows 重定位回归改为一次性执行
+
+- **运行证据：** [PR #169](https://github.com/b1indsight/viberwhisper/pull/169) 的
+  [Windows CI](https://github.com/b1indsight/viberwhisper/actions/runs/42708522042/job/129471621252)
+  已通过构建、共享测试和受监督的原生 setup/DPI 阶段；随后预览捕获在约 10.4 秒触发原有 10 秒总限时。
+  三次流式更新之间分别耗时约 3.9、2.6、3.1 秒，超时退出发生在失败/超时布局断言完成之后。
+  [v0.5.2 基线 CI](https://github.com/b1indsight/viberwhisper/actions/runs/42518507183) 的同一捕获流程约 6.3 秒完成。
+  两次运行不是同机消融对照，不能据此单独量化每个原生调用的成本。
+- **原因与最小调整：** 新增 `smoke_relocation` 位于每次流式更新都会调用的 `smoke_streaming` 内，
+  因而在这个总限时流程中重复执行三次。将它移到既有 `smoke_dpi` 一次性原生 fixture，
+  与完整滚动/外观回归并列，并限定为 `cfg(test)`；同一个受监督 setup 测试仍执行全部生成中与编辑后重定位断言。
+  不增加超时、不减少断言、不改产品代码、工作流、位置选择或错误气泡布局；新版是否消除超时仍以同一 Windows CI 流程复验。
+- **已查看的 Windows 渲染：** 失败气泡为 192×38、超时为 216×38，长提示达到 420×96；
+  已查看失败、超时和长提示图片，文字完整且不保留空正文。失败图另以原图复核；薄描边的原生像素断言已通过。
+  这些截图与前序断言不将整条失败的捕获任务改记为通过，也不证明真实 Chrome/托盘目标与落字。
+- **本地检查与证据：** `cargo test --locked --features integration`、Windows GNU
+  `windows-app,integration` all-targets Clippy、`cargo fmt --all --check` 和 `git diff --check` 均通过。
+  本轮日志在 `.amp/in/artifacts/three-stage-ci-fix-{tests,windows-clippy}.log`；
+  原始 CI/基线日志与 Windows 截图在 `.amp/in/artifacts/three-stage-windows-{ci-failure,baseline-ci}.log`
+  及 `.amp/in/artifacts/three-stage-windows-ci-failure-captures/`。
+- **交付边界：** 沿用同一 bookmark 和 PR #169，经既有代码审查后推送以触发正常 PR CI；不手动重跑工作流、合并或发布。
+  本机没有 Windows 运行环境，修订后的原生执行及真实 Chrome/托盘/混合 DPI 验收仍待后续证据。
