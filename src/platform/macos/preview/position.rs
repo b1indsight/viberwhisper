@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow, ensure};
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSScreen;
 use objc2_application_services::{AXError, AXUIElement, AXValue, AXValueType};
-use objc2_core_foundation::{CFRange, CFRetained, CFString, CFType};
+use objc2_core_foundation::{CFBoolean, CFRange, CFRetained, CFString, CFType};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use super::super::accessibility::{copy_attribute, native_error};
@@ -71,7 +71,7 @@ fn caret_bounds(element: &AXUIElement) -> Result<PreviewRect> {
     .ok_or_else(|| anyhow!("光标坐标无效"))
 }
 
-fn input_bounds(element: &AXUIElement) -> Result<PreviewRect> {
+fn require_input_role(element: &AXUIElement) -> Result<()> {
     let role = copy_attribute(
         element,
         &CFString::from_static_str("AXRole"),
@@ -86,6 +86,11 @@ fn input_bounds(element: &AXUIElement) -> Result<PreviewRect> {
         ),
         "控件没有提供输入位置"
     );
+    Ok(())
+}
+
+fn input_bounds(element: &AXUIElement) -> Result<PreviewRect> {
+    require_input_role(element)?;
     let position = attribute(element, "AXPosition")?;
     let size = attribute(element, "AXSize")?;
     let mut point = NSPoint::new(0.0, 0.0);
@@ -114,6 +119,93 @@ pub(super) fn capture_anchor(element: Option<&AXUIElement>) -> Option<PreviewRec
             None
         }
     }
+}
+
+/// A late click is eligible only on the retained focused editor, not on a stale focus
+/// behind a button, the Dock or our window. Writability is queried without setting any
+/// AX attribute; selection support alone would also accept read-only text controls.
+pub(super) fn capture_after_click(element: &AXUIElement, point: (f64, f64)) -> Result<PreviewRect> {
+    ensure!(
+        [point.0, point.1]
+            .into_iter()
+            .all(|value| value.is_finite() && (value as f32).is_finite()),
+        "点击坐标无效"
+    );
+    qualify_click(element, point)?;
+    let anchor =
+        capture_anchor(Some(element)).ok_or_else(|| anyhow!("点击的输入框没有可用位置"))?;
+    // AX providers can process a focus or editability change while answering geometry.
+    qualify_click(element, point)?;
+    Ok(anchor)
+}
+
+fn settable(element: &AXUIElement, name: &'static str) -> Result<bool> {
+    let mut writable = 0;
+    // SAFETY: This is a query with a live Boolean out-pointer; no value is assigned.
+    let status = unsafe {
+        element.is_attribute_settable(
+            &CFString::from_static_str(name),
+            NonNull::from(&mut writable),
+        )
+    };
+    match status {
+        AXError::Success => Ok(writable != 0),
+        AXError::AttributeUnsupported | AXError::NoValue | AXError::NotImplemented => Ok(false),
+        _ => Err(native_error("clicked input writability", status).into()),
+    }
+}
+
+fn qualify_click(element: &AXUIElement, point: (f64, f64)) -> Result<()> {
+    require_input_role(element)?;
+    let enabled = copy_attribute(
+        element,
+        &CFString::from_static_str("AXEnabled"),
+        "clicked input enabled state",
+    )?
+    .downcast::<CFBoolean>()
+    .map_err(|_| anyhow!("输入框可用状态无效"))?;
+    ensure!(
+        enabled.value() && (settable(element, "AXSelectedText")? || settable(element, "AXValue")?),
+        "点击的输入框不可编辑"
+    );
+    let system = unsafe { AXUIElement::new_system_wide() };
+    let mut hit = null();
+    // SAFETY: The recorded point uses AX/CoreGraphics top-left coordinates, and the
+    // successful Copy transfers one retained AX proxy into the owner worker below.
+    let status = unsafe {
+        system.copy_element_at_position(point.0 as f32, point.1 as f32, NonNull::from(&mut hit))
+    };
+    if status != AXError::Success {
+        return Err(native_error("clicked input hit test", status).into());
+    }
+    let pointer = NonNull::new(hit.cast_mut()).ok_or_else(|| anyhow!("点击位置没有输入框"))?;
+    let mut hit = unsafe { CFRetained::from_raw(pointer) };
+    for _ in 0..64 {
+        if *hit == *element {
+            return Ok(());
+        }
+        let role = copy_attribute(
+            &hit,
+            &CFString::from_static_str("AXRole"),
+            "clicked element role",
+        )?
+        .downcast::<CFString>()
+        .map_err(|_| anyhow!("点击控件类型无效"))?;
+        // Accept text descendants, never a button or a separate nested input whose
+        // click left the outer editor focused. The reverse ancestry is not evidence.
+        ensure!(
+            matches!(role.to_string().as_str(), "AXStaticText" | "AXGroup"),
+            "点击位置不是当前输入框"
+        );
+        hit = copy_attribute(
+            &hit,
+            &CFString::from_static_str("AXParent"),
+            "clicked input ancestry",
+        )?
+        .downcast::<AXUIElement>()
+        .map_err(|_| anyhow!("点击控件归属无效"))?;
+    }
+    anyhow::bail!("点击位置不是当前输入框")
 }
 
 /// AppKit's global Y axis is opposite to AX's; its first screen defines the shared origin.

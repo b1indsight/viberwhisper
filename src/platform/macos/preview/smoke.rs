@@ -33,11 +33,14 @@ impl NativePreview {
 
     /// Exercise the native key dispatcher without posting keys to another app.
     /// The caller checks that Enter emitted nothing before Esc emits cancellation.
-    pub(crate) fn smoke_error(&self, verify_pending: &dyn Fn() -> Result<()>) -> Result<()> {
+    pub(crate) fn smoke_error(&mut self, verify_pending: &dyn Fn() -> Result<()>) -> Result<()> {
+        use objc2::ClassType;
+
         let window = self
             .window
             .as_ref()
-            .ok_or_else(|| anyhow!("Error preview was not created"))?;
+            .ok_or_else(|| anyhow!("Error preview was not created"))?
+            .clone();
         let state = window.ivars();
         ensure!(
             state.text.string().is_empty()
@@ -50,9 +53,116 @@ impl NativePreview {
             !state.status.isHidden() && state.status.stringValue().to_string().contains("Esc"),
             "Error preview did not explain cancellation"
         );
-        window.notify_key(PreviewKey::Confirm);
-        verify_pending()?;
-        window.notify_key(PreviewKey::Cancel);
+        let compact_height = state.status.frame().size.height + 6.0;
+        ensure!(
+            state.scroll.isHidden() && (window.frame().size.height - compact_height).abs() < 1.0,
+            "Empty error preview still reserves a blank editor row"
+        );
+        let warning = state.status.stringValue().to_string();
+        let compact_width = window.frame().size.width;
+        ensure!(
+            compact_width < state.max_width,
+            "Short error warning still forces the maximum bubble width"
+        );
+        // Equal character counts must fit native glyph widths, including a longer second line.
+        let mut widths = [0.0; 2];
+        for (index, message) in [
+            "错误。\niiiiiiiiiiiiiiiiiiiiiiii · Esc",
+            "错误。\nWWWWWWWWWWWWWWWWWWWWWWWW · Esc",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.update_text("", false, Some(message))?;
+            widths[index] = window.frame().size.width;
+            ensure!(
+                (window.frame().size.height - compact_height).abs() < 1.0,
+                "A fitting two-line warning wrapped or changed the compact height"
+            );
+        }
+        ensure!(
+            widths[0] < widths[1] && widths[1] < state.max_width,
+            "Error width ignored native glyphs or the longest second line"
+        );
+        let long_warning = format!(
+            "{}\n按 Esc 关闭。",
+            "识别服务暂时不可用，请检查网络连接后重试。".repeat(6)
+        );
+        self.update_text("", false, Some(&long_warning))?;
+        ensure!(
+            (window.frame().size.width - state.max_width).abs() < 1.0
+                && window.frame().size.height > compact_height
+                && state.scroll.isHidden(),
+            "A long error warning did not wrap at the bubble width limit"
+        );
+        println!(
+            "Native error warning widths: {compact_width}; proportional glyphs: {widths:?}; wrapped: {:?}",
+            window.frame().size
+        );
+        self.update_text("", false, Some(&warning))?;
+        // A partial result and a user's emptied editable candidate must stay editable;
+        // whitespace-only failures still have no usable body. Reuse the same window.
+        for (text, ready, collapsed) in [
+            ("部分识别结果", true, false),
+            ("", true, false),
+            (" \n ", false, true),
+            ("", false, true),
+        ] {
+            self.update_text(text, ready, Some(&warning))?;
+            ensure!(
+                state.scroll.isHidden() == collapsed
+                    && state.text.isEditable() == ready
+                    && if collapsed {
+                        (window.frame().size.height - compact_height).abs() < 1.0
+                            && (window.frame().size.width - compact_width).abs() < 1.0
+                    } else {
+                        window.frame().size.height >= compact_height + 28.0
+                            && (window.frame().size.width - state.max_width).abs() < 1.0
+                    },
+                "Error layout lost its body visibility or editable recovery; ready={ready}"
+            );
+            if ready && text.is_empty() {
+                self.show_error(&warning, false);
+                ensure!(
+                    !state.scroll.isHidden(),
+                    "A blocked delivery retry hid an editable candidate"
+                );
+            }
+        }
+        self.focus();
+        let text_responder: &objc2_app_kit::NSResponder = &state.text;
+        ensure!(
+            window.isKeyWindow()
+                && NSApplication::sharedApplication(window.mtm()).isActive()
+                && window.firstResponder().as_deref() != Some(text_responder),
+            "Error preview did not focus its window instead of the hidden editor"
+        );
+        for (key_code, characters) in [(36_u16, "\r"), (53_u16, "\u{1b}")] {
+            for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+                let characters = NSString::from_str(characters);
+                // SAFETY: Factory arguments match NSEvent; the event stays in our own window.
+                let event: Option<Retained<NSEvent>> = unsafe {
+                    msg_send![NSEvent::class(),
+                        keyEventWithType: kind,
+                        location: NSPoint::new(0.0, 0.0),
+                        modifierFlags: NSEventModifierFlags::empty(),
+                        timestamp: 0.0_f64,
+                        windowNumber: window.windowNumber(),
+                        context: Option::<&AnyObject>::None,
+                        characters: &*characters,
+                        charactersIgnoringModifiers: &*characters,
+                        isARepeat: false,
+                        keyCode: key_code
+                    ]
+                };
+                let event =
+                    event.ok_or_else(|| anyhow!("Could not create native error key event"))?;
+                window.sendEvent(&event);
+            }
+            if key_code == 36 {
+                verify_pending()?;
+            }
+        }
         Ok(())
     }
 
@@ -127,7 +237,7 @@ impl NativePreview {
             .ivars()
             .text;
         ensure!(
-            text.string().is_empty() && !text.isEditable(),
+            text.string().is_empty() && !text.isEditable() && !text.isHiddenOrHasHiddenAncestor(),
             "An empty aggregate did not retract the read-only provisional text"
         );
         self.window
@@ -154,7 +264,128 @@ impl NativePreview {
                 .is_none(),
             "A generating Enter survived the ready transition"
         );
+        self.smoke_relocation()?;
         Ok(())
+    }
+
+    /// Late placement must survive both a manually moved bubble and existing user edits.
+    /// Keep native selection/scroll/undo evidence, not just the string after relocation.
+    fn smoke_relocation(&mut self) -> Result<()> {
+        let window = self
+            .window
+            .as_ref()
+            .ok_or_else(|| anyhow!("No preview"))?
+            .clone();
+        let state = window.ivars();
+        let saved_anchor = state.anchor.get();
+        let saved_title = window.title();
+        let saved_text = state.text.string().to_string();
+        let saved_warning =
+            (!state.status.isHidden()).then(|| state.status.stringValue().to_string());
+        let saved_ready = state.retry_allowed.get();
+        let saved_undo = state.text.allowsUndo();
+        state.text.setAllowsUndo(true);
+        let reference =
+            saved_anchor.unwrap_or_else(|| PreviewRect::new(0.0, 0.0, 1.0, 18.0).unwrap());
+        let (work, top) = position::screen_geometry(reference, window.mtm())
+            .ok_or_else(|| anyhow!("No preview work area"))?;
+        let long = "hello 😀 中文\n".repeat(40);
+        let result = (|| {
+            for ready in [false, true] {
+                self.update_text(&long, ready, Some("识别提醒\n无法获取输入目标"))?;
+                let undo = state
+                    .text
+                    .undoManager()
+                    .ok_or_else(|| anyhow!("No native undo manager"))?;
+                if ready {
+                    undo.beginUndoGrouping();
+                    unsafe {
+                        state.text.insertText_replacementRange(
+                            &NSString::from_str("user correction"),
+                            NSRange::new(state.text.string().len_utf16(), 0),
+                        );
+                    }
+                    undo.endUndoGrouping();
+                }
+                state.text.setSelectedRange(NSRange::new(6, 2)); // A whole emoji.
+                state.text.scrollPoint(NSPoint::new(0.0, 60.0));
+                let selection = state.text.selectedRange();
+                let visible = state.scroll.documentVisibleRect().origin;
+                ensure!(
+                    visible.y > 0.0,
+                    "Relocation fixture did not scroll its long preview"
+                );
+                let text = state.text.string().to_string();
+                let key = window.isKeyWindow();
+                let responder = window.firstResponder();
+                let active = NSWorkspace::sharedWorkspace()
+                    .frontmostApplication()
+                    .map(|app| app.processIdentifier());
+                let frame = window.frame();
+                window.setFrameOrigin(NSPoint::new(frame.origin.x + 20.0, frame.origin.y + 20.0));
+                let anchor = PreviewRect::new(work.x + 51.0, work.y + 93.0, 1.0, 18.0).unwrap();
+                let warning = ready.then_some("识别提醒");
+                self.relocate("Late input target", anchor, warning)?;
+                let expected = position::origin(anchor, window.frame().size, work, top);
+                let actual = window.frame();
+                let scroll = state.scroll.documentVisibleRect().origin;
+                ensure!(
+                    state.text.string().to_string() == text
+                        && state.text.selectedRange() == selection
+                        && (scroll.x - visible.x).abs() <= 1.0
+                        && (scroll.y - visible.y).abs() <= 1.0
+                        && state.text.isEditable() == ready
+                        && state.retry_allowed.get() == ready
+                        && undo.canUndo() == ready
+                        && window.isKeyWindow() == key
+                        && window.firstResponder() == responder
+                        && NSWorkspace::sharedWorkspace()
+                            .frontmostApplication()
+                            .map(|app| app.processIdentifier())
+                            == active,
+                    "Relocation reset native text, selection, scroll, undo, editing state or focus"
+                );
+                ensure!(
+                    (actual.origin.x - expected.x).abs() <= 1.0
+                        && (actual.origin.y - expected.y).abs() <= 1.0
+                        && window.title().to_string() == "ViberWhisper · Late input target"
+                        && state.status.stringValue().to_string() == warning.unwrap_or("")
+                        && state.status.isHidden() == warning.is_none(),
+                    "Relocation lost its new anchor, destination or source warning"
+                );
+                let editor = state.scroll.frame();
+                ensure!(
+                    editor.origin.x == 10.0
+                        && actual.size.width - editor.size.width == 20.0
+                        && actual.size.height - editor.origin.y - editor.size.height == 3.0
+                        && (warning.is_some() || editor.origin.y == 3.0),
+                    "Relocated preview lost its compact body margins"
+                );
+                if ready {
+                    undo.undo();
+                    ensure!(
+                        state.text.string().to_string() == long,
+                        "Relocation broke native undo"
+                    );
+                    let status = state.status.frame();
+                    ensure!(
+                        status.origin.x == 14.0
+                            && actual.size.width - status.size.width == 28.0
+                            && status.origin.y == 3.0
+                            && editor.origin.y - status.origin.y - status.size.height == 3.0,
+                        "Relocated preview lost its compact warning margins"
+                    );
+                }
+            }
+            Ok(())
+        })();
+        state.anchor.set(saved_anchor);
+        state.last_origin.set(None);
+        window.setTitle(&saved_title);
+        let restored = self.update_text(&saved_text, saved_ready, saved_warning.as_deref());
+        state.text.setAllowsUndo(saved_undo);
+        result?;
+        restored
     }
 
     pub(crate) fn smoke_confirmation(
@@ -239,7 +470,7 @@ impl NativePreview {
         );
         replace(&"中文 English 🎙️ 自动换行。".repeat(200));
         ensure!(
-            window.frame().size.height <= 220.0,
+            window.frame().size.height <= 202.0,
             "Long text exceeded the bubble height limit"
         );
         replace("短句\n");
@@ -293,7 +524,7 @@ impl NativePreview {
         );
         replace("短句");
         ensure!(
-            window.frame().size.height == short.size.height + 44.0,
+            window.frame().size.height == short.size.height + 35.0,
             "Message footer overlapped the resized editor"
         );
         window.set_message(None);

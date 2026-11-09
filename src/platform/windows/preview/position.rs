@@ -1,5 +1,6 @@
 //! Native caret geometry and monitor work areas in Win32 screen coordinates.
 
+use anyhow::{Result, anyhow, ensure};
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
@@ -10,7 +11,7 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GA_ROOT, GUITHREADINFO, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
-    GetWindowRect, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
+    GetWindowRect, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WindowFromPhysicalPoint,
 };
 
 use crate::platform::preview::PreviewRect;
@@ -94,7 +95,7 @@ pub(super) fn capture_anchor(thread: u32, focus: HWND) -> Option<PreviewRect> {
     {
         return Some(rect);
     }
-    match automation::capture_anchor(focus) {
+    match automation::capture_anchor(focus, None) {
         Ok(Some(rect)) => return Some(rect),
         Ok(None) => {}
         Err(error) => tracing::debug!(%error, "UIA preview anchor unavailable"),
@@ -123,6 +124,41 @@ pub(super) fn capture_anchor(thread: u32, focus: HWND) -> Option<PreviewRect> {
         (bounds.right - bounds.left) as f64,
         (bounds.bottom - bounds.top) as f64,
     )
+}
+
+/// Qualify the recorded click against the actual focused editor before accepting geometry.
+/// Pixel hit testing rejects the taskbar, our nonactivating bubble and other overlay windows
+/// even when a previous text control retains keyboard focus behind them.
+pub(super) fn capture_after_click(
+    thread: u32,
+    focus: HWND,
+    point: (f64, f64),
+) -> Result<PreviewRect> {
+    ensure!(
+        [point.0, point.1].into_iter().all(|value| {
+            value.is_finite() && value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX)
+        }),
+        "Invalid click coordinates"
+    );
+    let point = POINT {
+        x: point.0.round() as i32,
+        y: point.1.round() as i32,
+    };
+    let window = unsafe { GetAncestor(focus, GA_ROOT) };
+    let clicked_window = || unsafe { GetAncestor(WindowFromPhysicalPoint(point), GA_ROOT) };
+    ensure!(
+        !window.is_null() && clicked_window() == window,
+        "Click is outside the focused input window"
+    );
+    let anchor = automation::capture_anchor(focus, Some((point.x, point.y)))?
+        .ok_or_else(|| anyhow!("Clicked input has no usable preview position"))?;
+    ensure!(
+        clicked_window() == window
+            && unsafe { GetForegroundWindow() } == window
+            && super::thread_focus(thread)? == focus,
+        "Clicked input changed while capturing its position"
+    );
+    Ok(anchor)
 }
 
 pub(super) fn work_area(anchor: PreviewRect) -> Option<PreviewRect> {

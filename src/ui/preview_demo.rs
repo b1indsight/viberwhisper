@@ -332,6 +332,22 @@ impl ApplicationHandler<DemoEvent> for Demo {
                                 self.preview.update_text(text, true, warning)?;
                                 self.capture(name)?;
                             }
+                        } else if session_id == SessionId(2) {
+                            let long_warning = format!(
+                                "{}\n按 Esc 关闭后重试。",
+                                "识别服务暂时不可用，请检查网络连接和服务配置。".repeat(6)
+                            );
+                            for (name, message) in [
+                                (
+                                    "error-second-line.png",
+                                    "识别失败。\n请检查网络连接和服务配置，再按 Esc 关闭后重试。",
+                                ),
+                                ("error-wrapped.png", long_warning.as_str()),
+                            ] {
+                                self.preview.update_text("", false, Some(message))?;
+                                self.capture(name)?;
+                            }
+                            self.preview.update_text("", false, warning.as_deref())?;
                         }
                         Ok(())
                     })();
@@ -435,7 +451,7 @@ impl ApplicationHandler<DemoEvent> for Demo {
                 event_loop.exit();
             }
             DemoEvent::Update(
-                PreviewUpdate::Streaming { .. }
+                PreviewUpdate::Destination { .. }
                 | PreviewUpdate::HistorySaved(_)
                 | PreviewUpdate::PermissionRequired,
             ) => {}

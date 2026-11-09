@@ -125,9 +125,9 @@ impl NativePreview {
         Ok(())
     }
 
-    /// Empty errors cannot submit text; exercise the same native key subclass as users.
+    /// Empty errors cannot submit text; dispatch keys to the window, not its hidden editor.
     #[cfg(feature = "integration")]
-    pub(crate) fn smoke_error(&self, verify_pending: &dyn Fn() -> Result<()>) -> Result<()> {
+    pub(crate) fn smoke_error(&mut self, verify_pending: &dyn Fn() -> Result<()>) -> Result<()> {
         ensure!(
             self.state.normalized_text()?.is_empty()
                 && !self.state.retry_allowed.get()
@@ -145,15 +145,116 @@ impl NativePreview {
                 message.len() as i32,
             )
         };
+        let warning = String::from_utf16_lossy(&message[..count as usize]);
         ensure!(
-            unsafe { IsWindowVisible(self.state.status.get()) } != 0
-                && String::from_utf16_lossy(&message[..count as usize]).contains("Esc"),
+            unsafe { IsWindowVisible(self.state.status.get()) } != 0 && warning.contains("Esc"),
             "Error preview did not explain cancellation"
+        );
+        let window = self.state.window.get();
+        let mut bounds = RECT::default();
+        let mut status = RECT::default();
+        ensure!(
+            unsafe { GetWindowRect(window, &mut bounds) } != 0
+                && unsafe { GetWindowRect(self.state.status.get(), &mut status) } != 0,
+            "Could not measure error preview"
+        );
+        let compact_height = status.bottom - status.top + self.state.pixels(3) * 2;
+        ensure!(
+            unsafe { IsWindowVisible(self.state.text.get()) } == 0
+                && bounds.bottom - bounds.top == compact_height
+                && status.top - bounds.top == self.state.pixels(3),
+            "Empty error preview still reserves a blank editor row"
+        );
+        let compact_width = bounds.right - bounds.left;
+        ensure!(
+            compact_width < self.state.pixels(420),
+            "Short error warning still forces the maximum bubble width"
+        );
+        // Match macOS: equal character counts with a longer second line must fit glyph widths.
+        let mut widths = [0; 2];
+        for (index, message) in [
+            "错误。\niiiiiiiiiiiiiiiiiiiiiiii · Esc",
+            "错误。\nWWWWWWWWWWWWWWWWWWWWWWWW · Esc",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.update_text("", false, Some(message))?;
+            ensure!(
+                unsafe { GetWindowRect(window, &mut bounds) } != 0
+                    && bounds.bottom - bounds.top == compact_height,
+                "A fitting two-line warning wrapped or changed the compact height"
+            );
+            widths[index] = bounds.right - bounds.left;
+        }
+        ensure!(
+            widths[0] < widths[1] && widths[1] < self.state.pixels(420),
+            "Error width ignored native glyphs or the longest second line"
+        );
+        let long_warning = format!(
+            "{}\n按 Esc 关闭。",
+            "识别服务暂时不可用，请检查网络连接后重试。".repeat(6)
+        );
+        self.update_text("", false, Some(&long_warning))?;
+        ensure!(
+            unsafe { GetWindowRect(window, &mut bounds) } != 0
+                && bounds.right - bounds.left == self.state.pixels(420)
+                && bounds.bottom - bounds.top > compact_height
+                && unsafe { IsWindowVisible(self.state.text.get()) } == 0,
+            "A long error warning did not wrap at the bubble width limit"
+        );
+        println!(
+            "Native error warning widths: {compact_width}; proportional glyphs: {widths:?}; wrapped: {}x{}",
+            bounds.right - bounds.left,
+            bounds.bottom - bounds.top
+        );
+        self.update_text("", false, Some(&warning))?;
+        // Match the macOS error fixture: partial/editable-empty bodies survive,
+        // while a whitespace-only failure stays compact when this window is reused.
+        for (text, ready, collapsed) in [
+            ("部分识别结果", true, false),
+            ("", true, false),
+            (" \n ", false, true),
+            ("", false, true),
+        ] {
+            self.update_text(text, ready, Some(&warning))?;
+            ensure!(
+                unsafe { GetWindowRect(window, &mut bounds) } != 0,
+                "Could not measure recovered error preview"
+            );
+            ensure!(
+                (unsafe { IsWindowVisible(self.state.text.get()) } == 0) == collapsed
+                    && (unsafe { GetWindowLongPtrW(self.state.text.get(), GWL_STYLE) }
+                        & ES_READONLY as isize
+                        == 0)
+                        == ready
+                    && if collapsed {
+                        bounds.bottom - bounds.top == compact_height
+                            && bounds.right - bounds.left == compact_width
+                    } else {
+                        bounds.bottom - bounds.top >= compact_height + self.state.pixels(28)
+                            && bounds.right - bounds.left == self.state.pixels(420)
+                    },
+                "Error layout lost its body visibility or editable recovery; ready={ready}"
+            );
+            if ready && text.is_empty() {
+                self.show_error(&warning, false);
+                ensure!(
+                    unsafe { IsWindowVisible(self.state.text.get()) } != 0,
+                    "A blocked delivery retry hid an editable candidate"
+                );
+            }
+        }
+        self.focus();
+        let focus = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
+        ensure!(
+            focus == window,
+            "Error preview did not focus its window instead of the hidden editor"
         );
         for key in [VK_RETURN, VK_ESCAPE] {
             unsafe {
-                SendMessageW(self.state.text.get(), WM_KEYDOWN, key as usize, 0);
-                SendMessageW(self.state.text.get(), WM_KEYUP, key as usize, 0);
+                SendMessageW(focus, WM_KEYDOWN, key as usize, 0);
+                SendMessageW(focus, WM_KEYUP, key as usize, 0);
             }
             if key == VK_RETURN {
                 verify_pending()?;
@@ -301,16 +402,16 @@ impl NativePreview {
                 );
                 ensure!(
                     bounds.bottom - bounds.top
-                        == pixels(if !scrollable {
-                            52
-                        } else if ready {
-                            264
-                        } else {
-                            220
-                        })
+                        == pixels(if scrollable { 196 } else { 28 })
+                            + pixels(3) * 2
+                            + if warning.is_some() {
+                                pixels(32) + pixels(3)
+                            } else {
+                                0
+                            }
                         && bounds.right - bounds.left <= pixels(420)
-                        && edit_bounds.left - bounds.left == pixels(16)
-                        && edit_bounds.top - bounds.top == pixels(12)
+                        && edit_bounds.left - bounds.left == pixels(10)
+                        && edit_bounds.top - bounds.top == pixels(3)
                         && edit_bounds.bottom - edit_bounds.top
                             == pixels(if scrollable { 196 } else { 28 })
                         && bounds.top == suggested.top
@@ -597,10 +698,16 @@ impl NativePreview {
                         // Two warning lines fit the minimum; the three-line error must grow it.
                         ensure!(
                             status.bottom - status.top >= measured.bottom
-                                && status.top - body.bottom >= self.state.pixels(12)
-                                && window.bottom - status.bottom >= self.state.pixels(12)
-                                && status.left - window.left == self.state.pixels(20)
-                                && window.right - status.right == self.state.pixels(20)
+                                && if case == "error" {
+                                    (unsafe { IsWindowVisible(self.state.text.get()) } == 0)
+                                        && body.bottom == body.top
+                                        && status.top - window.top == self.state.pixels(3)
+                                } else {
+                                    status.top - body.bottom >= self.state.pixels(3)
+                                }
+                                && window.bottom - status.bottom >= self.state.pixels(3)
+                                && status.left - window.left == self.state.pixels(14)
+                                && window.right - status.right == self.state.pixels(14)
                                 && (case != "error" || measured.bottom > self.state.pixels(32)),
                             "Warning/error footer assertion failed: case={case}; DPI={dpi}; system-colors={system_colors}"
                         );
@@ -679,7 +786,126 @@ impl NativePreview {
                 == 0,
             "Final preview did not become editable"
         );
+        self.smoke_relocation()?;
         Ok(())
+    }
+
+    /// A destination can arrive after a user has edited and scrolled the centered bubble.
+    /// Exercise native undo as well as text/selection, so reopening the editor cannot pass.
+    fn smoke_relocation(&mut self) -> Result<()> {
+        let read = |window| {
+            let mut value = vec![0u16; unsafe { GetWindowTextLengthW(window) } as usize + 1];
+            let count = unsafe { GetWindowTextW(window, value.as_mut_ptr(), value.len() as i32) };
+            String::from_utf16_lossy(&value[..count.max(0) as usize])
+        };
+        let window = self.state.window.get();
+        let editor = self.state.text.get();
+        let saved_anchor = self.state.anchor.get();
+        let saved_text = self.state.normalized_text()?;
+        let saved_title = read(window);
+        let saved_warning = self
+            .state
+            .message_visible
+            .get()
+            .then(|| read(self.state.status.get()));
+        let saved_ready = self.state.retry_allowed.get();
+        let mut bounds = RECT::default();
+        ensure!(
+            unsafe { GetWindowRect(window, &mut bounds) } != 0,
+            "No preview bounds"
+        );
+        let reference = PreviewRect::new(bounds.left as f64, bounds.top as f64, 1.0, 18.0).unwrap();
+        let work = position::work_area(reference).ok_or_else(|| anyhow!("No preview work area"))?;
+        let long = "hello 😀 中文\n".repeat(40);
+        let result = (|| {
+            for ready in [false, true] {
+                self.update_text(&long, ready, Some("识别提醒\n无法获取输入目标"))?;
+                if ready {
+                    let correction = nul_terminated_utf16("user correction");
+                    unsafe {
+                        SendMessageW(editor, EM_SETSEL, usize::MAX, -1);
+                        SendMessageW(editor, EM_REPLACESEL, 1, correction.as_ptr() as isize);
+                    }
+                }
+                unsafe {
+                    SendMessageW(editor, EM_SETSEL, 6, 8); // Preserve a whole emoji selection.
+                    SendMessageW(editor, EM_LINESCROLL, 0, -10000);
+                    SendMessageW(editor, EM_LINESCROLL, 0, 5);
+                }
+                let text = self.state.normalized_text()?;
+                let first = unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) };
+                ensure!(
+                    first == 5,
+                    "Relocation fixture did not scroll its long preview"
+                );
+                let foreground = unsafe { GetForegroundWindow() };
+                let focus = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
+                let anchor = PreviewRect::new(work.x + 51.0, work.y + 93.0, 1.0, 18.0).unwrap();
+                let warning = ready.then_some("识别提醒");
+                self.relocate("Late input target", anchor, warning)?;
+                let mut start = 0u32;
+                let mut end = 0u32;
+                unsafe {
+                    SendMessageW(
+                        editor,
+                        EM_GETSEL,
+                        (&raw mut start) as usize,
+                        (&raw mut end) as isize,
+                    );
+                }
+                ensure!(
+                    unsafe { GetWindowRect(window, &mut bounds) } != 0,
+                    "No relocated bounds"
+                );
+                let expected = preview_origin(
+                    anchor,
+                    (
+                        (bounds.right - bounds.left) as f64,
+                        (bounds.bottom - bounds.top) as f64,
+                    ),
+                    work,
+                );
+                ensure!(
+                    self.state.window.get() == window
+                        && self.state.text.get() == editor
+                        && self.state.normalized_text()? == text
+                        && (start, end) == (6, 8)
+                        && unsafe { SendMessageW(editor, EM_GETFIRSTVISIBLELINE, 0, 0) } == first
+                        && (unsafe { SendMessageW(editor, EM_CANUNDO, 0, 0) } != 0) == ready
+                        && (unsafe { GetWindowLongPtrW(editor, GWL_STYLE) } & ES_READONLY as isize
+                            != 0)
+                            != ready
+                        && self.state.retry_allowed.get() == ready
+                        && unsafe { GetForegroundWindow() } == foreground
+                        && unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() }
+                            == focus,
+                    "Relocation reset native text, selection, scroll, undo, editing state or focus"
+                );
+                ensure!(
+                    (bounds.left as f64 - expected.0).abs() <= 1.0
+                        && (bounds.top as f64 - expected.1).abs() <= 1.0
+                        && read(window) == "ViberWhisper · Late input target"
+                        && read(self.state.status.get()) == warning.unwrap_or("")
+                        && (unsafe { IsWindowVisible(self.state.status.get()) } != 0)
+                            == warning.is_some(),
+                    "Relocation lost its new anchor, destination or source warning"
+                );
+                if ready {
+                    unsafe { SendMessageW(editor, WM_UNDO, 0, 0) };
+                    ensure!(
+                        self.state.normalized_text()? == long,
+                        "Relocation broke native undo"
+                    );
+                }
+            }
+            Ok(())
+        })();
+        self.state.anchor.set(saved_anchor);
+        let title = nul_terminated_utf16(&saved_title);
+        unsafe { SetWindowTextW(window, title.as_ptr()) };
+        let restored = self.update_text(&saved_text, saved_ready, saved_warning.as_deref());
+        result?;
+        restored
     }
 
     /// Resize the actual controls at each screen corner, both generating and editable.
@@ -737,7 +963,7 @@ impl NativePreview {
                         ensure!(
                             scrollable
                                 || bounds.bottom - bounds.top
-                                    == self.state.pixels(28) + self.state.pixels(24),
+                                    == self.state.pixels(28) + self.state.pixels(3) * 2,
                             "Fitting text did not return to the single-line bubble height"
                         );
                         let expected = preview_origin(
@@ -864,7 +1090,7 @@ impl NativePreview {
         replace(&"中文 English 🎙️ 自动换行。".repeat(200));
         let capped = bounds()?;
         ensure!(
-            capped.bottom - capped.top <= pixels(220),
+            capped.bottom - capped.top <= pixels(196) + pixels(3) * 2,
             "Long text exceeded the bubble height limit"
         );
         replace("短句\r\n");
@@ -889,7 +1115,7 @@ impl NativePreview {
             "Could not read the native caret"
         );
         ensure!(
-            (info.rcCaret.top + info.rcCaret.bottom - (short.bottom - short.top - pixels(24)))
+            (info.rcCaret.top + info.rcCaret.bottom - (short.bottom - short.top - pixels(3) * 2))
                 .abs()
                 <= pixels(2),
             "Short candidate is not vertically centered"
@@ -913,7 +1139,7 @@ impl NativePreview {
         replace("短句");
         let footer = bounds()?;
         ensure!(
-            footer.bottom - footer.top == short.bottom - short.top + pixels(44),
+            footer.bottom - footer.top == short.bottom - short.top + pixels(32) + pixels(3),
             "Message footer overlapped the resized editor"
         );
         let mut viewport = RECT::default();
@@ -922,7 +1148,7 @@ impl NativePreview {
             "Could not read editor bounds"
         );
         ensure!(
-            viewport.bottom == short.bottom - short.top - pixels(24),
+            viewport.bottom == short.bottom - short.top - pixels(3) * 2,
             "Editor did not shrink with its bubble"
         );
         self.state.set_message(None)?;

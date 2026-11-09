@@ -85,6 +85,31 @@ fn reject_password(control: HWND) -> Result<()> {
 
 impl NativeTarget {
     pub(crate) fn capture() -> Result<Self> {
+        let mut target = Self::capture_focused()?;
+        target.anchor = position::capture_anchor(target.thread, target.focus);
+        Ok(target)
+    }
+
+    /// Capture only when this release hit the currently focused writable input. A hook
+    /// can run before the destination processes the click, so retry that correspondence
+    /// on this worker, never by activating a window or waiting for identical samples.
+    pub(crate) fn capture_after_click(point: (f64, f64)) -> Result<Self> {
+        let mut captured = None;
+        wait_for_activation(|| {
+            let mut target = Self::capture_focused()?;
+            target.anchor = Some(position::capture_after_click(
+                target.thread,
+                target.focus,
+                point,
+            )?);
+            target.validate()?;
+            captured = Some(target);
+            Ok(())
+        })?;
+        captured.ok_or_else(|| anyhow!("未找到点击的输入位置"))
+    }
+
+    fn capture_focused() -> Result<Self> {
         // SAFETY: This query has no caller-side pointer requirements.
         let window = unsafe { GetForegroundWindow() };
         ensure!(!window.is_null(), "未找到输入目标窗口");
@@ -96,7 +121,6 @@ impl NativeTarget {
         );
         let focus = thread_focus(thread)?;
         reject_password(focus)?;
-        let anchor = position::capture_anchor(thread, focus);
         let mut title = [0u16; 512];
         let count = unsafe { GetWindowTextW(window, title.as_mut_ptr(), title.len() as i32) };
         Ok(Self {
@@ -105,7 +129,7 @@ impl NativeTarget {
             thread,
             process,
             title: String::from_utf16_lossy(&title[..count.max(0) as usize]),
-            anchor,
+            anchor: None,
         })
     }
 
@@ -505,8 +529,19 @@ impl WindowState {
             });
             let (natural, line_height) = self.measure_text(self.text.get(), None)?;
             let margins = unsafe { SendMessageW(self.text.get(), EM_GETMARGINS, 0, 0) } as u32;
-            let padding = pixels(34) + (margins & 0xffff) as i32 + (margins >> 16) as i32;
-            let mut width = if self.message_visible.get() {
+            let padding = pixels(22) + (margins & 0xffff) as i32 + (margins >> 16) as i32;
+            // Like macOS, only a read-only empty preview fits the warning instead of its body.
+            let message_only = self.message_visible.get()
+                && unsafe { GetWindowLongPtrW(self.text.get(), GWL_STYLE) } & ES_READONLY as isize
+                    != 0
+                && self.normalized_text()?.trim().is_empty();
+            let mut width = if message_only {
+                let (message, _) = self.measure_text(self.status.get(), None)?;
+                message
+                    .right
+                    .saturating_add(pixels(28))
+                    .clamp(pixels(96), max_width)
+            } else if self.message_visible.get() {
                 max_width
             } else {
                 natural
@@ -524,15 +559,15 @@ impl WindowState {
             // Count lines at the no-scrollbar client width, without toggling the bar on
             // every update. Use the actual non-client width, including its current DPI.
             let measure_width =
-                width - pixels(32) + editor_bounds.right - editor_bounds.left - viewport.right;
+                width - pixels(20) + editor_bounds.right - editor_bounds.left - viewport.right;
             if editor_bounds.right - editor_bounds.left != measure_width {
                 ensure!(
                     unsafe {
                         SetWindowPos(
                             self.text.get(),
                             null_mut(),
-                            pixels(16),
-                            pixels(12),
+                            pixels(10),
+                            pixels(3),
                             measure_width,
                             viewport.bottom,
                             SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
@@ -546,7 +581,7 @@ impl WindowState {
             }
             let lines = unsafe { SendMessageW(self.text.get(), EM_GETLINECOUNT, 0, 0) } as i32;
             let content_height = lines.max(1).saturating_mul(line_height);
-            let overflow = content_height > pixels(196);
+            let overflow = !message_only && content_height > pixels(196);
             if (unsafe { GetWindowLongPtrW(self.text.get(), GWL_STYLE) } & WS_VSCROLL as isize != 0)
                 != overflow
             {
@@ -565,18 +600,23 @@ impl WindowState {
                 width = (width + measure_width - viewport.right).min(max_width);
             }
             // Match the macOS viewport bounds; taller text stays scrollable.
-            let editor_height = content_height.clamp(pixels(28), pixels(196));
+            let editor_height = if message_only {
+                0
+            } else {
+                content_height.clamp(pixels(28), pixels(196))
+            };
             let message_height = if self.message_visible.get() {
                 let (message, _) =
-                    self.measure_text(self.status.get(), Some(width - pixels(40)))?;
+                    self.measure_text(self.status.get(), Some(width - pixels(28)))?;
                 message.bottom.max(pixels(32))
             } else {
                 0
             };
+            let message_gap = if message_only { 0 } else { pixels(3) };
             let height = editor_height
-                + pixels(24)
+                + pixels(3) * 2
                 + if self.message_visible.get() {
-                    message_height + pixels(12)
+                    message_height + message_gap
                 } else {
                     0
                 };
@@ -605,13 +645,17 @@ impl WindowState {
                     SetWindowPos(
                         self.text.get(),
                         null_mut(),
-                        pixels(16),
-                        pixels(12),
-                        width - pixels(32),
+                        pixels(10),
+                        pixels(3),
+                        width - pixels(20),
                         editor_height,
                         SWP_NOZORDER | SWP_NOACTIVATE
                     ) != 0,
                     "无法调整预览输入框"
+                );
+                ShowWindow(
+                    self.text.get(),
+                    if message_only { SW_HIDE } else { SW_SHOWNA },
                 );
                 SendMessageW(self.text.get(), EM_SETRECTNP, 0, 0);
                 let mut format = RECT::default();
@@ -629,9 +673,9 @@ impl WindowState {
                     SetWindowPos(
                         self.status.get(),
                         null_mut(),
-                        pixels(20),
-                        editor_height + pixels(24),
-                        width - pixels(40),
+                        pixels(14),
+                        editor_height + pixels(3) + message_gap,
+                        width - pixels(28),
                         message_height,
                         SWP_NOZORDER | SWP_NOACTIVATE
                     ) != 0,
@@ -1148,6 +1192,28 @@ impl NativePreview {
         Ok(())
     }
 
+    /// Move an existing session to a newly qualified destination without resetting the
+    /// native editor, its undo buffer or focus. The warning is the caller's updated source
+    /// warning; delivery errors remain owned by the confirmation/retry path.
+    pub(crate) fn relocate(
+        &mut self,
+        destination: &str,
+        anchor: PreviewRect,
+        warning: Option<&str>,
+    ) -> Result<()> {
+        ensure!(
+            !self.state.window.get().is_null() && self.state.session_id.get().is_some(),
+            "预览窗口尚未创建"
+        );
+        self.state.anchor.set(Some(anchor));
+        let title = super::nul_terminated_utf16(&format!("ViberWhisper · {destination}"));
+        ensure!(
+            unsafe { SetWindowTextW(self.state.window.get(), title.as_ptr()) } != 0,
+            "无法更新输入目标"
+        );
+        self.state.set_message(warning)
+    }
+
     /// Apply a word-aligned tail patch while preserving selection and user scroll state.
     pub(crate) fn update_text(
         &mut self,
@@ -1209,6 +1275,16 @@ impl NativePreview {
                 Some((map_selection(selection_start), map_selection(selection_end)));
             self.state.clear_programmatic_undo();
         }
+        if ready {
+            self.state.keys.borrow_mut().reset();
+            self.state.disarm_held_keys();
+            self.state.retry_allowed.set(true);
+            self.state.set_read_only(false);
+            self.state.clear_programmatic_undo();
+        } else {
+            self.state.retry_allowed.set(false);
+            self.state.set_read_only(true);
+        }
         self.state.set_message(warning)?;
         if let Some((start, end)) = restore_selection {
             if follow_tail {
@@ -1219,16 +1295,6 @@ impl NativePreview {
             unsafe {
                 SendMessageW(self.state.text.get(), EM_SETSEL, start, end as isize);
             }
-        }
-        if ready {
-            self.state.keys.borrow_mut().reset();
-            self.state.disarm_held_keys();
-            self.state.retry_allowed.set(true);
-            self.state.set_read_only(false);
-            self.state.clear_programmatic_undo();
-        } else {
-            self.state.retry_allowed.set(false);
-            self.state.set_read_only(true);
         }
         Ok(())
     }
@@ -1249,7 +1315,11 @@ impl NativePreview {
         unsafe {
             ShowWindow(window, SW_SHOW);
             if SetForegroundWindow(window) != 0 {
-                SetFocus(self.state.text.get());
+                SetFocus(if IsWindowVisible(self.state.text.get()) != 0 {
+                    self.state.text.get()
+                } else {
+                    window
+                });
             }
         }
     }

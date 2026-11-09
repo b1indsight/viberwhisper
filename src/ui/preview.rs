@@ -15,6 +15,7 @@ use crate::platform::{DeliveryTarget, PreviewRect};
 use crate::session::SessionId;
 
 /// Preview content and the optional capability to learn after successful delivery.
+#[derive(Debug)]
 pub(super) struct PreviewTranscription {
     pub text: String,
     pub warning: Option<String>,
@@ -33,10 +34,12 @@ impl From<(String, Option<String>)> for PreviewTranscription {
 
 #[derive(Debug, Clone)]
 pub(super) enum PreviewUpdate {
-    Streaming {
+    Destination {
         session_id: SessionId,
         destination: String,
         anchor: Option<PreviewRect>,
+        warning: Option<String>,
+        stopped: bool,
     },
     Ready {
         session_id: SessionId,
@@ -55,10 +58,20 @@ pub(super) enum PreviewUpdate {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) enum PreviewCommand {
+    Stop,
+    SelectAt((f64, f64)),
+    Transcribed(Option<PreviewTranscription>),
     Confirm(String),
     Cancel,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum CaptureStage {
+    Start,
+    Stop,
+    Click((f64, f64)),
 }
 
 enum ConfirmationPhase {
@@ -184,10 +197,84 @@ pub(super) fn confirm_delivery(
     gate.type_text_if_active(typer, text, &|| target.validate())
 }
 
-/// Keeps native destination objects on this worker until confirmation or cancellation.
-/// Capture and event publishing are injected so the real command loop can be tested
-/// without a desktop, network, or native target crossing a thread boundary.
-/// Always acquires the saved target, even if cancellation won the Ready handoff.
+/// Runs the same three capture stages for HTTP and Realtime, independently of recognition.
+/// Only the owning worker sees native targets; the UI receives destination metadata.
+pub(super) fn run_preview_session<T: DeliveryTarget>(
+    session_id: SessionId,
+    typer: &dyn TextTyper,
+    history: Option<&HistoryStore>,
+    gate: &FinalizationGate,
+    (commands, receiver): (mpsc::Sender<PreviewCommand>, mpsc::Receiver<PreviewCommand>),
+    mut capture: impl FnMut(CaptureStage) -> Result<T>,
+    notify: &impl Fn(PreviewUpdate) -> bool,
+) {
+    let mut session = PreviewSession::new(
+        session_id,
+        typer,
+        history,
+        gate,
+        capture(CaptureStage::Start),
+    );
+    if gate.is_cancelled() || !session.publish_destination(false, notify) {
+        return;
+    }
+    let mut stopped = false;
+    while let Ok(command) = receiver.recv() {
+        if gate.is_cancelled() {
+            return;
+        }
+        match command {
+            PreviewCommand::Stop if !stopped => {
+                if session.can_select() {
+                    let candidate = capture(CaptureStage::Stop);
+                    if gate.is_cancelled() {
+                        return;
+                    }
+                    session.consider(candidate);
+                }
+                stopped = true;
+                // This acknowledgement must precede preview activation, even if neither
+                // capture found geometry. Centering does not close the click stage.
+                if !session.publish_destination(true, notify) {
+                    return;
+                }
+            }
+            PreviewCommand::SelectAt(point) if stopped && session.can_select() => {
+                let candidate = capture(CaptureStage::Click(point));
+                if gate.is_cancelled() {
+                    return;
+                }
+                // An invalid click must not replace even a geometry-less legal target.
+                if candidate
+                    .as_ref()
+                    .is_ok_and(|target| target.preview_anchor().is_some())
+                {
+                    session.consider(candidate);
+                    if !session.publish_destination(true, notify) {
+                        return;
+                    }
+                }
+            }
+            PreviewCommand::Transcribed(Some(transcription))
+                if stopped && session.transcription.is_none() =>
+            {
+                if !session.ready(transcription, commands.clone(), notify) {
+                    return;
+                }
+            }
+            PreviewCommand::Transcribed(None) => return,
+            command => {
+                if session.handle_confirmation(command, notify).is_break() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// The static native demo uses the same confirmation transaction without recording stages.
+/// Always acquires its saved target, even if cancellation won the Ready handoff.
+#[cfg(any(test, feature = "integration"))]
 pub(super) fn wait_for_confirmation<T: DeliveryTarget>(
     session_id: SessionId,
     transcription: PreviewTranscription,
@@ -197,130 +284,228 @@ pub(super) fn wait_for_confirmation<T: DeliveryTarget>(
     capture: impl FnOnce() -> Result<T>,
     notify: &impl Fn(PreviewUpdate) -> bool,
 ) {
-    let target = capture();
-    if !run_confirmation(
-        session_id,
-        transcription,
-        typer,
-        history,
-        gate,
-        &target,
-        notify,
-    ) && let Ok(target) = &target
-        && let Err(error) = target.restore()
-    {
-        debug!(%error, "Could not restore abandoned preview destination");
+    let mut session = PreviewSession::new(session_id, typer, history, gate, capture());
+    let (commands, receiver) = mpsc::channel();
+    if session.ready(transcription, commands, notify) {
+        while let Ok(command) = receiver.recv() {
+            if session.handle_confirmation(command, notify).is_break() {
+                break;
+            }
+        }
     }
 }
 
-/// Returns whether delivery succeeded; every other exit restores the target in the caller.
-fn run_confirmation<T: DeliveryTarget>(
+/// Owns the chosen native destination, confirmation capability and retry transaction.
+/// Unsuccessful exits restore the saved destination before publishing session completion.
+struct PreviewSession<'a, T: DeliveryTarget> {
     session_id: SessionId,
-    transcription: PreviewTranscription,
-    typer: &dyn TextTyper,
-    history: Option<&HistoryStore>,
-    gate: &FinalizationGate,
-    target: &Result<T>,
-    notify: &impl Fn(PreviewUpdate) -> bool,
-) -> bool {
-    if gate.is_cancelled() {
-        return false;
-    }
-    let PreviewTranscription {
-        text,
-        warning,
-        mut confirmation,
-    } = transcription;
-    let can_confirm = !text.trim().is_empty();
-    let anchor = target
-        .as_ref()
-        .ok()
-        .and_then(DeliveryTarget::preview_anchor);
-    let destination = target
-        .as_ref()
-        .map_or_else(|_| "无法确定输入目标".into(), DeliveryTarget::name);
-    let capture_permission_denied = target
-        .as_ref()
-        .err()
-        .is_some_and(crate::platform::is_text_delivery_permission_error);
-    let warning = if can_confirm && target.is_err() {
-        let unavailable = "无法获取输入目标；可复制文字后手动粘贴。";
-        Some(warning.map_or_else(
-            || unavailable.into(),
-            |warning| format!("{warning}\n{unavailable}"),
-        ))
-    } else {
-        warning
-    };
-    let (commands, receiver) = mpsc::channel();
-    if gate.is_cancelled()
-        || !notify(PreviewUpdate::Ready {
+    typer: &'a dyn TextTyper,
+    history: Option<&'a HistoryStore>,
+    gate: &'a FinalizationGate,
+    target: Result<T>,
+    transcription: Option<PreviewTranscription>,
+    saved: Option<String>,
+    selection_open: bool,
+    retry_allowed: bool,
+    delivered: bool,
+}
+
+impl<'a, T: DeliveryTarget> PreviewSession<'a, T> {
+    fn new(
+        session_id: SessionId,
+        typer: &'a dyn TextTyper,
+        history: Option<&'a HistoryStore>,
+        gate: &'a FinalizationGate,
+        target: Result<T>,
+    ) -> Self {
+        Self {
             session_id,
-            text,
-            destination,
-            anchor,
-            warning,
-            commands,
-        })
-    {
-        return false;
+            typer,
+            history,
+            gate,
+            target,
+            transcription: None,
+            saved: None,
+            selection_open: true,
+            retry_allowed: true,
+            delivered: false,
+        }
     }
-    let mut saved = None;
-    while let Ok(command) = receiver.recv() {
-        if gate.is_cancelled() {
-            return false;
+
+    fn anchor(&self) -> Option<PreviewRect> {
+        self.target
+            .as_ref()
+            .ok()
+            .and_then(DeliveryTarget::preview_anchor)
+    }
+
+    fn destination(&self) -> String {
+        self.target
+            .as_ref()
+            .map_or_else(|_| "无法确定输入目标".into(), DeliveryTarget::name)
+    }
+
+    fn can_confirm(&self) -> bool {
+        self.transcription
+            .as_ref()
+            .is_some_and(|text| !text.text.trim().is_empty())
+    }
+
+    fn can_select(&self) -> bool {
+        self.selection_open
+            && self.anchor().is_none()
+            && (self.transcription.is_none() || self.can_confirm())
+    }
+
+    fn consider(&mut self, candidate: Result<T>) {
+        if self.target.is_err()
+            || candidate
+                .as_ref()
+                .is_ok_and(|target| target.preview_anchor().is_some())
+        {
+            self.target = candidate;
+        }
+    }
+
+    fn warning(&self) -> Option<String> {
+        let warning = self
+            .transcription
+            .as_ref()
+            .and_then(|text| text.warning.clone());
+        if self.can_confirm() && self.target.is_err() {
+            let unavailable = "无法获取输入目标；可复制文字后手动粘贴。";
+            Some(warning.map_or_else(
+                || unavailable.into(),
+                |warning| format!("{warning}\n{unavailable}"),
+            ))
+        } else {
+            warning
+        }
+    }
+
+    fn publish_destination(&self, stopped: bool, notify: &impl Fn(PreviewUpdate) -> bool) -> bool {
+        notify(PreviewUpdate::Destination {
+            session_id: self.session_id,
+            destination: self.destination(),
+            anchor: self.anchor(),
+            warning: self.warning(),
+            stopped,
+        })
+    }
+
+    fn ready(
+        &mut self,
+        transcription: PreviewTranscription,
+        commands: mpsc::Sender<PreviewCommand>,
+        notify: &impl Fn(PreviewUpdate) -> bool,
+    ) -> bool {
+        self.transcription = Some(transcription);
+        !self.gate.is_cancelled()
+            && notify(PreviewUpdate::Ready {
+                session_id: self.session_id,
+                text: self
+                    .transcription
+                    .as_ref()
+                    .expect("just prepared")
+                    .text
+                    .clone(),
+                destination: self.destination(),
+                anchor: self.anchor(),
+                warning: self.warning(),
+                commands,
+            })
+    }
+
+    fn handle_confirmation(
+        &mut self,
+        command: PreviewCommand,
+        notify: &impl Fn(PreviewUpdate) -> bool,
+    ) -> std::ops::ControlFlow<()> {
+        use std::ops::ControlFlow::{Break, Continue};
+        if self.gate.is_cancelled() {
+            return Break(());
         }
         match command {
-            PreviewCommand::Cancel => return false,
+            PreviewCommand::Cancel => Break(()),
             // An error-only preview cannot acquire delivery capability from a
             // queued native callback carrying arbitrary nonempty text.
-            PreviewCommand::Confirm(_) if !can_confirm => continue,
+            PreviewCommand::Confirm(_) if !self.can_confirm() || !self.retry_allowed => {
+                Continue(())
+            }
             PreviewCommand::Confirm(text) => {
+                self.selection_open = false;
                 if text.trim().is_empty() {
-                    return false;
+                    return Break(());
                 }
-                let result = match target {
-                    Ok(target) => {
-                        confirm_delivery(typer, target, &text, history, &mut saved, gate, |text| {
+                let result = match &self.target {
+                    Ok(target) => confirm_delivery(
+                        self.typer,
+                        target,
+                        &text,
+                        self.history,
+                        &mut self.saved,
+                        self.gate,
+                        |text| {
                             notify(PreviewUpdate::HistorySaved(text));
-                        })
-                    }
+                        },
+                    ),
                     Err(error) => Err(anyhow::anyhow!("无法恢复输入目标：{error}")),
                 };
                 match result {
                     Ok(delivered) => {
+                        self.delivered = delivered;
                         if delivered
-                            && let Some(confirmation) = confirmation.take()
+                            && let Some(confirmation) = self
+                                .transcription
+                                .as_mut()
+                                .and_then(|text| text.confirmation.take())
                             && let Err(error) = confirmation.confirm(text)
                         {
                             error!(%error, "Confirmed text was delivered but dictation learning failed");
                         }
-                        return delivered;
+                        Break(())
                     }
                     Err(error) => {
-                        if gate.is_cancelled() {
-                            return false;
+                        if self.gate.is_cancelled() {
+                            return Break(());
                         }
                         error!(%error, "Confirmed text delivery failed");
-                        if capture_permission_denied
+                        if self
+                            .target
+                            .as_ref()
+                            .err()
+                            .is_some_and(crate::platform::is_text_delivery_permission_error)
                             || crate::platform::is_text_delivery_permission_error(&error)
                         {
                             notify(PreviewUpdate::PermissionRequired);
                         }
-                        let retry_allowed = !error.is::<crate::input::typer::PartialTextDelivery>();
+                        self.retry_allowed =
+                            !error.is::<crate::input::typer::PartialTextDelivery>();
                         if !notify(PreviewUpdate::DeliveryFailed {
-                            session_id,
+                            session_id: self.session_id,
                             error: error.to_string(),
-                            retry_allowed,
+                            retry_allowed: self.retry_allowed,
                         }) {
-                            return false;
+                            return Break(());
                         }
+                        Continue(())
                     }
                 }
             }
+            _ => Continue(()),
         }
     }
-    false
+}
+
+impl<T: DeliveryTarget> Drop for PreviewSession<'_, T> {
+    fn drop(&mut self) {
+        if !self.delivered
+            && let Ok(target) = &self.target
+            && let Err(error) = target.restore()
+        {
+            debug!(%error, "Could not restore abandoned preview destination");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -352,6 +537,312 @@ mod tests {
     }
 
     struct RetryingTyper(std::sync::Mutex<usize>, HistoryStore);
+
+    #[test]
+    fn recording_stages_keep_the_first_position_and_deliver_to_its_target() {
+        use std::rc::Rc;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        struct Positioned {
+            name: &'static str,
+            anchor: Option<PreviewRect>,
+            focus: Arc<Mutex<Option<&'static str>>>,
+            _owner: Rc<()>,
+        }
+        impl DeliveryTarget for Positioned {
+            fn name(&self) -> String {
+                self.name.into()
+            }
+            fn preview_anchor(&self) -> Option<PreviewRect> {
+                self.anchor
+            }
+            fn restore(&self) -> Result<()> {
+                *self.focus.lock().unwrap() = Some(self.name);
+                Ok(())
+            }
+            fn validate(&self) -> Result<()> {
+                anyhow::ensure!(*self.focus.lock().unwrap() == Some(self.name));
+                Ok(())
+            }
+        }
+        struct RecordingTyper {
+            focus: Arc<Mutex<Option<&'static str>>>,
+            delivered: Arc<Mutex<Vec<(&'static str, String)>>>,
+        }
+        impl TextTyper for RecordingTyper {
+            fn type_text(&self, text: &str) -> Result<()> {
+                self.delivered
+                    .lock()
+                    .unwrap()
+                    .push((self.focus.lock().unwrap().unwrap(), text.into()));
+                Ok(())
+            }
+        }
+
+        let a = PreviewRect::new(125.0, 241.0, 1.0, 19.0).unwrap();
+        let b = PreviewRect::new(-913.0, 57.0, 2.0, 23.0).unwrap();
+        let c = PreviewRect::new(713.0, -216.0, 0.0, 17.0).unwrap();
+        // A tray session can have a legal window but no caret at either boundary.
+        // Clicking an input must still work before or after recognition is ready;
+        // once A/B/C wins, a later click on D must not redirect the edited result.
+        for (start, stop, click_before_ready, expected_name, expected_anchor) in [
+            (Some(Some(a)), Some(Some(b)), true, "A", a),
+            (Some(Some(a)), Some(Some(b)), false, "A", a),
+            (None, Some(Some(b)), false, "B", b),
+            (Some(None), Some(Some(b)), true, "B", b),
+            (Some(None), Some(None), true, "C", c),
+            (Some(None), Some(None), false, "C", c),
+            (None, None, true, "C", c),
+            (None, None, false, "C", c),
+        ] {
+            let directory = tempdir().unwrap();
+            let history = HistoryStore::at(directory.path().join("history.jsonl"), 4096);
+            let worker_history = history.clone();
+            let delivered = Arc::new(Mutex::new(Vec::new()));
+            let output = Arc::clone(&delivered);
+            let (commands, receiver) = mpsc::channel();
+            let worker_commands = commands.clone();
+            let (notify, events) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let focus = Arc::new(Mutex::new(None));
+                let typer = RecordingTyper {
+                    focus: Arc::clone(&focus),
+                    delivered: output,
+                };
+                run_preview_session(
+                    SessionId(27),
+                    &typer,
+                    Some(&worker_history),
+                    &FinalizationGate::new(),
+                    (worker_commands, receiver),
+                    |stage| {
+                        let (name, anchor) = match stage {
+                            CaptureStage::Start => ("A", start),
+                            CaptureStage::Stop => ("B", stop),
+                            CaptureStage::Click((1.0, 2.0)) => ("C", Some(Some(c))),
+                            CaptureStage::Click((3.0, 4.0)) => ("D", Some(Some(b))),
+                            CaptureStage::Click(_) => bail!("not an input click"),
+                        };
+                        Ok(Positioned {
+                            name,
+                            anchor: anchor.ok_or_else(|| anyhow::anyhow!("no target"))?,
+                            focus: Arc::clone(&focus),
+                            _owner: Rc::new(()),
+                        })
+                    },
+                    &|event| notify.send(event).is_ok(),
+                );
+            });
+            assert!(matches!(
+                events.recv_timeout(Duration::from_secs(1)).unwrap(),
+                PreviewUpdate::Destination { stopped: false, .. }
+            ));
+            commands.send(PreviewCommand::SelectAt((1.0, 2.0))).unwrap();
+            commands.send(PreviewCommand::Stop).unwrap();
+            let PreviewUpdate::Destination {
+                stopped, anchor, ..
+            } = events.recv_timeout(Duration::from_secs(1)).unwrap()
+            else {
+                panic!("stop capture must finish before preview activation");
+            };
+            assert!(stopped);
+            assert_eq!(anchor, start.flatten().or(stop.flatten()));
+
+            let clicks = || {
+                commands
+                    .send(PreviewCommand::SelectAt((-1.0, -1.0)))
+                    .unwrap();
+                commands.send(PreviewCommand::SelectAt((1.0, 2.0))).unwrap();
+                commands.send(PreviewCommand::SelectAt((3.0, 4.0))).unwrap();
+            };
+            if click_before_ready {
+                clicks();
+            }
+            commands
+                .send(PreviewCommand::Transcribed(Some(
+                    (
+                        "recognition draft".into(),
+                        Some("recognition warning".into()),
+                    )
+                        .into(),
+                )))
+                .unwrap();
+            loop {
+                if let PreviewUpdate::Ready {
+                    destination,
+                    anchor,
+                    warning,
+                    text,
+                    ..
+                } = events.recv_timeout(Duration::from_secs(1)).unwrap()
+                {
+                    assert_eq!(text, "recognition draft");
+                    assert!(warning.unwrap().contains("recognition warning"));
+                    if click_before_ready || expected_name != "C" {
+                        assert_eq!(destination, expected_name);
+                        assert_eq!(anchor, Some(expected_anchor));
+                    } else {
+                        assert_eq!(anchor, None, "Ready must not be a fourth capture");
+                    }
+                    break;
+                }
+            }
+            if !click_before_ready {
+                clicks();
+            }
+            commands
+                .send(PreviewCommand::Confirm("edited final 🎙️".into()))
+                .unwrap();
+            worker.join().unwrap();
+            if !click_before_ready && expected_name == "C" {
+                let update = events.try_iter().find_map(|event| match event {
+                    PreviewUpdate::Destination {
+                        destination,
+                        anchor,
+                        warning,
+                        ..
+                    } => Some((destination, anchor, warning)),
+                    _ => None,
+                });
+                assert_eq!(
+                    update,
+                    Some(("C".into(), Some(c), Some("recognition warning".into())))
+                );
+            }
+            assert_eq!(
+                *delivered.lock().unwrap(),
+                [(expected_name, "edited final 🎙️".into())]
+            );
+            assert_eq!(history.load_recent().unwrap(), ["edited final 🎙️"]);
+        }
+    }
+
+    #[test]
+    fn late_selection_cannot_revive_empty_cancelled_or_confirmed_previews() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone, Copy, Debug)]
+        enum Case {
+            Empty,
+            Cancelled,
+            CancelledDuringClick,
+            ClosedTarget,
+            ConfirmationFailed,
+            PartialDelivery,
+        }
+        struct Destination<'a> {
+            name: &'static str,
+            anchor: Option<PreviewRect>,
+            closed: bool,
+            focused: &'a Cell<&'static str>,
+        }
+        impl DeliveryTarget for Destination<'_> {
+            fn name(&self) -> String {
+                self.name.into()
+            }
+            fn preview_anchor(&self) -> Option<PreviewRect> {
+                self.anchor
+            }
+            fn restore(&self) -> Result<()> {
+                self.focused.set(self.name);
+                anyhow::ensure!(!self.closed, "original target closed");
+                Ok(())
+            }
+            fn validate(&self) -> Result<()> {
+                anyhow::ensure!(!self.closed);
+                Ok(())
+            }
+        }
+        struct PartialTyper(AtomicUsize);
+        impl TextTyper for PartialTyper {
+            fn type_text(&self, _: &str) -> Result<()> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Err(crate::input::typer::PartialTextDelivery.into())
+            }
+        }
+        // A later valid input click cannot turn an error/cancelled preview into a
+        // deliverable one, redirect a failed confirmation, or repeat a partial paste.
+        for case in [
+            Case::Empty,
+            Case::Cancelled,
+            Case::CancelledDuringClick,
+            Case::ClosedTarget,
+            Case::ConfirmationFailed,
+            Case::PartialDelivery,
+        ] {
+            let gate = FinalizationGate::new();
+            let focused = Cell::new("none");
+            let typer = PartialTyper(AtomicUsize::new(0));
+            let (commands, receiver) = mpsc::channel();
+            commands.send(PreviewCommand::Stop).unwrap();
+            commands
+                .send(PreviewCommand::Transcribed(Some(
+                    (
+                        if matches!(case, Case::Empty) {
+                            ""
+                        } else {
+                            "draft"
+                        }
+                        .into(),
+                        None,
+                    )
+                        .into(),
+                )))
+                .unwrap();
+            if matches!(
+                case,
+                Case::ClosedTarget | Case::ConfirmationFailed | Case::PartialDelivery
+            ) {
+                commands
+                    .send(PreviewCommand::Confirm("first confirmation".into()))
+                    .unwrap();
+            }
+            commands.send(PreviewCommand::SelectAt((1.0, 2.0))).unwrap();
+            commands
+                .send(PreviewCommand::Confirm("stale confirmation".into()))
+                .unwrap();
+            commands.send(PreviewCommand::Cancel).unwrap();
+            run_preview_session(
+                SessionId(31),
+                &typer,
+                None,
+                &gate,
+                (commands, receiver),
+                |stage| {
+                    let clicked = matches!(stage, CaptureStage::Click(_));
+                    if clicked && matches!(case, Case::CancelledDuringClick) {
+                        gate.cancel();
+                    }
+                    Ok(Destination {
+                        name: if clicked {
+                            "late input"
+                        } else {
+                            "original input"
+                        },
+                        anchor: (clicked || matches!(case, Case::ClosedTarget))
+                            .then(|| PreviewRect::new(113.0, 217.0, 1.0, 19.0).unwrap()),
+                        closed: matches!(case, Case::ClosedTarget | Case::ConfirmationFailed),
+                        focused: &focused,
+                    })
+                },
+                &|event| {
+                    if matches!(case, Case::Cancelled)
+                        && matches!(event, PreviewUpdate::Ready { .. })
+                    {
+                        gate.cancel();
+                    }
+                    true
+                },
+            );
+            assert_eq!(focused.get(), "original input", "{case:?}");
+            assert_eq!(
+                typer.0.load(Ordering::Relaxed),
+                usize::from(matches!(case, Case::PartialDelivery)),
+                "{case:?}"
+            );
+        }
+    }
 
     #[test]
     fn preview_receives_captured_coordinates_before_focus_restoration() {

@@ -31,22 +31,34 @@ Each pending candidate stores one session ID and a single confirmation phase: re
 or retry blocked. Matching-session cancellation remains available after retries are blocked,
 and queued callbacks are rejected while an accepted command is in progress.
 
-Finalization prepares text and captures the destination on its worker before displaying the
-main-thread native preview. Only text, destination labels, session IDs and commands cross the
-thread boundary. The worker waits for confirmation or cancellation and retains the native target.
+HTTP and Realtime start the same destination owner when recording starts. It tries capture at
+start, again at stop if there is no anchor, and then on a post-stop input click if still unpositioned.
+The first valid anchor and its corresponding native target remain paired; a successful capture
+without geometry does not lock selection. Recognition completion only provides text, never a fourth
+capture. Recognition/cleanup waits on a separate session worker so input clicks remain actionable
+before and after Ready. Only text, destination metadata, session IDs and commands cross threads.
+The native target stays on its original owner until confirmation or cancellation.
 The recording machine stays `Stopping` until that worker returns; the microphone and tray already
-show stopped. Pending recording requests focus the current preview. Confirmation accepts one
+show stopped. Stop capture is acknowledged before any preview activation. Pending recording requests
+then focus the current preview. Confirmation accepts one
 transaction at a time, carries the current edited text, saves each confirmed revision once,
 restores the target and validates it after the platform
 focus delay. Failures preserve the candidate; partial SendInput acceptance disables automatic retry.
-Cancel drops the candidate without saving history; exit cancels the gate and disconnects the worker.
+Cancel drops the candidate without saving history and explicitly wakes the owner; exit also cancels
+the gate. Completion follows destination restoration and recognition cleanup.
 
-Realtime starts this same delivery worker when recording starts, captures the destination before
-any preview can take focus, and waits for the recorder's stop signal before finalization. Native
-target objects stay on that worker. A recording-scoped latest-text mailbox wakes the UI without
+The existing global input hook forwards left-button release separately from hotkey events, capturing
+its screen point and monotonic time in the callback. Only clicks after the current stop boundary are
+eligible; native hit testing must match the currently focused editable control. Invalid, secure,
+read-only, tray and own-window clicks do not lock selection. Late selection updates metadata and
+relocates the existing bubble without replacing text, selection, scrolling or undo, and without
+activating it. Original recognition warnings survive removal of an unavailable-target warning.
+Selection closes at confirmation/cancellation, and error-only previews cannot gain delivery capability.
+
+Realtime additionally uses a recording-scoped latest-text mailbox to wake the UI without
 queuing every token. Provisional text is read-only/selectable, Enter cannot confirm it, and no
-`PendingPreview` command channel exists until final validation. During recording the bubble is
-non-activating; stop focuses it once. Esc closes progress, cancels the recognition token even
+`PendingPreview` exists until final validation. During recording the bubble is
+non-activating; acknowledged stop focuses it once. Esc closes progress, cancels the recognition token even
 after finalizer detachment, and drives session-scoped recorder/orchestrator cleanup. The machine
 stays `Stopping` until cleanup and destination restoration finish, preventing restart races.
 
@@ -56,12 +68,12 @@ and pure additions append. Shared `platform::preview::TextPatch` uses Chinese se
 Unicode word/grapheme boundaries; native adapters convert byte offsets to UTF-16 (including
 Windows CRLF), preserve prefix selection and scroll, and clear programmatic undo/held-key state
 at the ready transition. Failure discards the current unvalidated tail; only validated partial
-results can enter the editable warning/confirmation path. HTTP and dataset capture keep their
-existing finalization path.
+results can enter the editable warning/confirmation path. HTTP shares target selection and final
+confirmation without provisional text. Dataset capture keeps its existing finalization path.
 
-Recognition failure or convergence timeout with no usable text retains an empty, read-only preview
-and a distinct cancellation warning. Existing retry-blocked state rejects Enter but allows Esc;
-the worker keeps waiting until cancellation, then restores its saved destination. Its initial empty
+Recognition failure or convergence timeout with no usable text retains a warning-only preview;
+the empty, read-only editor and its layout space are hidden. Existing retry-blocked state rejects
+Enter but allows Esc; the worker keeps waiting until cancellation, then restores its saved destination. Its initial empty
 body cannot acquire delivery capability from later confirmation text, so error previews never inject,
 save history, or submit learning. Nonempty partial results remain editable with their warning;
 empty success, silence, and no-chunk results stay quiet. The integration render fixture uses the

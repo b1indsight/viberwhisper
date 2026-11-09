@@ -259,6 +259,12 @@ pub enum HotkeyEvent {
     Released(HotkeySource),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InputEvent {
+    Hotkey(HotkeyEvent),
+    PointerReleased,
+}
+
 #[derive(Debug)]
 pub(crate) struct EventMapper {
     hold_key: Option<Key>,
@@ -311,15 +317,15 @@ impl EventMapper {
     }
 }
 
-/// Start the process-lifetime global hotkey listener.
+/// Start the process-lifetime keyboard and pointer listener.
 ///
 /// The detached `rdev` thread cannot be stopped independently; process shutdown is its lifetime
 /// boundary. The filter returns `Some` to map an event or `None` to drop it and reset mapper
 /// key-down bookkeeping.
-pub(crate) fn start_hotkey_listener<P, F>(
+pub(crate) fn start_input_listener<P, F>(
     config: &HotkeyConfig,
     filter: F,
-    notify: impl Fn(HotkeyEvent) + Send + 'static,
+    notify: impl Fn(InputEvent) + Send + 'static,
 ) where
     P: HotkeyPolicy,
     F: Fn(EventType) -> Option<EventType> + Send + 'static,
@@ -342,7 +348,7 @@ pub(crate) fn start_hotkey_listener<P, F>(
 fn spawn_listener<F>(
     mut mapper: EventMapper,
     filter: F,
-    notify: impl Fn(HotkeyEvent) + Send + 'static,
+    notify: impl Fn(InputEvent) + Send + 'static,
 ) where
     F: Fn(EventType) -> Option<EventType> + Send + 'static,
 {
@@ -350,8 +356,14 @@ fn spawn_listener<F>(
         debug!("rdev listener thread started");
         let callback = move |event: Event| {
             let event_type = filter(event.event_type);
+            if matches!(
+                event_type,
+                Some(EventType::ButtonRelease(rdev::Button::Left))
+            ) {
+                notify(InputEvent::PointerReleased);
+            }
             if let Some(event) = mapper.map_filtered(event_type) {
-                notify(event);
+                notify(InputEvent::Hotkey(event));
             }
         };
 

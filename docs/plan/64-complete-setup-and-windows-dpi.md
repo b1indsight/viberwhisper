@@ -1310,3 +1310,273 @@ DPI 通知重入的最小处理、CI runner 的 DPI 和可执行的预览场景�
   浏览器/Electron 提供者、查询中途失焦/失效、真实混合 DPI/4K/IME 和用户实际应用仍待 Windows 验收。
 - **交付状态：** 产品、原生用例和 changelog 已在本地修改；未提交、推送或创建新 PR。
   后续需获推送/建 PR 授权并通过既有审查门禁，再让正常 Windows CI 运行上述原生场景、下载并检查截图。
+
+### [034] — 2026-11-09 — Chrome 网页输入框仍居中的定向修复方案（待批准）
+
+#### 已确认的场景与证据边界
+
+- 用户补充：ViberWhisper v0.5.2，Windows Chrome 网页内输入框，浮窗仍在屏幕中央。
+  [本次讨论](https://ampcode.com/threads/T-01a1bfcd-54c3-738e-81be-d67110954ef3)。
+  本次 fetch 后 `origin/master` 仍是 [v0.5.2 发布准备提交](https://github.com/b1indsight/viberwhisper/commit/851e9bca)，
+  已包含 [PR #167](https://github.com/b1indsight/viberwhisper/pull/167) 的 [033] 实现。
+- [当前捕获](../../src/platform/windows/preview/position.rs) 只尝试 Win32 caret、UIA 和原生 Edit/RichEdit 边界；
+  没有读取 MSAA `OBJID_CARET`。无可用锚点时 [show/show_streaming](../../src/platform/windows/preview.rs)
+  明确居中。尚无用户机器的捕获日志，不能确定是 UIA 初始化、元素资格、窗口归属、超时还是焦点复检失败。
+- 既有 [geometry_probe](../../src/platform/windows/preview/geometry_probe.rs) 只使用 WPF，并允许精确 caret
+  或整个输入框边界二选一通过。[此前 Windows CI](https://github.com/b1indsight/viberwhisper/actions/runs/42504998082)
+  的首行与末行锚点均为 `(100, 80, 240, 180)`，独立期望的 caret 分别为 `(119, 81, 0, 23.94)`
+  与 `(144, 177, 0, 23.94)`。这只证明输入边界回退，不证明精确光标定位，更没有覆盖 Chrome。
+- 已核读固定 Chromium 源码：
+  [顶层窗口](https://github.com/chromium/chromium/blob/e14e318bf332ed2ae1d5dda82e56ff09ba4d6ae3/ui/views/win/hwnd_message_handler.cc#L1371-L1387)
+  根据当前文字输入客户端更新 MSAA caret，并在
+  [焦点属于本 HWND 时响应 OBJID_CARET](https://github.com/chromium/chromium/blob/e14e318bf332ed2ae1d5dda82e56ff09ba4d6ae3/ui/views/win/hwnd_message_handler.cc#L2364-L2369)；
+  [旧渲染窗口](https://github.com/chromium/chromium/blob/e14e318bf332ed2ae1d5dda82e56ff09ba4d6ae3/content/browser/renderer_host/legacy_render_widget_host_win.cc#L417-L423)
+  也保留 caret 接口。因此不能假定原生焦点一定是 `Chrome_RenderWidgetHostHWND`，或只查询该类。
+  [caret 几何](https://github.com/chromium/chromium/blob/e14e318bf332ed2ae1d5dda82e56ff09ba4d6ae3/ui/accessibility/platform/ax_system_caret_win.cc#L70-L106)
+  使用物理像素，隐藏时设置 invisible。此源码不证明用户安装版本中的实际返回值。
+- [Chrome 官方说明](https://developer.chrome.com/blog/windows-uia-support-update) 指出 Chrome 138 起默认提供原生 UIA，
+  MSAA/IA2 仍可直接访问；不能笼统归因为 Chrome 不支持 UIA。首次查询尚未得到网页元素只是待验证假设。
+
+#### 拟采用的最小修复
+
+1. **先定位实际失败阶段。** 在现有捕获函数中增加必要的 debug 阶段日志，区分原生 caret 缺失、
+   UIA 查询错误、元素被拒绝、无 caret 几何与焦点失效；只记录阶段、窗口类、几何及耗时，不读取或记录网页文字、
+   值、元素名称或标题。日志不新增领域状态、公共诊断协议或通用无障碍框架。
+2. **有资格的输入元素补读 MSAA caret。** 保留 Win32 快路径和现有 UIA 插入点；UIA 未提供有效插入点时，
+   在输入框边界回退之前尝试已捕获焦点 HWND 的 `OBJID_CARET`/`IAccessible::accLocation`。
+   只接受有效、非 invisible 的 caret，并核对目标窗口、原生及可访问性焦点与输入区域；物理像素不再次缩放。
+   不使用 `hwnd = NULL` 的全局 caret，不扫描其他窗口，也不将裸 caret 对象当作输入元素可写或非密码的证据。
+   现有密码、只读、失效、非编辑元素和焦点/归属拒绝策略不放宽。COM 与 VARIANT 在当前捕获工作线程释放。
+3. **居中失败不能只靠增加几何接口掩盖。** 若真实 Chrome 基线显示 UIA 尚未暴露实际网页焦点，
+   先针对已验证属于目标窗口的网页宿主初始化/查询 UIA，再在同一次捕获内作有界重查；每次重查仍执行原有安全检查。
+   只有运行证据证明需要时才保留这段兼容处理。不得要求用户加启动参数、启用系统屏幕阅读器或修改 Chrome 配置，
+   不照搬全局 `SPI_SETSCREENREADER`，也不无条件发送屏幕阅读器探测消息。
+   若问题来自别的具体拒绝条件，应修正该条件的已验证错误，不绕过拒绝或堆叠多个猜测性 fallback。
+4. **不改变气泡与会话语义。** 仍在浮窗获得焦点前捕获文字插入点，同一会话复用，沿用既有下方优先、
+   底部翻转与工作区限位；不改鼠标定位、不增加实时跟踪定时器，不改 macOS、外观、投递、依赖或打包。
+   `position/automation.rs` 继续拥有辅助功能几何，优先在现有文件修改，不预建新模块。
+
+#### 实施顺序与验收
+
+- 批准后先扩展既有受监督的 Windows 原生驱动，使用有头 Chrome、临时独立 profile 和自有测试页；
+  在未改产品行为时运行，记录 Chrome 版本、实际原生焦点类、各捕获阶段与返回锚点。
+  不使用 `--force-renderer-accessibility`、headless、辅助功能树预热工具或人造 anchor 来替代基线。
+  没有安装 Chrome、没有运行到捕获、没有复现时都明确报告，不记作已修复。
+- 普通 `input`、多行 `textarea` 和 `contenteditable` 覆盖首次与重复捕获、空内容以及两个明显不同的插入位置。
+  期望位置由自有页面的独立几何与物理屏幕映射提供，不能从待测 MSAA/UIA 返回值反推。
+  精确 caret 案例不得接受整个输入框矩形或屏幕中心；旧 WPF 的降级合同另行保留，不混为精确定位通过。
+- 使用同一捕获锚点实际显示生成中与最终气泡，检查相对插入点的位置与工作区限位，保存并查看包含自有网页输入区域的
+  原始桌面截图。鼠标放在远处，避免把鼠标定位误判为成功。至少验证 textarea 换行前后结果确实变化。
+- 保留 password、readonly、按钮及切换焦点/前台的负对照；新 MSAA 路径不能让这些目标获得锚点。
+  逐项禁用实际保留的 MSAA 或初始化修复，在相同 Chrome 场景验证对应失败重新出现；无法复现的候选不保留。
+- 沿用 Windows Job、准入、串行桌面输入与清理机制，Chrome 的子进程及临时 profile 一并受监督和清理。
+  不延长或放宽既有 setup、scrollbar、geometry 阶段；必要时为浏览器场景增加独立有界阶段。
+  UIA 连接/事务超时不等于总捕获硬期限，也不约束 MSAA COM 调用；不得把一次响应探测声称为防挂起保证。
+  若新增调用造成不可接受的捕获阻塞，先报告并缩减方案，不默认引入永久后台线程或进程框架。
+- 运行格式、macOS 现有回归和 Windows 交叉类型/lint；交叉检查不代替 Windows 浏览器运行。
+  本机没有 Windows runner，真实红/绿、截图和消融必须在可用 Windows 环境执行；如使用正常 PR CI，
+  先取得代码推送/建 PR 授权并遵守现有审查门禁，不手动触发发布。真实 4K/混合屏未覆盖时单独说明。
+
+#### 当前状态
+
+- 仅补充本方案，待用户批准；尚未改产品或测试代码，未提交、推送或新建 PR。
+- 已取得 tools/MCP 为空、固定 Opus 5.5 的只读方案咨询，并按源码修正了其中只允许旧渲染窗口类的过度限制。
+  咨询中的强制新增诊断枚举、以预探测保证 MSAA 超时及额外通用框架未采纳。咨询不算 Windows 执行证据。
+
+### [035] — 2026-11-09 — 统一三阶段定位，最早有效位置优先
+
+#### 背景与决定状态
+
+- 用户已对照测试：同一 Windows Chrome 场景，快捷键录音正常，只有托盘录音居中；托盘使用流程是在停止录音后
+  再点击输入框提供输入位置。随后明确确认三个定位时点为“开始、停止、停止后点击输入框”，最早成功的位置优先。
+  来源：[本次讨论](https://ampcode.com/threads/T-01a1bfcd-54c3-738e-81be-d67110954ef3)。
+- 源码确认：[Realtime 在开始时捕获、HTTP 在最终转写后捕获](../../src/ui/listener/event_loop.rs#L701-L772)，
+  [普通输入点击没有转发为定位事件](../../src/input/hotkey.rs#L280-L299)，
+  [确认阶段只接收确认/取消](../../src/ui/preview.rs#L269-L288)。这证明缺少录音后选目标的流程，
+  不代表已在用户机器确认每个 Windows API 的返回值。
+- **行为要求已确认，以下技术实施方案待批准。** 本条取代 [034] 的捕获时机方案；先解决共享流程，
+  暂缓其 MSAA、Chrome 初始化和新增几何兼容路径。不改原生坐标来源、DPI 换算、布局规则、识别接口或打包。
+
+#### 统一行为合同
+
+- Realtime 与 HTTP、快捷键与托盘使用同一规则：开始录音时尝试；尚无有效位置则在停止录音时尝试；
+  仍无有效位置则接受停止后的输入框点击。**转写完成只更新文字，不再成为第四个定位时点。**
+- “成功定位”要求原生目标捕获通过已有校验，并返回有效 `preview_anchor`。仅取得标题/窗口句柄，
+  或 `Ok(target)` 但没有坐标，均不锁定定位优先级。现有光标矩形及被允许的输入框边界仍按原规则使用。
+- 首次成功时整体保留该次捕获的输入目标与锚点；后续阶段不得覆盖，也不因晚到的识别结果重新捕获。
+  已锁定目标后来失效，仍由现有恢复/投递校验报错，不自动改投到另一个窗口；不新增历史 caret/DOM 选区恢复能力。
+- 没有坐标时可暂时居中，但居中不算定位成功。三阶段均无坐标时保留现有受校验投递及手动复制路径，
+  不凭鼠标坐标伪造文字插入点，不凭窗口句柄放宽目标安全检查。
+
+| 开始录音 | 停止录音 | 停止后点击输入框 | 最终位置与对应目标 |
+|---|---|---|---|
+| 成功 A | 有其他位置 B | 有其他位置 C | 保留 A，后续不覆盖 |
+| 未定位 | 成功 B | 有其他位置 C | 保留 B，后续不覆盖 |
+| 未定位 | 未定位 | 成功 C | 使用 C，包括气泡已经显示的情况 |
+| 未定位 | 未定位 | 未定位 | 保留居中与既有失败/复制处理 |
+
+#### 最小技术方案与边界
+
+1. **共享会话拥有定位规则。** 在 `src/ui/listener/event_loop.rs`、`src/ui/preview.rs` 中统一 delivery worker
+   的开始/停止生命周期，两种识别模式都从开始时保存候选目标。原生对象始终留在同一个所属工作线程，
+   UI 只接收带 `SessionId` 的位置、目标标签和就绪状态；不标注原生对象为 `Send`，不建立全局目标追踪框架。
+2. **停止定位先于浮窗激活。** 调整现有停止路径及进度显示中的聚焦条件，先让所属线程完成第二阶段定位或确认
+   已有首选位置，再执行原来的停止后聚焦。主线程不等待原生查询，不让浮窗先抢焦点后再读取“当前输入框”。
+3. **等待识别不阻塞选目标。** 最终识别/整理在会话内独立完成，经现有消息边界交回文字；目标所属线程持续处理
+   停止、点击、确认和取消。识别结果在第三次点击之前或之后返回，不能改变定位优先级。
+   未显示的气泡缓存新锚点，已显示的气泡也可补位，不能仅在 `Ready` 之前接受第三阶段。
+4. **复用现有输入监听转发必要点击。** 在 `src/input/hotkey.rs` 与 `src/platform/runtime.rs` 的既有 rdev
+   监听路径增加点击通知，保持热键与指针意图的区分，不另建鼠标监听器。仅当前会话已停止、尚未定位且未结束时
+   接受第三阶段；托盘、自身浮窗及非输入区域的点击不能占用成功位置。密码、只读及失效目标沿用原有拒绝边界。
+   捕获前须核对点击对应的原生可编辑控件及实际焦点，必要时在该次事件内有限复核；不得用固定延时、连续两次
+   相同采样或“前台窗口必须变化”替代点击已处理的证据。同一 Chrome 窗口内点击输入框也必须支持。
+5. **位置与目标一起补位，文字不重置。** 扩展现有预览消息及 Windows/macOS 原生预览入口，只更新锚点、
+   目标元数据和必要的目标提示，再复用布局；不以重新 `show` 的方式覆盖正文、编辑、选区、滚动或撤销栈，
+   不为第三阶段的重定位额外抢焦点。无坐标候选不阻止后续定位；最终无坐标时继续保留已有合法目标的投递校验，
+   不能只移气泡却仍把文字发给另一候选目标。目标变化时只刷新相关提示，保留识别警告。
+6. **收尾与安全合同不变。** 确认、取消、退出或部分投递禁止重试后停止选目标；迟到消息不改变新会话。
+   取消应显式唤醒目标所属线程，及时阻止输入并按原规则恢复目标；后台识别清理结束后才发布会话完成。
+   空文本或仅错误提示的预览不能因后来点击输入框获得确认能力；历史仍按现有确认事务去重，学习仅在成功投递后提交。
+   Prompt-lab 数据集采集路径不参与本次调整。
+
+#### 实施顺序、验证与风险
+
+- 批准后先扩展既有 listener/preview 合同测试，复现“开始和停止均无位置、停止后点击才提供位置”在旧实现失败，
+  再实现共享生命周期与三阶段规则，最后接入点击和原生气泡补位。断言可观察的目标/坐标、实际投递对象与正文，
+  不以私有函数调用次数或顺序作为成功依据。
+- 用不同的 A/B/C 目标和非对称坐标覆盖上表；增加无坐标成功候选、识别先/后完成、气泡已编辑后补位、同窗口
+  输入框切换、早先目标关闭、无效点击、取消及迟到会话事件。既有空结果、部分输入、历史和学习回归继续保留。
+- 原生点击早于目标更新是必须验证的竞态：[Windows rdev 回调](../../vendor/rdev/src/windows/listen.rs#L20-L41)
+  在 `CallNextHookEx` 前通知调用方。实施时验证点击与焦点/输入框的对应关系，不能把稳定的旧焦点锁成第三阶段结果；
+  不声称原有 UIA 单次超时或有限重试等于整个捕获事务的硬期限。具体原生时序须在测试驱动中验证。
+- 运行 `cargo fmt --check`、macOS 现有 integration 测试与 all-targets Clippy，以及既有 Windows 交叉检查。
+  对原生重定位检查短/长正文、已有编辑及第三阶段发生于最终结果前后的状态，捕获并查看渲染结果，确认没有文本重置。
+- 可用 Windows 环境中用真实 Chrome 输入框，对照修改前后的托盘开始/停止/点击与快捷键流程，并加入托盘、按钮、
+  密码框等负对照；检查浮窗位置和最终落字都属于选中的目标。沿用受监督的原生驱动与清理边界，必要时增加独立阶段，
+  不放宽原有阶段。临时关闭第三阶段应重现该失败，临时允许后续覆盖应使 A/B 优先级用例失败。
+- 本机仅有 Mac runner。Windows 交叉检查不能代替真实托盘/Chrome 运行；没有原生证据时明确保留该验收项，
+  不声称 Windows 问题已修复。本次不推送、不创建 PR，也不手动触发 CI、发布或部署。
+
+#### 当前交付状态
+
+- 仅追加本技术方案；三时点及最早成功优先由用户确认，产品与测试代码尚未修改，未提交、推送或新建 PR。
+- 已核验 Opus 5.5 只读咨询的实际模型及空 tools/MCP 初始化。采用会话内目标所有权与识别等待解耦的建议；
+  未采纳把指针混入热键类型、仅凭同进程拒绝托盘、连续两次相同采样即视为焦点收敛等不足以保证合同的建议。
+  咨询不作为原生执行证据。
+
+### [036] — 2026-11-09 — 三阶段目标与位置成对补位，缩小浮窗留白（本地实现）
+
+#### 批准范围与实现选择
+
+- 用户接受 [035] 的整体方案，并补充缩小窗口边框留白；本条记录实际实现及验证，保留此前方案原文。
+  来源：[本次讨论](https://ampcode.com/threads/T-01a1bfcd-54c3-738e-81be-d67110954ef3)。
+- [共享预览会话](../../src/ui/preview.rs) 统一处理开始、停止和停止后点击。HTTP 与 Realtime 都由
+  [录音开始时启动的目标所属线程](../../src/ui/listener/event_loop.rs) 捕获目标，识别等待在独立线程完成；
+  最终识别消息只带文字，不再捕获第四个位置。无锚点的合法目标不会阻止后续定位，首个有效锚点与目标一起保留。
+- 停止捕获的确认消息先于浮窗激活。第三阶段在最终文字显示后仍可生效；已显示窗口只更新目标、锚点和提示，
+  不重新显示或改写正文，也不额外抢焦点。保留原有识别警告；只有目标捕获并校验成功才清除目标不可用提示。
+- [输入监听](../../src/input/hotkey.rs) 沿用既有 rdev 线程，把左键释放与热键分开；
+  [平台运行时](../../src/platform/runtime.rs) 在回调内取得坐标和单调时间。界面仅向已停止的当前会话转发
+  不早于停止边界的点击，防止录音前或停止前排队的点击被当作第三阶段。
+- Windows 与 macOS 的 `capture_after_click` 检查点击位置对应的可编辑元素与当前焦点，拒绝托盘、自身浮窗、
+  非编辑、密码及只读控件，不要求切换顶层窗口；Windows 保留 UIA/原生几何，macOS 保留 AX 几何。
+  不引入固定延时、MSAA、浏览器开关、连续跟踪或以鼠标点伪造 caret。
+- 目标对象、确认事务和重试状态仍由同一线程拥有。取消显式唤醒该线程，在捕获后再次检查取消；
+  清理识别线程后才发送完成。空结果、失败提示、部分输入后禁止重试、历史去重及仅成功投递后学习的约束不变。
+  Windows 的投递目标校验仍是原有 HWND 层级，不声称能恢复历史 DOM 焦点或选区。
+- 两平台使用一致的紧凑留白：水平内边距 16→10、垂直 12→6 逻辑单位，配套缩小自然宽度和提示区留白。
+  保留字体、正文视口上限与 1px 描边；重定位复用原有布局和工作区限位。
+
+#### 回归、消融与已运行检查
+
+- 先在既有 preview 测试文件扩展共享合同。旧接口首先出现缺少新命令/入口的编译失败；此阶段不计作
+  Windows 场景复现。实现后以非对称 A/B/C/D 目标和坐标验证首个成功位置及对应实际投递对象，
+  覆盖无坐标候选、识别先后完成、无效点击、最终结果后补位及保留编辑后的确认正文。
+  另覆盖取消、捕获中取消、空结果、失败提示和部分输入后禁止重试，复用原有确认/历史回归。
+- 使用 `cargo test --locked --lib ui::preview::tests`，逐一临时关闭第三阶段、只允许 Ready 前点击、
+  允许后续位置覆盖、把无坐标候选当作已定位，以及移除点击捕获后的取消检查。同一组合同用例分别失败，
+  说明这些机制保护了可观察行为；全部变体已恢复。删去与 `can_select()` 重复的内部锚点防护，未增加新的定位层。
+  日志保存在本线程 `.amp/in/artifacts/three-stage-ablation-*.log`。
+- 已运行 `cargo test --locked --features integration`、`cargo build --locked --features integration`，
+  macOS all-targets Clippy 在默认及 integration feature 下通过。
+  Windows GNU all-targets Clippy 在 `windows-app` 及 `windows-app,integration` 下通过，使用 `DOCS_RS=1`；
+  这是交叉类型/lint 检查，不包含 Windows 链接、UIA、托盘或 Chrome 执行。既有 vendor/rdev 警告未改。
+- 已运行 `cargo run --locked --features integration --bin viberwhisper-preview -- --artifacts .amp/in/artifacts/three-stage-final-native-preview`，
+  执行自有原生窗口的编辑及重定位检查并导出图片，不使用麦克风、网络、个人输入目标、历史或实际落字。
+  生成中和已编辑长文的原生检查验证正文、选区、滚动、撤销、目标标题、警告、位置及焦点保持。
+  已查看短句、已有编辑、长文、带警告长文、生成中、撤回到空、识别失败和超时的最终图片。
+- 长文顶部的部分行在旧边距的同一原生缓存截图中也可复现。对照原边距、紧凑布局及移除重定位检查的三个
+  独立进程，确认新布局的文字从 2× 图片第 12 行（6pt）开始，未进入外部留白；紧凑布局有无重定位检查的
+  长文顶部区域没有像素差异。因此不把该现象当成本次新回归，不修改无关滚动或截图行为，也不推断实时合成器
+  必然与缓存截图一致。原图、实验补丁、源码哈希及像素记录保存在本线程
+  `.amp/in/artifacts/three-stage-native-preview-investigation/`。
+- 最终 `cargo fmt --all --check`、`git diff --check`、integration 回归及两平台 integration Clippy 均通过；
+  最终日志和图片保存在本线程 `.amp/in/artifacts/three-stage-final-*`。
+
+#### 验收边界与交付状态
+
+- 当前仅本地实现，未提交、推送、创建 PR、手动触发 CI 或发布。
+- 本机没有 Windows 运行环境；真实 Chrome 的托盘开始/停止/点击、同窗口输入框切换、负对照、
+  最终落字及混合 DPI 仍待 Windows 原生验收。macOS 外部应用的 AX 点击资格与跨屏重定位也未执行。
+  共享回归、原生自有窗口与交叉 Clippy 不替代这些证据，不能据此宣布用户报告已在实机修复。
+
+### [037] — 2026-11-09 — 上下留白在紧凑布局基础上再减半（本地实现）
+
+- **需求与范围：** 用户要求上下宽度再减少一半。将 [036] 的上下留白由 6 降为 3 逻辑单位，
+  正文与提示区的间距、提示下方留白一起减半；左右留白、字体、描边、正文视口范围和三阶段定位流程不变。
+  来源：[本次讨论](https://ampcode.com/threads/T-01a1bfcd-54c3-738e-81be-d67110954ef3)。
+- **实现：** 直接调整 Windows/macOS 现有布局和初始化尺寸，同步现有原生几何断言及平台架构文档。
+  Windows 先将每个 3 单位间距换算为像素再相加，避免 150% 缩放时将两个边距合并取整造成上下相差一像素。
+  没有增加布局抽象或运行时选项，仅数值调整，不另做机制消融。
+- **验证：** 先将既有 macOS 原生断言更新为 3，旧布局运行失败于 `Relocated preview lost its compact body margins`；
+  修改布局后，同一 `viberwhisper-preview --artifacts` 原生流程通过。已查看短句、已有编辑、长文、带提示长文、
+  生成中、撤回到空、失败和超时的最终截图。PNG 尺寸对照确认宽度全部不变，2× 普通气泡减少 12px 高度，
+  带提示气泡减少 18px；长文既有的部分行缓存截图行为未修改。
+- **检查与证据：** `cargo test --locked --features integration`、macOS integration all-targets Clippy、
+  Windows GNU `windows-app,integration` all-targets Clippy、`cargo fmt --all --check` 和 `git diff --check` 均通过。
+  命令沿用 [036]，本轮日志及图片在本线程 `.amp/in/artifacts/three-stage-half-padding-*`；既有 vendor/rdev 警告未改。
+- **交付与限制：** 仍为未提交、未推送的本地改动。Windows 仅交叉类型/lint 检查，未执行 Windows 原生显示或 Chrome/托盘验收。
+
+### [038] — 2026-11-09 — 无正文的识别失败/超时气泡只显示提示（本地实现）
+
+- **需求与原因：** 用户确认移除失败气泡的空白正文。错误提示原本是独立 footer，空正文仍保留 28 单位
+  最小视口。此项调整补充 [037] 的紧凑布局，不改变三阶段定位、识别或输入目标校验。
+  来源：[本次讨论](https://ampcode.com/threads/T-01a1bfcd-54c3-738e-81be-d67110954ef3)。
+- **决策与实现：** Windows/macOS 直接复用原生编辑器的只读状态、提示可见性及正文内容：
+  有提示且正文仅为空白的只读预览隐藏编辑器，省去正文高度和正文/提示间距；提示上下仍各留 3 逻辑单位。
+  最终更新先设置编辑权限再布局，避免窗口复用时用到旧权限。纯提示时聚焦窗口，由既有窗口键盘处理接收 Esc。
+  不以“正文为空”或“禁止重试”单独决定折叠，避免用户清空可编辑结果后丢失编辑区。
+- **保留行为：** 有效部分文字仍可编辑并显示警告；生成流正常撤回为空时保留原视口；输入可能部分完成后
+  仍禁止再次确认。没有改变确认、取消、历史和语境学习规则，也没有增加新的模式、状态字段或布局抽象。
+- **对照与回归：** 先扩展既有原生错误 fixture，旧布局失败于 `Empty error preview still reserves a blank editor row`；
+  修改后同一 `viberwhisper-preview --artifacts` 流程通过。原生断言覆盖部分文字、可编辑空正文、禁止重试仍保留编辑区、
+  仅空白字符的失败及窗口复用；macOS 通过构造原生 Enter/Esc 事件检查隐藏编辑器后的窗口键盘分派，两个错误预览均由 Esc 取消。
+  macOS 截图中失败/超时由 840×138 降为 840×76，其他 fixture 尺寸不变；已查看最终失败、超时、带警告长文、
+  正常短句和撤回为空的截图。仅复用现有状态作条件布局，无需独立机制消融；旧布局对照已验证所移除空间的来源。
+- **检查与证据：** `cargo test --locked --features integration`、macOS integration all-targets Clippy、
+  Windows GNU `windows-app,integration` all-targets Clippy、`cargo fmt --all --check` 和 `git diff --check` 均通过；命令沿用 [036]。
+  日志在本线程 `.amp/in/artifacts/three-stage-error-only-{before,native,tests,macos-clippy,windows-clippy,dimensions,format}.log`，
+  最终截图在 `.amp/in/artifacts/three-stage-error-only-native/`；既有 vendor/rdev 警告未改。
+- **交付与限制：** 仍为未提交、未推送、未发布的本地改动。Windows 原生渲染、焦点/按键及 Chrome/托盘实机场景尚未执行；
+  macOS 自有窗口 fixture 和 Windows 交叉检查不替代 Windows 验收。
+
+### [039] — 2026-11-09 — 纯错误气泡按提示实际宽度收窄（本地实现）
+
+- **需求与范围：** 用户指出 [038] 的纯错误气泡仍明显宽于文字，并确认按最长一行提示的实际宽度自适应。
+  本项仅修改无有效正文的只读错误气泡；带正文的警告、普通编辑/生成预览、三阶段定位及输入安全规则不变。
+  来源：[本次讨论](https://ampcode.com/threads/T-01a1bfcd-54c3-738e-81be-d67110954ef3)。
+- **决策与实现：** 纯错误按原生提示控件测得的最长行宽加左右各 14 逻辑单位留白计算宽度，保留现有上下限和屏幕约束。
+  macOS 使用 label cell 的自然尺寸，包含提示字体与控件自身内边距；达到上限后仅为纯错误启用换行并按受限尺寸增高。
+  Windows 复用既有 `measure_text(status, None)`，随后按最终宽度测高；隐藏正文不再产生滚动条或额外宽度。
+  不增加配置、布局层或共享状态，保留 Enter 拦截、Esc 取消及可编辑空正文。
+- **对照与回归：** 扩展既有原生错误 fixture 后，旧布局失败于 `Short error warning still forces the maximum bubble width`；
+  修改后同一 `viberwhisper-preview --artifacts` 流程通过。等字符数的 i/W 且第二行更长的用例区分原生字形宽度、
+  固定字数估算和只测首行；另覆盖长提示上限/换行、错误窗口复用及带正文布局不变。
+  macOS 原生 padding 探针对相同两行错误和 12pt 系统字比较：仅字形宽取整为 162 时需要 45 高度，
+  原生 cell 宽取整为 172 时仅需 30，验证不能漏掉控件内边距。此为原生测量对照，不代表 Windows 运行证据。
+- **渲染与检查：** 已查看失败、超时、第二行较长、长提示换行、正常短句及带警告长文的最终 macOS 截图。
+  2× 截图中失败由 840×76 收为 400×76，超时由 840×76 收为 448×76；其他既有 fixture 尺寸不变。
+  integration 测试、macOS/Windows GNU all-targets Clippy、`cargo fmt --all --check` 和 `git diff --check` 均通过，命令沿用 [036]。
+  日志在本线程 `.amp/in/artifacts/three-stage-error-width-{before,native,tests,macos-clippy,windows-clippy,dimensions,format,native-padding}.log`；
+  最终截图在 `.amp/in/artifacts/three-stage-error-width-native/`。
+- **交付与限制：** 当前未提交、未推送、未发布。Windows 仅通过交叉类型/lint 检查，仍待原生显示、按键及 Chrome/托盘实机验收。

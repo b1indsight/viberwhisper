@@ -104,6 +104,9 @@ mod fallback {
         pub(crate) fn capture() -> Result<Self> {
             anyhow::bail!("Desktop preview is unsupported on this platform")
         }
+        pub(crate) fn capture_after_click(_: (f64, f64)) -> Result<Self> {
+            Self::capture()
+        }
     }
     impl DeliveryTarget for NativeTarget {
         fn name(&self) -> String {
@@ -143,6 +146,9 @@ mod fallback {
             anyhow::bail!("Desktop preview is unsupported on this platform")
         }
         pub(crate) fn update_text(&mut self, _: &str, _: bool, _: Option<&str>) -> Result<()> {
+            anyhow::bail!("Desktop preview is unsupported on this platform")
+        }
+        pub(crate) fn relocate(&mut self, _: &str, _: PreviewRect, _: Option<&str>) -> Result<()> {
             anyhow::bail!("Desktop preview is unsupported on this platform")
         }
         pub(crate) fn focus(&self) {}

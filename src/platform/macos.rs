@@ -47,6 +47,14 @@ impl PlatformBackend for MacBackend {
         (Arc::new(typer), Box::new(filter))
     }
 
+    fn pointer_location() -> Option<(f64, f64)> {
+        // CGEvent uses the same top-left global coordinates as AX hit testing, unlike
+        // NSEvent's AppKit coordinates. Snapshot here, not later on the target worker.
+        let event = objc2_core_graphics::CGEvent::new(None)?;
+        let point = objc2_core_graphics::CGEvent::location(Some(&event));
+        (point.x.is_finite() && point.y.is_finite()).then_some((point.x, point.y))
+    }
+
     fn copy_to_clipboard(text: &str) -> AnyhowResult<()> {
         let _write = DESKTOP_WRITE
             .lock()

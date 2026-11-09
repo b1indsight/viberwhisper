@@ -16,4 +16,6 @@ pub(crate) trait PlatformBackend: 'static {
 
     fn text_typer_and_hotkey_filter() -> (Arc<dyn TextTyper>, HotkeyFilter);
     fn copy_to_clipboard(text: &str) -> Result<()>;
+    /// Read synchronously in the input callback; native hit testing stays on the target worker.
+    fn pointer_location() -> Option<(f64, f64)>;
 }

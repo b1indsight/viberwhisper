@@ -60,26 +60,52 @@ impl NativeTarget {
 
     pub(crate) fn capture() -> Result<Self> {
         objc2::rc::autoreleasepool(|_| {
-            let application = NSWorkspace::sharedWorkspace()
-                .frontmostApplication()
-                .ok_or_else(|| anyhow!("未找到输入目标应用"))?;
-            ensure!(
-                application.processIdentifier() as u32 != std::process::id(),
-                "请先在目标应用中选择输入框"
-            );
-            let element = match validated_focused_element() {
-                Ok(element) => Some(element),
-                Err(AccessibilityError::NoFocusedElement) => None,
-                Err(error) => return Err(error.into()),
-            };
-            let window = focused_window(application.processIdentifier())?;
-            let anchor = position::capture_anchor(element.as_deref());
-            Ok(Self {
-                application,
-                window,
-                element,
-                anchor,
-            })
+            let mut target = Self::capture_focused()?;
+            target.anchor = position::capture_anchor(target.element.as_deref());
+            Ok(target)
+        })
+    }
+
+    /// Hit-test the release point without activating or assigning any AX attributes.
+    /// Retry only this event's focused-input correspondence, since the mouse callback
+    /// may run before the clicked application's input queue processes it.
+    pub(crate) fn capture_after_click(point: (f64, f64)) -> Result<Self> {
+        objc2::rc::autoreleasepool(|_| {
+            let mut captured = None;
+            wait_for_activation(|| {
+                let mut target = Self::capture_focused()?;
+                let element = target
+                    .element
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("点击位置没有输入焦点"))?;
+                target.anchor = Some(position::capture_after_click(element, point)?);
+                target.validate()?;
+                captured = Some(target);
+                Ok(())
+            })?;
+            captured.ok_or_else(|| anyhow!("未找到点击的输入位置"))
+        })
+    }
+
+    fn capture_focused() -> Result<Self> {
+        let application = NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .ok_or_else(|| anyhow!("未找到输入目标应用"))?;
+        ensure!(
+            application.processIdentifier() as u32 != std::process::id(),
+            "请先在目标应用中选择输入框"
+        );
+        let element = match validated_focused_element() {
+            Ok(element) => Some(element),
+            Err(AccessibilityError::NoFocusedElement) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let window = focused_window(application.processIdentifier())?;
+        Ok(Self {
+            application,
+            window,
+            element,
+            anchor: None,
         })
     }
 }
@@ -329,16 +355,17 @@ impl PreviewWindow {
         });
         state
             .text
-            .setMaxSize(NSSize::new(max_width - 32.0, f64::MAX));
+            .setMaxSize(NSSize::new(max_width - 20.0, f64::MAX));
         let font = state.text.font().expect("preview font is configured");
         let attributes: Retained<NSDictionary<NSString, AnyObject>> =
             NSDictionary::from_slices(&[unsafe { NSFontAttributeName }], &[&font]);
         // Measure unwrapped lines with the editor's font so narrow Latin letters,
         // wide glyphs, Chinese and emoji determine the actual compact width.
-        let natural_width = state
-            .text
-            .string()
-            .to_string()
+        let text = state.text.string().to_string();
+        // An editable candidate keeps its body even after the user deletes all text.
+        let message_only =
+            !state.status.isHidden() && !state.text.isEditable() && text.trim().is_empty();
+        let natural_width = text
             .lines()
             .map(|line| unsafe {
                 NSString::from_str(line)
@@ -346,14 +373,19 @@ impl PreviewWindow {
                     .width
             })
             .fold(0.0_f64, f64::max);
-        let width = if state.status.isHidden() {
-            (natural_width + 34.0).ceil().clamp(96.0, max_width)
+        let cell = state.status.cell().expect("preview label is cell-backed");
+        cell.setWraps(message_only);
+        let width = if message_only {
+            // Native cell sizing includes text padding as well as the actual warning font.
+            (cell.cellSize().width + 28.0).ceil().clamp(96.0, max_width)
+        } else if state.status.isHidden() {
+            (natural_width + 22.0).ceil().clamp(96.0, max_width)
         } else {
             max_width
         };
         state
             .scroll
-            .setFrameSize(NSSize::new(width - 32.0, state.scroll.frame().size.height));
+            .setFrameSize(NSSize::new(width - 20.0, state.scroll.frame().size.height));
         let used_height = unsafe {
             state
                 .text
@@ -366,9 +398,28 @@ impl PreviewWindow {
                 })
                 .unwrap_or(28.0)
         };
-        let editor_height = used_height.clamp(28.0, 196.0);
-        let footer = if state.status.isHidden() { 0.0 } else { 44.0 };
-        let height = editor_height + 24.0 + footer;
+        let editor_height = if message_only {
+            0.0
+        } else {
+            used_height.clamp(28.0, 196.0)
+        };
+        let message_height = if message_only {
+            cell.cellSizeForBounds(NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(width - 28.0, f64::MAX),
+            ))
+            .height
+            .ceil()
+            .max(32.0)
+        } else {
+            32.0
+        };
+        let footer = if state.status.isHidden() {
+            0.0
+        } else {
+            message_height + if message_only { 0.0 } else { 3.0 }
+        };
+        let height = editor_height + 6.0 + footer;
         let mut frame = self.frame();
         frame.origin.x += (frame.size.width - width) / 2.0;
         frame.origin.y += frame.size.height - height;
@@ -380,17 +431,18 @@ impl PreviewWindow {
         self.setFrame_display(frame, true);
         state.last_origin.set(Some(self.frame().origin));
         state.scroll.setFrame(NSRect::new(
-            NSPoint::new(16.0, 12.0 + footer),
-            NSSize::new(width - 32.0, editor_height),
+            NSPoint::new(10.0, 3.0 + footer),
+            NSSize::new(width - 20.0, editor_height),
         ));
+        state.scroll.setHidden(message_only);
         state.text.setMinSize(NSSize::new(0.0, editor_height));
         state.text.setTextContainerInset(NSSize::new(
             0.0,
             ((editor_height - used_height) / 2.0).max(0.0),
         ));
         state.status.setFrame(NSRect::new(
-            NSPoint::new(20.0, 10.0),
-            NSSize::new(width - 40.0, 38.0),
+            NSPoint::new(14.0, 3.0),
+            NSSize::new(width - 28.0, message_height),
         ));
     }
 
@@ -505,7 +557,7 @@ impl NativePreview {
         let frame = |x, y, w, h| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
         let text = NSTextView::initWithFrame(
             NSTextView::alloc(mtm),
-            frame(0.0, 0.0, width - 32.0, height - 24.0),
+            frame(0.0, 0.0, width - 20.0, height - 6.0),
         );
         text.setEditable(true);
         text.setSelectable(true);
@@ -513,14 +565,14 @@ impl NativePreview {
         text.setDrawsBackground(false);
         text.setFont(Some(&NSFont::systemFontOfSize(15.0)));
         text.setTextColor(Some(&NSColor::textColor()));
-        text.setMinSize(NSSize::new(0.0, height - 24.0));
-        text.setMaxSize(NSSize::new(width - 32.0, f64::MAX));
+        text.setMinSize(NSSize::new(0.0, height - 6.0));
+        text.setMaxSize(NSSize::new(width - 20.0, f64::MAX));
         text.setVerticallyResizable(true);
         text.setHorizontallyResizable(false);
         text.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         text.setTextContainerInset(NSSize::new(0.0, 0.0));
         if let Some(container) = unsafe { text.textContainer() } {
-            container.setContainerSize(NSSize::new(width - 32.0, f64::MAX));
+            container.setContainerSize(NSSize::new(width - 20.0, f64::MAX));
             container.setWidthTracksTextView(true);
             container.setLineFragmentPadding(0.0);
         }
@@ -534,7 +586,7 @@ impl NativePreview {
         content.addSubview(&status);
         let scroll = NSScrollView::initWithFrame(
             NSScrollView::alloc(mtm),
-            frame(16.0, 12.0, width - 32.0, height - 24.0),
+            frame(10.0, 3.0, width - 20.0, height - 6.0),
         );
         scroll.setHasVerticalScroller(true);
         scroll.setAutohidesScrollers(true);
@@ -658,6 +710,37 @@ impl NativePreview {
         Ok(())
     }
 
+    /// Update only destination metadata and placement. In particular, do not use
+    /// show/show_streaming here: both replace the native editor's current contents.
+    pub(crate) fn relocate(
+        &mut self,
+        destination: &str,
+        anchor: PreviewRect,
+        warning: Option<&str>,
+    ) -> Result<()> {
+        let window = self
+            .window
+            .as_ref()
+            .ok_or_else(|| anyhow!("预览窗口尚未创建"))?;
+        let state = window.ivars();
+        ensure!(state.session_id.get().is_some(), "预览会话已结束");
+        let selection = state.text.selectedRange();
+        let visible = state.scroll.documentVisibleRect().origin;
+        state.anchor.set(Some(anchor));
+        // A user may have moved the previously centered bubble. That old origin is not
+        // evidence against the newly qualified anchor supplied by this click.
+        state.last_origin.set(None);
+        window.setTitle(&NSString::from_str(&format!(
+            "ViberWhisper · {destination}"
+        )));
+        window.set_message(warning);
+        if state.text.selectedRange() != selection {
+            state.text.setSelectedRange(selection);
+        }
+        state.text.scrollPoint(visible);
+        Ok(())
+    }
+
     pub(crate) fn update_text(
         &mut self,
         text: &str,
@@ -669,7 +752,6 @@ impl NativePreview {
             .as_ref()
             .ok_or_else(|| anyhow!("预览窗口尚未创建"))?;
         window.replace_streaming_text(text);
-        window.set_message(warning);
         let state = window.ivars();
         if ready {
             state.keys.borrow_mut().reset();
@@ -682,6 +764,7 @@ impl NativePreview {
             state.retry_allowed.set(false);
             state.text.setEditable(false);
         }
+        window.set_message(warning);
         Ok(())
     }
 
@@ -698,7 +781,11 @@ impl NativePreview {
         if let Some(window) = &self.window {
             NSApplication::sharedApplication(window.mtm()).activateIgnoringOtherApps(true);
             window.makeKeyAndOrderFront(None);
-            window.makeFirstResponder(Some(&window.ivars().text));
+            if window.ivars().scroll.isHidden() {
+                window.makeFirstResponder(None);
+            } else {
+                window.makeFirstResponder(Some(&window.ivars().text));
+            }
         }
     }
     pub(crate) fn hide(&self) {
