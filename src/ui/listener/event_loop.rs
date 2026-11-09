@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Instant;
 
 use tracing::{debug, error, info, warn};
 use winit::application::ApplicationHandler;
@@ -19,15 +20,15 @@ use crate::dictation::Progress;
 use crate::history::HistoryStore;
 use crate::input::typer::TextTyper;
 use crate::platform::{
-    DeliveryTarget, NativePlatform, NativePreview, NativeTarget, PlatformAction, PlatformEvent,
-    PreviewAction, PreviewEvent, PreviewRect,
+    NativePlatform, NativePreview, NativeTarget, PlatformAction, PlatformEvent, PreviewAction,
+    PreviewEvent, PreviewRect,
 };
 use crate::postprocess::PostProcessor;
 use crate::prompt_lab::{CaptureTranscription, PromptLabCapture, SttSnapshot};
 use crate::session::SessionId;
 use crate::ui::preview::{
-    FinalizationGate, PendingPreview, PreviewCommand, PreviewTranscription, PreviewUpdate,
-    wait_for_confirmation,
+    CaptureStage, FinalizationGate, PendingPreview, PreviewCommand, PreviewTranscription,
+    PreviewUpdate, run_preview_session,
 };
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,9 @@ struct FinalizationTask {
     session_id: SessionId,
     gate: Arc<FinalizationGate>,
     stop: Option<mpsc::Sender<()>>,
+    commands: Option<mpsc::Sender<PreviewCommand>>,
+    stopped_at: Option<Instant>,
+    stop_captured: bool,
 }
 
 struct StreamingPreview {
@@ -202,6 +206,19 @@ impl ListenerApplication {
         match event {
             AppEvent::Platform(event) => {
                 if let Some(action) = self.platform.handle_event(event) {
+                    if let PlatformAction::PointerReleased { point, occurred_at } = action {
+                        if matches!(self.machine.state(), RecordingState::Stopping { .. })
+                            && let Some(task) = &self.finalization
+                            && task
+                                .stopped_at
+                                .is_some_and(|stopped| occurred_at >= stopped)
+                            && !task.gate.is_cancelled()
+                            && let Some(commands) = &task.commands
+                        {
+                            let _ = commands.send(PreviewCommand::SelectAt(point));
+                        }
+                        return;
+                    }
                     if (self.pending_preview.is_some()
                         || self.streaming_preview.is_some()
                             && matches!(self.machine.state(), RecordingState::Stopping { .. }))
@@ -214,6 +231,10 @@ impl ListenerApplication {
                             .pending_preview
                             .as_ref()
                             .is_some_and(|pending| pending.is_busy())
+                            && self
+                                .finalization
+                                .as_ref()
+                                .is_some_and(|task| task.stop_captured)
                         {
                             self.preview.focus();
                         }
@@ -257,17 +278,46 @@ impl ListenerApplication {
         match update {
             PreviewUpdate::HistorySaved(text) => self.platform.push_history(text),
             PreviewUpdate::PermissionRequired => self.show_permission_guidance_if_needed(),
-            PreviewUpdate::Streaming {
+            PreviewUpdate::Destination {
                 session_id,
                 destination,
                 anchor,
+                warning,
+                stopped,
             } => {
+                let Some(task) = self
+                    .finalization
+                    .as_mut()
+                    .filter(|task| task.session_id == session_id && !task.gate.is_cancelled())
+                else {
+                    return;
+                };
+                let stopped_now = stopped && !task.stop_captured;
+                task.stop_captured |= stopped;
+                let shown = self
+                    .streaming_preview
+                    .as_ref()
+                    .is_some_and(|stream| stream.session_id == session_id && stream.shown)
+                    || self.pending_preview.as_ref().is_some_and(|pending| {
+                        pending.session_id == session_id && !pending.is_busy()
+                    });
+                if shown
+                    && let Some(anchor) = anchor
+                    && let Err(error) =
+                        self.preview
+                            .relocate(&destination, anchor, warning.as_deref())
+                {
+                    error!(%error, "Could not relocate confirmation preview");
+                }
                 if let Some(stream) = &mut self.streaming_preview
                     && stream.session_id == session_id
                 {
                     stream.destination = Some((destination, anchor));
-                    self.render_progress(session_id);
                 }
+                if stopped_now && shown {
+                    self.preview.focus();
+                }
+                self.render_progress(session_id);
             }
             PreviewUpdate::Ready {
                 session_id,
@@ -328,13 +378,14 @@ impl ListenerApplication {
     }
 
     fn render_progress(&mut self, session_id: SessionId) {
-        if !self
+        let Some(task) = self
             .finalization
             .as_ref()
-            .is_some_and(|task| task.session_id == session_id && !task.gate.is_cancelled())
-        {
+            .filter(|task| task.session_id == session_id && !task.gate.is_cancelled())
+        else {
             return;
-        }
+        };
+        let activate = task.stop_captured;
         let Some(stream) = self
             .streaming_preview
             .as_mut()
@@ -347,13 +398,8 @@ impl ListenerApplication {
             if shown {
                 self.preview.update_text(&text, false, None)
             } else {
-                self.preview.show_streaming(
-                    session_id,
-                    &text,
-                    destination,
-                    anchor,
-                    matches!(self.machine.state(), RecordingState::Stopping { .. }),
-                )
+                self.preview
+                    .show_streaming(session_id, &text, destination, anchor, activate)
             }
         });
     }
@@ -392,9 +438,7 @@ impl ListenerApplication {
                 }
             }
             PreviewAction::Cancel if pending.begin_cancel(event.session_id) => {
-                let _ = pending.commands.send(PreviewCommand::Cancel);
-                self.preview.close();
-                self.pending_preview = None;
+                self.cancel_finalization();
             }
             _ => {}
         }
@@ -557,14 +601,25 @@ impl ListenerApplication {
                         destination: None,
                         shown: false,
                     });
+                }
+                if matches!(self.output, ListenerOutput::Delivery { .. }) {
                     let (stop, receiver) = mpsc::channel();
+                    let (commands, events) = mpsc::channel();
                     let gate = Arc::new(FinalizationGate::new());
                     self.finalization = Some(FinalizationTask {
                         session_id,
                         gate: gate.clone(),
-                        stop: Some(stop),
+                        stop: Some(stop.clone()),
+                        commands: Some(commands.clone()),
+                        stopped_at: None,
+                        stop_captured: false,
                     });
-                    self.spawn_delivery_worker(session_id, gate, Some(receiver));
+                    self.spawn_delivery_worker(
+                        session_id,
+                        gate,
+                        (stop, receiver),
+                        (commands, events),
+                    );
                 }
                 SessionEvent::SessionStarted { session_id }
             }
@@ -602,6 +657,7 @@ impl ListenerApplication {
     /// Stop the recorder immediately and leave the state machine in `Stopping`
     /// while convergence, cleanup, and delivery run away from the native event loop.
     fn stop_session(&mut self, session_id: SessionId) -> Option<SessionEvent> {
+        let stopped_at = Instant::now();
         match self.recorder.stop_recording(session_id) {
             RecorderStopOutcome::Stopped {
                 session_id,
@@ -619,7 +675,7 @@ impl ListenerApplication {
                     self.output.archive_chunk(session_id, &chunk);
                     self.orchestrator.on_chunk_ready(session_id, chunk);
                 }
-                self.spawn_finalization(session_id);
+                self.spawn_finalization(session_id, stopped_at);
                 None
             }
             RecorderStopOutcome::StillRecording { session_id, error } => {
@@ -629,25 +685,22 @@ impl ListenerApplication {
             RecorderStopOutcome::NotRecording {
                 requested_session_id,
             } => {
-                self.spawn_finalization(requested_session_id);
+                self.spawn_finalization(requested_session_id, stopped_at);
                 None
             }
         }
     }
 
-    fn spawn_finalization(&mut self, session_id: SessionId) {
+    fn spawn_finalization(&mut self, session_id: SessionId, stopped_at: Instant) {
         if let Some(task) = &mut self.finalization
             && task.session_id == session_id
             && let Some(stop) = task.stop.take()
         {
-            let _ = stop.send(());
-            if self
-                .streaming_preview
-                .as_ref()
-                .is_some_and(|stream| stream.shown)
-            {
-                self.preview.focus();
+            task.stopped_at = Some(stopped_at);
+            if let Some(commands) = &task.commands {
+                let _ = commands.send(PreviewCommand::Stop);
             }
+            let _ = stop.send(());
             return;
         }
         let gate = Arc::new(FinalizationGate::new());
@@ -655,10 +708,15 @@ impl ListenerApplication {
             session_id,
             gate: Arc::clone(&gate),
             stop: None,
+            commands: None,
+            stopped_at: Some(stopped_at),
+            stop_captured: false,
         });
 
         match &mut self.output {
-            ListenerOutput::Delivery { .. } => self.spawn_delivery_worker(session_id, gate, None),
+            ListenerOutput::Delivery { .. } => {
+                unreachable!("delivery worker starts with recording")
+            }
             ListenerOutput::Capture { capture, stt } => {
                 let capture_session = capture.take(session_id);
                 let stt = stt.clone();
@@ -698,14 +756,14 @@ impl ListenerApplication {
         }
     }
 
-    /// Realtime captures its destination before the first bubble and waits for stop
-    /// on this same delivery worker. Progress reaches the UI independently while
-    /// final recognition blocks here; native target objects never cross threads.
+    /// Keep native targets on one owner while recognition waits independently.
+    /// Cancellation wakes both workers; completion follows native restoration and recognition cleanup.
     fn spawn_delivery_worker(
         &mut self,
         session_id: SessionId,
         gate: Arc<FinalizationGate>,
-        stop: Option<mpsc::Receiver<()>>,
+        (wake, stop): (mpsc::Sender<()>, mpsc::Receiver<()>),
+        (commands, events): (mpsc::Sender<PreviewCommand>, mpsc::Receiver<PreviewCommand>),
     ) {
         let ListenerOutput::Delivery {
             typer,
@@ -724,58 +782,42 @@ impl ListenerApplication {
         spawn_finalization_worker(
             session_id,
             move || {
+                let recognition_gate = Arc::clone(&gate);
+                let recognition_commands = commands.clone();
+                let recognition = thread::spawn(move || {
+                    if stop.recv().is_ok() && !recognition_gate.is_cancelled() {
+                        let transcription = finish_transcription(
+                            orchestrator.finish_for_delivery(session_id),
+                            &post_processor,
+                        );
+                        let _ =
+                            recognition_commands.send(PreviewCommand::Transcribed(transcription));
+                    }
+                });
                 let notify = |update| {
                     preview_proxy
                         .send_event(AppEvent::PreviewUpdate(update))
                         .is_ok()
                 };
-                let captured = if let Some(stop) = stop {
-                    let target = NativeTarget::capture();
-                    if !notify(PreviewUpdate::Streaming {
-                        session_id,
-                        destination: target
-                            .as_ref()
-                            .map_or_else(|_| "无法确定输入目标".into(), DeliveryTarget::name),
-                        anchor: target
-                            .as_ref()
-                            .ok()
-                            .and_then(DeliveryTarget::preview_anchor),
-                    }) || stop.recv().is_err()
-                        || gate.is_cancelled()
-                    {
-                        if let Ok(target) = &target
-                            && let Err(error) = target.restore()
-                        {
-                            debug!(%error, "Could not restore cancelled streaming destination");
-                        }
-                        return;
-                    }
-                    Some(target)
-                } else {
-                    None
-                };
-                let transcription = (!gate.is_cancelled())
-                    .then(|| {
-                        finish_transcription(
-                            orchestrator.finish_for_delivery(session_id),
-                            &post_processor,
-                        )
-                    })
-                    .flatten();
-                if let Some(transcription) = transcription.filter(|_| !gate.is_cancelled()) {
-                    wait_for_confirmation(
-                        session_id,
-                        transcription,
-                        typer.as_ref(),
-                        history.as_ref(),
-                        &gate,
-                        || captured.unwrap_or_else(NativeTarget::capture),
-                        &notify,
+                run_preview_session(
+                    session_id,
+                    typer.as_ref(),
+                    history.as_ref(),
+                    &gate,
+                    (commands, events),
+                    |stage| match stage {
+                        CaptureStage::Start | CaptureStage::Stop => NativeTarget::capture(),
+                        CaptureStage::Click(point) => NativeTarget::capture_after_click(point),
+                    },
+                    &notify,
+                );
+                gate.cancel();
+                let _ = wake.send(());
+                if recognition.join().is_err() {
+                    error!(
+                        session_id = session_id.0,
+                        "Recognition finalization worker panicked"
                     );
-                } else if let Some(Ok(target)) = captured
-                    && let Err(error) = target.restore()
-                {
-                    debug!(%error, "Could not restore failed streaming destination");
                 }
             },
             move |session_id| {
@@ -786,13 +828,16 @@ impl ListenerApplication {
 
     fn cancel_finalization(&mut self) {
         self.preview.close();
-        self.pending_preview = None; // Disconnects the waiting worker on shutdown.
+        self.pending_preview = None;
         if let Some(stream) = self.streaming_preview.take() {
             stream.progress.cancel();
         }
         if let Some(task) = &mut self.finalization {
             task.gate.cancel();
             task.stop.take();
+            if let Some(commands) = &task.commands {
+                let _ = commands.send(PreviewCommand::Cancel);
+            }
         }
     }
 }
@@ -1396,6 +1441,9 @@ mod tests {
             session_id,
             gate: Arc::new(FinalizationGate::new()),
             stop: None,
+            commands: None,
+            stopped_at: None,
+            stop_captured: false,
         });
         let stale_event = finalization_completion_event(&mut finalization, stale_session_id);
         machine.handle(stale_event);

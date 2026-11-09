@@ -96,6 +96,15 @@ impl PlatformBackend for WindowsBackend {
         (Arc::new(WindowsTyper), Box::new(Some))
     }
 
+    fn pointer_location() -> Option<(f64, f64)> {
+        let mut point = windows_sys::Win32::Foundation::POINT::default();
+        // The low-level mouse callback records pixels before its event reaches the worker.
+        // Do not inherit DPI virtualization from the hook thread or the clicked application.
+        (unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetPhysicalCursorPos(&mut point) }
+            != 0)
+            .then_some((f64::from(point.x), f64::from(point.y)))
+    }
+
     fn copy_to_clipboard(text: &str) -> Result<()> {
         clipboard::set_text(text).map_err(Into::into)
     }

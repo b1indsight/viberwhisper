@@ -253,9 +253,18 @@ out the wrapped native text at the resulting width. Windows handles the edit con
 `EN_CHANGE` notification, measures native glyph widths and wrapped lines with the actual font,
 and centers short text using the edit control's formatting rectangle.
 The editor viewport ranges from 28 to 196 points on macOS and 96-DPI logical units on Windows;
-longer content scrolls inside it.
+longer content scrolls inside it. Body insets are 10 horizontal and 3 vertical logical units;
+the existing thin outline and text font sizes are unchanged.
 Message visibility survives edits and contributes a separate footer to the bubble height;
-messages use the maximum bubble width to remain readable.
+messages alongside a body use the maximum bubble width to remain readable.
+Read-only failures without usable text hide the editor and omit its minimum height and warning
+gap, leaving only the warning with 3-unit top/bottom insets. Their width fits the longest warning
+line measured with the status control's own font and native padding, plus 14-unit side insets,
+within the existing width limits. Longer warnings wrap at the limit and grow vertically;
+AppKit uses its label cell's natural and width-constrained sizes, while Windows reuses native
+status-text measurement. Focus stays on the window so Esc still cancels. Partial results and
+editable candidates emptied by the user retain their body and existing layout; an ordinary
+empty streaming revision without a warning also keeps its existing viewport.
 
 Windows creates an owned system message font for the current HWND DPI, assigning it to both
 controls before releasing the previous font. Logical padding, viewport bounds, corner radii,
@@ -277,13 +286,25 @@ bubble to the nearest monitor work area. AX/Win32 coordinates share a top-left c
 AppKit placement converts using the primary screen's height. Resizing reuses the captured anchor.
 On macOS, a manual/system move detaches that anchor and preserves the chosen top/center position.
 Native target objects stay on the worker; only checked numeric rectangles enter UI events.
+Both recognition modes use the same start/stop/post-stop-click priority. A missing anchor may be
+filled after the bubble is already visible: `relocate` updates destination metadata, its warning
+and placement without replacing text or resetting selection, scroll, undo or focus. A centered
+bubble remains eligible for this update; an earlier valid anchor cannot be replaced by a later click.
+
+Post-stop click capture uses the point saved in the global button-release callback. Windows UIA
+hit testing must match the focused editable element; macOS performs the equivalent AX point/focus
+check. This rejects a button/tray click that leaves an old text field focused and permits input
+changes within one browser window. Bounded rechecks wait for native focus; identical samples or
+an elapsed delay alone do not authorize the candidate. No mouse point is treated as a text caret.
+The ordinary caret/control geometry sources and final destination-validation scope are unchanged.
 
 macOS registers standard Edit-menu key equivalents against the responder chain for Cmd+A/C/X/V.
 Windows consumes ordinary Return/Escape character messages even when a repeat did not arm an
 action, while composition and modified Return remain with the native editor.
 
-The finalization worker captures a target before the preview requests focus and retains it on
-that same worker. macOS saves the running application, AX window and available focused AX element;
+The destination owner captures a target before the preview requests focus, acknowledges stop
+capture before activation, and retains the chosen target on that same worker. macOS saves the
+running application, AX window and available focused AX element;
 Windows saves the top-level HWND, process/thread identity and focused HWND. Restoring a target
 does not bypass system foreground restrictions. Both backends wait on the worker for activation
 to settle, retrying validation at 10 ms intervals for up to 500 ms. Validation rechecks window and available control

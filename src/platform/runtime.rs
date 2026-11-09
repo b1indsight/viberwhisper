@@ -1,14 +1,17 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 
 use super::backend::PlatformBackend;
-use crate::input::hotkey::{HotkeyConfig, HotkeyEvent, HotkeySource, start_hotkey_listener};
+use crate::input::hotkey::{
+    HotkeyConfig, HotkeyEvent, HotkeySource, InputEvent, start_input_listener,
+};
 use crate::input::tray::{TrayAction, TrayEvent, TrayManager};
 use crate::input::typer::TextTyper;
 
-type HotkeyNotify = Arc<dyn Fn(HotkeyEvent) + Send + Sync>;
+type InputNotify = Arc<dyn Fn(InputEvent) + Send + Sync>;
 type TrayNotify = Arc<dyn Fn(TrayEvent) + Send + Sync>;
 
 /// Native callback payload whose representation is private to the platform runtime.
@@ -18,6 +21,10 @@ pub(crate) struct PlatformEvent(PlatformEventKind);
 #[derive(Debug, Clone)]
 enum PlatformEventKind {
     Hotkey(HotkeyEvent),
+    PointerReleased {
+        point: (f64, f64),
+        occurred_at: Instant,
+    },
     Tray(TrayEvent),
 }
 
@@ -32,11 +39,15 @@ impl PlatformEvent {
 }
 
 /// Platform-neutral user intent returned to the listener application.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum PlatformAction {
     HoldPressed,
     HoldReleased,
     ToggleRecording,
+    PointerReleased {
+        point: (f64, f64),
+        occurred_at: Instant,
+    },
     ExitRequested,
 }
 
@@ -84,10 +95,10 @@ impl<P: crate::input::tray::TrayPolicy> PlatformTray for TrayManager<P> {
 pub(crate) trait RuntimeDrivers<B: PlatformBackend>: 'static {
     type Tray: PlatformTray;
 
-    fn start_hotkeys(
+    fn start_input(
         config: &HotkeyConfig,
         filter: super::backend::HotkeyFilter,
-        notify: HotkeyNotify,
+        notify: InputNotify,
     );
     fn start_tray(notify: TrayNotify) -> Result<Self::Tray>;
 }
@@ -97,12 +108,12 @@ pub(crate) struct NativeDrivers;
 impl<B: PlatformBackend> RuntimeDrivers<B> for NativeDrivers {
     type Tray = TrayManager<B::Tray>;
 
-    fn start_hotkeys(
+    fn start_input(
         config: &HotkeyConfig,
         filter: super::backend::HotkeyFilter,
-        notify: HotkeyNotify,
+        notify: InputNotify,
     ) {
-        start_hotkey_listener::<B::Hotkeys, _>(config, filter, move |event| notify(event));
+        start_input_listener::<B::Hotkeys, _>(config, filter, move |event| notify(event));
     }
 
     fn start_tray(notify: TrayNotify) -> Result<Self::Tray> {
@@ -122,11 +133,22 @@ where
         let notify = Arc::new(notify);
         let (typer, hotkey_filter) = B::text_typer_and_hotkey_filter();
 
-        let hotkey_notify = Arc::clone(&notify);
-        D::start_hotkeys(
+        let input_notify = Arc::clone(&notify);
+        D::start_input(
             hotkeys,
             hotkey_filter,
-            Arc::new(move |event| hotkey_notify(PlatformEvent::hotkey(event))),
+            Arc::new(move |event| match event {
+                InputEvent::Hotkey(event) => input_notify(PlatformEvent::hotkey(event)),
+                InputEvent::PointerReleased => {
+                    let occurred_at = Instant::now();
+                    if let Some(point) = B::pointer_location() {
+                        input_notify(PlatformEvent(PlatformEventKind::PointerReleased {
+                            point,
+                            occurred_at,
+                        }));
+                    }
+                }
+            }),
         );
 
         let tray_notify = Arc::clone(&notify);
@@ -144,6 +166,9 @@ where
     pub(crate) fn handle_event(&mut self, event: PlatformEvent) -> Option<PlatformAction> {
         match event.0 {
             PlatformEventKind::Hotkey(event) => action_from_hotkey(event),
+            PlatformEventKind::PointerReleased { point, occurred_at } => {
+                Some(PlatformAction::PointerReleased { point, occurred_at })
+            }
             PlatformEventKind::Tray(event) => match self.tray.handle_event(event) {
                 Some(TrayAction::CopyHistory(text)) => {
                     if let Err(error) = B::copy_to_clipboard(&text) {
@@ -248,6 +273,10 @@ mod tests {
         fn copy_to_clipboard(_text: &str) -> Result<()> {
             Ok(())
         }
+
+        fn pointer_location() -> Option<(f64, f64)> {
+            Some((-317.0, 521.0))
+        }
     }
 
     struct FakeTray;
@@ -274,14 +303,15 @@ mod tests {
     impl RuntimeDrivers<FakeBackend> for FakeDrivers {
         type Tray = FakeTray;
 
-        fn start_hotkeys(
+        fn start_input(
             _config: &HotkeyConfig,
             filter: super::super::backend::HotkeyFilter,
-            notify: HotkeyNotify,
+            notify: InputNotify,
         ) {
             if filter(EventType::KeyPress(Key::F8)).is_some() {
-                notify(HotkeyEvent::Pressed(HotkeySource::Hold));
+                notify(InputEvent::Hotkey(HotkeyEvent::Pressed(HotkeySource::Hold)));
             }
+            notify(InputEvent::PointerReleased);
         }
 
         fn start_tray(notify: TrayNotify) -> Result<Self::Tray> {
@@ -318,10 +348,17 @@ mod tests {
             .drain(..)
             .filter_map(|event| runtime.handle_event(event))
             .collect();
-        assert_eq!(
-            actions,
-            [PlatformAction::HoldPressed, PlatformAction::ExitRequested]
-        );
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                PlatformAction::HoldPressed,
+                PlatformAction::PointerReleased {
+                    point: (-317.0, 521.0),
+                    ..
+                },
+                PlatformAction::ExitRequested,
+            ]
+        ));
 
         runtime.set_recording(true);
         assert!(RECORDING.load(Ordering::SeqCst));

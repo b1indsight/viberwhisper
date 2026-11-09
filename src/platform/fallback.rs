@@ -20,6 +20,10 @@ impl PlatformBackend for FallbackBackend {
         (Arc::new(MockTyper), Box::new(Some))
     }
 
+    fn pointer_location() -> Option<(f64, f64)> {
+        None
+    }
+
     fn copy_to_clipboard(text: &str) -> Result<()> {
         tracing::info!(
             text_bytes = text.len(),

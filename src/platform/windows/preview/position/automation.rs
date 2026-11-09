@@ -1,7 +1,7 @@
 //! Window-scoped UI Automation geometry for editors without a Win32 caret.
 
 use anyhow::{Result, ensure};
-use windows::Win32::Foundation::{BOOL, HWND as AutomationWindow};
+use windows::Win32::Foundation::{BOOL, HWND as AutomationWindow, POINT as AutomationPoint};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
@@ -14,7 +14,8 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation8, IUIAutomation2, IUIAutomationElement, IUIAutomationTextPattern,
     IUIAutomationTextPattern2, IUIAutomationTextRange, IUIAutomationValuePattern,
     TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start, UIA_ComboBoxControlTypeId,
-    UIA_EditControlTypeId, UIA_IsReadOnlyAttributeId, UIA_TextPattern2Id, UIA_TextPatternId,
+    UIA_EditControlTypeId, UIA_GroupControlTypeId, UIA_IsReadOnlyAttributeId,
+    UIA_PaneControlTypeId, UIA_TextControlTypeId, UIA_TextPattern2Id, UIA_TextPatternId,
     UIA_ValuePatternId,
 };
 use windows_sys::Win32::Foundation::HWND;
@@ -36,7 +37,12 @@ impl Drop for Apartment {
 
 /// Capture only the saved window's focused editable element, then recheck native/UIA focus.
 /// All COM objects are released before the worker's apartment; no text/value is retrieved.
-pub(super) fn capture_anchor(focus: HWND) -> Result<Option<PreviewRect>> {
+/// A click additionally requires affirmative writability and a hit on that element or its
+/// non-interactive text descendants, not merely the same browser/renderer HWND.
+pub(super) fn capture_anchor(
+    focus: HWND,
+    click: Option<(i32, i32)>,
+) -> Result<Option<PreviewRect>> {
     let window = unsafe { GetAncestor(focus, GA_ROOT) };
     if window.is_null() || unsafe { GetForegroundWindow() } != window {
         return Ok(None);
@@ -63,9 +69,18 @@ pub(super) fn capture_anchor(focus: HWND) -> Result<Option<PreviewRect>> {
     // the renderer HWND, and searching HasKeyboardFocus can match an ancestor container.
     let walker = unsafe { automation.RawViewWalker() }?;
     let mut ancestor = element.clone();
-    while !unsafe { automation.CompareElements(&ancestor, &root) }?.as_bool() {
+    let mut belongs_to_window = false;
+    for _ in 0..64 {
+        if unsafe { automation.CompareElements(&ancestor, &root) }?.as_bool() {
+            belongs_to_window = true;
+            break;
+        }
         ancestor = unsafe { walker.GetParentElement(&ancestor) }?;
     }
+    ensure!(
+        belongs_to_window,
+        "UIA focus is outside the captured window"
+    );
     if unsafe { element.CurrentIsPassword()? }.as_bool()
         || unsafe { element.CurrentIsOffscreen()? }.as_bool()
         || !unsafe { element.CurrentIsEnabled()? }.as_bool()
@@ -75,23 +90,15 @@ pub(super) fn capture_anchor(focus: HWND) -> Result<Option<PreviewRect>> {
     let control = unsafe { element.CurrentControlType() }?;
     let text =
         unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }.ok();
-    let writable = if let Ok(value) =
-        unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }
-    {
-        Some(!unsafe { value.CurrentIsReadOnly()? }.as_bool())
-    } else if let Some(text) = &text {
-        let attribute = unsafe {
-            text.DocumentRange()?
-                .GetAttributeValue(UIA_IsReadOnlyAttributeId)
-        }?;
-        bool::try_from(&attribute).ok().map(|read_only| !read_only)
-    } else {
-        None
-    };
+    let writable = writability(&element, text.as_ref())?;
     let input_control = control == UIA_EditControlTypeId
         || (control == UIA_ComboBoxControlTypeId && writable == Some(true));
     if writable == Some(false) || (!input_control && writable != Some(true)) {
         return Ok(None);
+    }
+    if let Some(point) = click {
+        ensure!(writable == Some(true), "Clicked input is not writable");
+        qualify_click(&automation, &element, point)?;
     }
     let caret = match caret_anchor(&element, text.as_ref()) {
         Ok(anchor) => anchor,
@@ -115,11 +122,80 @@ pub(super) fn capture_anchor(focus: HWND) -> Result<Option<PreviewRect>> {
     } else {
         None
     };
+    // A provider can process focus changes during geometry or hit testing. The clicked
+    // input and focused UIA element must still be identical before retaining its anchor.
+    if let Some(point) = click {
+        qualify_click(&automation, &element, point)?;
+        // Recheck the same safety properties as above: an editor can become secure,
+        // disabled or read-only without its HWND or UIA identity changing.
+        if unsafe { element.CurrentIsPassword()? }.as_bool()
+            || unsafe { element.CurrentIsOffscreen()? }.as_bool()
+            || !unsafe { element.CurrentIsEnabled()? }.as_bool()
+            || writability(&element, text.as_ref())? != Some(true)
+        {
+            return Ok(None);
+        }
+    }
+    let focused = unsafe { automation.GetFocusedElement() }?;
     Ok((unsafe { GetForegroundWindow() } == window
         && thread_focus(thread)? == focus
+        && unsafe { automation.CompareElements(&element, &focused) }?.as_bool()
         && unsafe { element.CurrentHasKeyboardFocus()? }.as_bool())
     .then_some(anchor)
     .flatten())
+}
+
+fn writability(
+    element: &IUIAutomationElement,
+    text: Option<&IUIAutomationTextPattern>,
+) -> Result<Option<bool>> {
+    if let Ok(value) =
+        unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }
+    {
+        Ok(Some(!unsafe { value.CurrentIsReadOnly()? }.as_bool()))
+    } else if let Some(text) = text {
+        let attribute = unsafe {
+            text.DocumentRange()?
+                .GetAttributeValue(UIA_IsReadOnlyAttributeId)
+        }?;
+        Ok(bool::try_from(&attribute).ok().map(|read_only| !read_only))
+    } else {
+        Ok(None)
+    }
+}
+
+fn qualify_click(
+    automation: &IUIAutomation2,
+    focused: &IUIAutomationElement,
+    point: (i32, i32),
+) -> Result<()> {
+    let mut hit = unsafe {
+        automation.ElementFromPoint(AutomationPoint {
+            x: point.0,
+            y: point.1,
+        })
+    }?;
+    let walker = unsafe { automation.RawViewWalker() }?;
+    for _ in 0..64 {
+        if unsafe { automation.CompareElements(&hit, focused) }?.as_bool() {
+            return Ok(());
+        }
+        let control = unsafe { hit.CurrentControlType() }?;
+        // Static text can be a child of a web editor. A button, another input or a
+        // scrollbar inside a composite editor must not qualify stale keyboard focus.
+        ensure!(
+            [
+                UIA_TextControlTypeId,
+                UIA_GroupControlTypeId,
+                UIA_PaneControlTypeId
+            ]
+            .contains(&control)
+                && !unsafe { hit.CurrentIsKeyboardFocusable()? }.as_bool(),
+            "Click does not belong to the focused input"
+        );
+        hit = unsafe { walker.GetParentElement(&hit) }?;
+    }
+    anyhow::bail!("Click does not belong to the focused input")
 }
 
 fn caret_anchor(
