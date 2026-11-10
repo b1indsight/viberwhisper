@@ -8,6 +8,11 @@ on:
         required: true
         default: false
         type: boolean
+      diagnostic_logs:
+        description: Save sensitive model prompts and text in local DEBUG logs (test packages only; cannot publish)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -27,11 +32,39 @@ jobs:
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       tag: ${{ steps.metadata.outputs.tag }}
+      asset_suffix: ${{ steps.package-mode.outputs.asset_suffix }}
+      macos_features: ${{ steps.package-mode.outputs.macos_features }}
+      windows_features: ${{ steps.package-mode.outputs.windows_features }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      - name: Validate and select package mode
+        id: package-mode
+        env:
+          PUBLISH_REQUESTED: ${{ inputs.publish }}
+          DIAGNOSTIC_LOGS_REQUESTED: ${{ inputs.diagnostic_logs }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${PUBLISH_REQUESTED}" == "true" && "${DIAGNOSTIC_LOGS_REQUESTED}" == "true" ]]; then
+            echo "Diagnostic packages cannot be published; set publish=false or diagnostic_logs=false." >&2
+            exit 1
+          fi
+
+          asset_suffix=""
+          macos_features=""
+          windows_features="windows-app"
+          if [[ "${DIAGNOSTIC_LOGS_REQUESTED}" == "true" ]]; then
+            asset_suffix="-diagnostic"
+            macos_features="diagnostic-logs"
+            windows_features="windows-app,diagnostic-logs"
+          fi
+          echo "asset_suffix=${asset_suffix}" >> "${GITHUB_OUTPUT}"
+          echo "macos_features=${macos_features}" >> "${GITHUB_OUTPUT}"
+          echo "windows_features=${windows_features}" >> "${GITHUB_OUTPUT}"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -80,7 +113,8 @@ jobs:
     runs-on: macos-latest
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
-      ASSET_PREFIX: ViberWhisper-${{ needs.preflight.outputs.tag }}-macos-universal
+      ASSET_PREFIX: ViberWhisper-${{ needs.preflight.outputs.tag }}-macos-universal${{ needs.preflight.outputs.asset_suffix }}
+      PACKAGE_FEATURES: ${{ needs.preflight.outputs.macos_features }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,9 +133,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --locked --target aarch64-apple-darwin
-          cargo build --release --locked --target x86_64-apple-darwin
-          cargo test --release --locked --target aarch64-apple-darwin bundled_model_rejects_noise_and_resets_between_chunks
+          cargo build --release --locked --target aarch64-apple-darwin --features "${PACKAGE_FEATURES}"
+          cargo build --release --locked --target x86_64-apple-darwin --features "${PACKAGE_FEATURES}"
+          cargo test --release --locked --target aarch64-apple-darwin --features "${PACKAGE_FEATURES}" bundled_model_rejects_noise_and_resets_between_chunks
 
       - name: Build universal application bundle
         shell: bash
@@ -109,7 +143,7 @@ jobs:
           set -euo pipefail
           mkdir -p target/release
           cp target/aarch64-apple-darwin/release/viberwhisper target/release/viberwhisper
-          CARGO_BUNDLE_SKIP_BUILD=1 cargo bundle --release --format osx
+          CARGO_BUNDLE_SKIP_BUILD=1 cargo bundle --release --format osx --features "${PACKAGE_FEATURES}"
           lipo -create \
             target/aarch64-apple-darwin/release/viberwhisper \
             target/x86_64-apple-darwin/release/viberwhisper \
@@ -202,7 +236,7 @@ jobs:
       - name: Upload macOS distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-macos
+          name: release-macos${{ needs.preflight.outputs.asset_suffix }}
           path: release-assets/*
           if-no-files-found: error
           retention-days: 7
@@ -212,7 +246,8 @@ jobs:
     needs: preflight
     runs-on: windows-latest
     env:
-      ASSET_PREFIX: ViberWhisper-${{ needs.preflight.outputs.tag }}-windows-x86_64
+      ASSET_PREFIX: ViberWhisper-${{ needs.preflight.outputs.tag }}-windows-x86_64${{ needs.preflight.outputs.asset_suffix }}
+      PACKAGE_FEATURES: ${{ needs.preflight.outputs.windows_features }}
       RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - name: Check out source
@@ -238,14 +273,14 @@ jobs:
 
       - name: Build locked static-CRT executables
         shell: pwsh
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc --features windows-app
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc --features $env:PACKAGE_FEATURES
 
       - name: Smoke-test native setup dialogs and released entry points
         shell: pwsh
         run: |
-          cargo test --release --locked --target x86_64-pc-windows-msvc --features windows-app native_setup_dialogs_show_and_return
+          cargo test --release --locked --target x86_64-pc-windows-msvc --features $env:PACKAGE_FEATURES native_setup_dialogs_show_and_return
           if ($LASTEXITCODE -ne 0) { throw "Native setup dialog test failed" }
-          cargo test --release --locked --target x86_64-pc-windows-msvc --features windows-app bundled_model_rejects_noise_and_resets_between_chunks
+          cargo test --release --locked --target x86_64-pc-windows-msvc --features $env:PACKAGE_FEATURES bundled_model_rejects_noise_and_resets_between_chunks
           if ($LASTEXITCODE -ne 0) { throw "Bundled VAD model test failed" }
           ./scripts/test-windows-setup.ps1 -BinaryDirectory target/x86_64-pc-windows-msvc/release
 
@@ -571,14 +606,14 @@ jobs:
       - name: Upload Windows distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-windows
+          name: release-windows${{ needs.preflight.outputs.asset_suffix }}
           path: release-assets/*
           if-no-files-found: error
           retention-days: 7
 
   publish:
     name: Publish GitHub Release
-    if: inputs.publish && github.ref_type == 'tag'
+    if: inputs.publish && !inputs.diagnostic_logs && github.ref_type == 'tag'
     needs: [preflight, package-macos, package-windows]
     runs-on: ubuntu-latest
     environment: release

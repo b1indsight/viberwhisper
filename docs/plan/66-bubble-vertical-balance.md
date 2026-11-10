@@ -1,7 +1,7 @@
 # 66 - 修正气泡底部留白，让识别文字垂直居中
 
 **阶段：** 紧凑方案已批准、本地实现与 macOS 检查完成；Windows 原生验收待运行。初始方案与历次调查限制保留，原生基线测量见 [004]，替代方案与实现见 [005]。
-**PR：** [Draft #172](https://github.com/b1indsight/viberwhisper/pull/172)，远端仍为计划与临时只读诊断；本轮实现尚未推送、未合并、未发布。
+**PR：** [Draft #172](https://github.com/b1indsight/viberwhisper/pull/172)，紧凑实现已推送；与新 `master` 的 changelog 冲突已在本地追加合并解决，等待推送后启动 Windows 原生验收。未合并、未发布。
 **Bookmark：** `fix/bubble-vertical-balance`；后续计划与实现沿用同一 bookmark / draft PR，目标分支为 `master`。
 **基线：** 已 fetch 的 `master@origin` / v0.5.3，[发布准备提交 34288ff9](https://github.com/b1indsight/viberwhisper/commit/34288ff9bc2ad6cf4fdba4864ac2ec6c7896c275)。目标是下一版本，不在本计划指定版本号或执行发布。
 **工作区：** 独立 JJ workspace `bubble-vertical-balance-plan-20261110`，路径 `.amp/in/feature-workspaces/bubble-vertical-balance`；不修改源主工作区或另两个 feature 的工作区。
@@ -233,3 +233,5 @@ Windows 沿用现有 `windows-app,integration` 原生测试、一次性 DPI/setu
 **Windows 与交付限制。** `CARGO_TARGET_DIR=.amp/in/target-compact-windows cargo check --locked --target x86_64-pc-windows-msvc --features windows-app,integration --all-targets` 退出 101；本机缺少 Windows MSVC C 头文件，`zstd-sys` 编译报 `stdlib.h` / `string.h` 不存在，尚未检查到应用代码，不改依赖或伪造 Windows 配置绕过。原始日志为 `compact-windows-msvc-check.log`。新 Windows 原生读回、截图、最终确认/取消及真实显示器/IME 验收均未完成，不沿用诊断提交的绿灯声称修复通过。此前明确推送授权限于诊断，本轮实现尚未推送；独立审阅后仍需获准将实现推到现有 PR，才能由既有 Windows CI 运行新增原生检查，不能以重跑旧提交代替。
 
 **简化与消融边界。** 产品改动只收紧现有高度计算并删除失去用途的居中补偿，没有增加算法、状态、分支或配置，因此不引入消融框架。新增 native helper 仅在原生夹具内部复用实际几何验收，不参与产品布局。原布局和新布局的同输入原生 A/B 及短句/九行/溢出/警告负对照仍须待 Windows 执行，未把纸面高度计算当作已完成实验。临时组件日志在取得修复后的原生证据后清理，保持同一 bookmark / draft PR。
+
+**推送与基线同步。** 用户随后明确要求“推送实现到 PR #172，并跑 Windows 原生验收”。只读双审阅均完成、无发现后，已推送[紧凑实现 a8eea25](https://github.com/b1indsight/viberwhisper/commit/a8eea25938850418996f5c66da2a2a610b35b662)。GitHub 确认 PR 与新 `master` 存在合并冲突，未为该 head 创建 CI；没有把旧提交的成功结果当作本次结果。获取[已合并的诊断日志功能 7aa37ae](https://github.com/b1indsight/viberwhisper/commit/7aa37aeffb85510fa79d375a87d0cfbf0abd1f24) 后，追加合并提交，只解决 changelog 顶部两条新增记录的冲突并同时保留它们；不重写已发布历史，不改上游功能。合并头仍须推送并以新的确切 SHA 订阅 CI，Windows 结果继续待验收。

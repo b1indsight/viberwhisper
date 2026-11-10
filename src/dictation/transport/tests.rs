@@ -195,6 +195,10 @@ async fn recording_answers_heartbeat_and_reports_server_error_before_stop() {
 
 #[tokio::test]
 async fn truncated_response_is_rejected_even_when_text_done_looks_valid() {
+    #[cfg(feature = "diagnostic-logs")]
+    let (log, dispatch) = logging::test_support::capture();
+    #[cfg(feature = "diagnostic-logs")]
+    let _guard = tracing::dispatcher::set_default(&dispatch);
     let (listener, settings) = listen().await;
     let server = tokio::spawn(async move {
         let mut socket = accept_session(&listener).await;
@@ -217,6 +221,8 @@ async fn truncated_response_is_rejected_even_when_text_done_looks_valid() {
     let error = connection.finish(&input, "truncated").await.unwrap_err();
     assert!(error.to_string().contains("truncated"));
     server.await.unwrap();
+    #[cfg(feature = "diagnostic-logs")]
+    assert!(log.as_file().metadata().unwrap().len() > 0);
 }
 
 #[tokio::test]

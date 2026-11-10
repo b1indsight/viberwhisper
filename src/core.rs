@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod config;
 pub(crate) mod listener;
+pub(crate) mod logging;
 pub mod orchestrator;
 mod prompt_lab;
 pub(crate) mod recognition;
@@ -13,7 +14,6 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::Parser;
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
 
 use crate::core::cli::{Cli, Commands, ConfigAction};
 use crate::core::config::{ConfigDocument, ConfigStore, fields};
@@ -44,7 +44,7 @@ pub fn run() -> Result<()> {
     if setup::run_hotkey_capture_helper_if_requested()? {
         return Ok(());
     }
-    init_tracing();
+    logging::init()?;
 
     let cli = Cli::parse();
 
@@ -86,7 +86,10 @@ pub fn run_desktop() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    init_tracing();
+    if let Err(error) = logging::init() {
+        crate::platform::report_desktop_startup_error(&error);
+        return ExitCode::FAILURE;
+    }
 
     match run_listener_with_setup() {
         Ok(()) => ExitCode::SUCCESS,
@@ -102,17 +105,6 @@ fn run_listener_with_setup() -> Result<()> {
         crate::ui::listener::run_with_config(config)?;
     }
     Ok(())
-}
-
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("viberwhisper=info")),
-        )
-        .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
 }
 
 fn load_config() -> Result<(ConfigStore, ConfigDocument)> {

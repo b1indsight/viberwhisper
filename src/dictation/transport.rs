@@ -1,3 +1,5 @@
+#[cfg(feature = "diagnostic-logs")]
+use crate::core::{config::SecretValue, logging};
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::{SinkExt, StreamExt};
@@ -48,6 +50,10 @@ pub(super) struct Connection {
     segment: Option<Segment>,
     response_pending: Option<String>,
     pending_events: VecDeque<Value>,
+    #[cfg(feature = "diagnostic-logs")]
+    diagnostic_model: String,
+    #[cfg(feature = "diagnostic-logs")]
+    diagnostic_key: Option<SecretValue>,
 }
 
 impl Connection {
@@ -83,6 +89,10 @@ impl Connection {
             segment: None,
             response_pending: None,
             pending_events: VecDeque::new(),
+            #[cfg(feature = "diagnostic-logs")]
+            diagnostic_model: settings.model.clone(),
+            #[cfg(feature = "diagnostic-logs")]
+            diagnostic_key: key.map(SecretValue::new),
         };
         timeout(Duration::from_secs(10), async {
             connection.wait_type("session.created").await?;
@@ -324,6 +334,18 @@ impl Connection {
                 loop {
                     let event = self.wait_type("response.done").await?;
                     if event["response"]["id"] == id {
+                        #[cfg(feature = "diagnostic-logs")]
+                        if let Some(segment) = &self.segment {
+                            logging::model_event(
+                                "realtime",
+                                &segment.correlation,
+                                "response.done",
+                                json!({
+                                    "id": id, "status": event["response"]["status"].as_str()
+                                }),
+                                self.diagnostic_key.as_ref().map(SecretValue::expose),
+                            );
+                        }
                         break;
                     }
                 }
@@ -447,15 +469,25 @@ impl Connection {
             .to_owned();
         self.segment.as_mut().unwrap().audio = AudioState::Committed(audio_id.clone());
         self.response_pending = Some(correlation.to_owned());
-        self.send(json!({"type":"response.create", "response":{
+        let request = json!({"type":"response.create", "response":{
             "conversation":"none", "output_modalities":["text"], "instructions":self.instructions,
             "max_output_tokens":4096, "metadata":{"dictation_id":correlation},
             "input":[{"type":"item_reference","id":prefix_id},
                 {"type":"item_reference","id":audio_id},
                 {"type":"message","role":"user","content":[{"type":"input_text",
                     "text":serde_json::to_string(&input.dynamic)?}]}]
-        }}))
-        .await?;
+        }});
+        #[cfg(feature = "diagnostic-logs")]
+        logging::model_event(
+            "realtime",
+            correlation,
+            "request",
+            json!({
+                "model": self.diagnostic_model, "stable_prefix": input.stable, "request": request
+            }),
+            self.diagnostic_key.as_ref().map(SecretValue::expose),
+        );
+        self.send(request).await?;
         let mut response_id = None;
         let mut seen = HashSet::new();
         let mut delta_bytes = 0;
@@ -489,6 +521,19 @@ impl Connection {
                     self.response_pending = None;
                 }
                 Some("response.output_text.delta" | "response.output_text.done") => {
+                    #[cfg(feature = "diagnostic-logs")]
+                    if event["type"] == "response.output_text.done" {
+                        logging::model_event(
+                            "realtime",
+                            correlation,
+                            "output_text.done",
+                            json!({
+                                "response_id": event["response_id"].as_str(), "text": event["text"].as_str(),
+                                "output_index": event["output_index"].as_u64(), "content_index": event["content_index"].as_u64()
+                            }),
+                            self.diagnostic_key.as_ref().map(SecretValue::expose),
+                        );
+                    }
                     ensure!(
                         response_id.as_deref() == event["response_id"].as_str()
                             && response_id.is_some(),
@@ -513,6 +558,28 @@ impl Connection {
                     }
                 }
                 Some("response.done") => {
+                    #[cfg(feature = "diagnostic-logs")]
+                    {
+                        // A malformed completion may contain audio despite requesting text.
+                        // Preserve final text/status without dumping arbitrary protocol fields.
+                        let text: Vec<_> = event["response"]["output"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+                            .filter(|part| part["type"] == "output_text")
+                            .filter_map(|part| part["text"].as_str())
+                            .collect();
+                        logging::model_event(
+                            "realtime",
+                            correlation,
+                            "response.done",
+                            json!({
+                                "id": event["response"]["id"].as_str(), "status": event["response"]["status"].as_str(), "output_text": text
+                            }),
+                            self.diagnostic_key.as_ref().map(SecretValue::expose),
+                        );
+                    }
                     ensure!(
                         response_id.is_some()
                             && response_id.as_deref() == event["response"]["id"].as_str(),

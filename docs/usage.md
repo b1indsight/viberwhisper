@@ -97,6 +97,32 @@ macOS 启动监听时若缺少辅助功能权限，会显示授权说明和「�
 语境记忆与确认后学习另存于同目录的 `dictation-memory.json`，用途、发送给服务的内容和清理方法见[Realtime 与语境记忆指南](dictation.md)。
 `config.json` 中由向导保存的密钥、历史与记忆均是本机明文，请按需保护或备份所在目录。
 
+## 诊断测试包日志
+
+普通包只输出 INFO/WARN/ERROR 运行诊断；`RUST_LOG=debug` 或 `trace` 也不能开启 DEBUG、TRACE
+或模型正文记录。需要排查模型输入输出时，按[发布手册](releasing.md#diagnostic-test-packages)
+在 `Package & Release` 中关闭 `publish`、开启 `diagnostic_logs`，取得文件名带 `-diagnostic` 的测试包。
+本地源码构建使用 `cargo build --release --locked --features diagnostic-logs`；Windows 桌面入口同时启用
+`windows-app`。开关在打包时确定，不需要改配置或环境变量。
+
+诊断包启动后，直接在 `config.json` 同目录追加 UTF-8 JSONL：
+
+- macOS：`~/Library/Application Support/com.b1indsight.viberwhisper/viberwhisper.YYYY-MM-DD.jsonl`
+- Windows：`%APPDATA%\ViberWhisper\viberwhisper.YYYY-MM-DD.jsonl`
+
+日期取本机本地日期。诊断包启动时、跨日后的下一次写入前，会删除其他日期且完整匹配该命名规则的应用日志；
+同一天重启继续追加。应用未运行时不后台清理，换回普通包也不会删除旧日志。配置、历史、记忆及其他文件不动。
+日志目录不可用时诊断包启动失败并提示路径。运行中写入或清理失败向 stderr 应急报告，Windows 无控制台入口
+可能看不到该报告；不保证磁盘故障下持久保存。
+
+文件保存应用 DEBUG 诊断，以及 HTTP STT、LLM 整理（含预热）和 Realtime 的实际提示词、文本语境与返回内容；
+请求和响应通过 ID 配对。Realtime 包含稳定前缀原文，不能只看 item 引用 ID。HTTP LLM 的非成功响应仍仅记录状态，
+不额外读取错误正文。模型内容只写文件，控制台保持 INFO 上限，CLI stdout 命令结果不变。
+
+**诊断日志可能包含完整识别文字、历史、语境记忆和个人/工作秘密。** 仅在可信测试环境使用，分享前检查并脱敏。
+不主动记录音频、base64 音频、鉴权头或完整配置；已知的当前 API key 原样回显会在日志副本中替换，
+但不保证处理编码、变形或口述的秘密。日志不自动上传，当天文件没有大小上限；测试结束后请按需删除。
+
 ## 常见问题
 
 | 情况 | 处理方式 |
