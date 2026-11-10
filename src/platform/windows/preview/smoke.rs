@@ -7,9 +7,10 @@ use windows_sys::Win32::UI::Controls::{EM_CANUNDO, EM_GETSEL, EM_REPLACESEL};
 impl NativePreview {
     /// Ask only this fixture's HWND and native children to render into a PNG.
     pub(crate) fn smoke_capture(&self, path: &std::path::Path) -> Result<()> {
+        use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::Graphics::Gdi::{
-            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
-            DIB_RGB_COLORS, DeleteDC, GdiFlush,
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, ClientToScreen, CreateCompatibleDC,
+            CreateDIBSection, DIB_RGB_COLORS, DeleteDC, GdiFlush,
         };
 
         let window = self.state.window.get();
@@ -21,6 +22,49 @@ impl NativePreview {
         let width = bounds.right - bounds.left;
         let height = bounds.bottom - bounds.top;
         ensure!(width > 0 && height > 0, "Preview capture has no area");
+        // Read the real HWND geometry; do not reconstruct it from layout's requested sizes.
+        for (name, control) in [
+            ("bubble", window),
+            ("EDIT", self.state.text.get()),
+            ("STATIC", self.state.status.get()),
+        ] {
+            let mut outer = RECT::default();
+            let mut client = RECT::default();
+            let mut origin = POINT::default();
+            ensure!(
+                unsafe { GetWindowRect(control, &mut outer) } != 0
+                    && unsafe { GetClientRect(control, &mut client) } != 0
+                    && unsafe { ClientToScreen(control, &mut origin) } != 0,
+                "Could not read preview component geometry"
+            );
+            eprintln!(
+                "preview component: capture={}; name={name}; visible={}; screen-rect={:?}; client-rect={:?}; client-screen-origin={:?}; outer-height={}; client-height={}",
+                path.display(),
+                unsafe { IsWindowVisible(control) } != 0,
+                [outer.left, outer.top, outer.right, outer.bottom],
+                [client.left, client.top, client.right, client.bottom],
+                [origin.x, origin.y],
+                outer.bottom - outer.top,
+                client.bottom - client.top,
+            );
+        }
+        let mut format = RECT::default();
+        unsafe {
+            SendMessageW(
+                self.state.text.get(),
+                EM_GETRECT,
+                0,
+                (&raw mut format) as isize,
+            )
+        };
+        let (_, line_height) = self.state.measure_text(self.state.text.get(), None)?;
+        let lines = unsafe { SendMessageW(self.state.text.get(), EM_GETLINECOUNT, 0, 0) };
+        eprintln!(
+            "preview text allocation: capture={}; format-client-rect={:?}; format-height={}; native-font-line-height={line_height}; native-lines={lines}",
+            path.display(),
+            [format.left, format.top, format.right, format.bottom],
+            format.bottom - format.top,
+        );
         let info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: size_of::<BITMAPINFOHEADER>() as u32,
