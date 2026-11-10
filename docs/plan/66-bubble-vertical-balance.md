@@ -1,7 +1,7 @@
 # 66 - 修正气泡底部留白，让识别文字垂直居中
 
-**阶段：** 计划待批准；已完成获准的 Windows 原生组件测量，尚未实施布局修复。初始方案与历次调查限制保留，当前实测结论见 [004]。
-**PR：** [Draft #172](https://github.com/b1indsight/viberwhisper/pull/172)，仅计划与临时只读诊断；未合并、未发布修复。
+**阶段：** 紧凑方案已批准、本地实现与 macOS 检查完成；Windows 原生验收待运行。初始方案与历次调查限制保留，原生基线测量见 [004]，替代方案与实现见 [005]。
+**PR：** [Draft #172](https://github.com/b1indsight/viberwhisper/pull/172)，远端仍为计划与临时只读诊断；本轮实现尚未推送、未合并、未发布。
 **Bookmark：** `fix/bubble-vertical-balance`；后续计划与实现沿用同一 bookmark / draft PR，目标分支为 `master`。
 **基线：** 已 fetch 的 `master@origin` / v0.5.3，[发布准备提交 34288ff9](https://github.com/b1indsight/viberwhisper/commit/34288ff9bc2ad6cf4fdba4864ac2ec6c7896c275)。目标是下一版本，不在本计划指定版本号或执行发布。
 **工作区：** 独立 JJ workspace `bubble-vertical-balance-plan-20261110`，路径 `.amp/in/feature-workspaces/bubble-vertical-balance`；不修改源主工作区或另两个 feature 的工作区。
@@ -219,3 +219,17 @@ Windows 沿用现有 `windows-app,integration` 原生测试、一次性 DPI/setu
 **最小修复方向，尚待批准和前后验证。** 将 Windows 同一 `layout` 中非溢出文字的垂直起点改为基于最终 EDIT 客户区与正文高度平分剩余空间，不继续只在读回的较小格式框内部计算 inset。[现有决策点](../../src/platform/windows/preview.rs#L660-L671) 本次 96 DPI 短句的目标是把 20 高的格式区置于 EDIT 的 y=4–24，上下各 4；保留外层 3 后，相对气泡各 7。合成 144 / 192 的剩余空间分别是 11 / 15，应按实际像素平分为 5/6、7/8，不能固定增加 4px 或 6 DIP。水平 margin、左对齐、字体、控件、3 DIP 外边距、真实警告与超过上限的滚动策略都保持不变；macOS 不做对称改写。对设置后读回的实际格式框和首末行重新验收，不能只断言请求了某个 RECT。
 
 **验收与交付边界。** 普通/流式单行、中英/emoji 与九行回缩已有本轮实测；低于高度上限的独立自动换行边界、显式两三行、用户原句及真实 125% / 175% 显示器缩放仍需按初稿矩阵补齐。当前没有运行新修复，因此不能将 CI 成功称为“居中修复通过”，也不能声称完整 IME、确认/投递或用户 Windows 桌面已验收。临时诊断仍在 draft PR 供复查，未修改布局，未合并；后续修复验证后移除临时输出。原始数据保存在本工作区 `.amp/in/artifacts/bubble-vertical-balance/windows-component-ci.log`、`component-height-table.txt`、`windows-components-27a52a1/`，共享入口为[本调查线程](https://ampcode.com/threads/T-01a1c439-cfb3-74ca-943e-e5d91fdf7a4c)。
+
+### [005] · 2026-11-10 · 按文字收紧 Windows 气泡，保留上下各 3 DIP
+
+**需求与决策变更。** 用户进一步要求格式区上下各留 3px，并明确批准按已说明的紧凑方案实现。按当前 96 DPI 样本，保留 20px 格式区、将 EDIT 从 28px 收紧至 20px、气泡从 34px 收紧至 26px，使格式区相对气泡上下各 3px；高 DPI 继续将 3 DIP 外边距换算为物理像素。这取代 [004] 中保留 28 DIP 最小正文高度、仅平分内部余量的 7px/7px 方向，不新增固定下移值，也不承诺任意 DPI 下固定 3 个物理像素。macOS 的产品布局不变。
+
+**本地实现。** Windows `WindowState::layout` 将正文高度由 `content_height.clamp(pixels(28), pixels(196))` 改为 `content_height.min(pixels(196))`；空正文仍按原生至少一行计高，warning-only 错误仍隐藏正文。去掉只为较高编辑区服务的格式矩形 inset，保留原生 `EM_SETRECTNP` 重置、水平 margins、196 DIP 高度上限、滚动恢复、警告位置与现有控件/事件处理。没有修改文字、字体、Enter 释放确认、Esc、Shift+Enter、IME、目标或投递实现。
+
+**回归与证据设计。** 扩展原生 smoke 的非溢出正文检查，读取实际 bubble/EDIT/客户区/最终格式框，检查 3 DIP 外边距与无内部空占位；用 `EM_LINEINDEX`、`EM_POSFROMCHAR` 独立读取非空首末行位置。末尾空行仍保留，实际光标由既有确认 smoke 校验，不用不存在的字符位置伪造读回。沿用 DPI/屏幕边缘/滚动对照，将旧的 28 DIP 最小高度断言改为实际字体行高；加入只读流式多行/自动换行/回撤及真实 `EN_CHANGE` 两三行、用户原句、末尾换行和空输入检查。现有 render-only demo 补用户原句、两三行、未溢出自动换行、有效尾随空行及长文/警告后回缩的原始截图。
+
+**基线失败与本地验证。** 修改产品代码前，以此前实际 Windows 日志重放新紧凑契约：EDIT=28px、原生字体行高=20px、行数=1，明确失败并指出剩余 8px；记录为 `.amp/in/artifacts/bubble-vertical-balance/compact-baseline-check.log`。这是对真实基线读回的重放，不是新 smoke 已在 Windows 执行。本轮 `cargo fmt --check`、macOS 的 `cargo test --locked --features integration`、`cargo clippy --locked --all-targets --features integration -- -D warnings`、integration preview 构建与 `--artifacts` 实际执行均通过；依赖 `vendor/rdev` 保留既有警告。直接检查新增用户原句、两行、三行、自动换行、有效尾随空行与回缩的 macOS 原始图，文字左对齐、可读，没有残留警告；这些是共享夹具的 macOS 对照，不能当作 Windows 修复效果。日志及 PNG 在 `.amp/in/artifacts/bubble-vertical-balance/compact-macos-*`。
+
+**Windows 与交付限制。** `CARGO_TARGET_DIR=.amp/in/target-compact-windows cargo check --locked --target x86_64-pc-windows-msvc --features windows-app,integration --all-targets` 退出 101；本机缺少 Windows MSVC C 头文件，`zstd-sys` 编译报 `stdlib.h` / `string.h` 不存在，尚未检查到应用代码，不改依赖或伪造 Windows 配置绕过。原始日志为 `compact-windows-msvc-check.log`。新 Windows 原生读回、截图、最终确认/取消及真实显示器/IME 验收均未完成，不沿用诊断提交的绿灯声称修复通过。此前明确推送授权限于诊断，本轮实现尚未推送；独立审阅后仍需获准将实现推到现有 PR，才能由既有 Windows CI 运行新增原生检查，不能以重跑旧提交代替。
+
+**简化与消融边界。** 产品改动只收紧现有高度计算并删除失去用途的居中补偿，没有增加算法、状态、分支或配置，因此不引入消融框架。新增 native helper 仅在原生夹具内部复用实际几何验收，不参与产品布局。原布局和新布局的同输入原生 A/B 及短句/九行/溢出/警告负对照仍须待 Windows 执行，未把纸面高度计算当作已完成实验。临时组件日志在取得修复后的原生证据后清理，保持同一 bookmark / draft PR。
