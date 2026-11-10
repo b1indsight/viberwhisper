@@ -1,8 +1,8 @@
 # 66 - 修正气泡底部留白，让识别文字垂直居中
 
-**阶段：** 初始计划，待批准；本轮只有调查与文档，没有产品或测试代码改动。
-**PR：** 尚未创建；推送和建 PR 待授权，不表示已发布。
-**拟用 Bookmark：** `fix/bubble-vertical-balance`；后续计划与实现沿用同一 bookmark / draft PR，目标分支为 `master`。
+**阶段：** 计划待批准；已完成获准的 Windows 原生组件测量，尚未实施布局修复。初始方案与历次调查限制保留，当前实测结论见 [004]。
+**PR：** [Draft #172](https://github.com/b1indsight/viberwhisper/pull/172)，仅计划与临时只读诊断；未合并、未发布修复。
+**Bookmark：** `fix/bubble-vertical-balance`；后续计划与实现沿用同一 bookmark / draft PR，目标分支为 `master`。
 **基线：** 已 fetch 的 `master@origin` / v0.5.3，[发布准备提交 34288ff9](https://github.com/b1indsight/viberwhisper/commit/34288ff9bc2ad6cf4fdba4864ac2ec6c7896c275)。目标是下一版本，不在本计划指定版本号或执行发布。
 **工作区：** 独立 JJ workspace `bubble-vertical-balance-plan-20261110`，路径 `.amp/in/feature-workspaces/bubble-vertical-balance`；不修改源主工作区或另两个 feature 的工作区。
 
@@ -196,3 +196,26 @@ Windows 沿用现有 `windows-app,integration` 原生测试、一次性 DPI/setu
 **验证与执行限制。** 诊断代码已通过 `rustfmt --check`。尝试 `cargo check --locked --target x86_64-pc-windows-gnu --features integration --bin viberwhisper-preview`，在基线依赖 `ort-sys 2.0.0-rc.9` 构建脚本处失败：没有该 GNU target 的预编译 ONNX Runtime；不能将其写成 Windows 编译或运行通过，也不改依赖来绕过。本机重新确认只有 macOS runner，且无 Windows VM/Wine 入口。既有 CI 只响应 `master` push 或目标为 `master` 的 PR，没有手动 dispatch；新诊断需推送本 feature 分支并开 draft PR 才能在 Windows 执行，这两项外部写入待用户授权。[CI 触发条件](../../.github/workflows/ci.yml#L1-L7)
 
 **当前状态。** 新增的是临时取证日志，未实施产品布局修复，未得到新一轮 Windows 组件实测值。此前同一基线的 34px 普通单行窗口与可见警告的 STATIC 读回日志保留，不能把源码算出的 EDIT 高度或像素墨迹间距标为新测量。计划和诊断都仅保存在本独立 workspace，尚无提交、推送或 PR；不直接修改 `master`，也不把用户此次测试要求扩展为产品修复批准。取证结束后清理临时日志；只保留有依据的布局修正及必要行为回归。
+
+### [004] · 2026-11-10 · Windows 原生高度测量定位到 EDIT 内部的底部余量
+
+**执行与来源。** 用户授权推送只读诊断并创建 draft PR，新增诊断经两个独立审阅通过，无 findings。诊断提交为 [27a52a1f](https://github.com/b1indsight/viberwhisper/commit/27a52a1f341864f47584eaa8e6ea68f42aea4ea1)，对应 [Windows CI 原生作业](https://github.com/b1indsight/viberwhisper/actions/runs/42795731316/job/129760308159) 于 2026-11-10 10:02–10:09 UTC 实际执行成功，同轮 macOS CI 也成功。系统为 Windows Server 2025 / 10.0.26100。已下载本轮原始日志与截图，重新直接检查普通单行、流式和九行回缩画面；本条是新增原生 API 读回结果，不是旧截图估算或源码反推。
+
+**实测组件占用。** 下表统一使用物理像素，格式矩形 y 坐标相对 EDIT 客户区。字体行高来自实际字体的 `GetTextMetricsW`，行数来自原生 EDIT；矩形由 `GetWindowRect`、`GetClientRect`、`EM_GETRECT` 直接读取。
+
+| 原生状态 | 气泡客户区高 | EDIT 客户区高 | 格式矩形 y / 高 | 字体行高 / 行数 | STATIC 高 / 可见 |
+|---|---:|---:|---|---|---|
+| 最终单行、流式单行、中英/emoji 编辑单行；actual/layout DPI 96/96 | 34 | 28 | 0–20 / 20 | 20 / 1 | 0 / 否 |
+| 合成 layout DPI 144，actual DPI 96，单行 | 52 | 42 | 0–31 / 31 | 31 / 1 | 0 / 否 |
+| 合成 layout DPI 192，actual DPI 96，单行 | 68 | 56 | 0–41 / 41 | 41 / 1 | 0 / 否 |
+| 九行回缩，actual/layout DPI 96/96，无尾随换行/滚动条 | 186 | 180 | 0–180 / 180 | 20 / 9 | 0 / 否 |
+| 达到高度上限的长文，actual/layout DPI 96/96，滚动状态 | 202 | 196 | 0–180 / 180 | 20 / 37 | 0 / 否 |
+| 同一长文加真实警告，actual/layout DPI 96/96 | 237 | 196 | 0–180 / 180 | 20 / 37 | 32 / 是 |
+
+普通 96 DPI 单行的气泡内部，EDIT 的顶部为 y=3、底部为 y=31，外层上下各 3；EDIT 客户区与其窗口同为 28 高，没有额外非客户区高度。格式矩形为 `[4, 0, 152, 20]`，正好容纳一个 20 高的字体行，却位于 EDIT 顶部，因此 EDIT 内部上方余量为 0、下方为 8；相对整个气泡的格式区上方为 3、下方为 11。STATIC 不可见且实际高度为 0，虽然其零高窗口原点位于气泡底部，不能把该坐标当作额外 footer。警告状态则真实分配 32 高提示，正文到提示及提示到底部各 3，整体为 3 + 196 + 3 + 32 + 3 = 237。
+
+**已确认问题与边界。** 在本轮 Windows 环境中，短句最终格式框贴在较高的 EDIT 顶部、剩余空间全部留在其下方，是已证实的布局缺陷；更新 [001] / [002] 中“格式框是否偏上仍是假设”的状态。它与截图中文字偏上的外观一致，流式和 ready 状态均存在。此次读的是布局完成后的格式框，未记录 NULL 重置后、设置 inset 前的中间值；不据此宣称已经验证微软内部规范化的具体实现。九行回缩没有这段内部余量；长文的可视格式区与整行容纳、溢出和尾随空行有关，仍按滚动视口验收，不能统一移动全部内容。
+
+**最小修复方向，尚待批准和前后验证。** 将 Windows 同一 `layout` 中非溢出文字的垂直起点改为基于最终 EDIT 客户区与正文高度平分剩余空间，不继续只在读回的较小格式框内部计算 inset。[现有决策点](../../src/platform/windows/preview.rs#L660-L671) 本次 96 DPI 短句的目标是把 20 高的格式区置于 EDIT 的 y=4–24，上下各 4；保留外层 3 后，相对气泡各 7。合成 144 / 192 的剩余空间分别是 11 / 15，应按实际像素平分为 5/6、7/8，不能固定增加 4px 或 6 DIP。水平 margin、左对齐、字体、控件、3 DIP 外边距、真实警告与超过上限的滚动策略都保持不变；macOS 不做对称改写。对设置后读回的实际格式框和首末行重新验收，不能只断言请求了某个 RECT。
+
+**验收与交付边界。** 普通/流式单行、中英/emoji 与九行回缩已有本轮实测；低于高度上限的独立自动换行边界、显式两三行、用户原句及真实 125% / 175% 显示器缩放仍需按初稿矩阵补齐。当前没有运行新修复，因此不能将 CI 成功称为“居中修复通过”，也不能声称完整 IME、确认/投递或用户 Windows 桌面已验收。临时诊断仍在 draft PR 供复查，未修改布局，未合并；后续修复验证后移除临时输出。原始数据保存在本工作区 `.amp/in/artifacts/bubble-vertical-balance/windows-component-ci.log`、`component-height-table.txt`、`windows-components-27a52a1/`，共享入口为[本调查线程](https://ampcode.com/threads/T-01a1c439-cfb3-74ca-943e-e5d91fdf7a4c)。
