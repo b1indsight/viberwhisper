@@ -182,10 +182,6 @@ enum WorkerMsg {
 }
 
 enum WorkerEvent {
-    SegmentQueued {
-        index: usize,
-    },
-    InputDrained,
     UploadStarted {
         index: usize,
     },
@@ -453,7 +449,6 @@ struct HttpSession {
     cancelled: CancellationToken,
     config: OrchestratorConfig,
     segmentation: Segmentation,
-    input_drained: bool,
     input: Arc<HttpInputStatus>,
 }
 
@@ -504,7 +499,6 @@ impl HttpSession {
             cancelled,
             config,
             segmentation,
-            input_drained: segmentation == Segmentation::Fixed,
             input,
         }
     }
@@ -521,9 +515,6 @@ impl HttpSession {
                 });
             }
             while let Ok(event) = self.result_rx.try_recv() {
-                if matches!(event, WorkerEvent::InputDrained) {
-                    self.input_drained = true;
-                }
                 apply_worker_event(&mut self.chunk_entries, event);
             }
             return;
@@ -572,24 +563,22 @@ impl HttpSession {
         let mut chunk_entries = session.chunk_entries;
         let result_rx = session.result_rx;
         let worker = session.worker;
-        let mut input_drained = session.input_drained;
         let deadline = Instant::now() + session.config.convergence_timeout;
         let mut timed_out = false;
         let mut pending_count = 0;
 
         loop {
-            if input_drained && chunk_entries.iter().all(|entry| entry.state.is_terminal()) {
+            // Fixed input registers every chunk at intake. Live input may still
+            // have an unregistered tail, so only worker-channel EOF proves completion.
+            if session.segmentation == Segmentation::Fixed
+                && chunk_entries.iter().all(|entry| entry.state.is_terminal())
+            {
                 break;
             }
 
             let remaining = deadline.saturating_duration_since(Instant::now());
             match result_rx.recv_timeout(remaining) {
-                Ok(event) => {
-                    if matches!(event, WorkerEvent::InputDrained) {
-                        input_drained = true;
-                    }
-                    apply_worker_event(&mut chunk_entries, event);
-                }
+                Ok(event) => apply_worker_event(&mut chunk_entries, event),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     timed_out = true;
                     session.cancelled.cancel();
@@ -597,7 +586,7 @@ impl HttpSession {
                         .iter()
                         .filter(|entry| !entry.state.is_terminal())
                         .count()
-                        + usize::from(!input_drained);
+                        + usize::from(session.segmentation == Segmentation::PauseAware);
                     warn!(
                         pending_count = pending_count,
                         "Convergence timeout; marking pending chunks as Failed(Timeout)"
@@ -610,11 +599,6 @@ impl HttpSession {
                     break;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    if !input_drained {
-                        session
-                            .input
-                            .fail("HTTP audio worker closed before draining input");
-                    }
                     let error =
                         TranscribeError::Network("worker result channel closed".to_string());
                     for entry in &mut chunk_entries {
@@ -628,7 +612,8 @@ impl HttpSession {
         }
 
         if !timed_out {
-            // Every result was received or the result channel disconnected.
+            // The worker owns the only result sender. Join also waits for its
+            // panic guard to record any input fault after that sender is dropped.
             let _ = worker.join();
         } else {
             // Drop the handle without joining — the worker may still be mid-request.
@@ -757,7 +742,6 @@ impl HttpAudio {
             return Ok(());
         }
         let chunk = crate::audio::chunk::encode_i16_wav(&self.samples, self.rate)?;
-        let _ = tx.send(WorkerEvent::SegmentQueued { index: self.index });
         transcribe_chunk(self.index, &chunk, tx, transcriber, cancelled);
         self.samples.clear();
         self.index += 1;
@@ -806,18 +790,12 @@ fn live_worker_loop(
     {
         input.fail(&format!("HTTP audio tail: {error:#}"));
     }
-    let _ = tx.send(WorkerEvent::InputDrained);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn apply_worker_event(chunk_entries: &mut Vec<ChunkEntry>, event: WorkerEvent) {
     match event {
-        WorkerEvent::SegmentQueued { index } => chunk_entries.push(ChunkEntry {
-            index,
-            state: ChunkState::Flushed,
-        }),
-        WorkerEvent::InputDrained => {}
         WorkerEvent::UploadStarted { index } => {
             if let Some(entry) = chunk_entries.iter_mut().find(|entry| entry.index == index) {
                 if matches!(entry.state, ChunkState::Flushed) {
@@ -828,6 +806,12 @@ fn apply_worker_event(chunk_entries: &mut Vec<ChunkEntry>, event: WorkerEvent) {
                         "Ignoring upload event for chunk that is no longer flushed"
                     );
                 }
+            } else {
+                // Live segments become known only when the worker seals and starts them.
+                chunk_entries.push(ChunkEntry {
+                    index,
+                    state: ChunkState::Uploading,
+                });
             }
         }
         WorkerEvent::Completed { index, result } => {

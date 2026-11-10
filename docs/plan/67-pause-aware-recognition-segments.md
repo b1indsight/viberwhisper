@@ -397,3 +397,104 @@ Realtime 在 append 前求切点，按连续切片逐段提交；30 秒容量改
 **验证与状态：** Rust 1.99.1 的 `cargo fmt --check`、CI 原命令 `cargo clippy --locked --all-targets --features diagnostic-logs -- -D warnings`、all-targets/all-features Clippy 和 diagnostic-logs 全量测试均通过；原 1.94 工具链上的该 Realtime 样本连续性回归也通过。Windows 新提交的 CI 结果仍待确认，以上本地证据不替代 Windows 运行验收；第 4 条真实语料与服务验收限制不变，PR 继续保留 Draft。
 
 来源：[同版本复现](../../.amp/in/artifacts/ci-clippy-1.99.1-red.log)、[修复后验证](../../.amp/in/artifacts/ci-clippy-1.99.1-green.log)。
+
+### 8. 2026-11-10 — 录音侧统一分段的简化提案（待批准，未实现）
+
+**触发与状态：** 用户连续询问 `audio/segment.rs` 的必要性、orchestrator 新增逻辑的职责，以及为何不直接改变录音器的块判定，随后要求“先给出录音侧统一分段的简化方案”。同时保留“Realtime 仍需要边录边上传”的要求。本条只提出修订，不据此开始产品代码或测试修改，也不推送；获批后在同一 bookmark / [PR #173](https://github.com/b1indsight/viberwhisper/pull/173) 中调整。第 2 条的 worker-owned HTTP 分段取舍只有获批后才被本条取代。
+
+**调查参照：** 当前 feature 为 [03133926](https://github.com/b1indsight/viberwhisper/commit/03133926c6563d409b4b4ad94b85368993b8aacd)，该提交的 [macOS / Windows CI](https://github.com/b1indsight/viberwhisper/actions/runs/42807789015) 已通过；这不补足第 4 条的真实语料验收。调查时 `master@origin` 为 [ef508fd5](https://github.com/b1indsight/viberwhisper/commit/ef508fd5dd7c)，本轮没有变基或改变已发布产品代码。
+
+#### 建议结论与职责
+
+**由录音侧统一决定识别段的结束位置，上传方式按后端保留。** HTTP 取得完整 WAV 段；Realtime 继续取得短 PCM 帧，并在录音侧给出的段结束标记处 commit。两条桌面路径都不再在网络 worker 中执行停顿判定。
+
+| 所属位置 | 拟议职责 |
+|---|---|
+| CPAL 采集回调 | 保留现有下混、增益、写入有界原生 PCM 与轻量唤醒；不做推理、编码、网络或等待下游空间 |
+| 录音侧后台音频线程 | 每次录音一个，锁内只取待处理 PCM，锁外重采样、增量 VAD、决定切点及编码；复用现有 `Segmenter`，不新建通用 Pipeline / Strategy 框架 |
+| HTTP 输出 | 在原生采样域保留连续 PCM，停顿 / 上限 / stop 时封出一个完整 WAV，交给既有完整块提交入口；段号在提交时注册 |
+| Realtime 输出 | 连续重采样到 24kHz 后，使用同一 `Segmenter` 策略；按不超过 200ms 的短 PCM 帧输出，在切点插入本地“本段结束”标记 |
+| HTTP worker | 顺序消费完整 WAV，请求识别、记录结果与错误；不解码短帧再组段 |
+| Realtime engine / transport | 收到帧便 begin / append，收到段结束标记便执行既有门控、clear 或 commit / response / cleanup；不判断停顿 |
+| winit UI | 发起 start / stop / cancel，接收故障和处理完成通知；普通听写不再经 UI 搬运音频。raw capture 的原固定块与归档路径本期保留 |
+
+`Segmenter` 仍作为 audio 内部的小状态机保留，负责“本段见过人声、连续安静多久、还剩多少容量”；文件本身不承担会话、网络或调度职责。桌面 PauseAware 的调用者收敛到录音侧，离线 Fixed 的复用暂时不动；不为了消除一个文件而把这些状态散到网络模块。
+
+保持当前初值：0.3 人声概率、连续 25 个 32ms 低概率帧（800ms）、30 秒 / 23MiB 先到先切、正常 stop 刷新非空尾。短换气不因包结束而封段；VAD 异常退回本次录音的固定上限。无声学语义理解、回溯裁剪、音频重叠或文字去重。参数校准仍受第 4 条的证据限制。
+
+#### Realtime 边录边上传与采样域
+
+“短帧”用于传输，“识别段”用于一次 commit，二者不需要同长。录音 8 秒后停顿时，前 8 秒已经随短帧 append；约 800ms 的持续安静被确认后，录音侧给出段结束标记，engine 才 commit 并创建响应。标记只在本地音频输入通道中传递，不是服务端新协议，也不能让后段样本先 append 到前段。
+
+建议把当前 `Recording::push` 中桌面使用的连续 `PcmResampler(rate, 24000)` 一起移到音频线程：在实际发送的 24kHz 域决定切点，恰好 30 秒就是 720000 个样本，容量仍取共享策略。整次录音只有一个重采样器，**只在正常 EOF 刷新一次**；不按段 reset 或在段中补零 flush。这样不需要原生切点到延迟重采样输出的待定边界队列，且保持当前桌面 Realtime 的切点采样域。HTTP 仍保留原生采样率，不能为统一改成 24kHz。
+
+桌面 Realtime 直接消费已处理的 24kHz PCM，复用原 begin / append / finish_segment；离线 `Recording(Fixed)` 保持现有 WAV 解码、连续重采样、固定分段和 EOF 刷新。可以为桌面增加窄的 PCM 输入入口，不新建一套通用音频管线，不顺手重构离线评测。
+
+仍保持一段响应在途。当前 worker 在等待 `finish_segment` 返回期间也不读取下一帧，本方案不增加并行 append 下一段的协议行为；慢服务下允许有界等待，不能宣称上传永不间断。[当前重采样与分段](../../src/dictation/engine.rs#L389-L454)、[顺序输入循环](../../src/dictation/engine.rs#L229-L237)、[append 与 commit](../../src/dictation/transport.rs)。
+
+#### 可以删除与必须保留的协调
+
+- **HTTP 删除：** `WorkerMsg::Frame`、`live_worker_loop`、`HttpAudio`、300 短帧输入分支、HTTP 内的 `Segmentation` 选择及 `new_live_http` 专用入口。
+- **HTTP 删除：** `SegmentQueued`、`InputDrained`、`input_drained`。前提是录音线程提交完整段时已经通过现有入口注册段号，且最终收集严格等录音侧封尾结束才开始；不能只删事件而继续让未注册尾段落在收集之后。
+- **桌面 Realtime 移出：** 增量停顿判定和原生到 24kHz 重采样。保留本段 PCM 供既有整段人声门控、短尾补零与协议处理；整段门控和停顿判定职责不同。
+- **录音侧改写：** Live 的固定 `total / chunk_max_samples` 就绪判断与 UI 取帧中转；raw capture 仍使用这些接口，未迁移前不能把整个接口删掉。
+- **保留：** SessionId 路由、`Progress.cancelled`、已确认部分结果、单段请求失败后继续、`InputFailure` / PartialFailure 呈现、首个输入故障与 UI 唤醒，以及已有网络超时 / 重试。`HttpInputStatus` 不为追求删除数量而强行移除；只有实际写入者不再需要共享时才缩减，不能丢掉输入不完整的警告。
+
+主要简化是删除 HTTP 的第二套“短帧变完整段”生命周期，以及网络层对停顿策略的依赖。代价是增加一个音频线程和它的停止排空协调，不能预先保证总代码行数一定减少。[HTTP 现有 Live 状态](../../src/core/orchestrator.rs#L428-L529)、[录音就绪判定](../../src/audio/recorder.rs#L198-L226)。
+
+#### 通道、停止、取消与故障
+
+音频线程的输出直接交给现有会话的有界输入通道，不叠加“完成段队列 + UI 中转队列”。建议 HTTP 复用原完整段容量 2，Realtime 保留至多 300 个短帧 / 段结束消息；后者每个音频载荷最多 200ms，因此音频积压不超过约 60 秒，标记占槽时会更少。**不能把 300 短帧原样换成 300 个最长 30 秒的完整段。**
+
+队列满时让后台音频线程可取消地等待空间，把尚未处理的新音频留在原生 PCM 的 60 秒有界缓冲中。CPAL / UI 不等待，不能持 orchestrator/session 互斥锁等待。这样短段不会仅因两个队列槽暂满便立即失败；代价是背压时 VAD 也暂停，恢复后补算。等待实现必须能被取消或后端退出唤醒，否则不接受该实现；优先复用项目已有的有界 channel 与取消 token，不加依赖、轮询线程或另一套调度框架。
+
+各层都单独计入上界：HTTP 至多原生缓冲 60 秒 + 音频线程当前/待交付段 30 秒 + 队列 2×30 秒 + 在途段 30 秒；Realtime 是原生缓冲 60 秒 + 短帧队列至多 60 秒 + 网络当前段 30 秒，另有有界分析/重采样残余。PCM/WAV 编码及复制的瞬时开销仍须测量；不能把上述层数隐去并声称总共只缓存 60 秒。参数先复用现有值，不借本次设计扩大队列。
+
+1. **正常 stop：** UI 停设备并进入现有 Stopping，不等待推理/网络；音频线程排空已接受 PCM，Realtime 刷新一次重采样，再 `Segmenter::finish` 形成非空尾；全部完整段或 Frame / SegmentEnd 已提交后报告音频侧完成。现有后台 finalization 随后关闭识别输入并收集结果。HTTP 从原 `stopped_at` 起算的收敛预算包含排空，不能排空后重新多给 30 秒。
+2. **完成与异常：** 音频线程的正常完成 / 错误 / panic 由本地完成结果区分。只有正常封尾或已明确带故障的前缀处理完成才能继续最终收集；线程意外断开不能冒充正常 EOF。不另加 HTTP `InputDrained` 或独立 EOF 控制队列。Realtime 的段结束标记与对应 PCM 必须在同一有序通道中。
+3. **主动取消：** 先置共享取消 token，再停止设备、唤醒音频线程，丢弃未提交 PCM 和尾段，不运行正常封尾；网络层阻止后续请求和结果交付。在途同步 API 及其既有重试依旧不能撤回。音频线程不得因队列满而一直等到网络请求结束才能响应取消。
+4. **容量/完整性故障：** 首次溢出或输入故障后不接受缺口之后的 PCM，唤醒 UI 停录；HTTP 尽力提交故障前连续前缀，最终显示“不完整”，不能正常成功。Realtime 维持既有故障取消/连接退役及已验证部分文字的规则，不重放状态不明的音频。服务请求失败与采集缺口继续分开处理。
+
+这些顺序需要修改当前同步返回 `chunks` 的 stop 交接；新增的是录音侧完成结果，复用已有 Stopping 与后台 finalization，不为排空增加新的顶层录音状态。故障/完成通知仍带 SessionId，不能让旧线程关闭新会话。[当前 stop 交接](../../src/ui/listener/event_loop.rs#L657-L678)、[当前 recorder stop](../../src/audio/recorder.rs#L506-L537)、[既有状态](../../src/core/recording_session.rs#L5-L12)。
+
+#### 实施顺序与验收（尚未执行）
+
+1. 获批后先在同一 PR 上与最新 `master` 组合，保行为移动音频处理职责：复用现有 `Segmenter` / `StreamingVad`，接入一个录音侧音频线程和可取消背压，不同时改阈值。
+2. HTTP 改回完整段入口，先验证“封尾结束后才收集”与入队时注册，再删 Live 帧分支及 `SegmentQueued/InputDrained`；保留输入故障、部分结果和取消回归。
+3. 桌面 Realtime 连续重采样和切点移到录音侧，接入短帧 / 段结束标记；复用已有协议操作，离线 Fixed 路径不变。最后精简普通听写的 UI 音频中转，保留 raw capture 归档。
+4. 验证同一输入的 HTTP 段拼接逐样本等于原生 PCM；Realtime 拼接（排除协议短尾补零）等于整次连续重采样并 EOF flush 的输出。在 16/44.1/48kHz、317 样本 / 200ms / 不规则包下对照当前切点，覆盖 30 秒 ±1 样本、65 秒连续讲话、600ms 换气、800ms 阈值及停顿中恢复讲话。
+5. Realtime 第一段结束前必须已经观察到 append；Frame A / SegmentEnd / Frame B 的提交音频不能混段。stop 在切点上不得空提交，停顿阈值未到的 stop 仍收尾，单样本尾不能被分段层漏掉；纯静音不产生 HTTP 请求或 Realtime commit / response。
+6. 可控阻塞后端填满两种队列，验证多段短句只在原生缓冲超过容量后显式溢出，且没有跨缺口音频；在满队列、音频排空、HTTP detached worker / Realtime 响应等待期间分别取消，必须无后续请求/交付、无互斥锁死等。注入音频线程 panic、后端退出及耗尽原收敛期限，不能误报正常空结果。
+7. 离线两种 convert、prompt-lab 原始采集/评测保持固定段、连续重采样、WAV/评分身份的负对照；正常预览 / Enter / Esc 不变。重跑项目构建、测试、lint 和两平台 CI，并测量音频回调/UI 心跳、取消响应、CPU 与各级实际峰值；第 4 条真实中文/噪声/服务验收仍未完成。
+
+**候选与暂缓：** 完整段才开始 Realtime 上传的方案接口更少，但违背当前边录边上传要求，不推荐；保持重采样在 engine 并换算源切点会增加延迟边界状态，不推荐；把 VAD 放 CPAL 或 UI 虽少一个线程，现有耗时观测不足以证明不卡回调/UI，不采用。暂缓 raw capture 迁移、并行响应、新用户配置和通用音频框架。
+
+**顾问与验证边界：** 本地 Claude Code 顾问以 `claude-opus-5-5` 对显式源码材料生成草案，初始化 tools / mcp_servers 为空，响应模型一致、进程退出 0、结果无错误。采纳单音频线程、24kHz 域切点和背压前移；没有采纳新建可复用 Pipeline 类型、显式网络 EOF 消息、重构离线入口或另开 PR 的建议，也纠正其遗漏当前段/在途段的容量估算。上述是经源码核对的方案，未执行新实现或运行验收；仅本地追加本文，未推送。
+
+### 9. 2026-11-10 — 保留两条路径独立分段，合并 HTTP 重复注册事件
+
+**用户决定与范围：** 用户明确要求“我们就分开实现，尽量保持简化就行”。不采纳第 8 条的录音侧统一线程提案，保留第 1、2 条已经实现的后台分工：HTTP 的 `HttpAudio` 在原生采样域封 WAV 段并顺序识别；Realtime 的 `Recording` 在连续重采样后的 24kHz 域判定切点、边录边 append，到切点才门控 / commit / response。两者仍复用 `Segmenter` 的声学规则，不复制 VAD 算法、不强行统一传输形态。不增加线程、队列、公共配置或新的 EOF 协议，不改变停顿初值、30 秒上限、尾段、离线 / 原始采集、预览确认及现有背压行为。第 8 条保留为未采纳的讨论历史，相应方案图已标明历史提案。
+
+**已完成的小幅简化：** HTTP Live 封段后原先连续发送 `SegmentQueued` 和 `UploadStarted`，前者仅注册一个立即转为 Uploading 的段。删除 `SegmentQueued`，在收到尚未登记段号的 `UploadStarted` 时直接登记为 Uploading；完整块 Fixed 路径仍沿用提交时登记以及既有状态更新。没有新增类型、状态或 helper，也不改变识别请求时机与文本顺序。
+
+**保留的协调及原因：** `InputDrained` 仍负责证明短帧输入和未封尾段全部处理完；单靠“已登记段均完成”仍可能漏尾，不能合并掉。`HttpInputStatus`、共享取消 token、超时 / 输入不完整警告、失败前缀与 SessionId 隔离保持原样。Realtime 的重采样 / 协议代码未改，等待前一响应时后续音频在本地有界排队的行为不扩展为并行上传。
+
+**验证：** 在修改前用 Rust 1.99.1 运行现有 orchestrator 测试作为基线；修改后 `cargo +1.99.1 fmt --check`、`cargo +1.99.1 build --locked`、默认全量测试、diagnostic-logs 全量测试和 `cargo +1.99.1 clippy --locked --all-targets --all-features -- -D warnings` 均通过。现有通过公共入口检查尾段样本拼接、超时 / 停录后取消、满队列连续前缀和部分失败的测试保持不变；本次为移除冗余事件的保行为简化，无新增机制需要消融，也不新增只验证内部事件次序的永久测试。vendored rdev 的既有警告未压制或修改；没有新增 UI 外观变化，不重跑截图。未运行个人服务或新增 Windows 实机验证，第 4 条的质量验收限制继续有效。
+
+来源：[HTTP 实现](../../src/core/orchestrator.rs)、[修改前基线](../../.amp/in/artifacts/http-segment-registration-before.log)、[修改后组合验证](../../.amp/in/artifacts/http-segment-registration-after.log)。
+
+**交付状态：** 本轮代码和决策记录仅在独立 workspace 本地，未推送；现有 PR 的远程 head 不变。后续推送这次小幅简化前仍需重新通过代码审阅门禁，不能复用旧提交的 CI / 审阅结果，也不据此标记 Ready、合并或发布。
+
+### 10. 2026-11-11 — 用 HTTP 结果通道关闭替代重复排空状态
+
+**触发与检查范围：** 用户要求“检查简化一下代码”。检查共享 `Segmenter` / 增量 VAD、HTTP 帧处理及结果收敛、Realtime 分段提交与配置接线。沿用第 9 条的独立后端分工，不实施第 8 条提案，不增加线程、队列、类型、配置或分段规则。共享声学状态仍承担短暂停顿保护、连续分析和硬上限；没有将这些状态重复放入两个后端。
+
+**取舍及已实现：** 修正第 9 条关于必须保留 `InputDrained` 的结论。HTTP worker 独占结果通道唯一发送端，处理完已接受输入及尾段后才释放发送端，因此可以直接等待通道关闭，删除 `InputDrained` 事件、`input_drained` 字段及其更新分支。通道关闭后仍 join worker，让 panic guard 有机会记录输入故障，再收集成功结果或返回 `InputFailure`；正常完成和 worker panic 不混同。Fixed 完整块路径继续按提交时已登记的段判定完成，保留原有提前退出行为。Live 在超时前未见通道关闭时，仍将未排空输入计为至少一项待处理工作。架构文档同时反映第 9 条删除 `SegmentQueued` 后的直接注册及本次 EOF 规则。
+
+**必要边界的对照验证：** 修改前后现有 orchestrator 测试均通过。临时只把完成条件改成“已登记段都完成”，运行 `cargo +1.99.1 test --locked --lib nregistered_tail`，既有尾段测试实际失败：得到 `repeat`，期望 `repeat repeat`。恢复 Live 等待通道关闭后，该测试和完整检查通过，说明可以移除显式排空状态，但不能移除等待未登记尾段的约束。另一个临时内部故障探针向 Live worker 注入错误消息种类，使其在识别请求之外 panic；`finish` 仍返回 `InputFailure`。故障探针及对照变体均已删除 / 恢复，不增加只验证内部消息的永久测试。
+
+**验证结果与限制：** Rust 1.99.1 的 `fmt --check`、`build --locked`、默认 / diagnostic-logs / integration 全量测试及 `clippy --locked --all-targets --all-features -- -D warnings` 均通过，现有测试文件与用例不变。没有新增机制需要额外消融，以上对照验证专门检查被保留的 EOF 约束。既有依赖警告不变；没有 UI 外观修改、个人 API 调用、麦克风采集或新增 Windows 实机验证，第 4 条的真实语料和服务质量限制仍有效。
+
+来源：[修改前基线](../../.amp/in/artifacts/http-worker-eof-before.log)、[修改后定向检查](../../.amp/in/artifacts/http-worker-eof-after.log)、[缺少 EOF 等待的对照失败](../../.amp/in/artifacts/http-worker-eof-ablation.log)、[临时 panic 探针](../../.amp/in/artifacts/http-worker-eof-panic-probe.log)、[最终组合检查](../../.amp/in/artifacts/http-worker-eof-validation.log)。
+
+**交付状态：** 新简化及第 9 条的未推送改动仍只在本独立 workspace，未更新远程 PR，也未合并或发布。后续代码推送前仍需重新运行审阅门禁；旧提交的跨平台 CI 不代表当前本地改动已经通过远程 CI。
