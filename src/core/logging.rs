@@ -212,6 +212,14 @@ impl Write for &DailyWriter {
 pub(crate) mod test_support {
     /// Scoped capture for local HTTP/WebSocket fixtures, never a global subscriber.
     pub(crate) fn capture() -> (tempfile::NamedTempFile, tracing::Dispatch) {
+        // tracing-core's single-dispatch fast path caches the registering thread's
+        // interest. Keep a second, inert dispatch alive so unrelated test threads
+        // cannot permanently disable a model callsite before this scope reaches it.
+        static NO_SUBSCRIBER: std::sync::LazyLock<tracing::Dispatch> =
+            std::sync::LazyLock::new(|| {
+                tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new())
+            });
+        std::sync::LazyLock::force(&NO_SUBSCRIBER);
         let file = tempfile::NamedTempFile::new().unwrap();
         let subscriber = tracing_subscriber::fmt()
             .json()
