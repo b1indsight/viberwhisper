@@ -14,8 +14,9 @@ Realtime is disabled by default. An omitted URL resolves to
 - `config`: typed optional v3 configuration, endpoint validation, environment authentication,
   strict prompt components, full-string overrides and user-owned long-term terms. Debug output omits content.
 - `engine`: one persistent async worker and reusable connection, recording-scoped I/O and cancellation,
-  bounded backlog, ordered 30-second response segments, final text concatenation without deduplication.
-- `audio::PcmResampler`: shared stateful 24 kHz conversion with filter-delay and final-tail compensation.
+  bounded backlog, ordered pause-aware response segments capped at 30 seconds, final text concatenation without deduplication.
+- `audio::PcmResampler`: shared stateful conversion with explicit output rate, filter-delay and final-tail compensation; Realtime output remains 24 kHz.
+- `audio::segment`: shared source-cursor cuts; desktop uses pause detection, offline/evaluation explicitly retain fixed boundaries.
 - `transport`: standard session/response events, explicit audio-item references and context input,
   out-of-band responses, correlation, final-event consistency, completion status and item deletion.
 - `text_stream`: provisional top-level JSON `text` decoding across escaped strings and surrogate pairs;
@@ -85,6 +86,14 @@ a second recorder/callback protocol; shared `audio::decode_mono` uses the existi
 reader, and the network worker maintains one resampler per recording. The small headers never reach the service. The microphone callback only
 collects/downmixes input and notifies readiness; network and inference stay off the UI thread.
 
+Desktop `Recording` applies the shared pause-aware segmenter to 24 kHz PCM before appending
+each contiguous slice. After speech evidence, 800 ms of consecutive analyzed quiet can close a
+segment; 30 seconds (or the canonical byte capacity) always closes it first, and stop flushes
+the nonempty tail. No overlap, trimming or text deduplication is introduced. Acoustic VAD does
+not determine sentence meaning or tone. Endpoint failures degrade to fixed cuts for that recording.
+`turn_detection` remains null: the client owns all commits, prefix declarations and cleanup.
+Raw capture, offline conversion and prompt-lab evaluation remain fixed, preserving report identity.
+
 Recorder backlog and the 300-frame worker channel are bounded separately. Overflow is an explicit
 failure and stops recording on the next readiness event. Fault-triggered cancellation retains
 already completed, validated segment text as a partial failure; explicit user cancellation
@@ -126,8 +135,9 @@ only agreement between `response.output_text.done` and completed `response.done`
 the existing JSON/schema checks, authorizes final text. Existing final preparation applies local
 corrections, then the UI reconciles its read-only draft before allowing edits or confirmation.
 Progress never creates confirmation feedback, history or destination input. Requests still occur
-only at a 30-second boundary or stop, so a short recording streams generation after stop rather
-than during speech. Stable-prefix declarations and both item-deletion acknowledgements are unchanged.
+at a 30-second boundary or stop, and now also at suitable sustained pauses while recording continues.
+During responses, later input waits in the existing bounded queue; an early acoustic cut does not
+promise immediate submission under backlog. Stable-prefix declarations and both item-deletion acknowledgements are unchanged.
 
 Each recording
 works on a copy of memory; cancellation/failure discards its updates. Successful desktop recordings

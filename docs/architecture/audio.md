@@ -14,7 +14,8 @@ src/audio/
   recorder.rs  — cpal microphone capture and live WavChunk production
   signal.rs    — compact normalized RMS-window check for effectively silent chunks
   preprocess.rs — shared upload preparation and validated WAV decoding
-  vad.rs       — bundled Silero model, analysis-only resampling, whole-chunk speech gate
+  vad.rs       — shared Silero inference, whole-chunk gate and recording-scoped streaming state
+  segment.rs   — sample-exact pause/limit/stop boundaries for desktop recognition
   loudness.rs  — bounded constant-gain adjustment with peak protection
   wav_file.rs  — streaming local-WAV reader and fallible chunk iterator
 ```
@@ -49,12 +50,14 @@ error, so uncertain local analysis always preserves the previous upload/error be
 processing order is original energy gate, original-audio VAD, then loudness
 adjustment. A rejected chunk returns the existing successful empty transcription;
 an accepted chunk retains every frame, channel and pause. Recording callbacks,
-source WAVs, prompt-lab archives, and chunk boundaries remain unchanged.
+source WAVs and prompt-lab archives remain unchanged. This gate does not choose boundaries;
+desktop endpointing below closes each segment before upload preprocessing.
 
 Silero VAD v6.2 runs locally using CPU-only ONNX Runtime 1.20.0, statically linked
 through pinned ort/ort-sys rc.9. The model is embedded in the binary. A process-wide
 mutex serializes inference; recurrent state and context reset for every channel
-and chunk. Channels are analyzed separately to avoid phase cancellation. Rubato
+and chunk in the whole-chunk gate. Streaming analysis owns separate per-recording state;
+interleaved batch calls cannot reset it. Channels are analyzed separately to avoid phase cancellation. Rubato
 performs anti-aliased conversion to 16 kHz for analysis only, compensating delay
 and flushing its tail. Input rates outside 8–192 kHz bypass VAD with a diagnostic.
 
@@ -95,6 +98,31 @@ configuration and application callers do not carry limit fields or arguments.
 
 Recording and offline reader capacities are plain integers. There is no unlimited mode;
 short recordings and the final tail of longer files use their remaining frames.
+
+## Desktop Pause Boundaries
+
+Both desktop recognition workers use `Segmenter` in `PauseAware` mode. After speech evidence
+(probability ≥0.3), 25 consecutive low-probability 32 ms frames close a segment (800 ms of
+analyzed quiet). Renewed speech resets the quiet counter. Pure silence cannot repeatedly trigger
+pause cuts. These are acoustic estimates, not sentence or tone classification; a long thinking
+pause can still split a sentence. The threshold remains an internal initial value, not a setting.
+
+`StreamingVad` analyzes an i16/32768-normalized 16 kHz copy using the existing model. A recording
+owns its resampler, partial frame, context and recurrent state across packets and cuts. The shared
+`PcmResampler` takes explicit input/output rates; Realtime output remains 24 kHz. Only model
+inference holds the shared lock, never resampling, source-buffer assembly or network waits.
+
+Source PCM advances in approximately 20 ms steps, with a partial step retained across packets.
+Cuts refer to the current source cursor; consumers append each contiguous slice exactly once.
+Nothing is trimmed, overlapped or retrospectively removed, and original silent pauses stay in
+their segment. The hard capacity takes precedence even inside an analysis step. Stop immediately
+closes a nonempty tail once, without waiting for quiet or fabricating analysis silence. Analysis
+failure logs a warning and disables pause cuts for that recording; hard cuts and the tail remain.
+
+HTTP analyzes native mono PCM; Realtime analyzes its existing 24 kHz output before append/commit.
+Both use the canonical capacity calculation above. Offline conversion, prompt-lab evaluation
+and raw dataset capture remain fixed-boundary paths. The English fixture verifies integration,
+not Chinese recognition quality or real microphone endpoint accuracy.
 
 ## Live Recorder
 
@@ -138,6 +166,13 @@ from an old `SessionId` are ignored after stop or session replacement. On stop, 
 200 ms wait remains before stream destruction. The remaining PCM vector is then moved out of
 the mutex without copying, and complete slices plus the final tail are encoded outside the lock.
 `RecorderStopOutcome::Stopped` therefore owns `Vec<WavChunk>` rather than file paths.
+
+Desktop HTTP and Realtime enable the existing 200 ms frame mode and bounded 60-second PCM backlog.
+Stop-time residuals use the same small frame capacity; a recorder frame is not a recognition
+segment. Overflow is sticky, stops further acceptance and is checked before each UI drain attempt,
+including when no complete frame is available. Fixed raw capture retains complete WAV chunks.
+WAV envelopes are produced outside the callback; decoding, endpoint inference and STT run on the
+recognition worker. See [core](core.md#http-worker-concepts) for HTTP queue/EOF/failure semantics.
 
 Prompt-lab recording optionally clones these immutable chunks into a session-owned, capacity-two
 archive channel after they leave the recorder. Its worker validates one stable integer 16-bit WAV

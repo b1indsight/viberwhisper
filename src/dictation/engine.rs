@@ -15,14 +15,16 @@ use super::{
     transport::Connection,
 };
 use crate::{
-    audio::{PcmResampler, WavChunk},
+    audio::{
+        PcmResampler, WavChunk,
+        segment::{Segmentation, Segmenter},
+    },
     core::{config::SecretValue, orchestrator::SessionError},
     transcriber::TranscribeError,
 };
 
 // A bounded backlog of 200 ms recorder frames. This is local backpressure, not a server limit.
 const FRAME_QUEUE: usize = 300;
-const SEGMENT_SAMPLES: usize = 30 * 24_000;
 
 /// Per-recording I/O owned by the shared session orchestrator.
 pub(crate) struct RealtimeSession {
@@ -211,7 +213,7 @@ async fn worker(
             break;
         };
         let mut working_memory = memory.clone();
-        let mut recording = Recording::new();
+        let mut recording = Recording::new(Segmentation::PauseAware);
         recording.progress = job
             .progress
             .take()
@@ -322,6 +324,7 @@ async fn worker(
 pub(super) struct Recording {
     id: String,
     resampler: Option<PcmResampler>,
+    segmenter: Segmenter,
     segment: Vec<i16>,
     results: Vec<super::result::DictationResult>,
     index: usize,
@@ -331,7 +334,14 @@ pub(super) struct Recording {
 }
 
 impl Recording {
-    pub fn new() -> Self {
+    pub fn new(mode: Segmentation) -> Self {
+        let limit = crate::audio::max_frames_per_chunk(hound::WavSpec {
+            channels: 1,
+            sample_rate: 24_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        })
+        .expect("valid Realtime PCM format") as usize;
         Self {
             id: format!(
                 "{}-{}",
@@ -342,6 +352,7 @@ impl Recording {
                     .as_nanos()
             ),
             resampler: None,
+            segmenter: Segmenter::new(24_000, limit, mode),
             segment: Vec::new(),
             results: Vec::new(),
             index: 0,
@@ -352,7 +363,7 @@ impl Recording {
     }
 
     pub(super) fn for_evaluation(id: String, at: u64) -> Self {
-        let mut recording = Self::new();
+        let mut recording = Self::new(Segmentation::Fixed);
         recording.id = id;
         recording.evaluation = Some((at, Vec::new()));
         recording
@@ -383,7 +394,7 @@ impl Recording {
     ) -> Result<()> {
         let (rate, samples) = crate::audio::decode_mono(frame)?;
         if self.resampler.is_none() {
-            self.resampler = Some(PcmResampler::new(rate)?);
+            self.resampler = Some(PcmResampler::new(rate, 24_000)?);
         }
         let filter = self.resampler.as_mut().unwrap();
         ensure!(filter.rate() == rate, "audio rate changed during recording");
@@ -396,8 +407,10 @@ impl Recording {
             let tail = filter.push(&[], true)?;
             self.push_pcm(connection, memory, &tail).await?;
         }
-        if !self.segment.is_empty() {
+        if self.segmenter.finish().is_some() {
             self.finish_segment(connection, memory).await?;
+            self.segment.clear();
+            self.index += 1;
         }
         Ok(())
     }
@@ -406,24 +419,37 @@ impl Recording {
         &mut self,
         connection: &mut Connection,
         memory: &mut Memory,
-        mut pcm: &[i16],
+        pcm: &[i16],
     ) -> Result<()> {
-        while !pcm.is_empty() {
-            if self.segment.is_empty() {
-                let stable = self.stable.get_or_insert_with(|| memory.stable_prefix());
-                connection
-                    .begin(stable, &format!("{}-{}", self.id, self.index))
-                    .await?;
+        let cuts = self.segmenter.push(pcm);
+        let mut start = 0;
+        for (end, reason) in cuts
+            .into_iter()
+            .map(|cut| (cut.offset, Some(cut.reason)))
+            .chain(std::iter::once((pcm.len(), None)))
+        {
+            if start < end {
+                if self.segment.is_empty() {
+                    let stable = self.stable.get_or_insert_with(|| memory.stable_prefix());
+                    connection
+                        .begin(stable, &format!("{}-{}", self.id, self.index))
+                        .await?;
+                }
+                connection.append(&pcm[start..end]).await?;
+                self.segment.extend_from_slice(&pcm[start..end]);
             }
-            let count = (SEGMENT_SAMPLES - self.segment.len()).min(pcm.len());
-            connection.append(&pcm[..count]).await?;
-            self.segment.extend_from_slice(&pcm[..count]);
-            pcm = &pcm[count..];
-            if self.segment.len() == SEGMENT_SAMPLES {
+            if let Some(reason) = reason {
+                tracing::debug!(
+                    ?reason,
+                    index = self.index,
+                    samples = self.segment.len(),
+                    "Closing Realtime recognition segment"
+                );
                 self.finish_segment(connection, memory).await?;
                 self.segment.clear();
                 self.index += 1;
             }
+            start = end;
         }
         Ok(())
     }

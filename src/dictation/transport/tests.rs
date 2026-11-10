@@ -282,7 +282,7 @@ async fn live_realtime_structured_multiturn() {
     .unwrap();
     let rate = reader.spec().sample_rate;
     let samples: Vec<i16> = reader.samples().collect::<Result<_, _>>().unwrap();
-    let pcm = crate::audio::PcmResampler::new(rate)
+    let pcm = crate::audio::PcmResampler::new(rate, 24_000)
         .unwrap()
         .push(&samples, true)
         .unwrap();

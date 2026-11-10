@@ -17,7 +17,7 @@ struct State {
 pub(crate) struct Progress {
     state: Arc<Mutex<State>>,
     notify: Arc<dyn Fn() + Send + Sync>,
-    pub(super) cancelled: CancellationToken,
+    pub(crate) cancelled: CancellationToken,
 }
 
 impl Progress {

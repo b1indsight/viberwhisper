@@ -43,7 +43,7 @@ impl fmt::Display for RecorderError {
             }
             Self::UnsupportedSampleFormat => write!(f, "unsupported sample format"),
             Self::NoAudioData => write!(f, "no audio data recorded"),
-            Self::StreamingOverflow => write!(f, "Realtime recorder backlog exceeded its capacity"),
+            Self::StreamingOverflow => write!(f, "Recorder backlog exceeded its capacity"),
         }
     }
 }
@@ -268,7 +268,7 @@ impl AudioRecorder {
         }
     }
 
-    /// Keeps the existing WAV envelope internally, but emits a frame every 200 ms for Realtime.
+    /// Keeps the WAV envelope, but emits bounded 200 ms frames for desktop recognition workers.
     pub(crate) fn enable_streaming_frames(&mut self) {
         self.streaming_frames = true;
     }

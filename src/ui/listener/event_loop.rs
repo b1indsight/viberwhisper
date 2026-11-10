@@ -463,18 +463,19 @@ impl ListenerApplication {
             return;
         }
 
-        while let Some(chunk) = self.recorder.take_ready_chunk() {
+        loop {
             if self.recorder.streaming_overflowed() {
-                self.orchestrator.fail_session(
-                    session_id,
-                    "Realtime recorder backlog exceeded its capacity",
-                );
+                self.orchestrator
+                    .fail_session(session_id, "Recorder backlog exceeded its capacity");
             }
             if let Some(error) = self.orchestrator.recording_error(session_id) {
-                error!(%error, "Stopping failed Realtime recording");
+                error!(%error, "Stopping failed recording");
                 self.drive_session(event_loop, SessionEvent::StopRequested);
                 return;
             }
+            let Some(chunk) = self.recorder.take_ready_chunk() else {
+                break;
+            };
             self.drive_session(
                 event_loop,
                 SessionEvent::ChunkReady {
@@ -560,9 +561,8 @@ impl ListenerApplication {
             }
         };
 
-        let progress = if self.orchestrator.is_realtime()
-            && matches!(self.output, ListenerOutput::Delivery { .. })
-        {
+        // HTTP publishes no provisional text, but shares cancellation after stop/detachment.
+        let progress = if matches!(self.output, ListenerOutput::Delivery { .. }) {
             let proxy = self.proxy.clone();
             Some(Progress::new(move || {
                 let _ = proxy.send_event(AppEvent::RecognitionProgress { session_id });
@@ -907,6 +907,18 @@ pub(in crate::ui) fn finish_transcription(
             error!(error = %error, "Session routing failed while finalizing");
             None
         }
+        Err(SessionError::InputFailure {
+            error,
+            partial_text,
+        }) => {
+            error!(%error, "Recording input is incomplete");
+            let warning = if partial_text.trim().is_empty() {
+                "录音不完整，没有可输入的文字。\n按 Esc 关闭后重试。"
+            } else {
+                "录音不完整，请核对结果后输入。"
+            };
+            Some((partial_text, Some(warning.into())))
+        }
         Err(SessionError::PartialFailure {
             errors,
             partial_text,
@@ -958,6 +970,7 @@ fn capture_transcription(
         Err(error) => {
             let partial_text = match &error {
                 SessionError::PartialFailure { partial_text, .. }
+                | SessionError::InputFailure { partial_text, .. }
                 | SessionError::ConvergenceTimeout { partial_text, .. }
                     if !partial_text.is_empty() =>
                 {
@@ -1147,6 +1160,10 @@ mod tests {
                 },
                 SessionError::ConvergenceTimeout {
                     pending_count: 1,
+                    partial_text: partial.into(),
+                },
+                SessionError::InputFailure {
+                    error: "private-provider-error".into(),
                     partial_text: partial.into(),
                 },
             ] {
