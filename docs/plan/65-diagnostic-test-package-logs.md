@@ -143,9 +143,9 @@
 - **Ablation setup / results：** 每次只改一个机制并运行相同输入，实验后恢复正式代码：
   - 去掉旧日志删除后，`cargo test --locked --features diagnostic-logs daily_log_keeps_only_local_today_and_preserves_other_app_data` 在昨日文件仍存在处失败；恢复后通过。保留显式日期清理，不能用只换文件名代替。
   - 去掉稳定前缀原文后，`cargo test --locked --features diagnostic-logs diagnostic_realtime_keeps_actual_prefix_context_and_rejected_text_without_audio` 检出日志为 null、实际声明非空的差异；恢复后通过。保留 item 引用之外的原文。
-  - 去掉 diagnostic/publish 拒绝后，`ruby scripts/test-release-package-contract.rb` 检出非法组合被接受；恢复后四种组合通过。保留提前拒绝，避免仅靠末尾发布 job 跳过而浪费打包。
+  - 去掉 diagnostic/publish 拒绝后，当时的打包组合对照检出非法组合被接受；恢复后四种组合通过。保留提前拒绝，避免仅靠末尾发布 job 跳过而浪费打包。
   - 将模型事件临时改为 INFO，CLI 隐私回归在保留 target 排除时通过；仅移除该排除后，同一回归检出 prompt 出现在 stderr。恢复模型 DEBUG 和排除后通过。INFO 上限与正文专用 target 分别约束等级和内容边界；不依赖当前事件级别偶然满足隐私要求。
-- **Commands / outcome：** `cargo fmt --check`；`cargo test --locked`；`cargo test --locked --features diagnostic-logs`；普通 `cargo clippy --locked --all-targets -- -D warnings`；`cargo clippy --locked --all-targets --features integration,diagnostic-logs -- -D warnings`；普通/诊断的 `cargo build --release --locked` 及 `cargo test --release --locked --test cli_output`；release 契约、Ruby/Bash 语法、plist/WiX XML 与 `git diff --check` 均通过。诊断 Clippy 首次检出两个可自动合并的 if，已用 `cargo clippy --fix` 处理并重新验证；vendor/rdev 的既有警告不在本次改动内。
+- **Commands / outcome：** `cargo fmt --check`；`cargo test --locked`；`cargo test --locked --features diagnostic-logs`；普通 `cargo clippy --locked --all-targets -- -D warnings`；`cargo clippy --locked --all-targets --features integration,diagnostic-logs -- -D warnings`；普通/诊断的 `cargo build --release --locked` 及 `cargo test --release --locked --test cli_output`；release 契约、Bash 语法、plist/WiX XML 与 `git diff --check` 均通过。诊断 Clippy 首次检出两个可自动合并的 if，已用 `cargo clippy --fix` 处理并重新验证；vendor/rdev 的既有警告不在本次改动内。
 - **Limits / pending：** 两个既有测试仍按原规则忽略（私有录音集、真实 Realtime 服务）。打包契约在本机执行实际模式选择及 macOS 命令块的 stub 对照，Windows Cargo/PowerShell 仅静态核对；没有把它们当成 DMG/MSI 或 Windows 实机验收。尚未手动触发原生双平台打包、发布或合并；后续须按独立授权执行。
 
 ### [004] — 2026-11-10 — 修复 Windows CI 暴露的并行日志捕获竞态
@@ -155,3 +155,8 @@
 - **Decision / implemented：** 仅在 `cfg(all(test, feature = "diagnostic-logs"))` 的共用捕获器保留一个惰性、无操作 `Dispatch`，使 callsite 缓存综合它和实际 capture 的 interest，再按当前线程判断。它不安装全局默认 subscriber，不捕获其他测试，不保留文件句柄，也不改变生产日志、协议取消、线程调度或应用配置。没有通过串行测试、增加等待、重试断言或删掉日志断言掩盖失败。
 - **Validation / ablation：** 同一临时确定性用例在加入无操作 dispatch 后捕获数为 1；验证后移除临时用例，保留现有协议与日志回归不变。修复后的完整诊断单测二进制在相同 `--test-threads=32` 条件下连续 40 轮通过。`cargo fmt --check`、`cargo test --locked --features diagnostic-logs`、`cargo test --locked`、`cargo clippy --locked --all-targets --features integration,diagnostic-logs -- -D warnings` 和 `git diff --check` 通过。修复前/后日志与命令结果见[汇总验证记录](https://ampcode.com/artifacts/c6fda94b-f6bb-4d47-9786-2c4b90aa0525)。
 - **Limits / delivery：** 本地仍为 macOS arm64，重复验证不能代替修复提交的 Windows CI；审查通过后沿用同一 bookmark/PR 推送并订阅精确新提交。未手动重跑 workflow、触发打包、发布或合并。
+
+### [005] — 2026-11-10 — 缩减打包验证配套
+
+- 按用户要求删除额外的打包模拟脚本、现有契约入口对它的调用及使用说明，不引入替代测试框架；日志实现、发布开关和现有 Rust 回归保持不变。
+- 验证：禁用已移除脚本的解释器后，原入口在删除前退出 127，删除后通过；既有 Bash 契约、脚本语法、plist/WiX XML 与 `git diff --check` 均通过。此前组合对照保留为历史结果，不再是当前 CI 覆盖；模式/feature/名称传播需在获授权的原生打包中验证。

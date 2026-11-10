@@ -61,15 +61,11 @@ cargo clippy --locked -- -D warnings
 
 Submit this through a normal PR against `master`. The existing CI runs a lightweight package
 contract check: locked Cargo metadata, stable/MSI-compatible version rules, required release inputs,
-required distribution-guidance markers, package-mode/feature/name propagation, and plist/WiX XML
-syntax. Focused fixtures also confirm that each missing guidance category is rejected. Run these
-locally with `bash scripts/validate-release-contract.sh` and
-`bash scripts/test-release-notes-contract.sh`; the latter includes the package-mode fixtures
-(`ruby scripts/test-release-package-contract.rb`, using Ruby's standard library). The fixtures
-execute all four publish/diagnostic input combinations and the macOS cargo command blocks with
-stub tools, and inspect the Windows cargo/delegated-script contract. They do not replace native
-packaging checks. CI does not build DMG or MSI artifacts. Do not create a release tag from an
-unmerged change.
+required distribution-guidance markers, and plist/WiX XML syntax. Focused fixtures also confirm
+that each missing guidance category is rejected. Run these locally with
+`bash scripts/validate-release-contract.sh` and `bash scripts/test-release-notes-contract.sh`.
+CI does not build DMG or MSI artifacts or simulate package-mode feature/name propagation;
+validate those through the packaging dry run below. Do not create a release tag from an unmerged change.
 
 ## 2. Validate Packaging Before Tagging
 
