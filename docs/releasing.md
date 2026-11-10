@@ -61,15 +61,22 @@ cargo clippy --locked -- -D warnings
 
 Submit this through a normal PR against `master`. The existing CI runs a lightweight package
 contract check: locked Cargo metadata, stable/MSI-compatible version rules, required release inputs,
-required distribution-guidance markers, and plist/WiX XML syntax. Focused fixtures also confirm that
-each missing guidance category is rejected. CI does not build DMG or MSI artifacts. Do not create a
-release tag from an unmerged change.
+required distribution-guidance markers, package-mode/feature/name propagation, and plist/WiX XML
+syntax. Focused fixtures also confirm that each missing guidance category is rejected. Run these
+locally with `bash scripts/validate-release-contract.sh` and
+`bash scripts/test-release-notes-contract.sh`; the latter includes the package-mode fixtures
+(`ruby scripts/test-release-package-contract.rb`, using Ruby's standard library). The fixtures
+execute all four publish/diagnostic input combinations and the macOS cargo command blocks with
+stub tools, and inspect the Windows cargo/delegated-script contract. They do not replace native
+packaging checks. CI does not build DMG or MSI artifacts. Do not create a release tag from an
+unmerged change.
 
 ## 2. Validate Packaging Before Tagging
 
 The PR workflow performs only the lightweight contract check and does not invoke release packaging.
 After this manually dispatched workflow is available on the default branch, use `Package & Release`
-with `publish=false` for the full two-platform validation:
+with both **publish** and **diagnostic_logs** unchecked (their defaults) for an ordinary-package
+dry run and the full two-platform validation:
 
 - macOS: locked arm64/x86_64 builds, universal app assembly, metadata and deployment-target checks,
   ad-hoc signature verification, DMG mount inspection, and portable archive inspection;
@@ -79,15 +86,77 @@ with `publish=false` for the full two-platform validation:
   shortcut-target, installer-context, and machine ARP checks, and portable ZIP inspection.
 
 Dry runs upload seven-day workflow artifacts but cannot publish because the `publish` job is
-disabled unless the explicit boolean input is true and the selected ref is the exact version tag.
+disabled unless the explicit publication input is true, diagnostic logging is false, and the
+selected ref is the exact version tag.
 
 Once the workflow is present on the default branch, run a dry run for the selected branch or tag:
 
 ```bash
-gh workflow run release.yml --ref <branch-or-tag> -f publish=false
+gh workflow run release.yml --ref <branch-or-tag> -f publish=false -f diagnostic_logs=false
 gh run list --workflow release.yml --limit 5
 gh run view <run-id>
 ```
+
+### Diagnostic Test Packages
+
+For a test package that automatically saves local DEBUG logs and model text, open **Actions →
+Package & Release → Run workflow**, select the reviewed branch or tag, leave **publish** unchecked,
+and check **diagnostic_logs**. This is a build-time choice, not a runtime configuration switch;
+there is no configuration migration or environment-variable setup. Ordinary packages remain
+capped at INFO (plus WARN/ERROR), do not record model bodies, and do not create, write, or clean up
+diagnostic files.
+
+The equivalent dispatch, only when a packaging run has been authorized, is:
+
+```bash
+gh workflow run release.yml --ref <branch-or-tag> -f publish=false -f diagnostic_logs=true
+```
+
+Both modes retain optimized `--release` builds and all the same packaging validations. Diagnostic
+mode adds the nondefault Cargo feature `diagnostic-logs` to both macOS architectures and the Windows
+CLI and GUI launcher (`windows-app,diagnostic-logs`). Subsequent cargo smoke tests and cargo-bundle
+metadata use the same feature selection; macOS bundling keeps `CARGO_BUNDLE_SKIP_BUILD=1` and
+assembles the universal binary from those builds rather than rebuilding an ordinary executable.
+Preflight rejects `publish=true, diagnostic_logs=true` before either packaging job starts, and
+publication also explicitly excludes diagnostic mode. `publish=false, diagnostic_logs=false`
+continues to produce ordinary packages without changing their names or release upload contract.
+
+Download the `release-macos-diagnostic` and `release-windows-diagnostic` workflow artifacts. Their
+distribution filenames are:
+
+- `ViberWhisper-v<version>-macos-universal-diagnostic.dmg`
+- `ViberWhisper-v<version>-macos-universal-diagnostic.tar.gz`
+- `ViberWhisper-v<version>-windows-x86_64-diagnostic.msi`
+- `ViberWhisper-v<version>-windows-x86_64-diagnostic.zip`
+
+These are test distributions, not GitHub Releases. App/executable names and installation identity
+stay unchanged; in particular, Windows diagnostic and ordinary installers are not promised to
+coexist. Return to an ordinary package when testing is complete.
+
+Launching a diagnostic package automatically writes UTF-8 JSONL directly beside `config.json`,
+not in a `logs/` subdirectory or the current working directory:
+
+- macOS: `~/Library/Application Support/com.b1indsight.viberwhisper/`
+- Windows: `%APPDATA%\ViberWhisper\`
+
+The file is named `viberwhisper.YYYY-MM-DD.jsonl` for the machine's **current local calendar date**.
+Same-day restarts append to that file. At diagnostic startup and on the next write after a date
+rollover, the app stops using the old file and deletes other valid dated ViberWhisper log files,
+including future-dated files after a clock rollback. Config, history, memory, and files outside
+the exact application-log naming pattern are not deleted. There is no background cleanup while
+the app is stopped: an old file can remain until the next diagnostic startup/write. Cleanup
+failures are reported, not silently counted as successful retention; the current day's file has
+no size cap. Reverting to an ordinary package does not delete existing diagnostic files.
+Initialization failures stop startup and use the existing CLI/native desktop error boundary.
+Later I/O failures use emergency stderr reporting, which may be invisible in the console-free
+Windows launcher; disk failure or abrupt process termination is not a durability guarantee.
+
+**Sensitive data warning:** diagnostic logs can contain complete model prompts, context/memory,
+recognized text, and model outputs, including personal or work secrets. Use only in a trusted test
+environment, inspect and redact before sharing, and delete files when no longer needed. Diagnostic
+logging does not save raw audio/WAV/PCM, base64 audio, or authentication headers. Known-key redaction
+is not a guarantee that secrets spoken or embedded in model text are safe. Logs are never
+automatically uploaded; workflow artifact uploads contain packages, not testers' runtime logs.
 
 ## 3. Create the Release Tag
 
@@ -137,11 +206,11 @@ Never force-move a release tag.
 
 ## 4. Explicitly Publish and Monitor
 
-Only after an explicit release request, dispatch the workflow from the exact version tag with the
-publication input enabled:
+Only after an explicit release request, dispatch the workflow from the exact version tag with
+**publish** checked and **diagnostic_logs** unchecked:
 
 ```bash
-gh workflow run release.yml --ref v0.1.0 -f publish=true
+gh workflow run release.yml --ref v0.1.0 -f publish=true -f diagnostic_logs=false
 gh run list --workflow release.yml --limit 5
 gh run view <run-id> --log-failed
 ```

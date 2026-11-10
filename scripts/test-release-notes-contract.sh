@@ -90,4 +90,6 @@ if (( draft_line >= publish_line )); then
   exit 1
 fi
 
+ruby "${script_dir}/test-release-package-contract.rb"
+
 echo "Release notes contract fixtures passed."

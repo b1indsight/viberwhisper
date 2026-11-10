@@ -48,11 +48,17 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: Test diagnostic logging
+        run: cargo test --locked --features diagnostic-logs
+
       - name: macOS hotkey dependency regression
         run: cargo test --locked --manifest-path vendor/rdev/Cargo.toml --lib viberwhisper_tests
 
       - name: Clippy
         run: cargo clippy --locked -- -D warnings
+
+      - name: Clippy diagnostic logging
+        run: cargo clippy --locked --all-targets --features diagnostic-logs -- -D warnings
 
       - name: Discord failure alert
         if: failure()
@@ -104,6 +110,9 @@ jobs:
           VIBERWHISPER_PREVIEW_ARTIFACTS: ${{ runner.temp }}/windows-preview-captures
         run: cargo test --locked --features windows-app,integration
 
+      - name: Test diagnostic logging
+        run: cargo test --locked --features windows-app,diagnostic-logs
+
       - name: Native Windows setup and DPI smoke
         shell: pwsh
         env:
@@ -137,6 +146,9 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked --all-targets --features windows-app -- -D warnings
+
+      - name: Clippy diagnostic logging
+        run: cargo clippy --locked --all-targets --features windows-app,diagnostic-logs -- -D warnings
 
       - name: Discord failure alert
         if: failure()

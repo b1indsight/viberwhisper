@@ -1,5 +1,7 @@
 use crate::audio::{WavChunk, prepare_for_transcription};
 use crate::core::config::{ApiAuth, ConfigDocument, fields};
+#[cfg(feature = "diagnostic-logs")]
+use crate::core::logging;
 use crate::transcriber::TranscribeError;
 use anyhow::Context;
 use std::io::Cursor;
@@ -159,6 +161,27 @@ impl ApiTranscriber {
             form = form.text("prompt", prompt.clone());
         }
 
+        #[cfg(feature = "diagnostic-logs")]
+        let diagnostic_key = match &self.auth {
+            ApiAuth::Bearer(secret) => Some(secret.expose()),
+            ApiAuth::None => None,
+        };
+        #[cfg(feature = "diagnostic-logs")]
+        let diagnostic_id = {
+            let id = logging::next_request_id();
+            logging::model_event(
+                "stt",
+                id,
+                "request",
+                serde_json::json!({
+                    "model": self.model, "language": self.language, "prompt": self.prompt,
+                    "temperature": self.temperature.to_string(), "response_format": "verbose_json",
+                    "audio_bytes": chunk.len()
+                }),
+                diagnostic_key,
+            );
+            id
+        };
         let mut request = self.client.post(self.api_url.clone()).multipart(form);
         if let ApiAuth::Bearer(secret) = &self.auth {
             request = request.bearer_auth(secret.expose());
@@ -172,6 +195,16 @@ impl ApiTranscriber {
             .text()
             .map_err(|e| TranscribeError::Network(e.without_url().to_string()))?;
 
+        #[cfg(feature = "diagnostic-logs")]
+        logging::model_event(
+            "stt",
+            diagnostic_id,
+            "response",
+            serde_json::json!({
+                "status": status.as_u16(), "body": body
+            }),
+            diagnostic_key,
+        );
         if !status.is_success() {
             return Err(TranscribeError::Api {
                 status: status.as_u16(),
@@ -436,6 +469,10 @@ mod tests {
 
     #[test]
     fn retries_reuse_identical_prepared_audio() {
+        #[cfg(feature = "diagnostic-logs")]
+        let (log, dispatch) = logging::test_support::capture();
+        #[cfg(feature = "diagnostic-logs")]
+        let _guard = tracing::dispatcher::set_default(&dispatch);
         let prepared = prepare_for_transcription(&audible_chunk()).unwrap();
         let (port, requests) = spawn_request_sequence(&["503 Service Unavailable", "200 OK"]);
         let transcriber = transcriber_for_port(port);
@@ -450,6 +487,17 @@ mod tests {
                     .windows(prepared.len())
                     .any(|bytes| bytes == prepared.bytes())
             );
+        }
+        #[cfg(feature = "diagnostic-logs")]
+        {
+            let events = logging::test_support::model_events(&log);
+            assert_eq!(events.len(), 4);
+            assert_eq!(events[0]["request_id"], events[1]["request_id"]);
+            assert_eq!(events[2]["request_id"], events[3]["request_id"]);
+            assert_ne!(events[0]["request_id"], events[2]["request_id"]);
+            assert_eq!(events[1]["payload"]["status"], 503);
+            assert_eq!(events[3]["payload"]["status"], 200);
+            assert_eq!(events[3]["payload"]["body"], r#"{"text":"ok"}"#);
         }
     }
 

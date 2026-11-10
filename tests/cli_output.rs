@@ -36,7 +36,7 @@ impl Sandbox {
             "schema_version": 3,
             "input": {"hold_hotkey": "F8", "toggle_hotkey": "F9"},
             "audio": {"input_device": null, "mic_gain": 1.0},
-            "transcription": {"language": "en", "prompt": null, "temperature": 0.0},
+            "transcription": {"language": "en", "prompt": "CLI prompt sentinel", "temperature": 0.0},
             "post_process": {
                 "enabled": false,
                 "preheat_enabled": false,
@@ -85,7 +85,11 @@ impl Sandbox {
     }
 }
 
-fn convert_speech(status: &'static str, body: &'static str) -> Output {
+fn convert_speech(
+    status: &'static str,
+    body: &'static str,
+    filter: &str,
+) -> (Output, Vec<serde_json::Value>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!(
         "http://{}/v1/audio/transcriptions",
@@ -139,24 +143,163 @@ fn convert_speech(status: &'static str, body: &'static str) -> Output {
 
     let output = sandbox
         .command()
+        .env("RUST_LOG", filter)
         .arg("convert")
         .arg(input)
         .output()
         .unwrap();
     server.join().unwrap();
-    output
+    let path_output = sandbox.command().args(["config", "path"]).output().unwrap();
+    assert!(path_output.status.success(), "{path_output:?}");
+    let config = PathBuf::from(String::from_utf8(path_output.stdout).unwrap().trim());
+    let mut logs = Vec::new();
+    for entry in fs::read_dir(config.parent().unwrap()).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("viberwhisper.")
+        {
+            for line in fs::read_to_string(path).unwrap().lines() {
+                logs.push(serde_json::from_str(line).unwrap());
+            }
+        }
+    }
+    (output, logs)
 }
 
 #[test]
 fn convert_stdout_contains_only_the_transcription() {
     // Default INFO diagnostics must not become part of a redirected transcript file.
-    let output = convert_speech("200 OK", r#"{"text":"CLI transcript only"}"#);
+    let (output, _) = convert_speech(
+        "200 OK",
+        r#"{"text":"CLI transcript only"}"#,
+        "viberwhisper=info",
+    );
 
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(output.stdout, b"CLI transcript only\n", "{output:?}");
     let diagnostics = String::from_utf8(output.stderr).unwrap();
     assert!(diagnostics.contains("Transcribing audio file"));
     assert!(!diagnostics.contains("CLI transcript only"));
+}
+
+#[test]
+fn package_diagnostics_are_build_time_only_and_never_contaminate_console_output() {
+    // Testers may set RUST_LOG globally; that must neither enable DEBUG in ordinary
+    // packages nor expose diagnostic-package model content on the terminal.
+    for filter in ["debug", "trace", "off"] {
+        let (output, logs) = convert_speech(
+            "200 OK",
+            r#"{"text":"CLI transcript only","echo":"cli-stub-token"}"#,
+            filter,
+        );
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(output.stdout, b"CLI transcript only\n");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        for private in [
+            "CLI prompt sentinel",
+            "CLI transcript only",
+            "cli-stub-token",
+        ] {
+            assert!(
+                !stderr.contains(private),
+                "console leaked {private}: {stderr}"
+            );
+        }
+        if cfg!(feature = "diagnostic-logs") {
+            assert!(logs.iter().all(|event| {
+                event["target"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("viberwhisper")
+                    && event["level"] != "TRACE"
+            }));
+            let model: Vec<_> = logs
+                .iter()
+                .filter(|event| event["target"] == "viberwhisper::model")
+                .collect();
+            assert_eq!(model.len(), 2, "{logs:?}");
+            assert_eq!(model[0]["fields"]["protocol"], "stt");
+            assert_eq!(model[0]["fields"]["phase"], "request");
+            assert_eq!(
+                model[0]["fields"]["request_id"],
+                model[1]["fields"]["request_id"]
+            );
+            let request: serde_json::Value =
+                serde_json::from_str(model[0]["fields"]["payload"].as_str().unwrap()).unwrap();
+            assert_eq!(request["prompt"], "CLI prompt sentinel");
+            assert_eq!(request["model"], "cli-stub-model");
+            let response: serde_json::Value =
+                serde_json::from_str(model[1]["fields"]["payload"].as_str().unwrap()).unwrap();
+            assert_eq!(response["status"], 200);
+            let body: serde_json::Value =
+                serde_json::from_str(response["body"].as_str().unwrap()).unwrap();
+            assert_eq!(body["text"], "CLI transcript only");
+            assert_eq!(body["echo"], "[REDACTED]");
+            let serialized = serde_json::to_string(&logs).unwrap();
+            for excluded in ["cli-stub-token", "authorization", "RIFF"] {
+                assert!(!serialized.contains(excluded), "file leaked {excluded}");
+            }
+        } else {
+            assert!(logs.is_empty());
+            assert!(!stderr.contains("DEBUG"), "{stderr}");
+            assert!(!stderr.contains("TRACE"), "{stderr}");
+        }
+    }
+}
+
+#[test]
+fn diagnostic_startup_cleans_only_its_logs_and_reports_unusable_files() {
+    let sandbox = Sandbox::new("http://127.0.0.1:1/stt");
+    let output = sandbox.command().args(["config", "path"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let config = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    let directory = config.parent().unwrap();
+    let before = fs::read(&config).unwrap();
+    let old = directory.join("viberwhisper.2000-01-01.jsonl");
+    let future = directory.join("viberwhisper.9999-12-31.jsonl");
+    fs::write(&old, b"old sentinel").unwrap();
+    fs::write(&future, b"future sentinel").unwrap();
+    let output = sandbox
+        .command()
+        .env("RUST_LOG", "trace")
+        .args(["config", "path"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read(&config).unwrap(), before);
+    if cfg!(feature = "diagnostic-logs") {
+        assert!(!old.exists());
+        assert!(!future.exists());
+        let logs: Vec<_> = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("viberwhisper.")
+            })
+            .collect();
+        assert_eq!(logs.len(), 1);
+        fs::remove_file(&logs[0]).unwrap();
+        fs::create_dir(&logs[0]).unwrap();
+        let output = sandbox.command().args(["config", "path"]).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("failed to initialize diagnostic logging"),
+            "{stderr}"
+        );
+        assert!(stderr.contains(directory.to_str().unwrap()), "{stderr}");
+    } else {
+        assert_eq!(fs::read(old).unwrap(), b"old sentinel");
+        assert_eq!(fs::read(future).unwrap(), b"future sentinel");
+    }
+    assert_eq!(fs::read(config).unwrap(), before);
 }
 
 #[test]
@@ -217,7 +360,11 @@ fn silent_conversion_has_no_transcription_or_http_request() {
 #[test]
 fn failed_conversion_reports_diagnostics_only_on_stderr() {
     // API errors remain actionable and nonzero without contaminating command-result stdout.
-    let output = convert_speech("400 Bad Request", r#"{"error":"stub rejected the model"}"#);
+    let (output, _) = convert_speech(
+        "400 Bad Request",
+        r#"{"error":"stub rejected the model"}"#,
+        "viberwhisper=info",
+    );
 
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");

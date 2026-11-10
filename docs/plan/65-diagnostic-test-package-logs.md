@@ -1,7 +1,7 @@
 # 65 - 测试包诊断日志 — Feature record
 
-**Stage:** Implementation；用户已在本线程批准修订方案及推送/创建 PR，按初始计划与时间线 [001] 的覆盖项实施，尚未完成验证。
-**PR:** 尚未创建；拟使用 `feat/diagnostic-test-logs`，针对 `master`，计划和实现沿用同一 PR。
+**Stage:** Implemented；普通/诊断模式本地验证完成。远端 CI 与完整原生打包结果以 PR 和发布流程为准；未授权触发打包或发布。
+**PR:** [#171](https://github.com/b1indsight/viberwhisper/pull/171)，`feat/diagnostic-test-logs` → `master`，计划和实现沿用同一 PR。
 
 ## 1. Initial plan
 
@@ -123,3 +123,27 @@
 - **Validation amendment：** 在临时目录预置昨天、当天、未来日期的应用日志，以及 `config.json`、历史/记忆哨兵和不匹配文件；验证启动及跨本地午夜后仅保留当天应用日志，受保护文件字节不变，同一天重启追加而不覆盖。日期边界使用确定性时钟输入，不等待真实午夜，也不增加产品时区配置。普通包分别在默认、`RUST_LOG=debug` 和 `RUST_LOG=trace` 下验证既有 DEBUG/TRACE 事件和新增模型正文均不可见，INFO/WARN/ERROR 仍按配置过滤。Windows 日志测试通过文件 sink 的临时路径边界隔离，不为测试重新引入产品目录开关，也不读取个人配置。
 - **Evidence / validation：** 已只读复核 `src/core.rs` 的现有环境过滤、`src/core/config/store.rs` 的两平台目录和 `.github/workflows/release.yml` 的发布输入。当前仅更新文档；日志行为、清理和打包开关尚未实现或运行验证。
 - **Outcome / pending：** 以上四项要求已纳入方案，等待明确批准后实施。未推送、未创建 PR、未触发远端打包。
+
+### [002] — 2026-11-10 — 按修订契约实现日志与打包选择
+
+- **Requirement / context：** 实施已确认的初始计划及 [001]，保留配置同目录、本地当天文件和普通包 INFO 上限。
+- **Implemented：** `Cargo.toml` 增加非默认 `diagnostic-logs`，仅启用 optional `chrono` 本地日期和 tracing JSON 格式。`core::logging` 统一 CLI/GUI 初始化；文件 layer 固定仅接收应用 DEBUG 及以上，不受 `RUST_LOG` 影响。控制台统一 INFO 上限并单独排除模型 target，既保护普通包，也避免诊断包在全局 trace 过滤下转储第三方传输内容。
+- **Decision / status：** 已实现最窄同步 `DailyWriter`，替代初始计划的 UTC rolling appender。它在一个锁内取得本地日期、关闭旧句柄、删除完整匹配且日期非当天的普通日志文件、打开/追加当天文件，再写入完整 tracing 事件。启动和日期变化才扫描目录；没有后台线程、异步队列、自定义目录或额外配置。`tracing-appender` 的 UTC 文件/数量保留不能直接满足 [001]，因此没有引入该依赖。跨日锁内读时钟避免排队事件把文件错误切回昨日；同名符号链接/目录拒绝作为当前文件打开，新建 Unix 文件为 0600。
+- **Model boundaries：** STT 在实际上传边界保存字段及 status/body；LLM 复用实际 request JSON，成功正文在解析前保存，非 2xx 仍只取状态。HTTP 各尝试使用进程内 ID。Realtime 使用分段 ID，保存实际指令、稳定前缀及动态输入；最终文本/完成状态在校验前保存，取消完成也有状态。完成事件只选文本字段，排除意外音频 part，不新增完整帧转储。仅对日志副本中的当前非空已知 key 原样替换，业务输入/输出不变。
+- **Packaging：** 默认 false 的 `diagnostic_logs` 表单项在 preflight 中选择 feature 和名称后缀；所有 macOS 架构、Windows CLI/GUI 和后续 Cargo/bundle/smoke 步骤沿用同一选择。`publish=true, diagnostic_logs=true` 提前拒绝，发布 job 也显式排除诊断模式。普通包名称保持不变；诊断分发文件及 workflow artifact 名称带 `-diagnostic`。
+- **Affected modules / docs：** `core.rs`、`core/logging.rs`、三条模型调用路径、`tests/cli_output.rs`、release workflow/契约 fixtures，以及 usage/releasing/index/changelog。CI 增加两平台诊断 feature 的测试和 Clippy，不通过手动触发 release 来代替 PR 验证。
+- **Consequences：** 同步文件 I/O 只位于日志边界，没有音频逐帧正文写入。初始化/清理失败阻止诊断包启动，沿现有 CLI/原生 GUI 错误边界显示路径；运行中失败开启 tracing 的 stderr 应急报告，Windows 无控制台入口可能看不到，不承诺磁盘故障持久性。日志依然可能包含敏感内容，当天无大小上限；普通包不清理已有诊断文件。
+
+### [003] — 2026-11-10 — 本地验证、单机制对照与剩余范围
+
+- **Evidence：** [汇总验证记录](https://ampcode.com/artifacts/c6fda94b-f6bb-4d47-9786-2c4b90aa0525)。使用临时配置目录、本地 HTTP/WebSocket stub 和公开 WAV，未读取个人配置、记忆或录音，未调用真实模型。
+- **Before / after：** 首先新增 CLI 契约回归；原 logger 在 `RUST_LOG=debug` 下输出应用/第三方 DEBUG，回归失败。实现后普通/诊断模式均通过：stdout 仅命令结果，模型 prompt/返回不进入 stderr；普通模式不生成或清理日志，诊断文件在 debug/trace/off 过滤下仍独立工作，文件没有第三方/TRACE 事件。
+- **Retention / failure controls：** 确定性日期验证启动删除昨日/未来文件、同日重启追加、跨日及回拨清理，并核对配置/历史/记忆/不匹配文件字节不变；并发写入保持完整 JSONL。真实 release CLI 另验证不可删除旧日志时启动非零退出并保留原数据、当前日志符号链接拒绝且不修改配置、新建文件权限 0600。
+- **Model controls：** 保留回归核对 STT 503→200 的独立尝试 ID、并发 LLM 的实际 messages/非空语境与响应配对、短 key 日志副本替换且真实返回未变，以及 Realtime 的真实稳定/动态输入、校验失败前正文、截断/取消状态和音频字段排除。临时隔离用例另执行真实预热后台线程，确认其请求/结果写入文件且配对；验证后移除临时用例，不保留全局测试捕获器。真实 release CLI 的畸形 HTTP 200 STT 对照确认两次响应均在 JSON 解析前保存并脱敏。
+- **Ablation setup / results：** 每次只改一个机制并运行相同输入，实验后恢复正式代码：
+  - 去掉旧日志删除后，`cargo test --locked --features diagnostic-logs daily_log_keeps_only_local_today_and_preserves_other_app_data` 在昨日文件仍存在处失败；恢复后通过。保留显式日期清理，不能用只换文件名代替。
+  - 去掉稳定前缀原文后，`cargo test --locked --features diagnostic-logs diagnostic_realtime_keeps_actual_prefix_context_and_rejected_text_without_audio` 检出日志为 null、实际声明非空的差异；恢复后通过。保留 item 引用之外的原文。
+  - 去掉 diagnostic/publish 拒绝后，`ruby scripts/test-release-package-contract.rb` 检出非法组合被接受；恢复后四种组合通过。保留提前拒绝，避免仅靠末尾发布 job 跳过而浪费打包。
+  - 将模型事件临时改为 INFO，CLI 隐私回归在保留 target 排除时通过；仅移除该排除后，同一回归检出 prompt 出现在 stderr。恢复模型 DEBUG 和排除后通过。INFO 上限与正文专用 target 分别约束等级和内容边界；不依赖当前事件级别偶然满足隐私要求。
+- **Commands / outcome：** `cargo fmt --check`；`cargo test --locked`；`cargo test --locked --features diagnostic-logs`；普通 `cargo clippy --locked --all-targets -- -D warnings`；`cargo clippy --locked --all-targets --features integration,diagnostic-logs -- -D warnings`；普通/诊断的 `cargo build --release --locked` 及 `cargo test --release --locked --test cli_output`；release 契约、Ruby/Bash 语法、plist/WiX XML 与 `git diff --check` 均通过。诊断 Clippy 首次检出两个可自动合并的 if，已用 `cargo clippy --fix` 处理并重新验证；vendor/rdev 的既有警告不在本次改动内。
+- **Limits / pending：** 两个既有测试仍按原规则忽略（私有录音集、真实 Realtime 服务）。打包契约在本机执行实际模式选择及 macOS 命令块的 stub 对照，Windows Cargo/PowerShell 仅静态核对；没有把它们当成 DMG/MSI 或 Windows 实机验收。尚未手动触发原生双平台打包、发布或合并；后续须按独立授权执行。

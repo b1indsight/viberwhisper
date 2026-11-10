@@ -1,4 +1,6 @@
 use crate::core::config::ApiAuth;
+#[cfg(feature = "diagnostic-logs")]
+use crate::core::logging;
 use crate::dictation::{
     DictationResult, LearningWorker, Snapshot, Transcript, config::PromptComponents,
 };
@@ -130,6 +132,17 @@ impl LlmRequest {
             "stream": false
         });
 
+        #[cfg(feature = "diagnostic-logs")]
+        let diagnostic_key = match &self.auth {
+            ApiAuth::Bearer(secret) => Some(secret.expose()),
+            ApiAuth::None => None,
+        };
+        #[cfg(feature = "diagnostic-logs")]
+        let diagnostic_id = {
+            let id = logging::next_request_id();
+            logging::model_event("llm", id, "request", request_body.clone(), diagnostic_key);
+            id
+        };
         let mut request = self
             .client
             .post(self.api_url.clone())
@@ -142,12 +155,30 @@ impl LlmRequest {
 
         let status = response.status();
         if !status.is_success() {
+            #[cfg(feature = "diagnostic-logs")]
+            logging::model_event(
+                "llm",
+                diagnostic_id,
+                "response",
+                serde_json::json!({"status": status.as_u16()}),
+                diagnostic_key,
+            );
             return Err(PostProcessError::Api {
                 status: status.as_u16(),
             });
         }
 
         let body = response.text()?;
+        #[cfg(feature = "diagnostic-logs")]
+        logging::model_event(
+            "llm",
+            diagnostic_id,
+            "response",
+            serde_json::json!({
+                "status": status.as_u16(), "body": body
+            }),
+            diagnostic_key,
+        );
         let json: serde_json::Value = serde_json::from_str(&body)?;
         let content = json["choices"][0]["message"]["content"]
             .as_str()
@@ -336,6 +367,111 @@ mod tests {
             prompt: prompt.map(str::to_string),
             temperature: 0.0,
         }
+    }
+
+    #[cfg(feature = "diagnostic-logs")]
+    #[test]
+    fn diagnostic_requests_match_model_input_and_keep_rejected_responses() {
+        // Concurrent cleanup must pair each exact prompt/context with its own
+        // response, even when successful HTTP contains invalid business JSON.
+        let (log, dispatch) = logging::test_support::capture();
+        let responses = [
+            json!({"text":"清理结果 xy"}).to_string(),
+            "invalid business JSON xy".into(),
+        ];
+        let (endpoint, requests) = stub(responses.to_vec());
+        let outcomes = std::thread::scope(|scope| {
+            let threads: Vec<_> = ["第一段 xy", "second input"]
+                .into_iter()
+                .map(|text| {
+                    let dispatch = dispatch.clone();
+                    let endpoint = endpoint.clone();
+                    scope.spawn(move || {
+                        tracing::dispatcher::with_default(&dispatch, || {
+                            let mut config =
+                                config_with_postprocess(false, Some("system prompt xy"));
+                            config.endpoint = endpoint;
+                            config.auth = ApiAuth::Bearer(SecretValue::new("xy"));
+                            let memory =
+                                serde_json::from_value(json!({"enabled":true,"long_term":[{
+                                    "context":"项目", "kind":"proper_noun", "text":"ViberWhisper"
+                                }]}))
+                                .unwrap();
+                            let processor = PostProcessor::new_desktop(
+                                PostProcessConfig::Llm(config),
+                                memory,
+                                None,
+                                None,
+                            )
+                            .unwrap();
+                            let result = processor
+                                .process_for_delivery(text)
+                                .map(|transcript| transcript.text);
+                            processor.shutdown();
+                            result
+                        })
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| result.as_deref().is_ok_and(|text| text == "清理结果 xy"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Err(PostProcessError::InvalidResult)))
+                .count(),
+            1
+        );
+        let events = logging::test_support::model_events(&log);
+        assert_eq!(events.len(), 4);
+        let ids: std::collections::HashSet<_> = events
+            .iter()
+            .map(|event| event["request_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        for response in responses {
+            let wire = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(
+                wire.headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer xy")
+            );
+            let user: serde_json::Value =
+                serde_json::from_str(wire.body["messages"][1]["content"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(user["contexts"][0]["long_term"][0]["text"], "ViberWhisper");
+            let expected: serde_json::Value =
+                serde_json::from_str(&wire.body.to_string().replace("xy", "[REDACTED]")).unwrap();
+            let request = events
+                .iter()
+                .find(|event| event["phase"] == "request" && event["payload"] == expected)
+                .unwrap();
+            let logged_response = events
+                .iter()
+                .find(|event| {
+                    event["phase"] == "response" && event["request_id"] == request["request_id"]
+                })
+                .unwrap();
+            let body: serde_json::Value =
+                serde_json::from_str(logged_response["payload"]["body"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                body["choices"][0]["message"]["content"],
+                response.replace("xy", "[REDACTED]")
+            );
+        }
+        let contents = std::fs::read_to_string(log.path()).unwrap();
+        assert!(!contents.contains("xy"));
+        assert!(!contents.to_ascii_lowercase().contains("authorization"));
     }
 
     #[test]
