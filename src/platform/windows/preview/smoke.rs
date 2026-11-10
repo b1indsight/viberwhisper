@@ -9,10 +9,9 @@ use windows_sys::Win32::UI::Controls::{
 impl NativePreview {
     /// Ask only this fixture's HWND and native children to render into a PNG.
     pub(crate) fn smoke_capture(&self, path: &std::path::Path) -> Result<()> {
-        use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::Graphics::Gdi::{
-            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, ClientToScreen, CreateCompatibleDC,
-            CreateDIBSection, DIB_RGB_COLORS, DeleteDC, GdiFlush,
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+            DIB_RGB_COLORS, DeleteDC, GdiFlush,
         };
 
         let window = self.state.window.get();
@@ -24,49 +23,6 @@ impl NativePreview {
         let width = bounds.right - bounds.left;
         let height = bounds.bottom - bounds.top;
         ensure!(width > 0 && height > 0, "Preview capture has no area");
-        // Read the real HWND geometry; do not reconstruct it from layout's requested sizes.
-        for (name, control) in [
-            ("bubble", window),
-            ("EDIT", self.state.text.get()),
-            ("STATIC", self.state.status.get()),
-        ] {
-            let mut outer = RECT::default();
-            let mut client = RECT::default();
-            let mut origin = POINT::default();
-            ensure!(
-                unsafe { GetWindowRect(control, &mut outer) } != 0
-                    && unsafe { GetClientRect(control, &mut client) } != 0
-                    && unsafe { ClientToScreen(control, &mut origin) } != 0,
-                "Could not read preview component geometry"
-            );
-            eprintln!(
-                "preview component: capture={}; name={name}; visible={}; screen-rect={:?}; client-rect={:?}; client-screen-origin={:?}; outer-height={}; client-height={}",
-                path.display(),
-                unsafe { IsWindowVisible(control) } != 0,
-                [outer.left, outer.top, outer.right, outer.bottom],
-                [client.left, client.top, client.right, client.bottom],
-                [origin.x, origin.y],
-                outer.bottom - outer.top,
-                client.bottom - client.top,
-            );
-        }
-        let mut format = RECT::default();
-        unsafe {
-            SendMessageW(
-                self.state.text.get(),
-                EM_GETRECT,
-                0,
-                (&raw mut format) as isize,
-            )
-        };
-        let (_, line_height) = self.state.measure_text(self.state.text.get(), None)?;
-        let lines = unsafe { SendMessageW(self.state.text.get(), EM_GETLINECOUNT, 0, 0) };
-        eprintln!(
-            "preview text allocation: capture={}; format-client-rect={:?}; format-height={}; native-font-line-height={line_height}; native-lines={lines}",
-            path.display(),
-            [format.left, format.top, format.right, format.bottom],
-            format.bottom - format.top,
-        );
         let info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: size_of::<BITMAPINFOHEADER>() as u32,
@@ -603,6 +559,47 @@ impl NativePreview {
         preview.smoke_relocation()?;
         preview.smoke_scrolling(artifacts.as_deref())?;
         preview.smoke_appearance(artifacts.as_deref())?;
+        preview.close();
+
+        // Render-only captures do not call the interactive demo's confirmation fixture.
+        // Run it on an owned window here, without a destination or text injection.
+        let events = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let notified = std::rc::Rc::clone(&events);
+        let mut preview = Self::new(Box::new(move |event| {
+            notified.borrow_mut().push(event.action);
+        }));
+        preview.show(SessionId(902), "短句", "Native editing fixture", None, None)?;
+        let pending = || -> Result<()> {
+            ensure!(
+                events.borrow().is_empty(),
+                "Native key acted before release"
+            );
+            Ok(())
+        };
+        let edited = "Edited 中文 👩‍💻";
+        ensure!(
+            preview.smoke_confirmation(edited, &pending)?,
+            "Native editing fixture did not activate"
+        );
+        ensure!(
+            matches!(events.borrow().as_slice(), [PreviewAction::Confirm(text)] if text == edited),
+            "Enter did not confirm the edited text exactly once"
+        );
+        events.borrow_mut().clear();
+        unsafe {
+            SendMessageW(preview.state.text.get(), WM_KEYDOWN, VK_ESCAPE as usize, 0);
+        }
+        pending()?;
+        unsafe {
+            SendMessageW(preview.state.text.get(), WM_KEYUP, VK_ESCAPE as usize, 0);
+        }
+        ensure!(
+            matches!(events.borrow().as_slice(), [PreviewAction::Cancel]),
+            "Esc did not cancel exactly once"
+        );
+        eprintln!(
+            "native preview editing: EN_CHANGE, caret, Enter release, Shift+Enter and Esc checked; no destination or injection"
+        );
         Ok(())
     }
 
@@ -1128,7 +1125,7 @@ impl NativePreview {
         result
     }
 
-    #[cfg(feature = "integration")]
+    #[cfg(any(test, feature = "integration"))]
     pub(crate) fn smoke_confirmation(
         &self,
         edited_text: &str,
@@ -1141,7 +1138,7 @@ impl NativePreview {
         ensure!(dpi > 0, "Could not read preview DPI");
         let pixels = |logical: i32| ((i64::from(logical) * i64::from(dpi) + 48) / 96) as i32;
         let replace = |value: &str| unsafe {
-            let value = nul_terminated_utf16(value);
+            let value = nul_terminated_utf16(&value.replace("\r\n", "\n").replace('\n', "\r\n"));
             SendMessageW(self.state.text.get(), EM_SETSEL, 0, -1);
             SendMessageW(
                 self.state.text.get(),
@@ -1218,15 +1215,19 @@ impl NativePreview {
             cbSize: size_of::<GUITHREADINFO>() as u32,
             ..Default::default()
         };
-        for text in [
-            "用Codex连接Redis，再让Codex检查。",
-            "第一行\nEnglish gjpq",
-            "第一行\nEnglish gjpq\n末行 👩‍💻",
-            "第一行\nEnglish gjpq\n",
-            "",
-            "短句",
+        for (text, lines) in [
+            ("用Codex连接Redis，再让Codex检查。", 1),
+            ("第一行\nEnglish gjpq", 2),
+            ("第一行\nEnglish gjpq\n末行 👩‍💻", 3),
+            ("第一行\nEnglish gjpq\n", 3),
+            ("", 1),
+            ("短句", 1),
         ] {
             replace(text);
+            ensure!(
+                unsafe { SendMessageW(self.state.text.get(), EM_GETLINECOUNT, 0, 0) } == lines,
+                "Native edit did not retain the expected {lines} text lines"
+            );
             self.smoke_compact_body()?;
             let mut client = RECT::default();
             ensure!(
@@ -1281,6 +1282,39 @@ impl NativePreview {
             "Editor did not shrink with its bubble"
         );
         self.state.set_message(None)?;
+        // Exercise native EDIT's newline handling with thread-local Shift state;
+        // restore it before checking results, without posting physical input.
+        {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                GetKeyboardState, SetKeyboardState,
+            };
+            replace("短句");
+            let mut keyboard = [0u8; 256];
+            ensure!(
+                unsafe { GetKeyboardState(keyboard.as_mut_ptr()) } != 0,
+                "Could not save native keyboard state"
+            );
+            let mut shifted = keyboard;
+            shifted[VK_SHIFT as usize] |= 0x80;
+            ensure!(
+                unsafe { SetKeyboardState(shifted.as_ptr()) } != 0,
+                "Could not set thread-local Shift state"
+            );
+            unsafe {
+                SendMessageW(self.state.text.get(), WM_KEYDOWN, VK_RETURN as usize, 0);
+                SendMessageW(self.state.text.get(), WM_CHAR, VK_RETURN as usize, 0);
+                SendMessageW(self.state.text.get(), WM_KEYUP, VK_RETURN as usize, 0);
+            }
+            ensure!(
+                unsafe { SetKeyboardState(keyboard.as_ptr()) } != 0,
+                "Could not restore native keyboard state"
+            );
+            ensure!(
+                self.state.normalized_text()? == "短句\n",
+                "Shift+Enter did not retain a native editable newline"
+            );
+            self.smoke_compact_body()?;
+        }
         verify_pending()?;
         // Exercise the real subclass chain, including key repeats and WM_CHAR.
         unsafe {

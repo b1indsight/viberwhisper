@@ -1,8 +1,8 @@
 # 66 - 修正气泡底部留白，让识别文字垂直居中
 
-**阶段：** 紧凑方案已批准、本地实现与 macOS 检查完成；Windows 原生验收待运行。初始方案与历次调查限制保留，原生基线测量见 [004]，替代方案与实现见 [005]。
-**PR：** [Draft #172](https://github.com/b1indsight/viberwhisper/pull/172)，紧凑实现已推送；与新 `master` 的 changelog 冲突已在本地追加合并解决，等待推送后启动 Windows 原生验收。未合并、未发布。
-**Bookmark：** `fix/bubble-vertical-balance`；后续计划与实现沿用同一 bookmark / draft PR，目标分支为 `master`。
+**阶段：** 紧凑布局已随 #172 合并；其 Windows 原生几何与截图验收通过。后续编辑夹具与非 integration 编译门禁修复已在 Windows CI 执行通过，同轮 macOS CI 也通过；物理键盘、完整 IME、真实混合 DPI 与实际目标投递仍待实机。原生基线见 [004]，批准实现见 [005]，修复后实测见 [006]，合并后补验修复见 [007]，本轮执行证据与边界见 [008]。
+**PR：** [原实现 #172（已合并）](https://github.com/b1indsight/viberwhisper/pull/172)；编辑夹具与门禁修复由 [补验 #174](https://github.com/b1indsight/viberwhisper/pull/174) 承接，代码提交双平台 CI 成功。本次仅补充验收记录，不修改已通过的代码；补验 PR 尚未合并，未执行版本发布。
+**Bookmark：** 原实现为 `fix/bubble-vertical-balance`；#172 合并后，按用户明确要求，以 `fix/windows-preview-native-editing` 创建独立补验 PR，目标分支仍为 `master`。
 **基线：** 已 fetch 的 `master@origin` / v0.5.3，[发布准备提交 34288ff9](https://github.com/b1indsight/viberwhisper/commit/34288ff9bc2ad6cf4fdba4864ac2ec6c7896c275)。目标是下一版本，不在本计划指定版本号或执行发布。
 **工作区：** 独立 JJ workspace `bubble-vertical-balance-plan-20261110`，路径 `.amp/in/feature-workspaces/bubble-vertical-balance`；不修改源主工作区或另两个 feature 的工作区。
 
@@ -235,3 +235,33 @@ Windows 沿用现有 `windows-app,integration` 原生测试、一次性 DPI/setu
 **简化与消融边界。** 产品改动只收紧现有高度计算并删除失去用途的居中补偿，没有增加算法、状态、分支或配置，因此不引入消融框架。新增 native helper 仅在原生夹具内部复用实际几何验收，不参与产品布局。原布局和新布局的同输入原生 A/B 及短句/九行/溢出/警告负对照仍须待 Windows 执行，未把纸面高度计算当作已完成实验。临时组件日志在取得修复后的原生证据后清理，保持同一 bookmark / draft PR。
 
 **推送与基线同步。** 用户随后明确要求“推送实现到 PR #172，并跑 Windows 原生验收”。只读双审阅均完成、无发现后，已推送[紧凑实现 a8eea25](https://github.com/b1indsight/viberwhisper/commit/a8eea25938850418996f5c66da2a2a610b35b662)。GitHub 确认 PR 与新 `master` 存在合并冲突，未为该 head 创建 CI；没有把旧提交的成功结果当作本次结果。获取[已合并的诊断日志功能 7aa37ae](https://github.com/b1indsight/viberwhisper/commit/7aa37aeffb85510fa79d375a87d0cfbf0abd1f24) 后，追加合并提交，只解决 changelog 顶部两条新增记录的冲突并同时保留它们；不重写已发布历史，不改上游功能。合并头仍须推送并以新的确切 SHA 订阅 CI，Windows 结果继续待验收。
+
+### [006] · 2026-11-10 · Windows 原生实测通过，补齐编辑夹具执行入口
+
+**实际运行。** [合并头 85c46eb](https://github.com/b1indsight/viberwhisper/commit/85c46eb04a1853e349a08ccc76e8d4193f1cafdc) 的 [Windows 原生 CI](https://github.com/b1indsight/viberwhisper/actions/runs/42804752936/job/129790926337) 与同轮 macOS CI 均成功。下载该运行的原生日志和 `windows-preview-captures`，逐项独立重算窗口/客户区/格式框，并检查代表性原始截图；没有把 CI 绿灯单独当作视觉证明。以下单位为物理像素；除合成布局 DPI 对照外，实际窗口与布局均为 96 DPI。
+
+**同输入对照与结果。** 普通单行与流式前缀/完成状态，气泡/EDIT/格式区从 34/28/20 收紧为 26/20/20，格式区相对气泡从上 3、下 11 变为上 3、下 3，EDIT 内部底部多出的 8px 消失；STATIC 仍不可见且高 0。用户原句也为 26/20/20。显式两行和自动换行分别读回 46/40/40，显式三行与有效尾随空行分别为 66/60/60，均上下各 3px；尾随空行是保留的第三个编辑行，不当作布局留白删除。长文与警告后回缩恢复为 26/20/20。只读空文本回撤保留原生一行高，截图确实为空，无残留文字。
+
+**负对照与缩放。** 九行未溢出正文仍为 186/180/180，溢出正文仍为 202/196/180，带真实警告的溢出气泡仍为 237px、EDIT 196px、STATIC 32px；这些组件高度与取证基线一致，不要求溢出视口的完整行格式区填满 196px。合成布局 144/192 DPI 的短句从 52/42/31、68/56/41 收紧到 41/31/31、53/41/41，上下分别各 5/6px，实际窗口 DPI 均仍为 96，不能称作真实高分屏验收。系统色样本的“测试提示”确实占用原有警告 footer，因此整张图下半部较宽，不作为无 footer 上下均衡的反例或证明。
+
+**可复查证据与局限。** 本工作区 `.amp/in/artifacts/bubble-vertical-balance/compact-windows-85c46eb-ci.log`、`compact-windows-measurements.txt` 和 `compact-windows-85c46eb/` 保存原生日志、独立计算与原始 PNG。基线仍用 [004] 的 `windows-component-ci.log` / `windows-components-27a52a1/`；两次是同输入的 Windows CI 对照，不是同一物理桌面的连续运行。原生日志中的 `gate-denied` 子进程失败是已有夹具故意拒绝启动许可的负对照，父测试确认失败文本、未创建 UI 及输入清理后继续；没有忽略意外失败。
+
+**验证入口修正。** 核读调用链发现 `--artifacts` 路径会运行流式、几何和错误取消检查，但不进入 `--smoke` 专有的 `smoke_confirmation`；因此以上通过不包含新加的 EN_CHANGE/光标和编辑确认断言。保留这项区别，并在现有 once-per-run 原生 fixture 中用自有窗口调用同一确认夹具，检查编辑行数、有效尾随空行光标、Enter 释放后仅确认一次及 Esc 释放后仅取消一次。补查 Shift+Enter 时使用线程局部键盘状态和 native EDIT 的 WM_CHAR 路径，先恢复原键盘状态再断言换行，没有发送全局物理输入、捕获目标、实际注入或写历史。用于 EDIT 替换的夹具文本规范为 CRLF，并用独立的预期行数防止把输入未换行误判为通过。该补验尚待新提交在 Windows 执行，不据此声称真实键盘或完整 IME 已验证。
+
+**清理与交付。** 已取得修复后组件读回，按 [004]/[005] 的边界删除临时逐组件诊断输出及其专用导入，保留原生几何断言、既有截图元数据和正式回归输入。本批不改变产品布局或事件处理；仍使用原 bookmark / draft PR，完成审阅后推送并重新订阅精确 head。真实显示器混合 DPI、完整 IME 与目标应用投递仍待实机，未合并、未发布。
+
+### [007] · 2026-11-10 · 合并后补验：修正 Windows 测试夹具的编译门禁
+
+**背景与授权。** [006] 的独立审阅发现一项 medium：新增调用位于 `#[cfg(test)]` 的 `smoke_dpi`，而被调用的 `smoke_confirmation` 仅在 `feature = "integration"` 编译，导致普通 Windows 测试及 CI 的 `cargo test --locked --features windows-app,diagnostic-logs` 缺少该方法。该批补验未推送。随后用户自行合并 #172（[合并提交 ef508fd](https://github.com/b1indsight/viberwhisper/commit/ef508fd5dd7c872e4ff8e7bd8aa1bba99249bd9f)），并明确要求“修复，开一个新pr”；因此本次以新的补验 bookmark / PR 承接同一记录，不继续推送已合并分支。保留 [006] 当时的交付状态以便核查。
+
+**修复与取舍。** 仅将该方法的条件改为 `#[cfg(any(test, feature = "integration"))]`，与已有原生 smoke 模块的条件一致；不把新调用限制为 integration，从而保留普通 Windows 测试的原生编辑覆盖。沿用 [006] 尚未发布的编辑确认检查和临时诊断清理，不增加产品功能、依赖、CI 步骤或布局补偿。该修复只扩大测试构建中可用的夹具，不进入普通非 integration 产品构建；没有新增需要消融的算法或机制。
+
+**验证与边界。** 未推送的补验 change 已接到上述最新 `master@origin`；本机 macOS 的 `cargo fmt --check`、`git diff --check`、`cargo test --locked --features diagnostic-logs`、`cargo test --locked --features integration` 和 `cargo clippy --locked --all-targets --features integration,diagnostic-logs -- -D warnings` 均退出 0，日志保存在本工作区 `.amp/in/artifacts/bubble-vertical-balance/followup-macos-*.log`。最终精确提交须通过一次双审阅后才能推送。Windows 仍由新 PR 的既有 CI 检查 integration 原生夹具、非 integration 诊断测试及对应 clippy，不能用 macOS 测试替代 Windows 编译或运行。完整物理按键、真实显示器混合 DPI、IME 和实际目标投递仍不在本次 HWND 消息夹具的证明范围内；新 CI 结果待执行后补充。
+
+### [008] · 2026-11-10 · Windows 原生编辑补验与非 integration 测试通过
+
+**实际运行与证据。** [代码提交 16355e0](https://github.com/b1indsight/viberwhisper/commit/16355e00b4459cfcfa0b5fdde81867984ddef34b) 的 [Windows 原生 CI](https://github.com/b1indsight/viberwhisper/actions/runs/42868953227/job/130014730564) 与[同轮 macOS CI](https://github.com/b1indsight/viberwhisper/actions/runs/42868953227/job/130014729890) 均成功。已下载并核对 Windows 完整作业日志；`Native Windows setup and DPI smoke` 的 `--nocapture` 输出明确包含 `native preview editing: EN_CHANGE, caret, Enter release, Shift+Enter and Esc checked; no destination or injection`，随后原生父测试成功，证明 [006] 补接的夹具实际执行完毕，不再仅依据截图或编译结果推断编辑通过。原始日志保存在本工作区 `.amp/in/artifacts/bubble-vertical-balance/followup-windows-native-ci.log`。
+
+**覆盖与编译组合。** 本轮完成真实 HWND 上的编辑增长/回缩、独立指定行数的单行/两三行/有效尾随空行、光标范围、释放前无动作及 Enter/Esc 各一次、线程局部 Shift+Enter 换行检查。`cargo test --locked --features windows-app,integration`、不含 integration 的 `cargo test --locked --features windows-app,diagnostic-logs` 及 Windows 普通/诊断两种 all-targets clippy 均通过，原有 native preview captures 步骤也成功。[007] 的缺方法编译问题已由实际 Windows 构建组合验证解决。
+
+**交付与限制。** 两项独立审阅对上述精确代码提交均完成且无发现；审阅报告为本工作区 `.amp/in/artifacts/bubble-vertical-balance/followup-review.json`。本次仅同步计划、changelog 和 PR 验收说明，不改布局、事件处理或测试代码。窗口消息和线程局部键盘状态不等于完整物理键盘、IME、真实显示器混合 DPI 或实际目标投递验收，仍保留这些限制；补验 PR 尚未合并，也未发布版本。
