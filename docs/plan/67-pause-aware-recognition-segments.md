@@ -387,3 +387,13 @@ Realtime 在 append 前求切点，按连续切片逐段提交；30 秒容量改
 **背景与已完成集成：** 送审时 `master@origin` 已包含诊断日志功能，故将本 feature 变基到上述 7aa37aef。只有文档索引的并行追加冲突，保留诊断日志及停顿分段两个入口；产品代码自动合并，未改变既有诊断日志、依赖或工作流。初始方案的原 v0.5.3 调查仍保留，不将变基后的事实改写进初始结论。
 
 **已执行结果：** 新基线上 `cargo fmt --check`、`cargo build --locked`、默认测试、`--features diagnostic-logs` 测试、`--features integration` 测试及 `cargo clippy --locked --all-targets --all-features -- -D warnings` 均通过。[送审前组合检查日志](../../.amp/in/artifacts/validation-before-pr.log)。第 4、5 条的真实语料、服务及 Windows 运行限制仍然有效，Draft PR 不代表已满足发布验收。
+
+### 7. 2026-11-10 — 修复 stable CI 的测试解码 lint
+
+**触发与已核实原因：** [PR #173](https://github.com/b1indsight/viberwhisper/pull/173) 首轮 [macOS CI](https://github.com/b1indsight/viberwhisper/actions/runs/42806243198/job/129795986737) 和 [Windows CI](https://github.com/b1indsight/viberwhisper/actions/runs/42806243198/job/129795986358) 均在新增 Realtime 样本连续性测试的 `chunks_exact(2)` 处触发 `clippy::chunks_exact_to_as_chunks`；前置构建和测试步骤通过。CI 使用 Rust 1.99.1，前述本地检查使用 1.94。额外安装独立的 1.99.1 工具链后，在修改前用 CI 的 diagnostic-logs Clippy 命令复现相同失败，没有改变默认工具链或工作流。
+
+**已修复与边界：** 测试 PCM 解码改用 `as_chunks::<2>().0.iter()`，直接读取二字节数组；源音频拼接、字节序及逐样本断言不变。不增加 lint 豁免、依赖或运行机制，不修改产品分段策略。本次为测试写法兼容修复，无新增机制需要消融。
+
+**验证与状态：** Rust 1.99.1 的 `cargo fmt --check`、CI 原命令 `cargo clippy --locked --all-targets --features diagnostic-logs -- -D warnings`、all-targets/all-features Clippy 和 diagnostic-logs 全量测试均通过；原 1.94 工具链上的该 Realtime 样本连续性回归也通过。Windows 新提交的 CI 结果仍待确认，以上本地证据不替代 Windows 运行验收；第 4 条真实语料与服务验收限制不变，PR 继续保留 Draft。
+
+来源：[同版本复现](../../.amp/in/artifacts/ci-clippy-1.99.1-red.log)、[修复后验证](../../.amp/in/artifacts/ci-clippy-1.99.1-green.log)。

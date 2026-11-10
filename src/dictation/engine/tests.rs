@@ -46,8 +46,10 @@ async fn pause_commits_contiguous_audio_while_fixed_conversion_keeps_one_segment
                     let bytes = STANDARD.decode(event["audio"].as_str().unwrap()).unwrap();
                     segment.extend(
                         bytes
-                            .chunks_exact(2)
-                            .map(|s| i16::from_le_bytes([s[0], s[1]])),
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|s| i16::from_le_bytes(*s)),
                     );
                 }
                 segments.push(segment);
