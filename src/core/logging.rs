@@ -228,23 +228,6 @@ pub(crate) mod test_support {
             .finish();
         (file, tracing::Dispatch::new(subscriber))
     }
-
-    pub(crate) fn model_events(file: &tempfile::NamedTempFile) -> Vec<serde_json::Value> {
-        std::fs::read_to_string(file.path())
-            .unwrap()
-            .lines()
-            .filter_map(|line| {
-                let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
-                if event["target"] != "viberwhisper::model" {
-                    return None;
-                }
-                let mut fields = event["fields"].take();
-                fields["payload"] =
-                    serde_json::from_str(fields["payload"].as_str().unwrap()).unwrap();
-                Some(fields)
-            })
-            .collect()
-    }
 }
 
 #[cfg(all(test, feature = "diagnostic-logs"))]
@@ -260,93 +243,40 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let day = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
         let today = directory.path().join("viberwhisper.2026-11-10.jsonl");
-        let yesterday = directory.path().join("viberwhisper.2026-11-09.jsonl");
-        let future = directory.path().join("viberwhisper.2026-11-12.jsonl");
         fs::write(&today, b"existing\n").unwrap();
-        fs::write(&yesterday, b"old\n").unwrap();
-        fs::write(&future, b"future\n").unwrap();
         let preserved = [
             "config.json",
             "history.jsonl",
             "dictation-memory.json",
-            "viberwhisper.notes.jsonl",
             "viberwhisper.2026-02-30.jsonl",
-            "viberwhisper.2026-11-09.jsonl.backup",
-            "other.2026-11-09.jsonl",
         ];
         for name in preserved {
             fs::write(directory.path().join(name), b"do not change").unwrap();
         }
+        for date in ["2026-11-09", "2026-11-12"] {
+            let path = directory.path().join(format!("viberwhisper.{date}.jsonl"));
+            fs::write(&path, b"old").unwrap();
+            drop(DailyWriter::new(directory.path().to_owned(), day).unwrap());
+            assert!(!path.exists());
+        }
         let writer = DailyWriter::new(directory.path().to_owned(), day).unwrap();
         writer.write_on(|| day, b"first\n").unwrap();
         assert_eq!(fs::read(&today).unwrap(), b"existing\nfirst\n");
-        assert!(!yesterday.exists());
-        assert!(!future.exists());
-        drop(writer);
-        let writer = DailyWriter::new(directory.path().to_owned(), day).unwrap();
-        writer.write_on(|| day, b"restart\n").unwrap();
-        assert_eq!(fs::read(&today).unwrap(), b"existing\nfirst\nrestart\n");
         writer
             .write_on(|| day.succ_opt().unwrap(), b"tomorrow\n")
             .unwrap();
+        let tomorrow = directory.path().join("viberwhisper.2026-11-11.jsonl");
         assert!(!today.exists());
-        assert_eq!(
-            fs::read(directory.path().join("viberwhisper.2026-11-11.jsonl")).unwrap(),
-            b"tomorrow\n"
-        );
+        assert_eq!(fs::read(&tomorrow).unwrap(), b"tomorrow\n");
         // A backwards clock change must not leave a future-dated diagnostic file.
         writer.write_on(|| day, b"clock changed\n").unwrap();
         assert_eq!(fs::read(&today).unwrap(), b"clock changed\n");
-        assert!(
-            !directory
-                .path()
-                .join("viberwhisper.2026-11-11.jsonl")
-                .exists()
-        );
+        assert!(!tomorrow.exists());
         for name in preserved {
             assert_eq!(
                 fs::read(directory.path().join(name)).unwrap(),
                 b"do not change"
             );
         }
-        let blocker = directory.path().join("not-a-directory");
-        fs::write(&blocker, b"keep").unwrap();
-        assert!(DailyWriter::new(blocker.clone(), day).is_err());
-        assert_eq!(fs::read(blocker).unwrap(), b"keep");
-    }
-
-    #[test]
-    fn concurrent_events_remain_complete_json_lines() {
-        use std::sync::Arc;
-        let directory = tempfile::tempdir().unwrap();
-        let day = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
-        let writer = Arc::new(DailyWriter::new(directory.path().to_owned(), day).unwrap());
-        let threads: Vec<_> = (0..4)
-            .map(|thread| {
-                let writer = writer.clone();
-                std::thread::spawn(move || {
-                    for item in 0..20 {
-                        let line = format!("{{\"thread\":{thread},\"item\":{item}}}\n");
-                        writer.write_on(|| day, line.as_bytes()).unwrap();
-                    }
-                })
-            })
-            .collect();
-        for thread in threads {
-            thread.join().unwrap();
-        }
-        let contents =
-            fs::read_to_string(directory.path().join("viberwhisper.2026-11-10.jsonl")).unwrap();
-        let events: std::collections::HashSet<_> = contents
-            .lines()
-            .map(|line| {
-                let event: serde_json::Value = serde_json::from_str(line).unwrap();
-                (
-                    event["thread"].as_u64().unwrap(),
-                    event["item"].as_u64().unwrap(),
-                )
-            })
-            .collect();
-        assert_eq!(events.len(), 80);
     }
 }

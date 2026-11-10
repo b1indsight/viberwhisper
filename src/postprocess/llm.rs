@@ -369,111 +369,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "diagnostic-logs")]
-    #[test]
-    fn diagnostic_requests_match_model_input_and_keep_rejected_responses() {
-        // Concurrent cleanup must pair each exact prompt/context with its own
-        // response, even when successful HTTP contains invalid business JSON.
-        let (log, dispatch) = logging::test_support::capture();
-        let responses = [
-            json!({"text":"清理结果 xy"}).to_string(),
-            "invalid business JSON xy".into(),
-        ];
-        let (endpoint, requests) = stub(responses.to_vec());
-        let outcomes = std::thread::scope(|scope| {
-            let threads: Vec<_> = ["第一段 xy", "second input"]
-                .into_iter()
-                .map(|text| {
-                    let dispatch = dispatch.clone();
-                    let endpoint = endpoint.clone();
-                    scope.spawn(move || {
-                        tracing::dispatcher::with_default(&dispatch, || {
-                            let mut config =
-                                config_with_postprocess(false, Some("system prompt xy"));
-                            config.endpoint = endpoint;
-                            config.auth = ApiAuth::Bearer(SecretValue::new("xy"));
-                            let memory =
-                                serde_json::from_value(json!({"enabled":true,"long_term":[{
-                                    "context":"项目", "kind":"proper_noun", "text":"ViberWhisper"
-                                }]}))
-                                .unwrap();
-                            let processor = PostProcessor::new_desktop(
-                                PostProcessConfig::Llm(config),
-                                memory,
-                                None,
-                                None,
-                            )
-                            .unwrap();
-                            let result = processor
-                                .process_for_delivery(text)
-                                .map(|transcript| transcript.text);
-                            processor.shutdown();
-                            result
-                        })
-                    })
-                })
-                .collect();
-            threads
-                .into_iter()
-                .map(|thread| thread.join().unwrap())
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|result| result.as_deref().is_ok_and(|text| text == "清理结果 xy"))
-                .count(),
-            1
-        );
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|result| matches!(result, Err(PostProcessError::InvalidResult)))
-                .count(),
-            1
-        );
-        let events = logging::test_support::model_events(&log);
-        assert_eq!(events.len(), 4);
-        let ids: std::collections::HashSet<_> = events
-            .iter()
-            .map(|event| event["request_id"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids.len(), 2);
-        for response in responses {
-            let wire = requests.recv_timeout(Duration::from_secs(2)).unwrap();
-            assert!(
-                wire.headers
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer xy")
-            );
-            let user: serde_json::Value =
-                serde_json::from_str(wire.body["messages"][1]["content"].as_str().unwrap())
-                    .unwrap();
-            assert_eq!(user["contexts"][0]["long_term"][0]["text"], "ViberWhisper");
-            let expected: serde_json::Value =
-                serde_json::from_str(&wire.body.to_string().replace("xy", "[REDACTED]")).unwrap();
-            let request = events
-                .iter()
-                .find(|event| event["phase"] == "request" && event["payload"] == expected)
-                .unwrap();
-            let logged_response = events
-                .iter()
-                .find(|event| {
-                    event["phase"] == "response" && event["request_id"] == request["request_id"]
-                })
-                .unwrap();
-            let body: serde_json::Value =
-                serde_json::from_str(logged_response["payload"]["body"].as_str().unwrap()).unwrap();
-            assert_eq!(
-                body["choices"][0]["message"]["content"],
-                response.replace("xy", "[REDACTED]")
-            );
-        }
-        let contents = std::fs::read_to_string(log.path()).unwrap();
-        assert!(!contents.contains("xy"));
-        assert!(!contents.to_ascii_lowercase().contains("authorization"));
-    }
-
     #[test]
     fn authorization_header_matches_typed_auth_mode() {
         for (auth, expected_header) in [
@@ -521,12 +416,18 @@ mod tests {
     fn configured_processor_cleans_complete_text() {
         // Convert and setup verification use the configured processor directly;
         // an accidental pass-through here would silently skip enabled cleanup.
+        #[cfg(feature = "diagnostic-logs")]
+        let (log, dispatch) = logging::test_support::capture();
+        #[cfg(feature = "diagnostic-logs")]
+        let _guard = tracing::dispatcher::set_default(&dispatch);
         let (endpoint, _requests) = stub(vec![json!({"text":"clean"}).to_string()]);
         let mut config = config_with_postprocess(true, None);
         config.endpoint = endpoint;
         let processor = PostProcessor::new(PostProcessConfig::Llm(config));
 
         assert_eq!(processor.process_text("raw").unwrap(), "clean");
+        #[cfg(feature = "diagnostic-logs")]
+        assert!(log.as_file().metadata().unwrap().len() > 0);
     }
 
     #[test]

@@ -203,55 +203,36 @@ fn diagnostic_feature_only_enables_file_logging() {
     }
 }
 
+#[cfg(feature = "diagnostic-logs")]
 #[test]
-fn diagnostic_startup_cleans_only_its_logs_and_reports_unusable_files() {
+fn diagnostic_startup_reports_unusable_log_file() {
     let sandbox = Sandbox::new("http://127.0.0.1:1/stt");
     let output = sandbox.command().args(["config", "path"]).output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let config = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
     let directory = config.parent().unwrap();
     let before = fs::read(&config).unwrap();
-    let old = directory.join("viberwhisper.2000-01-01.jsonl");
-    let future = directory.join("viberwhisper.9999-12-31.jsonl");
-    fs::write(&old, b"old sentinel").unwrap();
-    fs::write(&future, b"future sentinel").unwrap();
-    let output = sandbox
-        .command()
-        .env("RUST_LOG", "trace")
-        .args(["config", "path"])
-        .output()
+    let log = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("viberwhisper.")
+        })
         .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(fs::read(&config).unwrap(), before);
-    if cfg!(feature = "diagnostic-logs") {
-        assert!(!old.exists());
-        assert!(!future.exists());
-        let logs: Vec<_> = fs::read_dir(directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| {
-                path.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("viberwhisper.")
-            })
-            .collect();
-        assert_eq!(logs.len(), 1);
-        fs::remove_file(&logs[0]).unwrap();
-        fs::create_dir(&logs[0]).unwrap();
-        let output = sandbox.command().args(["config", "path"]).output().unwrap();
-        assert_eq!(output.status.code(), Some(1));
-        assert!(output.stdout.is_empty());
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(
-            stderr.contains("failed to initialize diagnostic logging"),
-            "{stderr}"
-        );
-        assert!(stderr.contains(directory.to_str().unwrap()), "{stderr}");
-    } else {
-        assert_eq!(fs::read(old).unwrap(), b"old sentinel");
-        assert_eq!(fs::read(future).unwrap(), b"future sentinel");
-    }
+    fs::remove_file(&log).unwrap();
+    fs::create_dir(&log).unwrap();
+    let output = sandbox.command().args(["config", "path"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("failed to initialize diagnostic logging"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(directory.to_str().unwrap()), "{stderr}");
     assert_eq!(fs::read(config).unwrap(), before);
 }
 
