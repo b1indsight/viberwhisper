@@ -2,14 +2,17 @@
 
 use super::super::nul_terminated_utf16;
 use super::*;
-use windows_sys::Win32::UI::Controls::{EM_CANUNDO, EM_GETSEL, EM_REPLACESEL};
+use windows_sys::Win32::UI::Controls::{
+    EM_CANUNDO, EM_GETSEL, EM_LINEINDEX, EM_POSFROMCHAR, EM_REPLACESEL,
+};
 
 impl NativePreview {
     /// Ask only this fixture's HWND and native children to render into a PNG.
     pub(crate) fn smoke_capture(&self, path: &std::path::Path) -> Result<()> {
+        use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::Graphics::Gdi::{
-            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
-            DIB_RGB_COLORS, DeleteDC, GdiFlush,
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, ClientToScreen, CreateCompatibleDC,
+            CreateDIBSection, DIB_RGB_COLORS, DeleteDC, GdiFlush,
         };
 
         let window = self.state.window.get();
@@ -21,6 +24,49 @@ impl NativePreview {
         let width = bounds.right - bounds.left;
         let height = bounds.bottom - bounds.top;
         ensure!(width > 0 && height > 0, "Preview capture has no area");
+        // Read the real HWND geometry; do not reconstruct it from layout's requested sizes.
+        for (name, control) in [
+            ("bubble", window),
+            ("EDIT", self.state.text.get()),
+            ("STATIC", self.state.status.get()),
+        ] {
+            let mut outer = RECT::default();
+            let mut client = RECT::default();
+            let mut origin = POINT::default();
+            ensure!(
+                unsafe { GetWindowRect(control, &mut outer) } != 0
+                    && unsafe { GetClientRect(control, &mut client) } != 0
+                    && unsafe { ClientToScreen(control, &mut origin) } != 0,
+                "Could not read preview component geometry"
+            );
+            eprintln!(
+                "preview component: capture={}; name={name}; visible={}; screen-rect={:?}; client-rect={:?}; client-screen-origin={:?}; outer-height={}; client-height={}",
+                path.display(),
+                unsafe { IsWindowVisible(control) } != 0,
+                [outer.left, outer.top, outer.right, outer.bottom],
+                [client.left, client.top, client.right, client.bottom],
+                [origin.x, origin.y],
+                outer.bottom - outer.top,
+                client.bottom - client.top,
+            );
+        }
+        let mut format = RECT::default();
+        unsafe {
+            SendMessageW(
+                self.state.text.get(),
+                EM_GETRECT,
+                0,
+                (&raw mut format) as isize,
+            )
+        };
+        let (_, line_height) = self.state.measure_text(self.state.text.get(), None)?;
+        let lines = unsafe { SendMessageW(self.state.text.get(), EM_GETLINECOUNT, 0, 0) };
+        eprintln!(
+            "preview text allocation: capture={}; format-client-rect={:?}; format-height={}; native-font-line-height={line_height}; native-lines={lines}",
+            path.display(),
+            [format.left, format.top, format.right, format.bottom],
+            format.bottom - format.top,
+        );
         let info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: size_of::<BITMAPINFOHEADER>() as u32,
@@ -122,6 +168,57 @@ impl NativePreview {
                 != 0,
             self.state.style.get().high_contrast,
         );
+        self.smoke_compact_body()
+    }
+
+    /// Fitting text must not leave a hidden row of padding inside the native editor.
+    fn smoke_compact_body(&self) -> Result<()> {
+        let editor = self.state.text.get();
+        if unsafe { IsWindowVisible(editor) } == 0
+            || unsafe { GetWindowLongPtrW(editor, GWL_STYLE) } & WS_VSCROLL as isize != 0
+        {
+            return Ok(());
+        }
+        let mut bubble = RECT::default();
+        let mut body = RECT::default();
+        let mut client = RECT::default();
+        let mut format = RECT::default();
+        ensure!(
+            unsafe { GetWindowRect(self.state.window.get(), &mut bubble) } != 0
+                && unsafe { GetWindowRect(editor, &mut body) } != 0
+                && unsafe { GetClientRect(editor, &mut client) } != 0,
+            "Could not measure the compact body"
+        );
+        unsafe { SendMessageW(editor, EM_GETRECT, 0, (&raw mut format) as isize) };
+        let (_, line_height) = self.state.measure_text(editor, None)?;
+        let lines = unsafe { SendMessageW(editor, EM_GETLINECOUNT, 0, 0) } as i32;
+        ensure!(
+            body.top - bubble.top == self.state.pixels(3)
+                && (self.state.message_visible.get()
+                    || bubble.bottom - body.bottom == self.state.pixels(3))
+                && format.top == 0
+                && format.bottom == client.bottom
+                && client.bottom == lines * line_height,
+            "Fitting body retained internal padding or lost its 3-DIP outer margins: client={}, format={}..{}, lines={lines}, line-height={line_height}",
+            client.bottom,
+            format.top,
+            format.bottom,
+        );
+        // Query actual first/last line positions too; a requested RECT alone cannot
+        // prove where EDIT put the text. Empty final lines are covered by the caret smoke.
+        let length = unsafe { GetWindowTextLengthW(editor) } as isize;
+        for (line, expected) in [(0, 0), (lines - 1, client.bottom - line_height)] {
+            let index = unsafe { SendMessageW(editor, EM_LINEINDEX, line as usize, 0) };
+            ensure!(index >= 0, "Could not locate a native text line");
+            if index < length {
+                let position = unsafe { SendMessageW(editor, EM_POSFROMCHAR, index as usize, 0) };
+                let top = (position as u32 >> 16) as u16 as i16 as i32;
+                ensure!(
+                    position != -1 && top == expected,
+                    "Native line {line} is clipped or misplaced: y={top}, expected={expected}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -211,6 +308,7 @@ impl NativePreview {
         self.update_text("", false, Some(&warning))?;
         // Match the macOS error fixture: partial/editable-empty bodies survive,
         // while a whitespace-only failure stays compact when this window is reused.
+        let (_, line_height) = self.state.measure_text(self.state.text.get(), None)?;
         for (text, ready, collapsed) in [
             ("部分识别结果", true, false),
             ("", true, false),
@@ -232,7 +330,8 @@ impl NativePreview {
                         bounds.bottom - bounds.top == compact_height
                             && bounds.right - bounds.left == compact_width
                     } else {
-                        bounds.bottom - bounds.top >= compact_height + self.state.pixels(28)
+                        bounds.bottom - bounds.top
+                            >= compact_height + line_height + self.state.pixels(3)
                             && bounds.right - bounds.left == self.state.pixels(420)
                     },
                 "Error layout lost its body visibility or editable recovery; ready={ready}"
@@ -400,9 +499,10 @@ impl NativePreview {
                         && unsafe { GetWindowRect(editor, &mut edit_bounds) } != 0,
                     "Could not read DPI-scaled bounds"
                 );
+                let (_, line_height) = preview.state.measure_text(editor, None)?;
                 ensure!(
                     bounds.bottom - bounds.top
-                        == pixels(if scrollable { 196 } else { 28 })
+                        == (if scrollable { pixels(196) } else { line_height })
                             + pixels(3) * 2
                             + if warning.is_some() {
                                 pixels(32) + pixels(3)
@@ -413,7 +513,7 @@ impl NativePreview {
                         && edit_bounds.left - bounds.left == pixels(10)
                         && edit_bounds.top - bounds.top == pixels(3)
                         && edit_bounds.bottom - edit_bounds.top
-                            == pixels(if scrollable { 196 } else { 28 })
+                            == (if scrollable { pixels(196) } else { line_height })
                         && bounds.top == suggested.top
                         && ((bounds.left + bounds.right) - (suggested.left + suggested.right))
                             .abs()
@@ -774,7 +874,11 @@ impl NativePreview {
             unsafe { SendMessageW(self.state.text.get(), EM_CANUNDO, 0, 0) } == 0,
             "Streaming patch entered the undo history"
         );
-        self.update_text("", false, None)?;
+        let wrapped = "中文 English 🎙️ 自动换行。".repeat(3);
+        for text in ["第一行\nEnglish gjpq\n末行 👩‍💻", wrapped.as_str(), ""] {
+            self.update_text(text, false, None)?;
+            self.smoke_compact_body()?;
+        }
         ensure!(
             self.state.normalized_text()?.is_empty(),
             "An empty aggregate did not retract the provisional text"
@@ -961,12 +1065,15 @@ impl NativePreview {
                             unsafe { GetWindowRect(self.state.window.get(), &mut bounds) } != 0,
                             "Could not read resized bubble bounds"
                         );
+                        let (_, line_height) =
+                            self.state.measure_text(self.state.text.get(), None)?;
                         ensure!(
                             scrollable
                                 || bounds.bottom - bounds.top
-                                    == self.state.pixels(28) + self.state.pixels(3) * 2,
+                                    == line_height + self.state.pixels(3) * 2,
                             "Fitting text did not return to the single-line bubble height"
                         );
+                        self.smoke_compact_body()?;
                         let expected = preview_origin(
                             anchor,
                             (
@@ -1106,10 +1213,31 @@ impl NativePreview {
             shrunk.bottom - shrunk.top == short.bottom - short.top,
             "Bubble did not shrink after deletion"
         );
+        // Exercise EN_CHANGE rather than only programmatic streaming updates.
         let mut info = GUITHREADINFO {
             cbSize: size_of::<GUITHREADINFO>() as u32,
             ..Default::default()
         };
+        for text in [
+            "用Codex连接Redis，再让Codex检查。",
+            "第一行\nEnglish gjpq",
+            "第一行\nEnglish gjpq\n末行 👩‍💻",
+            "第一行\nEnglish gjpq\n",
+            "",
+            "短句",
+        ] {
+            replace(text);
+            self.smoke_compact_body()?;
+            let mut client = RECT::default();
+            ensure!(
+                unsafe { GetGUIThreadInfo(0, &mut info) } != 0
+                    && info.hwndCaret == self.state.text.get()
+                    && unsafe { GetClientRect(self.state.text.get(), &mut client) } != 0
+                    && info.rcCaret.top >= 0
+                    && info.rcCaret.bottom <= client.bottom,
+                "Editing clipped the caret, including the trailing empty line"
+            );
+        }
         ensure!(
             unsafe { GetGUIThreadInfo(0, &mut info) } != 0
                 && info.hwndCaret == self.state.text.get(),

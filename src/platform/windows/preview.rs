@@ -392,7 +392,7 @@ impl WindowState {
     fn max_first_visible_line(&self) -> Result<i32> {
         let lines = unsafe { SendMessageW(self.text.get(), EM_GETLINECOUNT, 0, 0) } as i32;
         let mut viewport = RECT::default();
-        // Layout centers fitting text by insetting the edit control's formatting rectangle.
+        // EDIT's formatting rectangle counts only the fully visible native text lines.
         unsafe { SendMessageW(self.text.get(), EM_GETRECT, 0, (&raw mut viewport) as isize) };
         let (_, line_height) = self.measure_text(self.text.get(), None)?;
         let visible_lines = ((viewport.bottom - viewport.top) / line_height).max(1);
@@ -490,7 +490,7 @@ impl WindowState {
         Ok((bounds, metrics.tmHeight))
     }
 
-    /// Fit short candidates and center their input line, wrapping at the width limit.
+    /// Fit candidates to their native text lines, wrapping at the width limit.
     fn layout(&self) -> Result<()> {
         // Resizing a native edit control can synchronously send more notifications.
         if self.laying_out.replace(true) {
@@ -599,11 +599,11 @@ impl WindowState {
                 // At the cap, extra wrapping cannot change the already capped height.
                 width = (width + measure_width - viewport.right).min(max_width);
             }
-            // Match the macOS viewport bounds; taller text stays scrollable.
+            // Fit the actual text lines without a padded minimum; taller text stays scrollable.
             let editor_height = if message_only {
                 0
             } else {
-                content_height.clamp(pixels(28), pixels(196))
+                content_height.min(pixels(196))
             };
             let message_height = if self.message_visible.get() {
                 let (message, _) =
@@ -658,17 +658,6 @@ impl WindowState {
                     if message_only { SW_HIDE } else { SW_SHOWNA },
                 );
                 SendMessageW(self.text.get(), EM_SETRECTNP, 0, 0);
-                let mut format = RECT::default();
-                SendMessageW(self.text.get(), EM_GETRECT, 0, (&raw mut format) as isize);
-                let inset = ((format.bottom - format.top - content_height) / 2).max(0);
-                format.top += inset;
-                format.bottom -= inset;
-                SendMessageW(
-                    self.text.get(),
-                    EM_SETRECTNP,
-                    0,
-                    (&raw const format) as isize,
-                );
                 ensure!(
                     SetWindowPos(
                         self.status.get(),

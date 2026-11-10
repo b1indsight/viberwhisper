@@ -318,8 +318,22 @@ impl ApplicationHandler<DemoEvent> for Demo {
                         self.capture(name)?;
                         if can_confirm {
                             let long = "明天下午三点开会，讨论 Windows 高分屏显示和 Realtime 识别结果。\nEnglish and emoji 🎙️ should remain readable.\n".repeat(12);
+                            let wrapped = "中文 English 🎙️ 自动换行。".repeat(3);
                             for (name, text, warning) in [
                                 ("ready-edited.png", SMOKE_TEXT, None),
+                                (
+                                    "ready-reported.png",
+                                    "用Codex连接Redis，再让Codex检查。",
+                                    None,
+                                ),
+                                ("ready-two-lines.png", "第一行\nEnglish gjpq", None),
+                                (
+                                    "ready-three-lines.png",
+                                    "第一行\nEnglish gjpq\n末行 👩‍💻",
+                                    None,
+                                ),
+                                ("ready-wrapped.png", wrapped.as_str(), None),
+                                ("ready-trailing-newline.png", "第一行\nEnglish gjpq\n", None),
                                 ("ready-long.png", long.as_str(), None),
                                 (
                                     "ready-warning.png",
@@ -328,6 +342,7 @@ impl ApplicationHandler<DemoEvent> for Demo {
                                         "部分音频识别失败，请检查文字后按 Enter 确认，或按 Esc 取消。",
                                     ),
                                 ),
+                                ("ready-shrunk.png", "短句", None),
                             ] {
                                 self.preview.update_text(text, true, warning)?;
                                 self.capture(name)?;
