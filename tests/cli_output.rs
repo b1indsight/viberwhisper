@@ -36,7 +36,7 @@ impl Sandbox {
             "schema_version": 3,
             "input": {"hold_hotkey": "F8", "toggle_hotkey": "F9"},
             "audio": {"input_device": null, "mic_gain": 1.0},
-            "transcription": {"language": "en", "prompt": null, "temperature": 0.0},
+            "transcription": {"language": "en", "prompt": "CLI prompt sentinel", "temperature": 0.0},
             "post_process": {
                 "enabled": false,
                 "preheat_enabled": false,
@@ -85,7 +85,7 @@ impl Sandbox {
     }
 }
 
-fn convert_speech(status: &'static str, body: &'static str) -> Output {
+fn convert_speech(status: &'static str, body: &'static str, filter: &str) -> (Output, bool) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!(
         "http://{}/v1/audio/transcriptions",
@@ -139,24 +139,101 @@ fn convert_speech(status: &'static str, body: &'static str) -> Output {
 
     let output = sandbox
         .command()
+        .env("RUST_LOG", filter)
         .arg("convert")
         .arg(input)
         .output()
         .unwrap();
     server.join().unwrap();
-    output
+    let path_output = sandbox.command().args(["config", "path"]).output().unwrap();
+    assert!(path_output.status.success(), "{path_output:?}");
+    let config = PathBuf::from(String::from_utf8(path_output.stdout).unwrap().trim());
+    let has_logs = fs::read_dir(config.parent().unwrap())
+        .unwrap()
+        .any(|entry| {
+            let entry = entry.unwrap();
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("viberwhisper.")
+                && entry.metadata().unwrap().len() > 0
+        });
+    (output, has_logs)
 }
 
 #[test]
 fn convert_stdout_contains_only_the_transcription() {
     // Default INFO diagnostics must not become part of a redirected transcript file.
-    let output = convert_speech("200 OK", r#"{"text":"CLI transcript only"}"#);
+    let (output, _) = convert_speech(
+        "200 OK",
+        r#"{"text":"CLI transcript only"}"#,
+        "viberwhisper=info",
+    );
 
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(output.stdout, b"CLI transcript only\n", "{output:?}");
     let diagnostics = String::from_utf8(output.stderr).unwrap();
     assert!(diagnostics.contains("Transcribing audio file"));
     assert!(!diagnostics.contains("CLI transcript only"));
+}
+
+#[test]
+fn diagnostic_feature_only_enables_file_logging() {
+    // Testers may set RUST_LOG globally; that must neither enable DEBUG in ordinary
+    // packages nor expose diagnostic-package model content on the terminal.
+    for filter in ["debug", "trace", "off"] {
+        let (output, has_logs) =
+            convert_speech("200 OK", r#"{"text":"CLI transcript only"}"#, filter);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(output.stdout, b"CLI transcript only\n");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(!stderr.contains("DEBUG"), "{stderr}");
+        assert!(!stderr.contains("TRACE"), "{stderr}");
+        for private in [
+            "CLI prompt sentinel",
+            "CLI transcript only",
+            "cli-stub-token",
+        ] {
+            assert!(
+                !stderr.contains(private),
+                "console leaked {private}: {stderr}"
+            );
+        }
+        assert_eq!(has_logs, cfg!(feature = "diagnostic-logs"));
+    }
+}
+
+#[cfg(feature = "diagnostic-logs")]
+#[test]
+fn diagnostic_startup_reports_unusable_log_file() {
+    let sandbox = Sandbox::new("http://127.0.0.1:1/stt");
+    let output = sandbox.command().args(["config", "path"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let config = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    let directory = config.parent().unwrap();
+    let before = fs::read(&config).unwrap();
+    let log = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("viberwhisper.")
+        })
+        .unwrap();
+    fs::remove_file(&log).unwrap();
+    fs::create_dir(&log).unwrap();
+    let output = sandbox.command().args(["config", "path"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("failed to initialize diagnostic logging"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(directory.to_str().unwrap()), "{stderr}");
+    assert_eq!(fs::read(config).unwrap(), before);
 }
 
 #[test]
@@ -217,7 +294,11 @@ fn silent_conversion_has_no_transcription_or_http_request() {
 #[test]
 fn failed_conversion_reports_diagnostics_only_on_stderr() {
     // API errors remain actionable and nonzero without contaminating command-result stdout.
-    let output = convert_speech("400 Bad Request", r#"{"error":"stub rejected the model"}"#);
+    let (output, _) = convert_speech(
+        "400 Bad Request",
+        r#"{"error":"stub rejected the model"}"#,
+        "viberwhisper=info",
+    );
 
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");

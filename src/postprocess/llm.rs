@@ -1,4 +1,6 @@
 use crate::core::config::ApiAuth;
+#[cfg(feature = "diagnostic-logs")]
+use crate::core::logging;
 use crate::dictation::{
     DictationResult, LearningWorker, Snapshot, Transcript, config::PromptComponents,
 };
@@ -130,6 +132,17 @@ impl LlmRequest {
             "stream": false
         });
 
+        #[cfg(feature = "diagnostic-logs")]
+        let diagnostic_key = match &self.auth {
+            ApiAuth::Bearer(secret) => Some(secret.expose()),
+            ApiAuth::None => None,
+        };
+        #[cfg(feature = "diagnostic-logs")]
+        let diagnostic_id = {
+            let id = logging::next_request_id();
+            logging::model_event("llm", id, "request", request_body.clone(), diagnostic_key);
+            id
+        };
         let mut request = self
             .client
             .post(self.api_url.clone())
@@ -142,12 +155,30 @@ impl LlmRequest {
 
         let status = response.status();
         if !status.is_success() {
+            #[cfg(feature = "diagnostic-logs")]
+            logging::model_event(
+                "llm",
+                diagnostic_id,
+                "response",
+                serde_json::json!({"status": status.as_u16()}),
+                diagnostic_key,
+            );
             return Err(PostProcessError::Api {
                 status: status.as_u16(),
             });
         }
 
         let body = response.text()?;
+        #[cfg(feature = "diagnostic-logs")]
+        logging::model_event(
+            "llm",
+            diagnostic_id,
+            "response",
+            serde_json::json!({
+                "status": status.as_u16(), "body": body
+            }),
+            diagnostic_key,
+        );
         let json: serde_json::Value = serde_json::from_str(&body)?;
         let content = json["choices"][0]["message"]["content"]
             .as_str()
@@ -385,12 +416,18 @@ mod tests {
     fn configured_processor_cleans_complete_text() {
         // Convert and setup verification use the configured processor directly;
         // an accidental pass-through here would silently skip enabled cleanup.
+        #[cfg(feature = "diagnostic-logs")]
+        let (log, dispatch) = logging::test_support::capture();
+        #[cfg(feature = "diagnostic-logs")]
+        let _guard = tracing::dispatcher::set_default(&dispatch);
         let (endpoint, _requests) = stub(vec![json!({"text":"clean"}).to_string()]);
         let mut config = config_with_postprocess(true, None);
         config.endpoint = endpoint;
         let processor = PostProcessor::new(PostProcessConfig::Llm(config));
 
         assert_eq!(processor.process_text("raw").unwrap(), "clean");
+        #[cfg(feature = "diagnostic-logs")]
+        assert!(log.as_file().metadata().unwrap().len() > 0);
     }
 
     #[test]

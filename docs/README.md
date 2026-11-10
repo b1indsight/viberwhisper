@@ -5,7 +5,7 @@
 | 文档 | 内容 |
 |---|---|
 | [快速上手](../README.md) | 下载、首次设置、录音、预览确认与常用命令 |
-| [使用详情与故障排查](usage.md) | 安装校验、原生气泡、平台权限、剪贴板与本地历史 |
+| [使用详情与故障排查](usage.md) | 安装校验、原生气泡、平台权限、剪贴板、本地历史与诊断测试包日志 |
 | [配置指南](configuration.md) | 严格 v3 配置、密钥、麦克风、单键热键、HTTP STT 与可选 LLM 整理 |
 | [Realtime 与确认后学习](dictation.md) | WebSocket 服务、提示词组件、两条桌面路径共用的语境记忆和人工纠错 |
 | [命令行参考](cli.md) | CLI 入口、setup、config、离线 WAV 转写与 Prompt-lab 入口 |
@@ -57,3 +57,4 @@
 | [HTTP 整理与学习](plan/61-http-postprocess-correction.md) | 与 Realtime 共用改口规则、语境纠错和确认反馈 |
 | [听写响应简化](plan/62-simplified-dictation-response.md) | 话题字符串、有序专名候选、保守定位与评测迁移 |
 | [听写审查修复](plan/63-audit-fixes.md) | 重复删除学习、URL 日志脱敏、无文字失败提示与 CLI 输出分流（已实现） |
+| [测试包诊断日志](plan/65-diagnostic-test-package-logs.md) | 发布表单开关、配置同目录当天日志与模型输入/输出记录 |
