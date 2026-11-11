@@ -664,7 +664,6 @@ fn collect_results(
 mod tests {
     use super::*;
     use crate::transcriber::MockTranscriber;
-    use std::sync::Condvar;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn make_orchestrator_with_timeout(
@@ -695,56 +694,8 @@ mod tests {
         WavChunk::from_encoded_bytes(b"test wav chunk".to_vec())
     }
 
-    struct AudioTranscriber {
-        uploads: mpsc::Sender<Vec<i16>>,
-        replies: Mutex<mpsc::Receiver<Result<String, TranscribeError>>>,
-    }
-
-    impl Transcriber for AudioTranscriber {
-        fn transcribe(&self, chunk: &WavChunk) -> Result<String, TranscribeError> {
-            self.uploads
-                .send(crate::audio::decode_mono(chunk).unwrap().1)
-                .unwrap();
-            self.replies
-                .lock()
-                .unwrap()
-                .recv()
-                .unwrap_or_else(|_| Ok("accepted".into()))
-        }
-    }
-
-    type HttpHarness = (
-        SessionOrchestrator,
-        mpsc::Receiver<Vec<i16>>,
-        mpsc::Sender<Result<String, TranscribeError>>,
-    );
-
-    fn http(timeout: Duration) -> HttpHarness {
-        let (uploads, received) = mpsc::channel();
-        let (replies, response) = mpsc::channel();
-        let orchestrator = SessionOrchestrator::new(
-            Arc::new(AudioTranscriber {
-                uploads,
-                replies: Mutex::new(response),
-            }),
-            OrchestratorConfig {
-                language: Some("en".into()),
-                convergence_timeout: timeout,
-            },
-        );
-        orchestrator.start_session(SessionId(1)).unwrap();
-        (orchestrator, received, replies)
-    }
-
-    fn submit_pcm(orchestrator: &SessionOrchestrator, pcm: &[i16]) {
-        orchestrator.on_chunk_ready(
-            SessionId(1),
-            crate::audio::chunk::encode_i16_wav(pcm, 16_000).unwrap(),
-        );
-    }
-
     #[test]
-    fn silent_chunks_use_no_service_and_one_sample_chunks_are_retained() {
+    fn silent_chunks_use_no_service() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let mut document = crate::core::config::ConfigDocument::default();
@@ -754,34 +705,30 @@ mod tests {
             crate::core::recognition::RecognitionConfig::from_config(&document, false).unwrap();
         let orchestrator = config.build().unwrap();
         orchestrator.start_session(SessionId(1)).unwrap();
-        submit_pcm(&orchestrator, &vec![0; 30 * 16_000]);
-        submit_pcm(&orchestrator, &vec![0; 16_000]);
+        for samples in [30 * 16_000, 16_000] {
+            orchestrator.on_chunk_ready(
+                SessionId(1),
+                crate::audio::chunk::encode_i16_wav(&vec![0; samples], 16_000).unwrap(),
+            );
+        }
         assert_eq!(orchestrator.finish_session(SessionId(1)).unwrap(), "");
         assert!(
             matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
         );
-
-        let (orchestrator, uploads, replies) = http(Duration::from_secs(5));
-        submit_pcm(&orchestrator, &[1234]);
-        drop(replies);
-        assert_eq!(
-            orchestrator.finish_session(SessionId(1)).unwrap(),
-            "accepted"
-        );
-        assert_eq!(uploads.try_recv().unwrap(), [1234]);
     }
 
     #[test]
     fn cancel_after_stop_reaches_the_detached_http_worker() {
-        let (orchestrator, uploads, replies) = http(Duration::from_millis(100));
-        orchestrator.abort_session(SessionId(1)).unwrap();
+        let (transcriber, calls, release) = GateTranscriber::new();
+        let orchestrator =
+            make_orchestrator_with_timeout(Arc::new(transcriber), Duration::from_millis(100));
         let progress = Progress::new(|| {});
         orchestrator
             .start_session_with_progress(SessionId(1), Some(progress.clone()))
             .unwrap();
-        submit_pcm(&orchestrator, &[11; 317]);
-        uploads.recv_timeout(Duration::from_secs(2)).unwrap();
-        submit_pcm(&orchestrator, &[22; 513]);
+        orchestrator.on_chunk_ready(SessionId(1), test_chunk());
+        calls.recv_timeout(Duration::from_secs(2)).unwrap();
+        orchestrator.on_chunk_ready(SessionId(1), test_chunk());
         let orchestrator = Arc::new(orchestrator);
         let finishing = Arc::clone(&orchestrator);
         let finished = thread::spawn(move || finishing.finish_session(SessionId(1)));
@@ -792,14 +739,13 @@ mod tests {
             thread::yield_now();
         }
         progress.cancel();
-        replies.send(Ok("late".into())).unwrap();
+        drop(release);
         let _ = finished.join().unwrap();
         orchestrator.abort_session(SessionId(2)).unwrap();
         drop(orchestrator);
-        drop(replies);
         assert!(
             matches!(
-                uploads.recv_timeout(Duration::from_secs(2)),
+                calls.recv_timeout(Duration::from_secs(2)),
                 Err(mpsc::RecvTimeoutError::Disconnected)
             ),
             "Esc after stop must prevent the next request without cancelling a new session"
@@ -808,28 +754,29 @@ mod tests {
 
     #[test]
     fn complete_chunks_submit_before_stop_and_preserve_repeated_text() {
-        let (orchestrator, uploads, replies) = http(Duration::from_secs(5));
-        let mut pcm = vec![11; 317];
-        submit_pcm(&orchestrator, &pcm);
-        let first = uploads.recv_timeout(Duration::from_secs(2)).unwrap();
-        let tail = vec![1234; 513];
-        submit_pcm(&orchestrator, &tail);
-        pcm.extend(tail);
-        replies.send(Ok("repeat".into())).unwrap();
-        let finished = thread::spawn(move || orchestrator.finish_session(SessionId(1)));
-        let second = uploads.recv_timeout(Duration::from_secs(2)).unwrap();
-        replies.send(Ok("repeat".into())).unwrap();
-        assert_eq!(finished.join().unwrap().unwrap(), "repeat repeat");
-        assert_eq!([first, second].concat(), pcm);
+        let (transcriber, calls) =
+            ScriptedTranscriber::new(vec![Ok("repeat".into()), Ok("repeat".into())]);
+        let orchestrator = default_orchestrator(Arc::new(transcriber));
+        orchestrator.start_session(SessionId(1)).unwrap();
+        orchestrator.on_chunk_ready(SessionId(1), test_chunk());
+        assert_eq!(calls.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
+        orchestrator.on_chunk_ready(SessionId(1), test_chunk());
+        assert_eq!(
+            orchestrator.finish_session(SessionId(1)).unwrap(),
+            "repeat repeat"
+        );
     }
 
     #[test]
     fn http_stops_new_calls_after_cancel_or_convergence_timeout() {
         for cancel in [true, false] {
-            let (orchestrator, uploads, replies) = http(Duration::ZERO);
-            submit_pcm(&orchestrator, &[11; 317]);
-            uploads.recv_timeout(Duration::from_secs(2)).unwrap();
-            submit_pcm(&orchestrator, &[22; 513]);
+            let (transcriber, calls, release) = GateTranscriber::new();
+            let orchestrator =
+                make_orchestrator_with_timeout(Arc::new(transcriber), Duration::ZERO);
+            orchestrator.start_session(SessionId(1)).unwrap();
+            orchestrator.on_chunk_ready(SessionId(1), test_chunk());
+            calls.recv_timeout(Duration::from_secs(2)).unwrap();
+            orchestrator.on_chunk_ready(SessionId(1), test_chunk());
             if cancel {
                 orchestrator.abort_session(SessionId(1)).unwrap();
             } else {
@@ -842,10 +789,10 @@ mod tests {
                 ));
             }
             drop(orchestrator);
-            replies.send(Ok("late".into())).unwrap();
+            drop(release);
             assert!(
                 matches!(
-                    uploads.recv_timeout(Duration::from_secs(2)),
+                    calls.recv_timeout(Duration::from_secs(2)),
                     Err(mpsc::RecvTimeoutError::Disconnected)
                 ),
                 "queued audio must not start another request"
@@ -897,17 +844,31 @@ mod tests {
         }
     }
 
+    /// Reports each call and blocks until the release sender is dropped.
     struct GateTranscriber {
-        release: Arc<(Mutex<bool>, Condvar)>,
+        calls: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl GateTranscriber {
+        fn new() -> (Self, mpsc::Receiver<()>, mpsc::Sender<()>) {
+            let (calls, started) = mpsc::channel();
+            let (release, wait) = mpsc::channel();
+            (
+                Self {
+                    calls,
+                    release: Mutex::new(wait),
+                },
+                started,
+                release,
+            )
+        }
     }
 
     impl Transcriber for GateTranscriber {
         fn transcribe(&self, _chunk: &WavChunk) -> Result<String, TranscribeError> {
-            let (lock, condvar) = &*self.release;
-            let mut released = lock.lock().unwrap();
-            while !*released {
-                released = condvar.wait(released).unwrap();
-            }
+            let _ = self.calls.send(());
+            let _ = self.release.lock().unwrap().recv();
             Ok("released".to_string())
         }
     }
@@ -1185,19 +1146,15 @@ mod tests {
 
     #[test]
     fn test_convergence_timeout() {
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        let t = Arc::new(GateTranscriber {
-            release: Arc::clone(&release),
-        });
-        let orch = make_orchestrator_with_timeout(t, Duration::from_millis(100));
+        let (transcriber, _calls, release) = GateTranscriber::new();
+        let orch =
+            make_orchestrator_with_timeout(Arc::new(transcriber), Duration::from_millis(100));
 
         orch.start_session(SessionId(1)).unwrap();
         orch.on_chunk_ready(SessionId(1), test_chunk());
         let result = orch.finish_session(SessionId(1));
 
-        let (lock, condvar) = &*release;
-        *lock.lock().unwrap() = true;
-        condvar.notify_all();
+        drop(release);
 
         match result {
             Err(SessionError::ConvergenceTimeout { pending_count, .. }) => {
@@ -1231,11 +1188,8 @@ mod tests {
 
     #[test]
     fn test_full_worker_queue_marks_chunk_failed_without_blocking() {
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        let t = Arc::new(GateTranscriber {
-            release: Arc::clone(&release),
-        });
-        let orch = default_orchestrator(t);
+        let (transcriber, _calls, release) = GateTranscriber::new();
+        let orch = default_orchestrator(Arc::new(transcriber));
         orch.start_session(SessionId(1)).unwrap();
 
         let started = Instant::now();
@@ -1269,9 +1223,7 @@ mod tests {
         assert!(!failed_indices.is_empty());
         drop(inner);
 
-        let (lock, condvar) = &*release;
-        *lock.lock().unwrap() = true;
-        condvar.notify_all();
+        drop(release);
         match orch.finish_session(SessionId(1)) {
             Err(SessionError::PartialFailure {
                 errors,

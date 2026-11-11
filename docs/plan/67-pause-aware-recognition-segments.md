@@ -524,3 +524,13 @@ Realtime 在 append 前求切点，按连续切片逐段提交；30 秒容量改
 最终 Rust 1.99.1 的 `fmt --check`、`build --locked`、默认 / diagnostic-logs / integration 全量测试及 `clippy --locked --all-targets --all-features -- -D warnings` 均通过；既有 vendored rdev 和 future-compat 警告未压制。没有 UI 外观改变，也没有调用个人 API、采集真实麦克风或新增 Windows 实机验证；第 4 条真实中文 / 噪声 / 服务质量验收的限制继续有效。[组合验证日志](../../.amp/in/artifacts/http-recorder-validation.log)。本轮本地 Claude Code 顾问使用 `claude-opus-5-5`，tools / MCP 为空，响应模型一致、退出 0 且结果无错误；采纳游标和单切点状态，不加入额外编码器测试抽象。
 
 **交付边界：** 修改前已发布的 [PR #173 head](https://github.com/b1indsight/viberwhisper/commit/164b3a9a3a3f16aa1415c593ce608143d9555d0c) 的两平台 CI 已通过；这不代表本轮代码已有远程 CI。本条实现先在独立 workspace 本地完成；用户随后要求“审阅后提交并更新 PR #173”。本次交付须重新运行代码审阅门禁，使用其返回的精确提交更新原 bookmark / PR，不复用旧提交结果；当前提交、审阅和双平台 CI 状态以 PR 为准。保留 Draft，不据此合并或发布；真实语料、服务质量和 Windows 实机验收仍未完成。
+
+### 12. 2026-11-11 — 精简 HTTP 测试替身，按所属模块保留覆盖
+
+**触发与实现：** 用户询问 `AudioTranscriber` 并要求“精简”。本轮仅修改 `core/orchestrator.rs` 的测试，删除负责解码和转发 PCM、等待逐次回复的 `AudioTranscriber`，以及 `HttpHarness`、`http()` 和 `submit_pcm()`。普通成功用例复用既有 `ScriptedTranscriber`，直接提交完整测试块；并发用例共用 `GateTranscriber`，只通知请求已开始，并阻塞至释放通道关闭，不增加通用 mock 配置。
+
+**覆盖与取舍：** 删除 HTTP 层重复的 PCM 拼接和单样本透传断言。逐样本连续性、30 秒边界及单样本尾段继续由录音器既有测试验证，不改这些测试。HTTP 继续验证停录前启动请求、重复文本保留、文本顺序、纯静音不连接服务、部分失败、满队列显式失败、取消和超时后不再启动排队请求；尤其保留停录后 worker 已 detach、共享取消仍生效且不取消新会话的回归。两种旧阻塞替身合并为一个只控制时序的替身；取消测试不再为配置共享取消而先启动、再撤销一个额外会话。产品代码、接口、两条分段路径和原有约束均未改变。本轮目标是降低测试维护复杂度，不据此声称运行速度改善；无新增产品机制需要消融。
+
+**验证与交付：** 修改前后 orchestrator 定向测试均通过。Rust 1.99.1 的 `fmt --check`、`test --locked` 和 `clippy --locked --all-targets --all-features -- -D warnings` 均通过，录音器既有回归随完整默认测试运行；依赖已有警告未压制。本轮未另跑 Windows 实机。精简完成时改动仅在独立 workspace；用户随后要求“审阅后提交并更新 PR #173”。本轮按新审阅返回的精确提交更新原 bookmark / PR，提交及远程 CI 结果以 PR 为准，不用上一版代码的 CI 代替。继续保留 Draft，不合并或发布。
+
+来源：[修改前定向检查](../../.amp/in/artifacts/http-tests-simplification-before.log)、[修改后定向检查](../../.amp/in/artifacts/http-tests-simplification-after.log)、[完整默认测试与严格 Clippy](../../.amp/in/artifacts/http-tests-simplification-validation.log)。
