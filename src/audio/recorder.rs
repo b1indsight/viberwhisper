@@ -10,6 +10,7 @@ use hound::WavSpec;
 use tracing::{debug, error, info, instrument, warn};
 
 use super::chunk::{ChunkError, WavChunk, encode_i16_wav};
+use super::segment::{Segmentation, Segmenter};
 use super::{AudioConfig, max_frames_per_chunk};
 use crate::session::SessionId;
 
@@ -94,8 +95,15 @@ pub struct AudioRecorder {
     active: Option<ActiveRecording>,
     input_device: Option<String>,
     gain: f32,
-    streaming_frames: bool,
+    chunk_mode: ChunkMode,
     chunk_notifier: Arc<dyn Fn(SessionId) + Send + Sync>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChunkMode {
+    Fixed,
+    Frames,
+    Pauses,
 }
 
 struct ActiveRecording {
@@ -104,16 +112,23 @@ struct ActiveRecording {
     stream: Option<cpal::Stream>,
     /// Number of samples already emitted as chunks during the current recording.
     flushed_samples: usize,
+    segmenter: Option<Segmenter>,
+    /// Absolute input cursor, including analyzed PCM not yet emitted.
+    analyzed_samples: usize,
+    /// Absolute end of a sealed segment, retained if WAV encoding fails.
+    pending_cut: Option<usize>,
 }
 
 struct RecordingBuffer {
     sample_rate: u32,
     /// Maximum mono frames per chunk; zero suppresses output.
     chunk_max_samples: usize,
+    /// Callback wake cadence; pause-aware output can end between these wakeups.
+    wake_samples: usize,
     recording: AtomicBool,
     samples: Mutex<Vec<i16>>,
     sample_count: AtomicUsize,
-    /// Number of complete chunks observed by the audio callback.
+    /// Number of wake boundaries observed by the audio callback.
     ready_chunk_count: AtomicUsize,
     capacity: Option<usize>,
     overflowed: AtomicBool,
@@ -181,6 +196,7 @@ impl RecordingBuffer {
         Ok(Self {
             sample_rate,
             chunk_max_samples,
+            wake_samples: chunk_max_samples,
             recording: AtomicBool::new(false),
             samples: Mutex::new(Vec::new()),
             sample_count: AtomicUsize::new(0),
@@ -192,6 +208,7 @@ impl RecordingBuffer {
 
     fn enable_streaming(&mut self) {
         self.chunk_max_samples = (self.sample_rate as usize / 5).max(1);
+        self.wake_samples = self.chunk_max_samples;
         self.capacity = Some(self.sample_rate as usize * 60);
     }
 
@@ -219,7 +236,7 @@ impl RecordingBuffer {
                 "Recording progress"
             );
         }
-        if let Some(ready_chunks) = total.checked_div(self.chunk_max_samples) {
+        if let Some(ready_chunks) = total.checked_div(self.wake_samples) {
             let previous = self.ready_chunk_count.swap(ready_chunks, Ordering::AcqRel);
             return ready_chunks > previous;
         }
@@ -263,14 +280,19 @@ impl AudioRecorder {
             active: None,
             input_device: config.input_device.clone(),
             gain,
-            streaming_frames: false,
+            chunk_mode: ChunkMode::Fixed,
             chunk_notifier: Arc::new(chunk_notifier),
         }
     }
 
-    /// Keeps the WAV envelope, but emits bounded 200 ms frames for desktop recognition workers.
+    /// Keeps the WAV envelope, but emits bounded 200 ms frames for Realtime.
     pub(crate) fn enable_streaming_frames(&mut self) {
-        self.streaming_frames = true;
+        self.chunk_mode = ChunkMode::Frames;
+    }
+
+    /// Detects acoustic endpoints when taking chunks, outside the capture callback and PCM lock.
+    pub(crate) fn enable_pause_aware_segments(&mut self) {
+        self.chunk_mode = ChunkMode::Pauses;
     }
 
     pub(crate) fn streaming_overflowed(&self) -> bool {
@@ -311,16 +333,7 @@ impl AudioRecorder {
 
         info!(sample_rate, channels, format = ?sample_format, "Starting recording");
 
-        let mut buffer = RecordingBuffer::new(sample_rate)?;
-        if self.streaming_frames {
-            buffer.enable_streaming();
-        }
-        let mut active = ActiveRecording {
-            session_id,
-            shared: Arc::new(buffer),
-            stream: None,
-            flushed_samples: 0,
-        };
+        let mut active = ActiveRecording::new(session_id, sample_rate, self.chunk_mode)?;
 
         let stream = match sample_format {
             cpal::SampleFormat::I16 => {
@@ -432,6 +445,35 @@ fn scale_f32(average: f32, gain: f32) -> i16 {
 }
 
 impl ActiveRecording {
+    fn new(session_id: SessionId, sample_rate: u32, mode: ChunkMode) -> Result<Self, ChunkError> {
+        let mut buffer = RecordingBuffer::new(sample_rate)?;
+        let segmenter = match mode {
+            ChunkMode::Fixed => None,
+            ChunkMode::Frames => {
+                buffer.enable_streaming();
+                None
+            }
+            ChunkMode::Pauses => {
+                buffer.wake_samples = (sample_rate as usize / 5).max(1);
+                buffer.capacity = Some(sample_rate as usize * 60);
+                Some(Segmenter::new(
+                    sample_rate,
+                    buffer.chunk_max_samples,
+                    Segmentation::PauseAware,
+                ))
+            }
+        };
+        Ok(Self {
+            session_id,
+            shared: Arc::new(buffer),
+            stream: None,
+            flushed_samples: 0,
+            segmenter,
+            analyzed_samples: 0,
+            pending_cut: None,
+        })
+    }
+
     /// Shares callback bookkeeping while keeping each input format's numeric conversion explicit.
     /// The scratch allocation is reused, and downmixing happens outside the shared PCM lock.
     fn input_callback<T: Copy + Into<f32>>(
@@ -461,27 +503,57 @@ impl ActiveRecording {
     }
 
     fn take_ready_chunk(&mut self) -> Option<ReadyChunk> {
-        let chunk_max_samples = self.shared.chunk_max_samples;
-        if chunk_max_samples == 0 {
+        let mut count = self.shared.chunk_max_samples;
+        if count == 0 {
             return None;
         }
-        let flushed_chunk_count = self.flushed_samples / chunk_max_samples;
-        if self.shared.ready_chunk_count.load(Ordering::Acquire) <= flushed_chunk_count {
-            return None;
+        if let Some(segmenter) = &mut self.segmenter {
+            while self.pending_cut.is_none() {
+                let pcm = {
+                    let buffer = self.shared.samples.lock().unwrap();
+                    let offset = self.analyzed_samples - self.flushed_samples;
+                    let end = (offset + self.shared.wake_samples).min(buffer.len());
+                    buffer[offset..end].to_vec()
+                };
+                if pcm.is_empty() {
+                    return None;
+                }
+                // A step can cross at most one endpoint. Stop analyzing at that
+                // cut so encoding failure needs only one retained boundary.
+                let step = (self.shared.wake_samples / 10).max(1).min(count);
+                for part in pcm.chunks(step) {
+                    let cuts = segmenter.push(part);
+                    if let Some(cut) = cuts.first() {
+                        debug_assert_eq!(cuts.len(), 1);
+                        self.pending_cut = Some(self.analyzed_samples + cut.offset);
+                        debug!(reason = ?cut.reason, "Closing recorded recognition segment");
+                    }
+                    self.analyzed_samples += part.len();
+                    if self.pending_cut.is_some() {
+                        break;
+                    }
+                }
+            }
+            count = self.pending_cut.unwrap() - self.flushed_samples;
+        } else {
+            let flushed_chunk_count = self.flushed_samples / count;
+            if self.shared.ready_chunk_count.load(Ordering::Acquire) <= flushed_chunk_count {
+                return None;
+            }
         }
 
         let chunk_samples = {
             let buffer = self.shared.samples.lock().unwrap();
             let total_samples = buffer.len();
-            if total_samples < chunk_max_samples {
+            if total_samples < count {
                 debug!(
                     total_samples,
-                    chunk_size = chunk_max_samples,
+                    chunk_size = count,
                     "Chunk count is ahead of buffered samples; leaving readiness pending"
                 );
                 return None;
             }
-            buffer[..chunk_max_samples].to_vec()
+            buffer[..count].to_vec()
         };
 
         let chunk = match encode_i16_wav(&chunk_samples, self.shared.sample_rate) {
@@ -491,12 +563,9 @@ impl ActiveRecording {
                 return None;
             }
         };
-        self.shared
-            .samples
-            .lock()
-            .unwrap()
-            .drain(..chunk_max_samples);
-        self.flushed_samples += chunk_max_samples;
+        self.shared.samples.lock().unwrap().drain(..count);
+        self.flushed_samples += count;
+        self.pending_cut = None;
         Some(ReadyChunk {
             session_id: self.session_id,
             chunk,
@@ -530,6 +599,30 @@ impl ActiveRecording {
         }
         if self.shared.chunk_max_samples == 0 {
             return Ok(Vec::new());
+        }
+        if let Some(segmenter) = &mut self.segmenter {
+            // Readiness may be unhandled at stop. Reuse already analyzed PCM,
+            // then process every remaining sample before sealing the tail.
+            let mut ends: Vec<_> = self.pending_cut.into_iter().collect();
+            ends.extend(
+                segmenter
+                    .push(&samples[self.analyzed_samples - self.flushed_samples..])
+                    .into_iter()
+                    .map(|cut| self.analyzed_samples + cut.offset),
+            );
+            if segmenter.finish().is_some() {
+                ends.push(self.flushed_samples + samples.len());
+            }
+            let mut start = 0;
+            return ends
+                .into_iter()
+                .map(|end| {
+                    let end = end - self.flushed_samples;
+                    let chunk = encode_i16_wav(&samples[start..end], self.shared.sample_rate);
+                    start = end;
+                    chunk.map_err(Into::into)
+                })
+                .collect();
         }
         samples
             .chunks(self.shared.chunk_max_samples)
@@ -639,6 +732,7 @@ mod tests {
                 shared: Arc::new(RecordingBuffer {
                     sample_rate: 16000,
                     chunk_max_samples,
+                    wake_samples: chunk_max_samples,
                     recording: AtomicBool::new(true),
                     samples: Mutex::new(samples),
                     sample_count: AtomicUsize::new(sample_count),
@@ -650,10 +744,13 @@ mod tests {
                 }),
                 stream: None,
                 flushed_samples: 0,
+                segmenter: None,
+                analyzed_samples: 0,
+                pending_cut: None,
             }),
             input_device: None,
             gain: 1.0,
-            streaming_frames: false,
+            chunk_mode: ChunkMode::Fixed,
             chunk_notifier: Arc::new(|_| {}),
         }
     }
@@ -669,6 +766,188 @@ mod tests {
                     .unwrap()
             })
             .collect()
+    }
+
+    fn pause_recorder(rate: u32) -> AudioRecorder {
+        let mut recorder = recorder_for_buffer(Vec::new(), rate as usize * 30);
+        recorder.active =
+            Some(ActiveRecording::new(SessionId(1), rate, ChunkMode::Pauses).unwrap());
+        recorder
+    }
+
+    #[test]
+    fn pause_chunks_preserve_breaths_and_samples_across_drain_patterns() {
+        let wav = WavChunk::from_encoded_bytes(
+            include_bytes!("../../tests/fixtures/audio/speech.wav").to_vec(),
+        );
+        let (_, speech) = crate::audio::decode_mono(&wav).unwrap();
+        for rate in [16_000, 44_100, 48_000] {
+            let voice = crate::audio::PcmResampler::new(16_000, rate)
+                .unwrap()
+                .push(&speech, true)
+                .unwrap();
+            for pause_ms in [600, 2000] {
+                let mut pcm = voice.clone();
+                pcm.extend(vec![0; rate as usize * pause_ms / 1000]);
+                pcm.extend_from_slice(&voice);
+                let mut boundaries = Vec::new();
+                // Include delayed UI consumption and stop before any readiness event is handled.
+                for (packet_size, drain) in [
+                    (317, true),
+                    (rate as usize / 5, true),
+                    (pcm.len(), true),
+                    (pcm.len(), false),
+                ] {
+                    let mut recorder = pause_recorder(rate);
+                    let mut chunks = Vec::new();
+                    for packet in pcm.chunks(packet_size) {
+                        recorder.active.as_ref().unwrap().shared.push_mono(packet);
+                        if drain {
+                            while let Some(ready) = recorder.take_ready_chunk() {
+                                assert_eq!(ready.session_id, SessionId(1));
+                                chunks.push(ready.chunk);
+                            }
+                        }
+                    }
+                    if drain {
+                        assert_eq!(chunks.len(), usize::from(pause_ms == 2000));
+                    }
+                    let RecorderStopOutcome::Stopped {
+                        chunks: tail,
+                        warning,
+                        ..
+                    } = recorder.stop_recording(SessionId(1))
+                    else {
+                        panic!("not stopped")
+                    };
+                    assert!(warning.is_none());
+                    chunks.extend(tail);
+                    assert_eq!(chunks.len(), 1 + usize::from(pause_ms == 2000));
+                    let lengths: Vec<_> = chunks
+                        .iter()
+                        .map(|chunk| {
+                            let reader =
+                                hound::WavReader::new(std::io::Cursor::new(chunk.bytes())).unwrap();
+                            assert_eq!(reader.spec().sample_rate, rate);
+                            reader.len() as usize
+                        })
+                        .collect();
+                    if pause_ms == 2000 {
+                        assert!((rate as usize * 3..rate as usize * 5).contains(&lengths[0]));
+                    }
+                    assert_eq!(decode_chunks(chunks), pcm);
+                    assert!(recorder.take_ready_chunk().is_none());
+                    boundaries.push(lengths);
+                }
+                assert!(boundaries.windows(2).all(|pair| pair[0] == pair[1]));
+            }
+        }
+    }
+
+    #[test]
+    fn pause_chunks_keep_the_hard_limit_and_exact_stop_tail() {
+        for rate in [16_000, 44_100, 48_000] {
+            let limit = rate as usize * 30;
+            for length in [limit - 1, limit, limit + 1, rate as usize * 65 + 317] {
+                let mut recorder = pause_recorder(rate);
+                let mut pcm = vec![0; length];
+                *pcm.last_mut().unwrap() = 17;
+                let mut chunks = Vec::new();
+                for packet in pcm.chunks(rate as usize / 5) {
+                    recorder.active.as_ref().unwrap().shared.push_mono(packet);
+                    while let Some(ready) = recorder.take_ready_chunk() {
+                        assert_eq!(decode_chunks([ready.chunk.clone()]).len(), limit);
+                        chunks.push(ready.chunk);
+                    }
+                }
+                assert_eq!(chunks.len(), length / limit);
+                let RecorderStopOutcome::Stopped {
+                    chunks: tail,
+                    warning,
+                    ..
+                } = recorder.stop_recording(SessionId(1))
+                else {
+                    panic!("not stopped")
+                };
+                assert!(warning.is_none());
+                assert_eq!(tail.len(), usize::from(length % limit != 0));
+                chunks.extend(tail);
+                assert_eq!(decode_chunks(chunks), pcm);
+            }
+        }
+    }
+
+    #[test]
+    fn pause_encoding_failure_preserves_the_cut_for_retry_stop_or_cancel() {
+        let wav = WavChunk::from_encoded_bytes(
+            include_bytes!("../../tests/fixtures/audio/speech.wav").to_vec(),
+        );
+        let (_, voice) = crate::audio::decode_mono(&wav).unwrap();
+        let mut pcm = voice.clone();
+        pcm.extend(vec![0; 32_000]);
+        pcm.extend(voice);
+        pcm.extend(vec![0; 32_000]);
+        pcm.push(17);
+        for action in ["retry", "stop", "cancel"] {
+            let mut recorder = pause_recorder(16_000);
+            recorder.active.as_ref().unwrap().shared.push_mono(&pcm);
+            Arc::get_mut(&mut recorder.active.as_mut().unwrap().shared)
+                .unwrap()
+                .sample_rate = 0;
+            assert!(recorder.take_ready_chunk().is_none());
+            Arc::get_mut(&mut recorder.active.as_mut().unwrap().shared)
+                .unwrap()
+                .sample_rate = 16_000;
+            if action == "cancel" {
+                assert_eq!(
+                    recorder.cancel_recording(SessionId(1)),
+                    RecorderCancelOutcome::Cancelled
+                );
+                assert!(recorder.take_ready_chunk().is_none());
+                assert!(matches!(
+                    recorder.stop_recording(SessionId(1)),
+                    RecorderStopOutcome::NotRecording { .. }
+                ));
+                continue;
+            }
+            let mut chunks = Vec::new();
+            if action == "retry" {
+                while let Some(ready) = recorder.take_ready_chunk() {
+                    chunks.push(ready.chunk);
+                }
+                assert_eq!(chunks.len(), 2);
+            }
+            let RecorderStopOutcome::Stopped {
+                chunks: tail,
+                warning,
+                ..
+            } = recorder.stop_recording(SessionId(1))
+            else {
+                panic!("not stopped")
+            };
+            assert!(warning.is_none());
+            chunks.extend(tail);
+            assert_eq!(chunks.len(), 3);
+            assert_eq!(decode_chunks(chunks), pcm);
+        }
+    }
+
+    #[test]
+    fn pause_recording_keeps_short_wakeups_and_bounded_pcm() {
+        let mut recorder = pause_recorder(16_000);
+        let shared = &recorder.active.as_ref().unwrap().shared;
+        assert!(!shared.push_mono(&[0; 3199]));
+        assert!(shared.push_mono(&[0]));
+        assert!(shared.push_mono(&vec![0; 60 * 16_000]));
+        assert!(recorder.streaming_overflowed());
+        let RecorderStopOutcome::Stopped {
+            chunks, warning, ..
+        } = recorder.stop_recording(SessionId(1))
+        else {
+            panic!("not stopped")
+        };
+        assert!(chunks.is_empty());
+        assert!(warning.unwrap().contains("capacity"));
     }
 
     #[test]
@@ -746,6 +1025,7 @@ mod tests {
     fn each_new_chunk_boundary_is_reported_to_the_callback() {
         let mut buffer = RecordingBuffer::new(16_000).unwrap();
         buffer.chunk_max_samples = 10;
+        buffer.wake_samples = 10;
         assert!(!buffer.push_mono(&[1; 5]));
         assert!(buffer.push_mono(&[1; 5]));
         assert!(buffer.push_mono(&[2; 10]));

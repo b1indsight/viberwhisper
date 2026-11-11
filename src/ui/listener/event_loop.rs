@@ -665,7 +665,10 @@ impl ListenerApplication {
                 warning,
             } => {
                 if let Some(warning) = warning.as_deref() {
-                    self.orchestrator.fail_session(session_id, warning);
+                    // Raw capture retains its log-only recorder warnings.
+                    if matches!(self.output, ListenerOutput::Delivery { .. }) {
+                        self.orchestrator.fail_session(session_id, warning);
+                    }
                     warn!(
                         session_id = session_id.0,
                         warning, "Recorder stopped with a warning"

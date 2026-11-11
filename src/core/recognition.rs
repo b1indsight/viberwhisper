@@ -4,9 +4,7 @@ use super::{
     orchestrator::{OrchestratorConfig, SessionOrchestrator},
 };
 use crate::{
-    audio::segment::Segmentation,
     dictation::config::DictationConfig,
-    session::SessionId,
     transcriber::{ApiTranscriber, TranscriberConfig, TranscriberMetadata},
 };
 use anyhow::Result;
@@ -17,7 +15,6 @@ pub(crate) enum RecognitionConfig {
     Http {
         transcriber: TranscriberConfig,
         orchestrator: OrchestratorConfig,
-        segmentation: Segmentation,
     },
     Realtime {
         settings: DictationConfig,
@@ -40,11 +37,6 @@ impl RecognitionConfig {
                 transcriber: TranscriberConfig::from_config(document)?,
                 orchestrator: document
                     .select(fields::TranscriptionLanguage, OrchestratorConfig::new),
-                segmentation: if raw_capture {
-                    Segmentation::Fixed
-                } else {
-                    Segmentation::PauseAware
-                },
             })
         }
     }
@@ -52,39 +44,20 @@ impl RecognitionConfig {
     pub fn is_realtime(&self) -> bool {
         matches!(self, Self::Realtime { .. })
     }
-    pub fn uses_streaming_frames(&self) -> bool {
-        self.is_realtime()
-            || matches!(
-                self,
-                Self::Http {
-                    segmentation: Segmentation::PauseAware,
-                    ..
-                }
-            )
-    }
     pub fn metadata(&self) -> Option<TranscriberMetadata> {
         match self {
             Self::Http { transcriber, .. } => Some(transcriber.metadata()),
             _ => None,
         }
     }
-    pub fn build(
-        self,
-        notify: impl Fn(SessionId) + Send + Sync + 'static,
-    ) -> Result<SessionOrchestrator> {
+    pub fn build(self) -> Result<SessionOrchestrator> {
         match self {
             Self::Http {
                 transcriber,
                 orchestrator,
-                segmentation,
             } => {
                 let transcriber = Arc::new(ApiTranscriber::new(transcriber)?);
-                Ok(match segmentation {
-                    Segmentation::Fixed => SessionOrchestrator::new(transcriber, orchestrator),
-                    Segmentation::PauseAware => {
-                        SessionOrchestrator::new_live_http(transcriber, orchestrator, notify)
-                    }
-                })
+                Ok(SessionOrchestrator::new(transcriber, orchestrator))
             }
             Self::Realtime {
                 settings,

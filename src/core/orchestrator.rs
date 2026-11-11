@@ -13,10 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::config::SecretValue;
-use crate::audio::{
-    WavChunk,
-    segment::{Segmentation, Segmenter},
-};
+use crate::audio::WavChunk;
 use crate::dictation::{
     DictationWorker, Progress, RealtimeSession, Transcript, config::DictationConfig,
 };
@@ -105,7 +102,7 @@ pub enum SessionError {
         errors: Vec<(usize, TranscribeError)>,
         partial_text: String,
     },
-    /// Input integrity failed; only the accepted continuous prefix can be delivered.
+    /// Recorder input failed; completed text carries an incomplete-recording warning.
     InputFailure {
         error: String,
         partial_text: String,
@@ -176,9 +173,9 @@ struct ChunkEntry {
     state: ChunkState,
 }
 
-enum WorkerMsg {
-    Chunk { index: usize, chunk: WavChunk },
-    Frame { chunk: WavChunk },
+struct WorkerMsg {
+    index: usize,
+    chunk: WavChunk,
 }
 
 enum WorkerEvent {
@@ -195,8 +192,6 @@ enum SessionBackend {
     Http {
         transcriber: Arc<dyn Transcriber>,
         config: OrchestratorConfig,
-        segmentation: Segmentation,
-        notify: Option<Arc<dyn Fn(SessionId) + Send + Sync>>,
     },
     Realtime(DictationWorker),
 }
@@ -232,25 +227,6 @@ impl SessionOrchestrator {
             backend: SessionBackend::Http {
                 transcriber,
                 config,
-                segmentation: Segmentation::Fixed,
-                notify: None,
-            },
-            inner: Mutex::new(None),
-        }
-    }
-
-    /// Live microphone input consists of bounded 200 ms WAV frames, not complete STT segments.
-    pub(crate) fn new_live_http(
-        transcriber: Arc<dyn Transcriber>,
-        config: OrchestratorConfig,
-        notify: impl Fn(SessionId) + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            backend: SessionBackend::Http {
-                transcriber,
-                config,
-                segmentation: Segmentation::PauseAware,
-                notify: Some(Arc::new(notify)),
             },
             inner: Mutex::new(None),
         }
@@ -294,22 +270,13 @@ impl SessionOrchestrator {
             SessionBackend::Http {
                 transcriber,
                 config,
-                segmentation,
-                notify,
-            } => {
-                let notify = notify.clone().map(|notify| {
-                    Arc::new(move || notify(session_id)) as Arc<dyn Fn() + Send + Sync>
-                });
-                SessionWorker::Http(HttpSession::new(
-                    Arc::clone(transcriber),
-                    config.clone(),
-                    *segmentation,
-                    notify,
-                    progress.map_or_else(CancellationToken::new, |progress| {
-                        progress.cancelled.clone()
-                    }),
-                ))
-            }
+            } => SessionWorker::Http(HttpSession::new(
+                Arc::clone(transcriber),
+                config.clone(),
+                progress.map_or_else(CancellationToken::new, |progress| {
+                    progress.cancelled.clone()
+                }),
+            )),
             SessionBackend::Realtime(worker) => {
                 SessionWorker::Realtime(worker.start_session(progress))
             }
@@ -383,21 +350,20 @@ impl SessionOrchestrator {
             .worker
         {
             SessionWorker::Realtime(session) => session.recording_error(),
-            SessionWorker::Http(session) => session.input.failure.lock().unwrap().clone(),
+            SessionWorker::Http(session) => session.input_failure.clone(),
         }
     }
 
     pub(crate) fn fail_session(&self, session_id: SessionId, error: &str) {
-        let inner = self.inner.lock().unwrap();
-        if let Some(active) = inner.as_ref().filter(|s| s.session_id == session_id) {
-            match &active.worker {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(active) = inner.as_mut().filter(|s| s.session_id == session_id) {
+            match &mut active.worker {
                 SessionWorker::Realtime(session) => session.fail(error),
-                SessionWorker::Http(session)
-                    if session.segmentation == Segmentation::PauseAware =>
-                {
-                    session.input.fail(error)
+                SessionWorker::Http(session) => {
+                    session
+                        .input_failure
+                        .get_or_insert_with(|| error.to_owned());
                 }
-                SessionWorker::Http(_) => {}
             }
         }
     }
@@ -419,27 +385,6 @@ impl Drop for SessionOrchestrator {
     }
 }
 
-/// Shared sticky input fault: reject subsequent frames and wake the UI even without more audio.
-#[derive(Default)]
-struct HttpInputStatus {
-    failure: Mutex<Option<String>>,
-    notify: Option<Arc<dyn Fn() + Send + Sync>>,
-}
-
-impl HttpInputStatus {
-    fn fail(&self, error: &str) {
-        let mut failure = self.failure.lock().unwrap();
-        if failure.is_some() {
-            return;
-        }
-        *failure = Some(error.to_owned());
-        drop(failure);
-        if let Some(notify) = &self.notify {
-            notify();
-        }
-    }
-}
-
 struct HttpSession {
     chunk_entries: Vec<ChunkEntry>,
     chunk_tx: mpsc::SyncSender<WorkerMsg>,
@@ -448,47 +393,20 @@ struct HttpSession {
     next_index: usize,
     cancelled: CancellationToken,
     config: OrchestratorConfig,
-    segmentation: Segmentation,
-    input: Arc<HttpInputStatus>,
+    input_failure: Option<String>,
 }
 
 impl HttpSession {
     fn new(
         transcriber: Arc<dyn Transcriber>,
         config: OrchestratorConfig,
-        segmentation: Segmentation,
-        notify: Option<Arc<dyn Fn() + Send + Sync>>,
         cancelled: CancellationToken,
     ) -> Self {
-        let capacity = if segmentation == Segmentation::PauseAware {
-            300
-        } else {
-            2
-        };
-        let (chunk_tx, chunk_rx) = mpsc::sync_channel::<WorkerMsg>(capacity);
+        let (chunk_tx, chunk_rx) = mpsc::sync_channel::<WorkerMsg>(2);
         let (result_tx, result_rx) = mpsc::channel::<WorkerEvent>();
         let worker_cancelled = cancelled.clone();
-        let input = Arc::new(HttpInputStatus {
-            failure: Mutex::new(None),
-            notify,
-        });
-        let worker_input = Arc::clone(&input);
         let worker = thread::spawn(move || {
-            if segmentation == Segmentation::Fixed {
-                worker_loop(chunk_rx, result_tx, transcriber, worker_cancelled);
-            } else if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                live_worker_loop(
-                    chunk_rx,
-                    result_tx,
-                    transcriber,
-                    worker_cancelled,
-                    &worker_input,
-                );
-            }))
-            .is_err()
-            {
-                worker_input.fail("HTTP audio worker panicked");
-            }
+            worker_loop(chunk_rx, result_tx, transcriber, worker_cancelled);
         });
         Self {
             chunk_entries: Vec::new(),
@@ -498,32 +416,16 @@ impl HttpSession {
             next_index: 0,
             cancelled,
             config,
-            segmentation,
-            input,
+            input_failure: None,
         }
     }
 
     fn on_chunk_ready(&mut self, session_id: SessionId, chunk: WavChunk) {
-        if self.segmentation == Segmentation::PauseAware {
-            if self.input.failure.lock().unwrap().is_some() {
-                return;
-            }
-            if let Err(error) = self.chunk_tx.try_send(WorkerMsg::Frame { chunk }) {
-                self.input.fail(match error {
-                    mpsc::TrySendError::Full(_) => "HTTP audio input queue full",
-                    mpsc::TrySendError::Disconnected(_) => "HTTP audio worker unavailable",
-                });
-            }
-            while let Ok(event) = self.result_rx.try_recv() {
-                apply_worker_event(&mut self.chunk_entries, event);
-            }
-            return;
-        }
         let session = self;
         let index = session.next_index;
         session.next_index += 1;
 
-        let state = if let Err(e) = session.chunk_tx.try_send(WorkerMsg::Chunk { index, chunk }) {
+        let state = if let Err(e) = session.chunk_tx.try_send(WorkerMsg { index, chunk }) {
             let message = match e {
                 mpsc::TrySendError::Full(_) => "worker queue full",
                 mpsc::TrySendError::Disconnected(_) => "worker channel closed",
@@ -548,13 +450,6 @@ impl HttpSession {
 
     fn finish(self) -> Result<String, SessionError> {
         let session = self;
-        if session.segmentation == Segmentation::Fixed && session.next_index == 0 {
-            // Closing the channel lets the idle worker exit immediately.
-            drop(session.chunk_tx);
-            let _ = session.worker.join();
-            return Err(SessionError::NoChunks);
-        }
-
         // Closing the sender is non-blocking. The receiver still drains every
         // queued chunk before its iterator ends, so the convergence deadline
         // covers the entire shutdown rather than starting after a blocking send.
@@ -568,11 +463,8 @@ impl HttpSession {
         let mut pending_count = 0;
 
         loop {
-            // Fixed input registers every chunk at intake. Live input may still
-            // have an unregistered tail, so only worker-channel EOF proves completion.
-            if session.segmentation == Segmentation::Fixed
-                && chunk_entries.iter().all(|entry| entry.state.is_terminal())
-            {
+            // Every complete chunk, including the recorder tail, is registered at intake.
+            if chunk_entries.iter().all(|entry| entry.state.is_terminal()) {
                 break;
             }
 
@@ -585,8 +477,7 @@ impl HttpSession {
                     pending_count = chunk_entries
                         .iter()
                         .filter(|entry| !entry.state.is_terminal())
-                        .count()
-                        + usize::from(session.segmentation == Segmentation::PauseAware);
+                        .count();
                     warn!(
                         pending_count = pending_count,
                         "Convergence timeout; marking pending chunks as Failed(Timeout)"
@@ -612,8 +503,6 @@ impl HttpSession {
         }
 
         if !timed_out {
-            // The worker owns the only result sender. Join also waits for its
-            // panic guard to record any input fault after that sender is dropped.
             let _ = worker.join();
         } else {
             // Drop the handle without joining — the worker may still be mid-request.
@@ -629,7 +518,7 @@ impl HttpSession {
             });
         }
 
-        if let Some(error) = session.input.failure.lock().unwrap().clone() {
+        if let Some(error) = session.input_failure {
             return Err(SessionError::InputFailure {
                 error,
                 partial_text: merge_texts(
@@ -653,16 +542,11 @@ fn worker_loop(
     transcriber: Arc<dyn Transcriber>,
     cancelled: CancellationToken,
 ) {
-    for msg in rx {
-        match msg {
-            WorkerMsg::Chunk { index, chunk } => {
-                if cancelled.is_cancelled() {
-                    continue;
-                }
-                transcribe_chunk(index, &chunk, &result_tx, transcriber.as_ref(), &cancelled);
-            }
-            WorkerMsg::Frame { .. } => unreachable!("fixed worker accepts whole chunks"),
+    for WorkerMsg { index, chunk } in rx {
+        if cancelled.is_cancelled() {
+            continue;
         }
+        transcribe_chunk(index, &chunk, &result_tx, transcriber.as_ref(), &cancelled);
     }
     debug!("Worker channel closed, exiting");
 }
@@ -686,115 +570,9 @@ fn transcribe_chunk(
     let _ = tx.send(WorkerEvent::Completed { index, result });
 }
 
-/// PCM and endpoint state stay on the existing serial HTTP worker, never on the callback/UI.
-struct HttpAudio {
-    rate: u32,
-    segmenter: Segmenter,
-    samples: Vec<i16>,
-    index: usize,
-}
-
-impl HttpAudio {
-    fn new(rate: u32) -> anyhow::Result<Self> {
-        let limit = crate::audio::max_frames_per_chunk(hound::WavSpec {
-            channels: 1,
-            sample_rate: rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        })? as usize;
-        anyhow::ensure!(limit > 0, "no capacity for HTTP audio");
-        Ok(Self {
-            rate,
-            segmenter: Segmenter::new(rate, limit, Segmentation::PauseAware),
-            samples: Vec::new(),
-            index: 0,
-        })
-    }
-
-    fn push(
-        &mut self,
-        pcm: &[i16],
-        tx: &mpsc::Sender<WorkerEvent>,
-        transcriber: &dyn Transcriber,
-        cancelled: &CancellationToken,
-    ) -> anyhow::Result<()> {
-        let mut start = 0;
-        for cut in self.segmenter.push(pcm) {
-            self.samples.extend_from_slice(&pcm[start..cut.offset]);
-            debug!(reason = ?cut.reason, index = self.index, samples = self.samples.len(), "Closing HTTP recognition segment");
-            self.submit(tx, transcriber, cancelled)?;
-            if cancelled.is_cancelled() {
-                return Ok(());
-            }
-            start = cut.offset;
-        }
-        self.samples.extend_from_slice(&pcm[start..]);
-        Ok(())
-    }
-
-    fn submit(
-        &mut self,
-        tx: &mpsc::Sender<WorkerEvent>,
-        transcriber: &dyn Transcriber,
-        cancelled: &CancellationToken,
-    ) -> anyhow::Result<()> {
-        if cancelled.is_cancelled() {
-            return Ok(());
-        }
-        let chunk = crate::audio::chunk::encode_i16_wav(&self.samples, self.rate)?;
-        transcribe_chunk(self.index, &chunk, tx, transcriber, cancelled);
-        self.samples.clear();
-        self.index += 1;
-        Ok(())
-    }
-}
-
-fn live_worker_loop(
-    rx: mpsc::Receiver<WorkerMsg>,
-    tx: mpsc::Sender<WorkerEvent>,
-    transcriber: Arc<dyn Transcriber>,
-    cancelled: CancellationToken,
-    input: &HttpInputStatus,
-) {
-    let mut audio: Option<HttpAudio> = None;
-    for message in rx {
-        if cancelled.is_cancelled() {
-            break;
-        }
-        let WorkerMsg::Frame { chunk } = message else {
-            unreachable!("live worker accepts frames");
-        };
-        let result = (|| -> anyhow::Result<()> {
-            let (rate, pcm) = crate::audio::decode_mono(&chunk)?;
-            // Live is a closed microphone-frame path, not a second offline WAV entry point.
-            anyhow::ensure!(
-                pcm.len() <= rate as usize / 5,
-                "HTTP audio frame exceeds 200 ms"
-            );
-            if audio.is_none() {
-                audio = Some(HttpAudio::new(rate)?);
-            }
-            let audio = audio.as_mut().unwrap();
-            anyhow::ensure!(audio.rate == rate, "audio rate changed during recording");
-            audio.push(&pcm, &tx, transcriber.as_ref(), &cancelled)
-        })();
-        if let Err(error) = result {
-            input.fail(&format!("HTTP audio input: {error:#}"));
-            break; // Never join later frames across an undecodable input hole.
-        }
-    }
-    if !cancelled.is_cancelled()
-        && let Some(audio) = &mut audio
-        && audio.segmenter.finish().is_some()
-        && let Err(error) = audio.submit(&tx, transcriber.as_ref(), &cancelled)
-    {
-        input.fail(&format!("HTTP audio tail: {error:#}"));
-    }
-}
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-fn apply_worker_event(chunk_entries: &mut Vec<ChunkEntry>, event: WorkerEvent) {
+fn apply_worker_event(chunk_entries: &mut [ChunkEntry], event: WorkerEvent) {
     match event {
         WorkerEvent::UploadStarted { index } => {
             if let Some(entry) = chunk_entries.iter_mut().find(|entry| entry.index == index) {
@@ -806,12 +584,6 @@ fn apply_worker_event(chunk_entries: &mut Vec<ChunkEntry>, event: WorkerEvent) {
                         "Ignoring upload event for chunk that is no longer flushed"
                     );
                 }
-            } else {
-                // Live segments become known only when the worker seals and starts them.
-                chunk_entries.push(ChunkEntry {
-                    index,
-                    state: ChunkState::Uploading,
-                });
             }
         }
         WorkerEvent::Completed { index, result } => {
@@ -945,14 +717,12 @@ mod tests {
         SessionOrchestrator,
         mpsc::Receiver<Vec<i16>>,
         mpsc::Sender<Result<String, TranscribeError>>,
-        mpsc::Receiver<SessionId>,
     );
 
-    fn live_http(timeout: Duration) -> HttpHarness {
+    fn http(timeout: Duration) -> HttpHarness {
         let (uploads, received) = mpsc::channel();
         let (replies, response) = mpsc::channel();
-        let (notify, faults) = mpsc::channel();
-        let orchestrator = SessionOrchestrator::new_live_http(
+        let orchestrator = SessionOrchestrator::new(
             Arc::new(AudioTranscriber {
                 uploads,
                 replies: Mutex::new(response),
@@ -961,34 +731,20 @@ mod tests {
                 language: Some("en".into()),
                 convergence_timeout: timeout,
             },
-            move |id| {
-                let _ = notify.send(id);
-            },
         );
         orchestrator.start_session(SessionId(1)).unwrap();
-        (orchestrator, received, replies, faults)
+        (orchestrator, received, replies)
     }
 
-    fn speech_then_pause() -> Vec<i16> {
-        let speech = WavChunk::from_encoded_bytes(
-            include_bytes!("../../tests/fixtures/audio/speech.wav").to_vec(),
+    fn submit_pcm(orchestrator: &SessionOrchestrator, pcm: &[i16]) {
+        orchestrator.on_chunk_ready(
+            SessionId(1),
+            crate::audio::chunk::encode_i16_wav(pcm, 16_000).unwrap(),
         );
-        let mut pcm = crate::audio::decode_mono(&speech).unwrap().1;
-        pcm.extend(vec![0; 32_000]);
-        pcm
-    }
-
-    fn feed_live(orchestrator: &SessionOrchestrator, pcm: &[i16]) {
-        for frame in pcm.chunks(3200) {
-            orchestrator.on_chunk_ready(
-                SessionId(1),
-                crate::audio::chunk::encode_i16_wav(frame, 16_000).unwrap(),
-            );
-        }
     }
 
     #[test]
-    fn silent_live_http_uses_no_service_and_one_sample_tail_is_retained() {
+    fn silent_chunks_use_no_service_and_one_sample_chunks_are_retained() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let mut document = crate::core::config::ConfigDocument::default();
@@ -996,17 +752,17 @@ mod tests {
             format!("http://{}/transcriptions", listener.local_addr().unwrap());
         let config =
             crate::core::recognition::RecognitionConfig::from_config(&document, false).unwrap();
-        assert!(config.uses_streaming_frames());
-        let orchestrator = config.build(|_| {}).unwrap();
+        let orchestrator = config.build().unwrap();
         orchestrator.start_session(SessionId(1)).unwrap();
-        feed_live(&orchestrator, &vec![0; 31 * 16_000]);
+        submit_pcm(&orchestrator, &vec![0; 30 * 16_000]);
+        submit_pcm(&orchestrator, &vec![0; 16_000]);
         assert_eq!(orchestrator.finish_session(SessionId(1)).unwrap(), "");
         assert!(
             matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
         );
 
-        let (orchestrator, uploads, replies, _) = live_http(Duration::from_secs(5));
-        feed_live(&orchestrator, &[1234]);
+        let (orchestrator, uploads, replies) = http(Duration::from_secs(5));
+        submit_pcm(&orchestrator, &[1234]);
         drop(replies);
         assert_eq!(
             orchestrator.finish_session(SessionId(1)).unwrap(),
@@ -1017,15 +773,15 @@ mod tests {
 
     #[test]
     fn cancel_after_stop_reaches_the_detached_http_worker() {
-        let (orchestrator, uploads, replies, _) = live_http(Duration::from_millis(100));
+        let (orchestrator, uploads, replies) = http(Duration::from_millis(100));
         orchestrator.abort_session(SessionId(1)).unwrap();
         let progress = Progress::new(|| {});
         orchestrator
             .start_session_with_progress(SessionId(1), Some(progress.clone()))
             .unwrap();
-        feed_live(&orchestrator, &speech_then_pause());
+        submit_pcm(&orchestrator, &[11; 317]);
         uploads.recv_timeout(Duration::from_secs(2)).unwrap();
-        feed_live(&orchestrator, &speech_then_pause());
+        submit_pcm(&orchestrator, &[22; 513]);
         let orchestrator = Arc::new(orchestrator);
         let finishing = Arc::clone(&orchestrator);
         let finished = thread::spawn(move || finishing.finish_session(SessionId(1)));
@@ -1051,16 +807,13 @@ mod tests {
     }
 
     #[test]
-    fn live_http_submits_before_stop_and_waits_for_unregistered_tail() {
-        // At EOF the first segment may already be terminal while the tail has
-        // not even acquired an index. Finalization must wait for both.
-        let (orchestrator, uploads, replies, _) = live_http(Duration::from_secs(5));
-        let mut pcm = speech_then_pause();
-        feed_live(&orchestrator, &pcm);
+    fn complete_chunks_submit_before_stop_and_preserve_repeated_text() {
+        let (orchestrator, uploads, replies) = http(Duration::from_secs(5));
+        let mut pcm = vec![11; 317];
+        submit_pcm(&orchestrator, &pcm);
         let first = uploads.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!((48_000..80_000).contains(&first.len()));
-        let tail = vec![1234; 317];
-        feed_live(&orchestrator, &tail);
+        let tail = vec![1234; 513];
+        submit_pcm(&orchestrator, &tail);
         pcm.extend(tail);
         replies.send(Ok("repeat".into())).unwrap();
         let finished = thread::spawn(move || orchestrator.finish_session(SessionId(1)));
@@ -1071,12 +824,12 @@ mod tests {
     }
 
     #[test]
-    fn live_http_stops_new_calls_after_cancel_or_convergence_timeout() {
+    fn http_stops_new_calls_after_cancel_or_convergence_timeout() {
         for cancel in [true, false] {
-            let (orchestrator, uploads, replies, _) = live_http(Duration::ZERO);
-            feed_live(&orchestrator, &speech_then_pause());
+            let (orchestrator, uploads, replies) = http(Duration::ZERO);
+            submit_pcm(&orchestrator, &[11; 317]);
             uploads.recv_timeout(Duration::from_secs(2)).unwrap();
-            feed_live(&orchestrator, &speech_then_pause());
+            submit_pcm(&orchestrator, &[22; 513]);
             if cancel {
                 orchestrator.abort_session(SessionId(1)).unwrap();
             } else {
@@ -1098,80 +851,6 @@ mod tests {
                 "queued audio must not start another request"
             );
         }
-    }
-
-    #[test]
-    fn live_http_full_queue_keeps_only_the_contiguous_prefix() {
-        let (orchestrator, uploads, replies, faults) = live_http(Duration::from_secs(5));
-        let mut accepted = speech_then_pause();
-        feed_live(&orchestrator, &accepted);
-        let first = uploads.recv_timeout(Duration::from_secs(2)).unwrap();
-        for marker in 1..=301 {
-            let frame = vec![marker; 3200];
-            feed_live(&orchestrator, &frame);
-            if orchestrator.recording_error(SessionId(1)).is_some() {
-                break;
-            }
-            accepted.extend(frame);
-        }
-        assert_eq!(
-            faults.recv_timeout(Duration::from_secs(1)).unwrap(),
-            SessionId(1)
-        );
-        feed_live(&orchestrator, &[999; 3200]);
-        drop(replies); // Release the blocked request and allow the accepted prefix to drain.
-        assert!(matches!(
-            orchestrator.finish_session(SessionId(1)),
-            Err(SessionError::InputFailure { .. })
-        ));
-        let mut actual = first;
-        for segment in uploads.try_iter() {
-            assert!(segment.len() <= 480_000);
-            actual.extend(segment);
-        }
-        assert_eq!(actual, accepted, "reject every frame after the first hole");
-    }
-
-    #[test]
-    fn live_http_decode_fault_wakes_without_more_audio_and_preserves_prefix() {
-        let (orchestrator, uploads, replies, faults) = live_http(Duration::from_secs(5));
-        feed_live(&orchestrator, &[77; 3200]);
-        orchestrator.on_chunk_ready(SessionId(1), test_chunk());
-        feed_live(&orchestrator, &[99; 3200]);
-        assert_eq!(
-            faults.recv_timeout(Duration::from_secs(2)).unwrap(),
-            SessionId(1)
-        );
-        assert_eq!(
-            uploads.recv_timeout(Duration::from_secs(2)).unwrap(),
-            vec![77; 3200]
-        );
-        replies.send(Ok("prefix".into())).unwrap();
-        assert!(matches!(orchestrator.finish_session(SessionId(1)),
-            Err(SessionError::InputFailure { partial_text, .. }) if partial_text == "prefix"));
-        assert!(uploads.try_recv().is_err());
-    }
-
-    #[test]
-    fn live_http_segment_failure_does_not_block_later_segments() {
-        let (orchestrator, uploads, replies, _) = live_http(Duration::from_secs(5));
-        let mut pcm = speech_then_pause();
-        pcm.extend(speech_then_pause());
-        pcm.extend([777]);
-        feed_live(&orchestrator, &pcm);
-        let finished = thread::spawn(move || orchestrator.finish_session(SessionId(1)));
-        for response in [
-            Err(TranscribeError::Timeout),
-            Ok("middle".into()),
-            Ok("tail".into()),
-        ] {
-            uploads.recv_timeout(Duration::from_secs(2)).unwrap();
-            replies.send(response).unwrap();
-        }
-        assert!(
-            matches!(finished.join().unwrap(), Err(SessionError::PartialFailure { errors, partial_text })
-            if errors.len() == 1 && errors[0].0 == 0 && partial_text == "middle tail")
-        );
     }
 
     // ── Mock transcribers ────────────────────────────────────────────────────
@@ -1262,7 +941,7 @@ mod tests {
         });
 
         chunk_tx
-            .send(WorkerMsg::Chunk {
+            .send(WorkerMsg {
                 index: 7,
                 chunk: test_chunk(),
             })
@@ -1356,7 +1035,7 @@ mod tests {
 
         for index in 0..2 {
             chunk_tx
-                .send(WorkerMsg::Chunk {
+                .send(WorkerMsg {
                     index,
                     chunk: test_chunk(),
                 })
@@ -1371,7 +1050,7 @@ mod tests {
         let (chunk_tx, chunk_rx) = mpsc::sync_channel(2);
         for index in 0..2 {
             chunk_tx
-                .send(WorkerMsg::Chunk {
+                .send(WorkerMsg {
                     index,
                     chunk: test_chunk(),
                 })
@@ -1416,6 +1095,29 @@ mod tests {
         let result = orch.finish_session(SessionId(1));
 
         assert!(matches!(result, Err(SessionError::NoChunks)));
+    }
+
+    #[test]
+    fn recorder_failure_keeps_the_first_error_and_completed_text() {
+        // Recorder faults must survive complete-chunk intake, including a fault
+        // before the first segment; segmentation no longer belongs to HTTP.
+        for has_chunk in [false, true] {
+            let orch = default_orchestrator(Arc::new(FixedTranscriber("prefix".into())));
+            orch.start_session(SessionId(1)).unwrap();
+            if has_chunk {
+                orch.on_chunk_ready(SessionId(1), test_chunk());
+            }
+            orch.fail_session(SessionId(1), "recorder overflow");
+            orch.fail_session(SessionId(1), "later fault");
+            assert_eq!(
+                orch.recording_error(SessionId(1)).as_deref(),
+                Some("recorder overflow")
+            );
+            assert!(matches!(orch.finish_session(SessionId(1)),
+                Err(SessionError::InputFailure { error, partial_text })
+                if error == "recorder overflow"
+                    && partial_text == if has_chunk { "prefix" } else { "" }));
+        }
     }
 
     #[test]

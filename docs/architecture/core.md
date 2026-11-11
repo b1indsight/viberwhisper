@@ -111,7 +111,8 @@ No subcommand runs the recording listener. Other commands are:
 Realtime. Its backend creates either an HTTP chunk worker or recording-scoped Realtime I/O; both
 return the existing session result/error contract. Finishing detaches the session and closes input
 before collecting results; abort and orchestrator drop cancel active work. The HTTP chunk tracking
-and convergence rules below distinguish fixed raw capture from pause-aware desktop input. Realtime connection/audio details live in
+and convergence rules below apply equally to fixed raw capture and already-segmented desktop input.
+Realtime connection/audio details live in
 [dictation](dictation.md).
 
 Desktop `finish_for_delivery` retains an optional single-use Realtime confirmation handle with
@@ -122,16 +123,16 @@ learning. HTTP results and partial failures carry no learning capability.
 ### HTTP Worker Concepts
 
 - **Chunk State Machine**: `Flushed → Uploading → Transcribed / Failed`
-- **Session-owned Results**: Each session exclusively owns `chunk_entries: Vec<ChunkEntry>`, tracking records rather than WAV data. The worker reports `UploadStarted` and `Completed` through a session-specific channel. Live input registers a segment on `UploadStarted` when the worker closes it, not for every 200 ms frame.
-- **Convergence Timeout**: A module-owned 30-second stop deadline covers queued input, the open tail and requests. Live completion waits for the result channel to close: its only sender belongs to the worker and remains alive through tail submission. An empty/all-terminal registry alone cannot prove EOF. Joining the exited worker then ensures its panic guard has recorded any input failure. Timeout cancels remaining work and counts undrained input as at least one pending audio work item.
+- **Session-owned Results**: Each session exclusively owns `chunk_entries: Vec<ChunkEntry>`, tracking records rather than WAV data. Every complete chunk is registered at intake, including recorder stop-time tails. The worker reports `UploadStarted` and `Completed` through a session-specific channel; events update existing entries only.
+- **Convergence Timeout**: Recorder stop and tail submission precede finalization. Closing the HTTP input starts the module-owned 30-second convergence budget for queued chunks and requests. An all-terminal registry proves no chunk results remain outstanding; the worker has no unregistered audio or tail. Timeout cancels remaining work and reports the number of pending chunks.
 - **Partial Failure**: If some chunks succeed and others fail, returns partial text with an error
-- **Bounded Queue**: Fixed capture retains the capacity-two complete-chunk queue. Desktop Live uses 300 frames of at most 200 ms each (about 60 seconds), with one serial worker for decoding, endpointing and STT and one current segment capped at 30 seconds. No second segment queue or concurrent request is added.
-- **Input Integrity**: Live's sticky `HttpInputStatus` records the first queue/decoder/format failure, rejects later intake and wakes the UI without waiting for new audio. Accepted input before a queue overflow drains in order; a decoder hole terminates consumption before any later frame. The valid prefix tail is flushed and returned with `InputFailure`, never reported as complete audio.
+- **Bounded Queue**: Both HTTP workflows use the original capacity-two complete-chunk queue and one serial STT worker. Nonblocking submission marks a full/disconnected queue's rejected chunk as Failed; later chunks may still be accepted. Finalization reports these failures with partial text. It does not wait for queue space, expand capacity or introduce another queue.
+- **Input Integrity**: Recorder overflow wakes the UI through the existing audio-readiness event. Desktop delivery records the first recorder error in the session-owned `input_failure: Option<String>`, under the existing session mutex. Stop warnings also reach this field when stop precedes readiness handling. Finalization returns `InputFailure` with any completed text, including when no chunk was produced; raw prompt-lab recorder warnings retain their original log-only behavior. HTTP has no short-frame decoder, shared fault notifier or separate EOF protocol.
 - **Memory Ownership**: Queued chunks are immutable shared WAV bytes. Rejected, stale, cancelled, or completed chunks are released by normal ownership drops; the orchestrator performs no chunk-file cleanup.
 - **Strict Session Routing**: start, chunk, finish, and abort operations carry `SessionId`; duplicate starts and mismatched IDs are rejected without replacing active work.
 
 `on_chunk_ready` is a notification returning `()`: invalid session IDs are logged and rejected
-internally, and callers do not repeat that logging. Fixed input first attempts non-blocking submission,
+internally, and callers do not repeat that logging. Input first attempts non-blocking submission,
 then registers either a pending or failed entry before consuming available worker events.
 Submission failures remain in the session for `finish_session` to report alongside partial text.
 `apply_worker_event` owns the shared upload/completion transitions, including terminal-state
@@ -154,7 +155,7 @@ that must remain available for later sessions.
 | `Routing(SessionRoutingError)` | No active session or a mismatched session ID |
 | `NoChunks` | Recording too short to produce any audio |
 | `PartialFailure { partial_text, errors }` | One or more chunks failed; includes any successful text |
-| `InputFailure { partial_text, error }` | Live input has a hole/fault; only the verified prefix is available, with an incomplete-recording warning and no learning capability |
+| `InputFailure { partial_text, error }` | Recorder input failed; completed text remains available with an incomplete-recording warning and no learning capability |
 | `ConvergenceTimeout { partial_text, pending_count }` | Timeout hit, includes what was completed |
 
 ---

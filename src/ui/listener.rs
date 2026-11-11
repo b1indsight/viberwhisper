@@ -79,15 +79,13 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
                 .expect("raw capture uses HTTP STT"),
         )),
     };
-    let streaming = config.recognition.uses_streaming_frames();
+    let streaming = config.recognition.is_realtime();
+    let pause_aware = !streaming && matches!(mode, ListenerMode::Delivery(_));
 
     let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    let failure_proxy = proxy.clone();
-    let orchestrator = Arc::new(config.recognition.build(move |session_id| {
-        let _ = failure_proxy.send_event(AppEvent::AudioChunkAvailable { session_id });
-    })?);
+    let orchestrator = Arc::new(config.recognition.build()?);
 
     let platform_proxy = proxy.clone();
     let mut platform = NativePlatform::start(&config.hotkeys, move |event| {
@@ -124,6 +122,8 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
     });
     if streaming {
         recorder.enable_streaming_frames();
+    } else if pause_aware {
+        recorder.enable_pause_aware_segments();
     }
 
     info!("System tray icon started");

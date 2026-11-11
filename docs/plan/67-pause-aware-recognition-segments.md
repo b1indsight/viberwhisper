@@ -498,3 +498,29 @@ Realtime 在 append 前求切点，按连续切片逐段提交；30 秒容量改
 来源：[修改前基线](../../.amp/in/artifacts/http-worker-eof-before.log)、[修改后定向检查](../../.amp/in/artifacts/http-worker-eof-after.log)、[缺少 EOF 等待的对照失败](../../.amp/in/artifacts/http-worker-eof-ablation.log)、[临时 panic 探针](../../.amp/in/artifacts/http-worker-eof-panic-probe.log)、[最终组合检查](../../.amp/in/artifacts/http-worker-eof-validation.log)。
 
 **交付状态：** 新简化及第 9 条的未推送改动仍只在本独立 workspace，未更新远程 PR，也未合并或发布。后续代码推送前仍需重新运行审阅门禁；旧提交的跨平台 CI 不代表当前本地改动已经通过远程 CI。
+
+### 11. 2026-11-11 — HTTP 分段移入既有录音取块流程，保留原完整块队列约束
+
+**触发与决定：** 用户继续询问 `HttpSession` 的签名、为何不外部分段后统一走完整块入口、VAD 能否放在取块流程、积压和原录音故障如何传播，最后明确要求“就这样简化，保留原有约束”。本轮只把 HTTP 停顿分段移到录音器已有的取块 / stop 流程。此决定取代第 9、10 条的 HTTP worker-owned 分段与未登记尾段等待；保留两后端独立分段的决定。第 8 条的统一录音线程、Realtime 段结束消息及新增等待背压仍未采纳。
+
+**实际实现与边界：**
+
+- `audio/recorder.rs` 保留 `Option<ReadyChunk>` 和 stop 返回 `Vec<WavChunk>` 的接口。普通 HTTP Delivery 选择停顿分段；Realtime 仍取得 200ms 短帧；raw capture 和 setup 保持固定完整块。`Segmenter` 的声学规则、模型和参数不变，不声称理解句意或语气。
+- CPAL 回调继续只做下混、增益、写入原生 PCM 和轻量唤醒。HTTP 每 200ms 唤醒既有取块调用，在回调和 PCM 锁之外只分析新样本。未出现切点时保留当前段；每段仍受 30 秒 / 23MiB 上限约束。正常 stop 补算尚未分析的 PCM、封出已有切点和非空尾段，再按原顺序提交；cancel 直接丢弃待处理 PCM，不分析或封尾。
+- 录音器复用原生 PCM 缓冲，HTTP 没有第二份累计 PCM 或完成段队列；保留 60 秒原生缓冲上限和显式溢出。HTTP 恢复容量为 2 的完整 WAV 队列、串行请求和 `try_send` 非阻塞提交。**队列满仍将该段标为失败，后续段可继续接收，最终返回 PartialFailure；不增加等待、重排、扩容或自动重试入队。** 原生缓冲溢出仍停录并告警，未提交缓冲按既有 stop 错误路径丢弃，不宣称恢复全部已采集音频。
+- HTTP 删掉 `new_live_http`、`WorkerMsg::Frame`、`HttpAudio`、`live_worker_loop`、300 短帧分支、`Segmentation` 参数及故障通知 callback。每个完整段在接收时登记，录音尾段也在 finalization 前登记，因此直接等待已登记段终态，无需未知尾段 / EOF 协调。30 秒收敛预算沿用原完整块流程，从关闭识别输入后开始，包含排队段与请求；录音 stop 的补算与编码在此之前同步完成。
+- HTTP 仅保留会话拥有的首个 `input_failure: Option<String>`，受原 session mutex 保护，不再额外共享故障 mutex / 唤醒器。普通 Delivery 的录音溢出及 stop warning 仍可返回 InputFailure 和已完成文字，即使首段尚未形成；raw prompt-lab 的 stop warning 仍只记录日志。原 CPAL runtime error callback 只写日志的行为不顺手修改。
+- 保留 SessionId 路由、提交顺序、部分失败、超时、与预览共享的取消 token，以及停录后已 detach HTTP worker 的取消行为。Realtime engine / transport、连续重采样、边录边上传、离线 convert、prompt-lab 评测和预览 / Enter 确认未改。不引入新线程、依赖、公共配置或通用管线。
+
+**保留的最小状态及消融：** `analyzed_samples` 区分已经分析但尚未发出的样本；`pending_cut` 只保留一个绝对切点，使 WAV 编码失败后仍可重试同一段。取块按约 20ms 小步处理，遇到首个切点暂停分析，无需切点队列。两项机制分别做了临时移除对照，之后恢复并删除对照代码：
+
+1. 删除编码失败后的切点保留，运行 `cargo +1.99.1 test --locked --lib pause_encoding_failure_preserves_the_cut_for_retry_stop_or_cancel`：预期两个提前完成的段变成一个，测试失败。恢复后重试、stop 与 cancel 三种处理均通过。[对照日志](../../.amp/in/artifacts/http-recorder-pending-cut-ablation.log)。
+2. stop 从头重复分析仍缓冲的 PCM，运行 `cargo +1.99.1 test --locked --lib pause_chunks_keep_the_hard_limit_and_exact_stop_tail`：在 30 秒少一个样本处产生越界切点，测试失败。恢复分析游标后通过。[对照日志](../../.amp/in/artifacts/http-recorder-analysis-cursor-ablation.log)。
+
+**验证与实际成本：** 修改前现有 library 测试通过；先加入完整块入口录音故障回归，在旧实现上因丢失故障而失败，再实现修复。录音器测试覆盖 16/44.1/48kHz、317 样本 / 200ms / 积压后取块 / 未处理就绪事件即 stop、600ms 换气和 2 秒停顿、30 秒 ±1 样本及 65 秒输入、编码恢复 / stop / cancel；输出拼接逐样本等于原输入。HTTP 继续覆盖纯静音不请求、单样本段、重复文本与顺序、容量 2 满队列、请求失败、超时和 detach 后取消。删除的 HTTP 短帧队列 / 解码故障测试对应已移除机制，没有通过删测试掩盖完整块失败行为。[修改前基线](../../.amp/in/artifacts/http-recorder-before.log)、[故障回归首次失败](../../.amp/in/artifacts/http-recorder-fault-red.log)、[修改后检查](../../.amp/in/artifacts/http-recorder-after.log)。
+
+临时离线耗时探针用既有英文 WAV 重复组成 40 秒输入，按 200ms 喂入，覆盖上述三采样率以及并发真实整段预处理；同时验证样本完全一致。debug 构建单次 drain 的 p99 最高 5.388ms，包含 WAV 编码的最大值 41.419ms，首次初始化 41.230ms。刻意先缓冲 40 秒再取块，完整补处理最高 952.248ms。**这些是离线 debug 测量，不是麦克风 / UI 心跳测量；人为积压也不是正常运行已观察到的积压。** 本方案接受既有 UI 取块 / stop 同步执行 VAD 和编码的取舍，不能据此保证 UI 永不卡顿。探针代码已删除，复现源码随测量日志保留。[设置、结果与探针源码](../../.amp/in/artifacts/http-recorder-timing.log)。
+
+最终 Rust 1.99.1 的 `fmt --check`、`build --locked`、默认 / diagnostic-logs / integration 全量测试及 `clippy --locked --all-targets --all-features -- -D warnings` 均通过；既有 vendored rdev 和 future-compat 警告未压制。没有 UI 外观改变，也没有调用个人 API、采集真实麦克风或新增 Windows 实机验证；第 4 条真实中文 / 噪声 / 服务质量验收的限制继续有效。[组合验证日志](../../.amp/in/artifacts/http-recorder-validation.log)。本轮本地 Claude Code 顾问使用 `claude-opus-5-5`，tools / MCP 为空，响应模型一致、退出 0 且结果无错误；采纳游标和单切点状态，不加入额外编码器测试抽象。
+
+**交付边界：** 修改前已发布的 [PR #173 head](https://github.com/b1indsight/viberwhisper/commit/164b3a9a3a3f16aa1415c593ce608143d9555d0c) 的两平台 CI 已通过；这不代表本轮代码已有远程 CI。本条实现先在独立 workspace 本地完成；用户随后要求“审阅后提交并更新 PR #173”。本次交付须重新运行代码审阅门禁，使用其返回的精确提交更新原 bookmark / PR，不复用旧提交结果；当前提交、审阅和双平台 CI 状态以 PR 为准。保留 Draft，不据此合并或发布；真实语料、服务质量和 Windows 实机验收仍未完成。

@@ -101,7 +101,7 @@ short recordings and the final tail of longer files use their remaining frames.
 
 ## Desktop Pause Boundaries
 
-Both desktop recognition workers use `Segmenter` in `PauseAware` mode. After speech evidence
+The HTTP recorder and Realtime recognition worker use `Segmenter` in `PauseAware` mode. After speech evidence
 (probability ≥0.3), 25 consecutive low-probability 32 ms frames close a segment (800 ms of
 analyzed quiet). Renewed speech resets the quiet counter. Pure silence cannot repeatedly trigger
 pause cuts. These are acoustic estimates, not sentence or tone classification; a long thinking
@@ -119,7 +119,9 @@ their segment. The hard capacity takes precedence even inside an analysis step. 
 closes a nonempty tail once, without waiting for quiet or fabricating analysis silence. Analysis
 failure logs a warning and disables pause cuts for that recording; hard cuts and the tail remain.
 
-HTTP analyzes native mono PCM; Realtime analyzes its existing 24 kHz output before append/commit.
+HTTP analyzes native mono PCM in the recorder's existing `take_ready_chunk()` flow; Realtime
+analyzes its existing 24 kHz output before append/commit. The HTTP worker receives complete WAVs
+and neither selects boundaries nor decodes/reassembles short recorder frames.
 Both use the canonical capacity calculation above. Offline conversion, prompt-lab evaluation
 and raw dataset capture remain fixed-boundary paths. The English fixture verifies integration,
 not Chinese recognition quality or real microphone endpoint accuracy.
@@ -145,11 +147,12 @@ an active session; stop and cancel consume the matching session without resettin
 
 The I16 and F32 cpal callbacks share a pipeline that downmixes input to mono `i16`, applies microphone
 gain with format-specific clipping, and reuses a callback-owned scratch vector outside the PCM lock.
-It appends PCM to the shared buffer and updates the number of complete chunks.
-Crossing a new complete-chunk boundary also
+It appends PCM to the shared buffer and updates the number of wake boundaries.
+Crossing a new wake boundary also
 sends one readiness callback containing the active `SessionId`. The existing ready-chunk count
-prevents repeated notifications within the same boundary, while the fixed chunk policy keeps the
-wakeup rate independent of audio sample-buffer traffic. The callback never performs WAV encoding,
+prevents repeated notifications within the same boundary. Fixed capture wakes at chunk boundaries;
+desktop HTTP and Realtime wake every 200 ms, independently of audio sample-buffer traffic.
+The callback never performs VAD inference, WAV encoding,
 channel waits, disk I/O, network I/O, or session transitions.
 
 The readiness callback becomes an application event that wakes winit. The event-loop handler drains
@@ -159,6 +162,13 @@ after successful encoding, and returns `ReadyChunk { session_id, chunk }`. The i
 encoder's error path is handled inside the recorder: it logs the failure, returns `None`, and leaves
 the PCM buffered for stop-time recovery.
 
+For HTTP delivery, the same method analyzes only new PCM outside the capture mutex. An absolute
+analysis cursor and one pending cut retain progress separately from emitted samples. It keeps
+processing buffered input until a segment is sealed or all available PCM has been analyzed;
+no endpoint yet must not strand later samples behind `None`. WAV encoding failure retains both
+the cut and the PCM. Stop processes any unanalyzed suffix, then emits the remaining cuts and one
+nonempty tail, including when readiness events have not run. Cancel performs no analysis or encoding.
+
 Each boundary notification is independent, so a boundary published while the listener is draining
 queues its own wakeup without a pending flag, re-arm protocol, or timer retry. Extra notifications
 are harmless because the listener drains until `take_ready_chunk()` returns `None`, and events
@@ -167,12 +177,15 @@ from an old `SessionId` are ignored after stop or session replacement. On stop, 
 the mutex without copying, and complete slices plus the final tail are encoded outside the lock.
 `RecorderStopOutcome::Stopped` therefore owns `Vec<WavChunk>` rather than file paths.
 
-Desktop HTTP and Realtime enable the existing 200 ms frame mode and bounded 60-second PCM backlog.
-Stop-time residuals use the same small frame capacity; a recorder frame is not a recognition
-segment. Overflow is sticky, stops further acceptance and is checked before each UI drain attempt,
-including when no complete frame is available. Fixed raw capture retains complete WAV chunks.
-WAV envelopes are produced outside the callback; decoding, endpoint inference and STT run on the
-recognition worker. See [core](core.md#http-worker-concepts) for HTTP queue/EOF/failure semantics.
+Desktop HTTP and Realtime retain a bounded 60-second native PCM buffer. For HTTP this includes
+the current, not-yet-emitted segment; there is no second PCM accumulator or completed-audio queue
+inside the recorder. HTTP outputs pause/limit/stop segments; Realtime still outputs 200 ms frames
+and stop-time residuals to its existing recognition worker. Overflow is sticky, stops further
+acceptance and is checked before each UI drain attempt, including when no complete output exists.
+Fixed raw capture and setup retain their original complete WAV chunks. HTTP endpoint analysis
+and WAV encoding run synchronously in the UI's existing retrieval/stop calls, outside the callback
+and PCM mutex; long delayed consumption can therefore delay UI dispatch while it catches up.
+See [core](core.md#http-worker-concepts) for the unchanged complete-chunk queue and failure policy.
 
 Prompt-lab recording optionally clones these immutable chunks into a session-owned, capacity-two
 archive channel after they leave the recorder. Its worker validates one stable integer 16-bit WAV

@@ -89,19 +89,16 @@ mod tests {
             Some("F8")
         );
         assert!(ListenerConfig::from_config(&document).is_err());
-        assert!(
-            !config.recognition.uses_streaming_frames(),
-            "raw capture must keep complete WAV blocks"
-        );
+        assert!(!config.recognition.is_realtime());
         for realtime in [false, true] {
             document.dictation.enabled = realtime;
             let capture = RecordingConfig::from_config(&document).unwrap();
             assert!(!capture.recognition.is_realtime());
-            assert!(!capture.recognition.uses_streaming_frames());
-            assert!(
+            assert_eq!(
                 crate::core::recognition::RecognitionConfig::from_config(&document, false)
                     .unwrap()
-                    .uses_streaming_frames()
+                    .is_realtime(),
+                realtime
             );
         }
     }
