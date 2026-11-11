@@ -11,6 +11,103 @@ use serde_json::json;
 use tokio::time::{Duration, timeout};
 
 #[tokio::test]
+async fn pause_commits_contiguous_audio_while_fixed_conversion_keeps_one_segment() {
+    use crate::audio::segment::Segmentation;
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use futures_util::StreamExt;
+    for mode in [Segmentation::PauseAware, Segmentation::Fixed] {
+        let speech = WavChunk::from_encoded_bytes(
+            include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
+        );
+        let (rate, speech) = crate::audio::decode_mono(&speech).unwrap();
+        let speech = PcmResampler::new(rate, 24_000)
+            .unwrap()
+            .push(&speech, true)
+            .unwrap();
+        let mut pcm = speech.clone();
+        pcm.extend(vec![0; 48_000]);
+        pcm.extend(speech);
+        let (listener, settings) = listen().await;
+        let server = tokio::spawn(async move {
+            let mut socket = accept_session(&listener).await;
+            let mut segments = Vec::new();
+            for index in 0..if mode == Segmentation::Fixed { 1 } else { 2 } {
+                let audio = format!("audio-{index}");
+                declare_prefix(&mut socket, &format!("prefix-{audio}")).await;
+                let mut segment = Vec::new();
+                loop {
+                    let message = socket.next().await.unwrap().unwrap();
+                    let event: serde_json::Value =
+                        serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    if event["type"] == "input_audio_buffer.commit" {
+                        break;
+                    }
+                    assert_eq!(event["type"], "input_audio_buffer.append");
+                    let bytes = STANDARD.decode(event["audio"].as_str().unwrap()).unwrap();
+                    segment.extend(
+                        bytes
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|s| i16::from_le_bytes(*s)),
+                    );
+                }
+                segments.push(segment);
+                send_json(
+                    &mut socket,
+                    json!({"type":"input_audio_buffer.committed","item_id":audio}),
+                )
+                .await;
+                let request = expect_event(&mut socket, "response.create").await;
+                complete_response(
+                    &mut socket,
+                    &request,
+                    &format!("r-{index}"),
+                    r#"{"text":"repeat","context":"未知语境","memory_candidates":[]}"#,
+                )
+                .await;
+                delete_segment(&mut socket, &audio).await;
+            }
+            segments
+        });
+        let mut connection = Connection::connect(&settings, None).await.unwrap();
+        let mut recording = Recording::new(mode);
+        let mut memory = Memory::frozen(Default::default());
+        for packet in pcm.chunks(8191) {
+            recording
+                .push(
+                    &mut connection,
+                    &mut memory,
+                    &crate::audio::chunk::encode_i16_wav(packet, 24_000).unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        if mode == Segmentation::PauseAware {
+            assert_eq!(
+                recording.text(None),
+                "repeat",
+                "first result must arrive before stop"
+            );
+        }
+        recording
+            .finish(&mut connection, &mut memory)
+            .await
+            .unwrap();
+        let segments = server.await.unwrap();
+        assert_eq!(
+            segments.concat(),
+            pcm,
+            "never trim, overlap or upload the next segment early"
+        );
+        if mode == Segmentation::PauseAware {
+            assert!((72_000..120_000).contains(&segments[0].len()));
+            assert_eq!(recording.text(None), "repeat repeat");
+        }
+    }
+}
+
+#[tokio::test]
 async fn failed_recording_reconnects_with_a_complete_prefix_and_fresh_audio() {
     // A dropped connection invalidates both item types; the next user recording
     // must declare its entire prefix again rather than replay the interrupted upload.
@@ -66,14 +163,16 @@ async fn failed_recording_reconnects_with_a_complete_prefix_and_fresh_audio() {
 #[tokio::test]
 async fn silence_and_empty_recordings_leave_no_prefix_for_the_next_recording() {
     // Silence has no committed audio item, but still owns a declared text item.
-    // Clearing only audio used to be sufficient; now text must be deleted as well.
+    // Both a full 30-second segment and its tail must clear audio and delete text.
     let (listener, settings) = listen().await;
     let server = tokio::spawn(async move {
         let mut socket = accept_session(&listener).await;
-        declare_prefix(&mut socket, "silent-prefix").await;
-        expect_event(&mut socket, "input_audio_buffer.clear").await;
-        send_json(&mut socket, json!({"type":"input_audio_buffer.cleared"})).await;
-        crate::dictation::test_support::delete_audio(&mut socket, "silent-prefix").await;
+        for prefix in ["silent-limit", "silent-tail"] {
+            declare_prefix(&mut socket, prefix).await;
+            expect_event(&mut socket, "input_audio_buffer.clear").await;
+            send_json(&mut socket, json!({"type":"input_audio_buffer.cleared"})).await;
+            crate::dictation::test_support::delete_audio(&mut socket, prefix).await;
+        }
         commit_segment(&mut socket, "voiced").await;
         let request = expect_event(&mut socket, "response.create").await;
         assert_eq!(request["response"]["input"][0]["id"], "prefix-voiced");
@@ -96,7 +195,7 @@ async fn silence_and_empty_recordings_leave_no_prefix_for_the_next_recording() {
                 if turn == 0 {
                     engine.on_chunk_ready(
                         id,
-                        crate::audio::chunk::encode_i16_wav(&[0; 4800], 24000).unwrap(),
+                        crate::audio::chunk::encode_i16_wav(&vec![0; 720_001], 24000).unwrap(),
                     );
                 } else if turn == 2 {
                     engine.on_chunk_ready(

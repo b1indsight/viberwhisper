@@ -14,7 +14,8 @@ src/audio/
   recorder.rs  — cpal microphone capture and live WavChunk production
   signal.rs    — compact normalized RMS-window check for effectively silent chunks
   preprocess.rs — shared upload preparation and validated WAV decoding
-  vad.rs       — bundled Silero model, analysis-only resampling, whole-chunk speech gate
+  vad.rs       — shared Silero inference, whole-chunk gate and recording-scoped streaming state
+  segment.rs   — sample-exact pause/limit/stop boundaries for desktop recognition
   loudness.rs  — bounded constant-gain adjustment with peak protection
   wav_file.rs  — streaming local-WAV reader and fallible chunk iterator
 ```
@@ -49,12 +50,14 @@ error, so uncertain local analysis always preserves the previous upload/error be
 processing order is original energy gate, original-audio VAD, then loudness
 adjustment. A rejected chunk returns the existing successful empty transcription;
 an accepted chunk retains every frame, channel and pause. Recording callbacks,
-source WAVs, prompt-lab archives, and chunk boundaries remain unchanged.
+source WAVs and prompt-lab archives remain unchanged. This gate does not choose boundaries;
+desktop endpointing below closes each segment before upload preprocessing.
 
 Silero VAD v6.2 runs locally using CPU-only ONNX Runtime 1.20.0, statically linked
 through pinned ort/ort-sys rc.9. The model is embedded in the binary. A process-wide
 mutex serializes inference; recurrent state and context reset for every channel
-and chunk. Channels are analyzed separately to avoid phase cancellation. Rubato
+and chunk in the whole-chunk gate. Streaming analysis owns separate per-recording state;
+interleaved batch calls cannot reset it. Channels are analyzed separately to avoid phase cancellation. Rubato
 performs anti-aliased conversion to 16 kHz for analysis only, compensating delay
 and flushing its tail. Input rates outside 8–192 kHz bypass VAD with a diagnostic.
 
@@ -96,6 +99,33 @@ configuration and application callers do not carry limit fields or arguments.
 Recording and offline reader capacities are plain integers. There is no unlimited mode;
 short recordings and the final tail of longer files use their remaining frames.
 
+## Desktop Pause Boundaries
+
+The HTTP recorder and Realtime recognition worker use `Segmenter` in `PauseAware` mode. After speech evidence
+(probability ≥0.3), 25 consecutive low-probability 32 ms frames close a segment (800 ms of
+analyzed quiet). Renewed speech resets the quiet counter. Pure silence cannot repeatedly trigger
+pause cuts. These are acoustic estimates, not sentence or tone classification; a long thinking
+pause can still split a sentence. The threshold remains an internal initial value, not a setting.
+
+`StreamingVad` analyzes an i16/32768-normalized 16 kHz copy using the existing model. A recording
+owns its resampler, partial frame, context and recurrent state across packets and cuts. The shared
+`PcmResampler` takes explicit input/output rates; Realtime output remains 24 kHz. Only model
+inference holds the shared lock, never resampling, source-buffer assembly or network waits.
+
+Source PCM advances in approximately 20 ms steps, with a partial step retained across packets.
+Cuts refer to the current source cursor; consumers append each contiguous slice exactly once.
+Nothing is trimmed, overlapped or retrospectively removed, and original silent pauses stay in
+their segment. The hard capacity takes precedence even inside an analysis step. Stop immediately
+closes a nonempty tail once, without waiting for quiet or fabricating analysis silence. Analysis
+failure logs a warning and disables pause cuts for that recording; hard cuts and the tail remain.
+
+HTTP analyzes native mono PCM in the recorder's existing `take_ready_chunk()` flow; Realtime
+analyzes its existing 24 kHz output before append/commit. The HTTP worker receives complete WAVs
+and neither selects boundaries nor decodes/reassembles short recorder frames.
+Both use the canonical capacity calculation above. Offline conversion, prompt-lab evaluation
+and raw dataset capture remain fixed-boundary paths. The English fixture verifies integration,
+not Chinese recognition quality or real microphone endpoint accuracy.
+
 ## Live Recorder
 
 `AudioConfig` carries an optional input-device display name. `None` resolves through cpal's system
@@ -117,11 +147,12 @@ an active session; stop and cancel consume the matching session without resettin
 
 The I16 and F32 cpal callbacks share a pipeline that downmixes input to mono `i16`, applies microphone
 gain with format-specific clipping, and reuses a callback-owned scratch vector outside the PCM lock.
-It appends PCM to the shared buffer and updates the number of complete chunks.
-Crossing a new complete-chunk boundary also
+It appends PCM to the shared buffer and updates the number of wake boundaries.
+Crossing a new wake boundary also
 sends one readiness callback containing the active `SessionId`. The existing ready-chunk count
-prevents repeated notifications within the same boundary, while the fixed chunk policy keeps the
-wakeup rate independent of audio sample-buffer traffic. The callback never performs WAV encoding,
+prevents repeated notifications within the same boundary. Fixed capture wakes at chunk boundaries;
+desktop HTTP and Realtime wake every 200 ms, independently of audio sample-buffer traffic.
+The callback never performs VAD inference, WAV encoding,
 channel waits, disk I/O, network I/O, or session transitions.
 
 The readiness callback becomes an application event that wakes winit. The event-loop handler drains
@@ -131,6 +162,13 @@ after successful encoding, and returns `ReadyChunk { session_id, chunk }`. The i
 encoder's error path is handled inside the recorder: it logs the failure, returns `None`, and leaves
 the PCM buffered for stop-time recovery.
 
+For HTTP delivery, the same method analyzes only new PCM outside the capture mutex. An absolute
+analysis cursor and one pending cut retain progress separately from emitted samples. It keeps
+processing buffered input until a segment is sealed or all available PCM has been analyzed;
+no endpoint yet must not strand later samples behind `None`. WAV encoding failure retains both
+the cut and the PCM. Stop processes any unanalyzed suffix, then emits the remaining cuts and one
+nonempty tail, including when readiness events have not run. Cancel performs no analysis or encoding.
+
 Each boundary notification is independent, so a boundary published while the listener is draining
 queues its own wakeup without a pending flag, re-arm protocol, or timer retry. Extra notifications
 are harmless because the listener drains until `take_ready_chunk()` returns `None`, and events
@@ -138,6 +176,16 @@ from an old `SessionId` are ignored after stop or session replacement. On stop, 
 200 ms wait remains before stream destruction. The remaining PCM vector is then moved out of
 the mutex without copying, and complete slices plus the final tail are encoded outside the lock.
 `RecorderStopOutcome::Stopped` therefore owns `Vec<WavChunk>` rather than file paths.
+
+Desktop HTTP and Realtime retain a bounded 60-second native PCM buffer. For HTTP this includes
+the current, not-yet-emitted segment; there is no second PCM accumulator or completed-audio queue
+inside the recorder. HTTP outputs pause/limit/stop segments; Realtime still outputs 200 ms frames
+and stop-time residuals to its existing recognition worker. Overflow is sticky, stops further
+acceptance and is checked before each UI drain attempt, including when no complete output exists.
+Fixed raw capture and setup retain their original complete WAV chunks. HTTP endpoint analysis
+and WAV encoding run synchronously in the UI's existing retrieval/stop calls, outside the callback
+and PCM mutex; long delayed consumption can therefore delay UI dispatch while it catches up.
+See [core](core.md#http-worker-concepts) for the unchanged complete-chunk queue and failure policy.
 
 Prompt-lab recording optionally clones these immutable chunks into a session-owned, capacity-two
 archive channel after they leave the recorder. Its worker validates one stable integer 16-bit WAV

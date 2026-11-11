@@ -65,7 +65,7 @@ impl OfflineDictation {
             }
             let connection = connection.as_mut().unwrap();
             let mut memory = Memory::frozen(self.settings.memory.clone());
-            let mut recording = Recording::new();
+            let mut recording = Recording::new(crate::audio::segment::Segmentation::Fixed);
             for chunk in chunks {
                 recording.push(connection, &mut memory, &chunk?).await?;
             }

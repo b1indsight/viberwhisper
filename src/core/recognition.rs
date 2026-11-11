@@ -55,10 +55,10 @@ impl RecognitionConfig {
             Self::Http {
                 transcriber,
                 orchestrator,
-            } => Ok(SessionOrchestrator::new(
-                Arc::new(ApiTranscriber::new(transcriber)?),
-                orchestrator,
-            )),
+            } => {
+                let transcriber = Arc::new(ApiTranscriber::new(transcriber)?);
+                Ok(SessionOrchestrator::new(transcriber, orchestrator))
+            }
             Self::Realtime {
                 settings,
                 key,

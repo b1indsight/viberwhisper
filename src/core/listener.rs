@@ -89,5 +89,17 @@ mod tests {
             Some("F8")
         );
         assert!(ListenerConfig::from_config(&document).is_err());
+        assert!(!config.recognition.is_realtime());
+        for realtime in [false, true] {
+            document.dictation.enabled = realtime;
+            let capture = RecordingConfig::from_config(&document).unwrap();
+            assert!(!capture.recognition.is_realtime());
+            assert_eq!(
+                crate::core::recognition::RecognitionConfig::from_config(&document, false)
+                    .unwrap()
+                    .is_realtime(),
+                realtime
+            );
+        }
     }
 }

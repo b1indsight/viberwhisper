@@ -31,6 +31,7 @@ pub mod chunk;
 mod loudness;
 mod preprocess;
 pub mod recorder;
+pub(crate) mod segment;
 mod signal;
 mod vad;
 pub mod wav_file;
@@ -45,6 +46,7 @@ pub use wav_file::WavChunkReader;
 /// A recording owns one resampler, including filter delay and the final partial input block.
 pub(crate) struct PcmResampler {
     rate: u32,
+    output_rate: u32,
     filter: Option<FftFixedInOut<f32>>,
     pending: VecDeque<f32>,
     skip: usize,
@@ -53,19 +55,25 @@ pub(crate) struct PcmResampler {
 }
 
 impl PcmResampler {
-    pub fn new(rate: u32) -> Result<Self> {
+    pub fn new(rate: u32, output_rate: u32) -> Result<Self> {
         ensure!(
-            (8_000..=192_000).contains(&rate),
-            "unsupported dictation sample rate"
+            (8_000..=192_000).contains(&rate) && (8_000..=192_000).contains(&output_rate),
+            "unsupported PCM sample rate"
         );
-        let filter = if rate == 24_000 {
+        let filter = if rate == output_rate {
             None
         } else {
-            Some(FftFixedInOut::new(rate as usize, 24_000, 1024, 1)?)
+            Some(FftFixedInOut::new(
+                rate as usize,
+                output_rate as usize,
+                1024,
+                1,
+            )?)
         };
         let skip = filter.as_ref().map_or(0, Resampler::output_delay);
         Ok(Self {
             rate,
+            output_rate,
             filter,
             pending: VecDeque::new(),
             skip,
@@ -84,7 +92,7 @@ impl PcmResampler {
             return Ok(samples.to_vec());
         };
         self.pending.extend(samples.iter().map(|s| f32::from(*s)));
-        let expected = self.input_count * 24_000 / self.rate as usize;
+        let expected = self.input_count * self.output_rate as usize / self.rate as usize;
         let mut output = Vec::new();
         loop {
             let size = filter.input_frames_next();
@@ -143,17 +151,19 @@ mod tests {
         let samples: Vec<i16> = (0..44_237)
             .map(|n| ((n as f32 * 0.06).sin() * 9000.0) as i16)
             .collect();
-        let whole = PcmResampler::new(44_100)
-            .unwrap()
-            .push(&samples, true)
-            .unwrap();
-        let mut stream = PcmResampler::new(44_100).unwrap();
-        let mut parts = Vec::new();
-        for frame in samples.chunks(317) {
-            parts.extend(stream.push(frame, false).unwrap());
+        for output_rate in [16_000, 24_000] {
+            let whole = PcmResampler::new(44_100, output_rate)
+                .unwrap()
+                .push(&samples, true)
+                .unwrap();
+            let mut stream = PcmResampler::new(44_100, output_rate).unwrap();
+            let mut parts = Vec::new();
+            for frame in samples.chunks(317) {
+                parts.extend(stream.push(frame, false).unwrap());
+            }
+            parts.extend(stream.push(&[], true).unwrap());
+            assert_eq!(parts.len(), samples.len() * output_rate as usize / 44_100);
+            assert_eq!(parts, whole);
         }
-        parts.extend(stream.push(&[], true).unwrap());
-        assert_eq!(parts.len(), samples.len() * 24_000 / 44_100);
-        assert_eq!(parts, whole);
     }
 }

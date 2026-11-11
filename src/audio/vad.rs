@@ -1,32 +1,38 @@
 //! Local Silero inference on an analysis-only 16 kHz copy; no source audio is trimmed.
 
-use std::sync::{Mutex, OnceLock};
+use std::{
+    collections::VecDeque,
+    sync::{Mutex, MutexGuard, OnceLock},
+};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use ort::{session::Session, value::Tensor};
 use rubato::{FftFixedInOut, Resampler};
 
-use super::preprocess::DecodedWav;
+use super::{PcmResampler, preprocess::DecodedWav};
 
 const MODEL: &[u8] = include_bytes!("../../assets/vad/silero-v6.2.onnx");
 const SAMPLE_RATE: usize = 16_000;
 const FRAME: usize = 512;
 const CONTEXT: usize = 64;
-const SPEECH_THRESHOLD: f32 = 0.3;
+pub(super) const SPEECH_THRESHOLD: f32 = 0.3;
 
-/// Serialized model access bounds CPU usage; each channel starts with fresh recurrent state.
-pub(super) fn contains_speech(pcm: &DecodedWav) -> Result<bool> {
+fn detector() -> Result<MutexGuard<'static, Detector>> {
     static DETECTOR: OnceLock<Result<Mutex<Detector>, String>> = OnceLock::new();
     let detector = DETECTOR.get_or_init(|| {
         Detector::new()
             .map(Mutex::new)
             .map_err(|e| format!("{e:#}"))
     });
-    let mut detector = detector
+    detector
         .as_ref()
         .map_err(|e| anyhow!("VAD initialization: {e}"))?
         .lock()
-        .map_err(|_| anyhow!("VAD lock poisoned"))?;
+        .map_err(|_| anyhow!("VAD lock poisoned"))
+}
+
+/// Serialized inference only; every channel starts with fresh recurrent state.
+pub(super) fn contains_speech(pcm: &DecodedWav) -> Result<bool> {
     for channel in 0..usize::from(pcm.spec.channels) {
         // Analyze separately so opposite-phase microphones cannot cancel speech.
         let samples: Vec<_> = pcm
@@ -37,11 +43,53 @@ pub(super) fn contains_speech(pcm: &DecodedWav) -> Result<bool> {
             .map(|s| *s as f32)
             .collect();
         let samples = analysis_samples(&samples, pcm.spec.sample_rate)?;
-        if detector.classify(&samples)? {
+        let mut state = [0.0; 256];
+        let mut context = [0.0; CONTEXT];
+        if classify_channel(&samples, |frame| {
+            detector()?.predict_frame(frame, &mut state, &mut context)
+        })? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Per-recording analysis state, continuous across packets and recognition cuts.
+pub(super) struct StreamingVad {
+    resampler: PcmResampler,
+    pending: VecDeque<i16>,
+    state: [f32; 256],
+    context: [f32; CONTEXT],
+}
+
+impl StreamingVad {
+    pub(super) fn new(rate: u32) -> Result<Self> {
+        drop(detector()?);
+        Ok(Self {
+            resampler: PcmResampler::new(rate, SAMPLE_RATE as u32)?,
+            pending: VecDeque::new(),
+            state: [0.0; 256],
+            context: [0.0; CONTEXT],
+        })
+    }
+
+    /// Consume only new source PCM. Stop is handled by the segmenter's unconditional tail cut.
+    pub(super) fn push(&mut self, pcm: &[i16]) -> Result<Vec<f32>> {
+        self.pending.extend(self.resampler.push(pcm, false)?);
+        let mut probabilities = Vec::new();
+        while self.pending.len() >= FRAME {
+            let mut frame = [0.0; FRAME];
+            for (output, input) in frame.iter_mut().zip(self.pending.drain(..FRAME)) {
+                *output = f32::from(input) / 32768.0;
+            }
+            probabilities.push(detector()?.predict_frame(
+                &frame,
+                &mut self.state,
+                &mut self.context,
+            )?);
+        }
+        Ok(probabilities)
+    }
 }
 
 struct Detector {
@@ -58,32 +106,46 @@ impl Detector {
         Ok(Self { session })
     }
 
+    #[cfg(test)]
     fn classify(&mut self, samples: &[f32]) -> Result<bool> {
-        // State is local to this call, even when a previous chunk returned early or failed.
-        let mut state = vec![0.0_f32; 256];
+        let mut state = [0.0_f32; 256];
         let mut context = [0.0_f32; CONTEXT];
         classify_channel(samples, |frame| {
-            let mut input = Vec::with_capacity(CONTEXT + FRAME);
-            input.extend_from_slice(&context);
-            input.extend_from_slice(frame);
-            let output = self.session.run(ort::inputs![
-                "input" => Tensor::from_array(([1, CONTEXT + FRAME], input))?,
-                "state" => Tensor::from_array(([2, 1, 128], state.clone()))?,
-                "sr" => Tensor::from_array((Vec::<usize>::new(), vec![SAMPLE_RATE as i64]))?,
-            ]?)?;
-            let (_, next_state) = output["stateN"].try_extract_raw_tensor::<f32>()?;
-            ensure!(
-                next_state.len() == state.len() && next_state.iter().all(|s| s.is_finite()),
-                "invalid VAD state"
-            );
-            state.copy_from_slice(next_state);
-            context.copy_from_slice(&frame[FRAME - CONTEXT..]);
-            let (_, probability) = output["output"].try_extract_raw_tensor::<f32>()?;
-            probability
-                .first()
-                .copied()
-                .context("missing VAD probability")
+            self.predict_frame(frame, &mut state, &mut context)
         })
+    }
+
+    fn predict_frame(
+        &mut self,
+        frame: &[f32],
+        state: &mut [f32; 256],
+        context: &mut [f32; CONTEXT],
+    ) -> Result<f32> {
+        let mut input = Vec::with_capacity(CONTEXT + FRAME);
+        input.extend_from_slice(context);
+        input.extend_from_slice(frame);
+        let output = self.session.run(ort::inputs![
+            "input" => Tensor::from_array(([1, CONTEXT + FRAME], input))?,
+            "state" => Tensor::from_array(([2, 1, 128], state.to_vec()))?,
+            "sr" => Tensor::from_array((Vec::<usize>::new(), vec![SAMPLE_RATE as i64]))?,
+        ]?)?;
+        let (_, next_state) = output["stateN"].try_extract_raw_tensor::<f32>()?;
+        ensure!(
+            next_state.len() == state.len() && next_state.iter().all(|s| s.is_finite()),
+            "invalid VAD state"
+        );
+        let (_, probability) = output["output"].try_extract_raw_tensor::<f32>()?;
+        let probability = probability
+            .first()
+            .copied()
+            .context("missing VAD probability")?;
+        ensure!(
+            probability.is_finite() && (0.0..=1.0).contains(&probability),
+            "invalid VAD probability"
+        );
+        state.copy_from_slice(next_state);
+        context.copy_from_slice(&frame[FRAME - CONTEXT..]);
+        Ok(probability)
     }
 }
 
@@ -153,6 +215,29 @@ fn analysis_samples(samples: &[f32], rate: u32) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_probabilities_survive_packetization_and_batch_interleaving() {
+        let speech = crate::audio::WavChunk::from_encoded_bytes(
+            include_bytes!("../../tests/fixtures/audio/speech.wav").to_vec(),
+        );
+        let (rate, mut pcm) = crate::audio::decode_mono(&speech).unwrap();
+        pcm.extend(vec![0; rate as usize * 2]);
+        let expected = StreamingVad::new(rate).unwrap().push(&pcm).unwrap();
+        let mut streaming = StreamingVad::new(rate).unwrap();
+        let mut actual = Vec::new();
+        for packet in pcm.chunks(317) {
+            actual.extend(streaming.push(packet).unwrap());
+            assert!(contains_speech(&DecodedWav::read(&speech).unwrap()).unwrap());
+        }
+        assert_eq!(actual, expected);
+        assert!(actual.iter().any(|p| *p >= SPEECH_THRESHOLD));
+        assert!(
+            actual[actual.len() - 25..]
+                .iter()
+                .all(|p| *p < SPEECH_THRESHOLD)
+        );
+    }
 
     #[test]
     fn short_inputs_pass_and_partial_tail_speech_is_preserved() {
