@@ -13,7 +13,8 @@ pub(crate) fn contains_speech_for_dictation(chunk: &WavChunk) -> Result<bool> {
     if !contains_audible_window(chunk)? {
         return Ok(false);
     }
-    vad::contains_speech(&DecodedWav::read(chunk)?)
+    let pcm = DecodedWav::read(chunk)?;
+    chunk.speech.map_or_else(|| vad::contains_speech(&pcm), Ok)
 }
 
 /// Returns `None` for silence/non-speech, otherwise one immutable payload for all retries.
@@ -43,7 +44,7 @@ fn prepare_with_vad(
             return Some(chunk.clone());
         }
     };
-    match classify(&pcm) {
+    match chunk.speech.map_or_else(|| classify(&pcm), Ok) {
         Ok(false) => {
             info!("Skipping audio chunk without detected speech");
             return None;
@@ -115,6 +116,28 @@ impl DecodedWav {
 mod tests {
     use super::*;
     use crate::audio::chunk::encode_i16_wav;
+
+    #[test]
+    fn cached_segment_evidence_skips_inference_but_not_energy_validation() {
+        // Recorder evidence belongs to this immutable WAV; HTTP and Realtime
+        // must not start a second detector with a different recurrent state.
+        let audible = encode_i16_wav(&[1_000; 800], 16_000).unwrap();
+        for speech in [false, true] {
+            let cached = audible.clone().with_speech(Some(speech));
+            assert_eq!(cached.shared_bytes(), audible.shared_bytes());
+            assert_eq!(contains_speech_for_dictation(&cached).unwrap(), speech);
+            assert_eq!(
+                prepare_with_vad(&cached, |_| panic!("cached evidence must skip inference"))
+                    .is_some(),
+                speech
+            );
+        }
+        let silent = encode_i16_wav(&[0; 800], 16_000)
+            .unwrap()
+            .with_speech(Some(true));
+        assert!(!contains_speech_for_dictation(&silent).unwrap());
+        assert!(prepare_with_vad(&silent, |_| panic!("silence must skip inference")).is_none());
+    }
 
     #[test]
     #[ignore = "requires VIBERWHISPER_VAD_DATASET pointing to a private prompt-lab dataset"]

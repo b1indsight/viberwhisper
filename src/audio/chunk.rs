@@ -8,6 +8,7 @@ use hound::{WavSpec, WavWriter};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WavChunk {
     wav_bytes: Arc<[u8]>,
+    pub(super) speech: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -48,7 +49,14 @@ impl WavChunk {
     pub(crate) fn from_encoded_bytes(wav_bytes: Vec<u8>) -> Self {
         Self {
             wav_bytes: Arc::from(wav_bytes),
+            speech: None,
         }
+    }
+
+    /// Attach this segment's completed gate without changing its source WAV.
+    pub(crate) fn with_speech(mut self, speech: Option<bool>) -> Self {
+        self.speech = speech;
+        self
     }
 
     #[cfg(test)]

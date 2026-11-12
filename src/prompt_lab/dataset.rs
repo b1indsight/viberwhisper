@@ -81,6 +81,9 @@ pub(crate) struct SttSnapshot {
     pub(crate) language: Option<String>,
     pub(crate) temperature: f32,
     pub(crate) prompt: Option<String>,
+    /// Some selects these instructions for source PCM shorter than two seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) short_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) input_layout: Option<String>,
 }
@@ -93,6 +96,7 @@ impl From<TranscriberMetadata> for SttSnapshot {
             language: metadata.language,
             temperature: metadata.temperature,
             prompt: metadata.prompt,
+            short_prompt: None,
             input_layout: None,
         }
     }
@@ -873,6 +877,7 @@ mod tests {
             language: Some("zh".to_string()),
             temperature: 0.0,
             prompt: Some("技术词汇提示".to_string()),
+            short_prompt: None,
         }
     }
 

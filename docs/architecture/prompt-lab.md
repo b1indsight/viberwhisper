@@ -75,6 +75,12 @@ default components, through the same configuration-owned composition used by liv
 Full-string and no-prompt evaluation overrides clear the cloned component selection, so a saved
 component object cannot conflict with an invocation-scoped full override. Reports and prompt
 digests describe the actual composed or overridden instructions, never just one component.
+Conditional Realtime defaults also record `stt.short_prompt`. Their prompt digest hashes JSON
+containing the normal prompt, short prompt and `source-duration-lt-2s-v1`; literal overrides and
+legacy reports without a short branch retain the single-prompt digest. Selection uses each
+production segment's source duration, including pauses and excluding protocol padding.
+Explicit Realtime scenarios record and validate the same short-branch metadata without changing
+their separate frozen-clock, memory or segmentation contract.
 For each WAV, decoded PCM enters one production `ActiveRecording` at 1x audio time, using its
 buffer, ready-chunk and stop-tail logic. HTTP uses desktop pause segmentation; Realtime uses its
 existing streaming frames. Saved capture gain is not applied again. Input and queue failures take
@@ -196,12 +202,14 @@ The scoring policy is versioned as `stt-prompt-scoring-v2`:
 
 ## Two-Phase JSON Report
 
-A successful ordinary run writes schema-3 JSON with `execution.policy=desktop-recognition-v1`,
+A successful ordinary run writes schema-3 JSON with `execution.policy=desktop-recognition-reference-text-v1`
+for Realtime's natural-language references, or `desktop-recognition-short-audio-v1` for HTTP,
 credential-free saved-settings and normalized-initial-memory hashes, and the existing scoring fields.
 Only the candidate audio prompt is excluded from the saved-settings hash. This conservatively
 requires other saved settings to match, including settings unused by a selected backend. It adds
 no worker clocks, acknowledgment protocol, stage traces or Memory replay. Historical schema-1/2
-reports remain readable; schema-3 reports from the withdrawn broader implementation require a rerun.
+reports remain readable, including `desktop-recognition-v1`; they cannot serve as a baseline for
+the new threshold/gate policy. Schema-3 reports from the withdrawn broader implementation require a rerun.
 The new policy cannot compare with STT-only or explicit diagnostic execution, or with different
 settings/initial memory. These checks run before recognition requests; rerun a compatible baseline.
 

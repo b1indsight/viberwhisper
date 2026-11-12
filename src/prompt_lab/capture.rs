@@ -291,6 +291,7 @@ mod tests {
             language: Some("zh".to_string()),
             temperature: 0.0,
             prompt: Some("词汇提示".to_string()),
+            short_prompt: None,
         }
     }
 

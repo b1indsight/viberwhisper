@@ -25,6 +25,9 @@ src/audio/
 `WavChunk` owns an `Arc<[u8]>` containing one complete WAV payload. It deliberately contains no
 path, session id, index, retry policy, or transcription state. Clones share the immutable bytes,
 which lets retries create fresh multipart readers without copying the payload.
+An internal optional speech result belongs to those bytes: pause-aware producers attach completed
+streaming/tail evidence; file and fixed-boundary producers leave it unknown. It is never written
+into WAVs or prompt-lab archives. Failed encoding retains both the pending cut and its evidence.
 Live and offline WAV encoders reserve output capacity from the encoded header and sample count,
 using checked arithmetic before allocating the byte buffer.
 
@@ -61,11 +64,19 @@ interleaved batch calls cannot reset it. Channels are analyzed separately to avo
 performs anti-aliased conversion to 16 kHz for analysis only, compensating delay
 and flushing its tail. Input rates outside 8–192 kHz bypass VAD with a diagnostic.
 
-Any 512-sample frame scoring at least 0.3 accepts the entire chunk. A trailing frame
+Any 512-sample frame scoring at least 0.2 accepts the entire chunk. A trailing frame
 is zero-padded only for inference; inputs shorter than one frame pass conservatively.
 Only a completely successful no-speech analysis suppresses an audible chunk. Model
 or resampling failures bypass VAD. Decode/non-finite-data and gain-encoding errors
 preserve original upload bytes. There is no first-launch model/runtime download.
+
+After energy and WAV validation, a segment's completed streaming evidence replaces the second
+whole-chunk detector run. Known speech needs no tail inference. Otherwise a copied recurrent state
+checks only unfinished analysis samples, including the endpoint step and resampler residual.
+The FFT resampler rebuilds overlap from its last input block; preview padding never enters the
+live detector or source PCM. Scores carry source intervals, so delayed evidence from a previous
+segment cannot accept the next one. An uncertain cross-boundary positive, unavailable detector or
+failed preview falls back to the existing whole-chunk gate. Fixed/offline inputs do the same.
 
 Loudness uses RMS of energy-active 50 ms windows, excluding long silent pauses.
 Target RMS is -20 dBFS, boost is capped at +12 dB, and sample peaks at -1 dBFS.
@@ -102,7 +113,7 @@ short recordings and the final tail of longer files use their remaining frames.
 ## Desktop Pause Boundaries
 
 The HTTP recorder and Realtime recognition worker use `Segmenter` in `PauseAware` mode. After speech evidence
-(probability ≥0.3), 25 consecutive low-probability 32 ms frames close a segment (800 ms of
+(probability ≥0.2), 25 consecutive low-probability 32 ms frames close a segment (800 ms of
 analyzed quiet). Renewed speech resets the quiet counter. Pure silence cannot repeatedly trigger
 pause cuts. These are acoustic estimates, not sentence or tone classification; a long thinking
 pause can still split a sentence. The threshold remains an internal initial value, not a setting.

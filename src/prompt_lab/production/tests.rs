@@ -154,6 +154,7 @@ fn dataset(root: &Path, count: u64, audio: &[u8]) -> DatasetStore {
                         model: "capture-only".into(),
                         language: None,
                         prompt: None,
+                        short_prompt: None,
                         temperature: 0.0,
                         input_layout: None,
                     },
@@ -188,6 +189,38 @@ fn request(runner: &Runner, output: PathBuf) -> EvaluationRequest {
         compare_to: None,
         realtime: None,
     }
+}
+
+#[test]
+fn ordinary_metadata_records_short_policy_but_literal_overrides_and_http_do_not() {
+    // Metadata must describe the actual production candidate, not just its normal branch;
+    // explicit prompt-file/no-prompt candidates must never inherit default short examples.
+    let mut document = ConfigDocument::default();
+    document.post_process.enabled = false;
+    document.post_process.preheat_enabled = false;
+    document.dictation.enabled = true;
+    let runner = Runner::new(&document, None, None).unwrap();
+    assert_eq!(runner.stt.prompt, Some(document.dictation.prompt()));
+    assert_eq!(runner.stt.short_prompt, document.dictation.short_prompt());
+    assert!(runner.stt.short_prompt.is_some());
+    assert_eq!(
+        runner.identity.policy,
+        "desktop-recognition-reference-text-v1"
+    );
+    drop(runner);
+    for prompt in ["candidate", ""] {
+        let runner = Runner::new(&document, Some(prompt.into()), None).unwrap();
+        assert_eq!(runner.stt.prompt.as_deref(), Some(prompt));
+        assert!(runner.stt.short_prompt.is_none());
+    }
+    document.dictation.prompt = Some("saved literal".into());
+    let runner = Runner::new(&document, None, None).unwrap();
+    assert_eq!(runner.stt.prompt.as_deref(), Some("saved literal"));
+    assert!(runner.stt.short_prompt.is_none());
+    drop(runner);
+    document.dictation.enabled = false;
+    let runner = Runner::new(&document, None, None).unwrap();
+    assert!(runner.stt.short_prompt.is_none());
 }
 
 #[test]
@@ -348,7 +381,7 @@ fn ordinary_http_matches_desktop_pcm_cleanup_and_learning_except_audio_prompt() 
     )
     .unwrap();
     let complete = crate::prompt_lab::apply_review(&output, &review).unwrap();
-    for variant in 0..3 {
+    for variant in 0..5 {
         let runner = Runner::new(&document, None, Some(source.clone())).unwrap();
         let mut prior = complete.clone();
         match variant {
@@ -357,7 +390,12 @@ fn ordinary_http_matches_desktop_pcm_cleanup_and_learning_except_audio_prompt() 
                 prior.execution = None;
             }
             1 => prior.execution.as_mut().unwrap().config_sha256 = "1".repeat(64),
-            _ => prior.execution.as_mut().unwrap().memory_sha256 = "2".repeat(64),
+            2 => prior.execution.as_mut().unwrap().memory_sha256 = "2".repeat(64),
+            3 => prior.execution.as_mut().unwrap().policy = "desktop-recognition-v1".into(),
+            _ => {
+                prior.execution.as_mut().unwrap().policy =
+                    "desktop-recognition-reference-text-v1".into()
+            }
         }
         let mut next = request(
             &runner,
@@ -597,10 +635,7 @@ fn ordinary_realtime_keeps_main_protocol_memory_and_one_connection() {
         .report;
     drop(runner);
     let requests = server.join().unwrap();
-    assert_eq!(
-        requests[0]["session"]["instructions"],
-        "candidate integrated instructions"
-    );
+    assert_eq!(requests[0]["session"]["instructions"], "");
     assert_eq!(report.status, RunStatus::Incomplete);
     assert_eq!(report.failures.len(), 1);
     assert!(report.samples[2].hypothesis.is_none());
@@ -608,25 +643,27 @@ fn ordinary_realtime_keeps_main_protocol_memory_and_one_connection() {
         assert_eq!(sample.hypothesis.as_deref(), Some(FINAL));
     }
     for (index, pair) in requests[1..].as_chunks::<2>().0.iter().enumerate() {
-        let prefix: Value =
-            serde_json::from_str(pair[0]["item"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert!(prefix.to_string().contains("ConfiguredPersonalSentinel"));
-        let input: Value = serde_json::from_str(
-            pair[1]["response"]["input"][2]["content"][0]["text"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(input.to_string().contains("先前使用ViberWhisper。"));
-        assert!(input.to_string().contains("维伯耳语"));
         assert_eq!(
-            input["contexts"][0]["history"][0],
+            pair[1]["response"]["instructions"],
+            "candidate integrated instructions"
+        );
+        let prefix = pair[0]["item"]["content"][0]["text"].as_str().unwrap();
+        assert!(prefix.contains("ConfiguredPersonalSentinel"));
+        assert!(serde_json::from_str::<Value>(prefix).is_err());
+        let reference = pair[1]["response"]["input"][2]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(serde_json::from_str::<Value>(reference).is_err());
+        assert!(reference.contains("先前使用ViberWhisper。"));
+        assert!(reference.contains("维伯耳语"));
+        assert!(reference.contains(&format!(
+            "1. {}",
             if index == 0 {
                 "先前使用ViberWhisper。"
             } else {
                 FINAL
             }
-        );
+        )));
     }
     assert_eq!(std::fs::read(&source).unwrap(), bytes);
     assert_eq!(

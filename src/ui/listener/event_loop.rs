@@ -1028,6 +1028,7 @@ mod tests {
             language: Some("zh".to_string()),
             temperature: 0.0,
             prompt: Some("候选提示词".to_string()),
+            short_prompt: None,
         }
     }
 

@@ -50,6 +50,7 @@ pub(crate) struct PcmResampler {
     output_rate: u32,
     filter: Option<FftFixedInOut<f32>>,
     pending: VecDeque<f32>,
+    previous_input: Vec<f32>,
     skip: usize,
     input_count: usize,
     output_count: usize,
@@ -77,6 +78,7 @@ impl PcmResampler {
             output_rate,
             filter,
             pending: VecDeque::new(),
+            previous_input: Vec::new(),
             skip,
             input_count: 0,
             output_count: 0,
@@ -85,6 +87,28 @@ impl PcmResampler {
 
     pub fn rate(&self) -> u32 {
         self.rate
+    }
+
+    /// Flush a boundary's analysis tail without inserting silence into the live stream.
+    /// rubato's fixed FFT overlap depends only on the last input block, so replaying
+    /// that block restores the filter without cloning private state or retaining audio history.
+    pub(super) fn preview_finish(&self, extra_source: &[i16]) -> Result<Vec<i16>> {
+        if self.filter.is_none() {
+            return Ok(extra_source.to_vec());
+        }
+        let mut preview = Self::new(self.rate, self.output_rate)?;
+        if !self.previous_input.is_empty() {
+            preview
+                .filter
+                .as_mut()
+                .unwrap()
+                .process(&[&self.previous_input], None)?;
+        }
+        preview.pending.clone_from(&self.pending);
+        preview.skip = self.skip;
+        preview.input_count = self.input_count;
+        preview.output_count = self.output_count;
+        preview.push(extra_source, true)
     }
 
     pub fn push(&mut self, samples: &[i16], finish: bool) -> Result<Vec<i16>> {
@@ -108,10 +132,12 @@ impl PcmResampler {
             let block = if count == 0 {
                 filter.process_partial::<&[f32]>(None, None)?
             } else if count == size {
-                filter.process(&[input], None)?
+                filter.process(&[&input], None)?
             } else {
-                filter.process_partial(Some(&[input]), None)?
+                filter.process_partial(Some(&[&input]), None)?
             };
+            self.previous_input.clone_from(&input);
+            self.previous_input.resize(size, 0.0);
             for sample in &block[0] {
                 if self.skip > 0 {
                     self.skip -= 1;
@@ -165,6 +191,45 @@ mod tests {
             parts.extend(stream.push(&[], true).unwrap());
             assert_eq!(parts.len(), samples.len() * output_rate as usize / 44_100);
             assert_eq!(parts, whole);
+        }
+    }
+
+    #[test]
+    fn boundary_preview_matches_flush_without_changing_the_stream() {
+        // A cut can leave both filter delay and an incomplete input block. Previewing
+        // that tail must not inject the cut's synthetic silence into the next segment.
+        let pcm: Vec<i16> = (0..12_000)
+            .map(|i| ((i * 7919 % 60_001) - 30_000) as i16)
+            .collect();
+        for rate in [8_000, 16_000, 24_000, 44_100, 48_000, 192_000] {
+            let size = PcmResampler::new(rate, 16_000)
+                .unwrap()
+                .filter
+                .as_ref()
+                .map_or(1024, Resampler::input_frames_next);
+            for cut in [0, 1, size - 1, size, size + 1, size * 2 + 17] {
+                for extra in [0, 1, 317, 1500] {
+                    let mut live = PcmResampler::new(rate, 16_000).unwrap();
+                    let mut terminal = PcmResampler::new(rate, 16_000).unwrap();
+                    let mut uninterrupted = PcmResampler::new(rate, 16_000).unwrap();
+                    live.push(&pcm[..cut], false).unwrap();
+                    terminal.push(&pcm[..cut], false).unwrap();
+                    uninterrupted.push(&pcm[..cut], false).unwrap();
+                    let tail = &pcm[cut..cut + extra];
+                    let expected = terminal.push(tail, true).unwrap();
+                    assert_eq!(
+                        live.preview_finish(tail).unwrap(),
+                        expected,
+                        "{rate}/{cut}/{extra}"
+                    );
+                    assert_eq!(live.preview_finish(tail).unwrap(), expected);
+                    assert_eq!(
+                        live.push(&pcm[cut..], true).unwrap(),
+                        uninterrupted.push(&pcm[cut..], true).unwrap(),
+                        "preview changed continuation at {rate}/{cut}"
+                    );
+                }
+            }
         }
     }
 }

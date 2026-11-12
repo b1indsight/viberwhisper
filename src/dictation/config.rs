@@ -12,6 +12,9 @@ pub(crate) struct PromptComponents {
     output_format: String,
     context: String,
     memory: String,
+    /// Only explicitly separated examples may be replaced for a short segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    examples: Option<String>,
 }
 
 impl Default for PromptComponents {
@@ -39,19 +42,34 @@ impl PromptComponents {
             &rules.context,
             &rules.memory,
         ]
+        .into_iter()
+        .chain(rules.examples.as_deref())
+        .collect::<Vec<_>>()
         .join("\n")
     }
 
     /// Join nonempty rules in a fixed order; JSON and template-looking text remain literal.
     pub fn compose(&self) -> String {
+        self.compose_for_segment(false)
+    }
+
+    /// Short segments replace explicit examples only; legacy memory rules stay literal.
+    pub fn compose_for_segment(&self, short: bool) -> String {
+        let examples = match (short, self.examples.as_deref()) {
+            (true, Some(_)) => {
+                "示例：音频中没有可辨认语音时。\n回复：{\"context\":\"未知语境\",\"memory_candidates\":[],\"text\":\"\"}"
+            }
+            (_, examples) => examples.unwrap_or_default(),
+        };
         [
-            &self.task,
-            &self.language,
-            &self.numbers,
-            &self.cleanup,
-            &self.output_format,
-            &self.context,
-            &self.memory,
+            self.task.as_str(),
+            self.language.as_str(),
+            self.numbers.as_str(),
+            self.cleanup.as_str(),
+            self.output_format.as_str(),
+            self.context.as_str(),
+            self.memory.as_str(),
+            examples,
         ]
         .into_iter()
         .map(|rule| rule.trim())
@@ -111,6 +129,20 @@ impl DictationConfig {
             .unwrap_or_else(|| PromptComponents::default().compose())
     }
 
+    /// Return conditional instructions only for components with explicit examples.
+    /// Full-string overrides, including an empty string, never enable this policy.
+    pub fn short_prompt(&self) -> Option<String> {
+        if self.prompt.is_some() {
+            return None;
+        }
+        let defaults = PromptComponents::default();
+        let components = self.prompt_components.as_ref().unwrap_or(&defaults);
+        components
+            .examples
+            .as_ref()
+            .map(|_| components.compose_for_segment(true))
+    }
+
     pub fn validate(&self) -> Result<()> {
         let url = reqwest::Url::parse(&self.url)?;
         ensure!(
@@ -135,6 +167,11 @@ impl DictationConfig {
         ensure!(
             self.prompt().chars().count() <= 4096,
             "dictation prompt exceeds 4096 characters"
+        );
+        ensure!(
+            self.short_prompt()
+                .is_none_or(|prompt| prompt.chars().count() <= 4096),
+            "dictation short prompt exceeds 4096 characters"
         );
         ensure!(
             self.api_key_env
@@ -235,6 +272,42 @@ mod prompt_tests {
     }
 
     #[test]
+    fn short_segments_replace_only_explicit_examples_and_keep_legacy_components_literal() {
+        // Old custom memory can contain example-looking text; only a separately owned
+        // examples field authorizes replacement, never scanning the user's memory rules.
+        let mut legacy = components();
+        legacy.memory = "记忆\n口述：自定义旧示例\n回复：保持原文".into();
+        assert_eq!(legacy.compose_for_segment(true), legacy.compose());
+        let config = DictationConfig {
+            prompt_components: Some(legacy.clone()),
+            ..Default::default()
+        };
+        assert!(config.short_prompt().is_none());
+
+        for examples in ["  自定义独立示例  ", ""] {
+            let mut rules = legacy.clone();
+            rules.examples = Some(examples.into());
+            let config = DictationConfig {
+                prompt_components: Some(rules.clone()),
+                ..Default::default()
+            };
+            let expected = format!(
+                "{}\n示例：音频中没有可辨认语音时。\n回复：{{\"context\":\"未知语境\",\"memory_candidates\":[],\"text\":\"\"}}",
+                legacy.compose()
+            );
+            assert_eq!(rules.compose_for_segment(true), expected);
+            assert_eq!(config.short_prompt(), Some(expected));
+            assert_eq!(rules.compose_for_segment(false), rules.compose());
+            let normal = if examples.is_empty() {
+                legacy.compose()
+            } else {
+                format!("{}\n{}", legacy.compose(), examples.trim())
+            };
+            assert_eq!(config.prompt(), normal);
+        }
+    }
+
+    #[test]
     fn example_config_resolves_to_the_bundled_prompt() {
         // Copying the editable example must not silently select stale rules instead of the bundled default.
         let example: serde_json::Value =
@@ -242,6 +315,11 @@ mod prompt_tests {
         let config: DictationConfig = serde_json::from_value(example["dictation"].clone()).unwrap();
         config.validate().unwrap();
         assert_eq!(config.prompt(), DictationConfig::default().prompt());
+        assert_eq!(
+            config.short_prompt(),
+            DictationConfig::default().short_prompt()
+        );
+        assert!(config.short_prompt().is_some());
     }
 
     #[test]
@@ -251,6 +329,7 @@ mod prompt_tests {
             assert!(config.prompt_components.is_none());
             config.validate().unwrap();
             assert_eq!(config.prompt(), text);
+            assert!(config.short_prompt().is_none());
         }
         let config: DictationConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.prompt(), PromptComponents::default().compose());
@@ -296,6 +375,22 @@ mod prompt_tests {
         config.validate().unwrap();
         // A second component adds both its contents and a separator to the request limit.
         config.prompt_components.as_mut().unwrap().language = "中".into();
+        assert!(config.validate().unwrap_err().to_string().contains("4096"));
+    }
+
+    #[test]
+    fn short_prompt_limit_is_checked_even_when_normal_examples_are_empty() {
+        // Replacing an explicit empty examples field can make the short prompt longer
+        // than the normal one; checking only the latter would allow an invalid request.
+        let mut rules = components();
+        rules.task = "字".repeat(4000);
+        rules.examples = Some(String::new());
+        let config = DictationConfig {
+            prompt_components: Some(rules),
+            ..Default::default()
+        };
+        assert!(config.prompt().chars().count() <= 4096);
+        assert!(config.short_prompt().unwrap().chars().count() > 4096);
         assert!(config.validate().unwrap_err().to_string().contains("4096"));
     }
 

@@ -32,6 +32,26 @@ impl StablePrefix {
         }
     }
 
+    /// Render only configured vocabulary before audio, independently of learned history.
+    pub fn reference_text(&self) -> String {
+        if self.contexts.is_empty() {
+            return "人工参考词：暂无。".into();
+        }
+        self.contexts
+            .iter()
+            .map(|context| {
+                let words = context
+                    .long_term
+                    .iter()
+                    .map(|term| term.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("、");
+                format!("话题：{}。\n人工参考词：{}。", context.id, words)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             contexts: self
@@ -47,6 +67,50 @@ impl StablePrefix {
                 })
                 .collect(),
         }
+    }
+}
+
+impl Snapshot {
+    /// Render the bounded runtime view as reference prose, without program metadata.
+    /// Configured vocabulary stays in the separate frozen prefix; selection is unchanged.
+    pub fn reference_text(&self) -> String {
+        let mut text = String::from(
+            "以下是历史参考资料，仅用于音频中模糊词语的拼写消歧。\n本次听写正文只来自前一条音频，不补入历史内容。",
+        );
+        if self.contexts.is_empty() {
+            text.push_str("\n\n暂无历史参考资料。");
+        }
+        for context in &self.contexts {
+            let words = context
+                .candidates
+                .iter()
+                .map(|candidate| candidate.term.text.as_str())
+                .collect::<Vec<_>>()
+                .join("、");
+            text.push_str(&format!(
+                "\n\n历史话题：{}。\n候选参考词：{}。",
+                context.id,
+                if words.is_empty() { "无" } else { &words }
+            ));
+            if !context.corrections.is_empty() {
+                text.push_str("\n已确认的词语更正：");
+                for correction in &context.corrections {
+                    text.push_str(&format!(
+                        "\n- 将“{}”写作“{}”。",
+                        correction.from, correction.to
+                    ));
+                }
+            }
+            if context.history.is_empty() {
+                text.push_str("\n最近确认的历史语句：无。");
+            } else {
+                text.push_str("\n\n最近确认的历史语句，按从近到远排列：");
+                for (index, sentence) in context.history.iter().enumerate() {
+                    text.push_str(&format!("\n{}. {}", index + 1, sentence));
+                }
+            }
+        }
+        text
     }
 }
 
