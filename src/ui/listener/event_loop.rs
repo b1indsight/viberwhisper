@@ -12,6 +12,7 @@ use winit::window::WindowId;
 use super::permission::PermissionGuidance;
 use super::platform_session_event;
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
+use crate::core::config::ConfigStore;
 use crate::core::orchestrator::{SessionError, SessionOrchestrator};
 use crate::core::recording_session::{
     RecordingSessionMachine, RecordingState, SessionEffect, SessionEvent,
@@ -202,10 +203,46 @@ impl ListenerApplication {
         }
     }
 
+    pub(super) fn refresh_input_devices(&mut self) {
+        let devices = crate::audio::recorder::input_device_names()
+            .inspect_err(|error| warn!(%error, "Could not enumerate input devices"));
+        if let Err(error) = self
+            .platform
+            .set_input_devices(devices, self.recorder.input_device())
+        {
+            error!(%error, "Could not update input device menu");
+        }
+    }
+
+    fn select_input_device(&mut self, device: Option<String>) {
+        let saved =
+            ConfigStore::discover().and_then(|store| store.set_input_device(device.as_deref()));
+        if saved.is_ok() {
+            self.recorder.set_input_device(device);
+            info!(device = ?self.recorder.input_device(), "Selected input for the next recording");
+        }
+        self.platform
+            .set_selected_input_device(self.recorder.input_device());
+        if let Err(error) = saved {
+            error!(%error, "Could not save input device; keeping the previous selection");
+            if let Err(error) = crate::platform::show_input_device_error() {
+                error!(%error, "Could not display input device error");
+            }
+        }
+    }
+
     fn handle_app_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::Platform(event) => {
                 if let Some(action) = self.platform.handle_event(event) {
+                    if let PlatformAction::SelectInputDevice(device) = action {
+                        self.select_input_device(device);
+                        return;
+                    }
+                    if action == PlatformAction::RefreshInputDevices {
+                        self.refresh_input_devices();
+                        return;
+                    }
                     if let PlatformAction::PointerReleased { point, occurred_at } = action {
                         if matches!(self.machine.state(), RecordingState::Stopping { .. })
                             && let Some(task) = &self.finalization

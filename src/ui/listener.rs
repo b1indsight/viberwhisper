@@ -151,6 +151,7 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
     info!("Listener ready; press Ctrl+C to exit");
 
     let mut application = ListenerApplication::new(recorder, orchestrator, platform, output, proxy);
+    application.refresh_input_devices();
     event_loop.run_app(&mut application)?;
     Ok(())
 }

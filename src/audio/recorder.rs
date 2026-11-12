@@ -285,6 +285,15 @@ impl AudioRecorder {
         }
     }
 
+    pub(crate) fn input_device(&self) -> Option<&str> {
+        self.input_device.as_deref()
+    }
+
+    /// Selects the next recording's input without changing the active stream or its buffers.
+    pub(crate) fn set_input_device(&mut self, device: Option<String>) {
+        self.input_device = device;
+    }
+
     /// Keeps the WAV envelope, but emits bounded 200 ms frames for Realtime.
     pub(crate) fn enable_streaming_frames(&mut self) {
         self.chunk_mode = ChunkMode::Frames;
@@ -722,6 +731,32 @@ mod tests {
         };
         assert_eq!(select_named_device(devices(), "USB Mic").unwrap(), 1);
         assert!(select_named_device(devices(), "usb mic").is_err());
+    }
+
+    #[test]
+    fn choosing_next_input_preserves_the_active_recording() {
+        // Selecting a microphone while recording must retain the current session and its PCM.
+        let samples = vec![-71, 280, 1300, -905];
+        let mut recorder = recorder_for_buffer(samples.clone(), 16_000);
+        recorder.set_input_device(Some("Next Mic".into()));
+        assert_eq!(recorder.input_device(), Some("Next Mic"));
+        assert!(matches!(
+            recorder.start_recording(SessionId(2)),
+            RecorderStartOutcome::AlreadyRecording {
+                active_session_id: SessionId(1),
+                ..
+            }
+        ));
+        let RecorderStopOutcome::Stopped {
+            chunks, warning, ..
+        } = recorder.stop_recording(SessionId(1))
+        else {
+            panic!("device selection interrupted the active recording");
+        };
+        assert_eq!(warning, None);
+        assert_eq!(decode_chunks(chunks), samples);
+        recorder.set_input_device(None);
+        assert_eq!(recorder.input_device(), None);
     }
 
     fn recorder_for_buffer(samples: Vec<i16>, chunk_max_samples: usize) -> AudioRecorder {

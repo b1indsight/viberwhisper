@@ -1,7 +1,7 @@
 # 69 - 托盘右键菜单选择输入设备
 
-**阶段：** 方案已确认，开始实施。
-**PR：** 正在创建 Draft PR。
+**阶段：** 实现及本地验证完成；Windows 菜单实机与物理麦克风切换待验证。
+**PR：** [Draft PR #175](https://github.com/b1indsight/viberwhisper/pull/175)。
 
 增加原生“输入设备”子菜单，选择后保存配置，从下一次录音生效，不中断当前录音。初始方案保留如下；后续实施与验收记录追加到文末。
 
@@ -85,3 +85,22 @@
 - **范围外：** 更改系统默认麦克风、唯一设备 ID、自动热插拔、全量配置热重载、录音中无缝接流及其他音频设置。
 
 ## 2. PR 变更时间线
+
+### 2026-11-12：接通菜单、配置与下一次录音选择
+
+- **触发与实际实现：** 按上述方案在 `input::tray` 增加原生子菜单、新菜单项 ID、原始名称映射与勾选同步；动作经过既有 `platform::runtime`，由 `ui::listener::event_loop` 在会话归一化之前处理。启动与手动刷新复用 recorder 的设备枚举。
+- **实现边界决定（已实施）：** 将“读取最新文档、仅改设备字段并原子保存”封装在 `ConfigStore::set_input_device`，由 listener 调用；相比将配置字段操作直接放入 UI，这让配置写入继续归配置模块所有，不新增存储层或全量热重载。缺失及无效文档拒绝覆盖。
+- **运行时与失败处理：** 保存成功后才更新 recorder 的持久选择字段，不操作当前流、PCM、会话 ID 或分段模式；成功、失败、重复选择均同步全部勾选。保存失败使用 AppKit `NSAlert` / Win32 `MessageBoxW` 显示固定 Unicode 提示，不展示配置或凭据。
+- **回归覆盖：** 先添加配置与录音器回归，缺少对应接口时编译失败；实现后通过。配置回归覆盖具名原始字符串、系统默认、保留外部修改、缺失/损坏文档不覆盖；录音器回归验证选择变化不影响活动会话及非对称 PCM 样本。
+- **显示修正：** 原生截图发现 muda 0.17.1 的 macOS check-item 构造器直接显示 `&`，按 Windows 规则转义会产生双 `&`。仅 macOS 设备勾选项保留字面 `&`；Windows 仍转义，保存和匹配始终保留原始名称。修正后的原生截图已重新检查。
+- **文档：** README、使用详情、input/audio 架构与 changelog 同步说明入口、刷新和下一次生效规则。未加入依赖、配置字段或后台设备监听。
+
+### 2026-11-12：原生验收、消融与验证边界
+
+- **macOS 原生交互（已执行）：** 临时 fixture 直接包含生产 `src/input/tray.rs`，构造单一真实 `TrayManager`，通过 `NSMenu::performActionForItemAtIndex` 调用真实菜单动作并接收 `MenuEvent`。验证默认/具名选择、重名去重、含 `&`/换行的原始字符串映射、重复点击、模拟保存失败后的勾选恢复、刷新、旧 ID 丢弃、未检测到设备、枚举失败和空列表。失败恢复检查调用生产同步入口，未据此声称真实磁盘写入失败到弹窗的完整端到端链路已验收。
+- **渲染（已执行）：** 原生弹出菜单后用 timer 捕获 fixture 自己的窗口，逐张查看默认、具名选择、失败恢复、断开、枚举失败、空列表六种状态；检查单一勾选、禁用样式、单个字面 `&` 和无裁切。名称均标注“验收示例”。截图与原生状态日志保存在[本线程验收记录](https://ampcode.com/artifacts/a0837abf-6bb9-4187-bff3-a193960c73b1)。未捕获其他应用内容。
+- **勾选同步消融（已执行）：** 在临时生产源码副本中只移除 `set_selected_input_device` 的同步循环，复用同一原生 fixture（关闭截图）。选择 USB 后断言失败，实际同时勾选 `None` 和 USB；正常实现通过。故保留显式单选同步。日志位置：本地 `.amp/in/artifacts/tray-check-ablation.log`（未入库）。
+- **最新文档消融（已执行）：** 在现有配置回归中临时加入对照分支：先保存启动快照，外部将 `mic_gain` 改为 1.5，再改选系统默认。正常 `set_input_device(None)` 通过；`ABLATE_CONFIG_RELOAD=1 cargo test --locked device_selection_preserves_latest_settings_and_rejects_unusable_documents` 改用旧快照保存后失败，实际增益回到 1.0。故保留保存前重新读取。临时分支及验收 fixture 均不保留在产品中。
+- **完整本地检查（已通过）：** `cargo fmt --check`、`cargo build --locked`、`cargo test --locked`、`cargo test --locked --features diagnostic-logs`、`cargo clippy --locked --all-targets --all-features -- -D warnings`。修正标签与撤销消融分支后再次全部通过；现有 `vendor/rdev` 警告未扩展处理。
+- **CI 边界：** 初始仅文档提交的 [macOS CI 成功，Windows CI 失败](https://github.com/b1indsight/viberwhisper/actions/runs/43149538933)。读取失败日志定位到既有 `ui::setup::windows::tests::native_setup_dialogs_show_and_return` 的 `scrollbar_probe.ps1:202 Pointer coordinates differ`，未涉及本功能代码，未修改该滚动条测试。实现提交将由同一 PR 的 CI 验证。
+- **仍未验收：** Windows 原生菜单点击/外观、物理麦克风录音源切换、真实不可写配置到错误弹窗的完整链路；本地录音缓冲回归与模拟错误不替代这些证据。没有为此改动个人配置、系统默认输入设备或权限设置。
