@@ -135,7 +135,7 @@ fn run_with_mode(
                         .ok()
                 })
                 .unwrap_or_default();
-            platform.set_history(recent_history);
+            platform.tray.set_history(recent_history);
             ListenerOutput::delivery(
                 platform.text_typer(),
                 pipeline.post_processor,

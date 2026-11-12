@@ -13,6 +13,8 @@ use tracing::{debug, info};
 
 mod accessibility;
 mod application;
+#[cfg(not(test))]
+pub(super) mod gain;
 pub(super) mod hotkey;
 mod pasteboard;
 mod permission;

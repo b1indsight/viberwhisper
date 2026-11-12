@@ -43,18 +43,19 @@ feature flag, or OS-name match in the desktop listener.
 
 ## Application Interface
 
-`platform/runtime.rs` exposes the application capabilities as inherent methods on
-`PlatformRuntime<B, D>`. The listener uses the concrete `NativePlatform` alias selected for the
-build target. `PlatformBackend` supplies native policy and operations; `RuntimeDrivers` provides
-the injection boundary used by runtime tests.
+`platform/runtime.rs` owns application capabilities in `PlatformRuntime<B, D>`. The listener uses
+the concrete `NativePlatform` alias selected for the build target and updates the owned `tray`
+directly through `TrayManager`, without per-property runtime forwarding. `PlatformBackend`
+supplies native policy and operations; `RuntimeDrivers` provides the injection boundary used by
+runtime tests. `PlatformTray` requires only event handling, not UI-state setters.
 
 | Method | Capability |
 | --- | --- |
 | `start(hotkeys, notify)` | Construct the runtime and connect native callbacks; returns `anyhow::Result<Self>` |
 | `handle_event(event)` | Handle an opaque event and return an optional recording or exit action |
-| `set_recording(recording)` | Update the tray recording indicator |
-| `set_history(entries)` | Populate the recent-history menu |
-| `push_history(text)` | Add a newly saved transcription to the menu |
+| `tray.set_recording(recording)` | Update the tray recording indicator |
+| `tray.set_history(entries)` | Populate the recent-history menu |
+| `tray.push_history(text)` | Add a newly saved transcription to the menu |
 | `text_typer()` | Clone the thread-safe text-delivery handle |
 
 `NativePlatform::start` constructs the selected text writer and hotkey filter, starts the
@@ -93,10 +94,10 @@ tray callback ─┘                                  │
                                                  v
                                    RecordingSessionMachine
 
-SessionEffect::SetTrayRecording ─> NativePlatform::set_recording
+SessionEffect::SetTrayRecording ─> platform.tray.set_recording
 final transcription              ─> NativePlatform::text_typer ─> worker
-startup history (at most five)   ─> NativePlatform::set_history  ─> tray
-successful appended entry        ─> NativePlatform::push_history ─> tray
+startup history (at most five)   ─> platform.tray.set_history
+successful appended entry        ─> platform.tray.push_history
 TrayAction::CopyHistory(full text) ─> backend clipboard function
 ```
 

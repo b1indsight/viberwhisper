@@ -384,3 +384,11 @@ impl RecognitionPipeline {
 **取舍与验证。** 仅暴露无凭证的阶段元数据，不把 lab 报告类型引入生产所有者，也不新增另一套识别装配对象。显式场景复制已经解析的设置，避免为每个场景重新查询凭证或应用候选覆盖。原有 main/lab 实际请求和连续学习回归继续通过，并核对报告中的音频候选、模型、文字指令及两个不同的 temperature 与实际请求一致。Rust 1.99.1 全特性完整测试和 CI 同命令 Clippy、Rust 1.94 默认完整测试、fmt 均通过；无 prompt 内容、个人状态或生产行为变更。[全特性测试](../../.amp/in/artifacts/pr177-review-fixes-test-199.log)、[兼容测试](../../.amp/in/artifacts/pr177-review-fixes-test-194.log)、[Clippy](../../.amp/in/artifacts/pr177-review-fixes-clippy.log)。
 
 **交付限制。** 以已发布提交的子提交执行一次 1800 秒双路审查，结果有效且无 critical 后才更新原草稿 PR；任何新发现完整报告，不由本次授权继续返工。[004] 的真实文字污染仍阻塞质量验收，不合并、不部署、不切换个人应用。
+
+### [009] — 2026-11-12 — 跟随最新 master 解决并行托盘功能冲突
+
+**触发与范围。** [008] 双路复审无新发现，修复作为子提交推送后，CI 订阅未找到检查；只读查询确认 GitHub 将 PR 标为 `mergeable=false` / `dirty`。最新 `master` 已合入独立增益 PR #176，本分支与其只在托盘历史 API 调用处和 changelog 的首行追加发生文本冲突。该兼容工作不来自新审查发现，不改变 [008] 的配置修复，也不重新发布增益实现。
+
+**决策与实施。** 在本分支以合并子提交纳入已发布的 `master`，不 rebase 或强推旧历史。保留共享 `RecognitionPipeline` 和 raw capture 的装配，历史菜单改用 master 的 `platform.tray.set_history`，两条 changelog 均保留。其余增益代码按 master 原样继承，不改原生控件、自动保存或录音增益规则；共用 default 工作区的混合差异不参与合并或推送。
+
+**验证与发布边界。** 合并结果的 Rust 1.99.1 全特性完整测试、CI 同命令 Clippy、fmt 和差异检查通过；该机械兼容不新增行为测试，原有识别、学习及已合入的增益测试一起运行。[完整测试](../../.amp/in/artifacts/pr177-master-integration-tests.log)、[Clippy](../../.amp/in/artifacts/pr177-master-integration-clippy.log)。合并子提交另经同一 1800 秒双路门禁，只有有效通过后才推进原 bookmark 和草稿 PR，并重新订阅新 head；不手动触发发布或切换应用，文字污染的质量阻塞仍保留。

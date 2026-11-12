@@ -1,6 +1,7 @@
 mod backend;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod fallback;
+pub(crate) mod gain;
 #[cfg(target_os = "macos")]
 mod macos;
 mod preview;

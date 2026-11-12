@@ -98,7 +98,8 @@ impl From<cpal::PlayStreamError> for RecorderError {
 pub struct AudioRecorder {
     active: Option<ActiveRecording>,
     input_device: Option<String>,
-    gain: f32,
+    /// Captured by value when building a stream; changes affect only the next recording.
+    pub(crate) gain: f32,
     chunk_mode: ChunkMode,
     chunk_notifier: Arc<dyn Fn(SessionId) + Send + Sync>,
 }
@@ -1437,6 +1438,42 @@ mod tests {
             [400, i16::MAX, i16::MIN, 0, i16::MAX, -32767, 0, 16383]
         );
         assert_eq!(*notifications.lock().unwrap(), [SessionId(1), SessionId(1)]);
+    }
+
+    #[test]
+    fn gain_changes_leave_active_audio_unchanged_and_apply_to_new_callbacks() {
+        // Editing gain mid-recording must not change the remaining samples in that recording.
+        let mut recorder = recorder_for_buffer(Vec::new(), 16);
+        let mut old_callback = recorder.active.as_ref().unwrap().input_callback(
+            1,
+            recorder.gain,
+            Arc::clone(&recorder.chunk_notifier),
+            scale_i16,
+        );
+        old_callback(&[1200i16, -3400]);
+        recorder.gain = 0.5;
+        old_callback(&[5600i16, -7800]);
+        let RecorderStopOutcome::Stopped { chunks, .. } = recorder.stop_recording(SessionId(1))
+        else {
+            panic!("recording did not stop");
+        };
+        assert_eq!(decode_chunks(chunks), [1200, -3400, 5600, -7800]);
+
+        let next = ActiveRecording::new(SessionId(2), 16_000, ChunkMode::Fixed).unwrap();
+        next.shared.recording.store(true, Ordering::Relaxed);
+        let mut new_callback = next.input_callback(
+            1,
+            recorder.gain,
+            Arc::clone(&recorder.chunk_notifier),
+            scale_i16,
+        );
+        new_callback(&[1200i16, -3400]);
+        recorder.active = Some(next);
+        let RecorderStopOutcome::Stopped { chunks, .. } = recorder.stop_recording(SessionId(2))
+        else {
+            panic!("next recording did not stop");
+        };
+        assert_eq!(decode_chunks(chunks), [600, -1700]);
     }
 
     #[test]
