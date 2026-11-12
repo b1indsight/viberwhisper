@@ -418,3 +418,9 @@ impl RecognitionPipeline {
 **状态消融。** 每次只修改 Runner 一个机制，运行 `cargo +1.99.1 test --locked --lib prompt_lab::production::tests::ordinary_http_matches_desktop_pcm_cleanup_and_learning_except_audio_prompt -- --exact --nocapture`。取消源初态时，lab final 保留错误专名，和桌面已纠正 final 不同；保留初态但丢弃确认时，第二次 cleanup 请求缺少上次 final 和候选，与桌面请求不同。两次均因实际可观察结果失败，保留这两项机制；恢复代码后完整默认及全特性测试通过。[初态消融](../../.amp/in/artifacts/pr177-scope-seed-ablation.log)、[确认消融](../../.amp/in/artifacts/pr177-scope-feedback-ablation.log)。不额外引入可移除的生产模式/时钟/trace 层。
 
 **完整检查与未交付事项。** Rust 1.99.1 的 `cargo test --locked`、`cargo test --locked --all-features`、`cargo clippy --locked --all-targets --all-features -- -D warnings`、fmt 和实际 evaluate help 通过；vendor rdev 既有警告保留。[默认测试](../../.amp/in/artifacts/pr177-scope-tests-default.log)、[全特性测试](../../.amp/in/artifacts/pr177-scope-tests-all-features.log)、[Clippy](../../.amp/in/artifacts/pr177-scope-clippy.log)、[CLI help](../../.amp/in/artifacts/pr177-scope-evaluate-help.log)。本地缩减未推送、未重新执行发布审查或远端 CI；此前审查不覆盖本版本。旧 head 的 Windows 原生 smoke 坐标失败仍未确认原因，本轮没有修改原生实现。`.156` 质量、麦克风与真实投递未复测，个人配置/记忆/服务/应用未修改；范围收缩不代表短音频污染已经修复。
+
+### [012] — 2026-11-12 — 将 WAV 回放移入录音子模块
+
+**要求与实施。** 用户要求移动回放函数。将 `replay_wav`、`replay_chunks`、`ReplayWake`、`wait_for_replay` 及原回放测试移入 `src/audio/recorder/replay.rs`；`recorder.rs` 保留私有模块声明和 `pub(crate)` 重导出。采用子模块使回放继续直接复用父模块私有的 `ActiveRecording`，不扩大录音内部类型或字段的可见范围；`audio::replay_wav` 和 lab 调用点不变。测试只调整相对路径，并保留本地 WAV 断言解码辅助函数，避免依赖另一测试模块。`dictation` 的记忆重放未改动。
+
+**验证与范围。** 移动前录音测试通过。源码核对确认回放实现正文逐字相同，原录音正文除回放导入和模块重导出外未变，回放测试除模块相对路径外未变。[核对记录](../../.amp/in/artifacts/replay-move-source-parity.log)。移动后的默认测试、全特性测试、全目标全特性 Clippy 和 fmt 通过；沿用原测试，不增加测试合同或运行机制，因此不另做消融。[默认测试](../../.amp/in/artifacts/replay-move-tests.log)、[全特性测试](../../.amp/in/artifacts/replay-move-tests-all-features.log)、[Clippy](../../.amp/in/artifacts/replay-move-clippy.log)。本次移动仅在专用工作区本地完成，未更新远端草稿 PR，也未改变识别行为、个人配置或应用。
