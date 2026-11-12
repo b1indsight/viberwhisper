@@ -1,7 +1,7 @@
 # 68 - Realtime 纯转写与文字后处理 — Feature record
 
 **Stage:** Draft implementation；初始两阶段方案、修订 002/004 及 HTTP 报告边界修正 005 已完成隔离实现与本地检查。连续生产状态实测仍复现文字后处理复制示例，质量验收未通过，PR 须保持草稿。真实桌面交付和 Windows 验收另行执行；发布审查与 CI 结果随 PR 记录。
-**PR:** `feat/production-recognition-parity` → `master`，仅草稿；用户已授权延长审查时限，门禁通过后提交、推送并创建。合并、部署、个人配置激活和实际应用切换不在授权中。
+**PR:** [草稿 #177](https://github.com/b1indsight/viberwhisper/pull/177)，`feat/production-recognition-parity` → `master`。合并、部署、个人配置激活和实际应用切换不在授权中。
 
 **当前设计：** 已批准的[修订 002](#002--2026-11-12--prompt-lab-复用完整生产识别路径)取代下文初始方案中“prompt-lab 保留旧协议”的安排；[修订 004](#004--2026-11-12--普通评估复用生产初态时钟会话和确认学习)进一步取代普通评估的空初态、逐样本重建与丢弃反馈。初始方案及既有时间线保留作为历史。实际实施与验证见 [003](#003--2026-11-12--共享生产识别与隔离评估的本地实现)及 004。
 
@@ -368,3 +368,9 @@ impl RecognitionPipeline {
 **明确授权。** 用户要求“延长审查时限，重跑通过后提草稿 PR”。本轮将 `JJ_REVIEW_TIMEOUT_SECONDS` 从默认 600 秒提高到 1800 秒，对隔离工作区的完整最新提交执行同一双路只读审查。只有获得有效通过结果，才把 `feat/production-recognition-parity` 指向门禁返回的精确提交并推送，创建面向 `master` 的草稿 PR。执行失败或 critical 发现仍停止发布，不把局部结果当成通过。
 
 **范围与报告。** 本次授权不包含按发现修改代码，也不包含文字 prompt 的新设计；所有有效审查发现随 PR 或交付结果完整报告。已有本地验证及连续状态污染证据保持不变，草稿 PR 明确区分路径一致性完成、质量验收未通过和未执行的原生验收。不公开个人状态报告，不合并、不部署、不激活个人配置或替换已安装应用。
+
+### [007] — 2026-11-12 — 跟随 CI 工具链修正测试分块写法
+
+**失败与修正。** [首轮 macOS CI](https://github.com/b1indsight/viberwhisper/actions/runs/43181427563/job/131058081588) 的构建及两组测试通过，但 Rust 1.99.1 的诊断模式 Clippy 拒绝三个测试中的常量大小 `chunks_exact`；此前本地 Rust 1.94 不含该检查。使用已安装的 1.99.1 和完全相同的 CI 命令复现三个错误后，将调用改为 `as_chunks::<N>().0.iter()`，保留块大小、顺序和忽略不足整块尾部的行为。语音选择谓词解引用一次以适配数组引用，避免直接应用自动建议产生的类型错误。不关闭 lint、不改变 CI 或工具链配置，不改生产识别行为；两个既有审查发现和文字污染均未在本轮修改。
+
+**验证与发布边界。** 同一 `cargo +1.99.1 clippy --locked --all-targets --features diagnostic-logs -- -D warnings` 先红后绿；1.99.1 的诊断模式完整测试、1.94 的全特性完整测试与 fmt 通过。现有回归不变，无新增行为或额外状态，消融不适用。本补丁作为已发布提交的子提交独立审查，门禁通过后仅更新同一草稿 PR，不改写已发布历史；远端结果由新一轮 CI 决定。[复现日志](../../.amp/in/artifacts/pr177-clippy-199-red.log)、[修正后 Clippy](../../.amp/in/artifacts/pr177-clippy-199-green.log)、[1.99.1 测试](../../.amp/in/artifacts/pr177-test-199-green.log)、[1.94 测试](../../.amp/in/artifacts/pr177-test-194-green.log)。

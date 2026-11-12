@@ -204,7 +204,7 @@ fn ordinary_integrated_evaluation_reuses_production_memory_and_connection_withou
 
     // Inspect the peer's bytes, not just the report's reconstructed memory snapshots.
     assert_eq!(requests.len(), 5); // One session update and two prefix/response pairs.
-    for (index, pair) in requests[1..].chunks_exact(2).enumerate() {
+    for (index, pair) in requests[1..].as_chunks::<2>().0.iter().enumerate() {
         let prefix: Value =
             serde_json::from_str(pair[0]["item"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(

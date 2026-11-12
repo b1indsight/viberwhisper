@@ -20,8 +20,10 @@ fn short_speech() -> Vec<i16> {
         .unwrap();
     // Choose a real 500 ms speech excerpt using the same production gate; DC
     // tones are not speech and would exercise silence cleanup instead of ASR.
-    pcm.chunks_exact(12_000)
-        .find(|samples| {
+    pcm.as_chunks::<12_000>()
+        .0
+        .iter()
+        .find(|&samples| {
             crate::audio::contains_speech_for_dictation(
                 &crate::audio::chunk::encode_i16_wav(samples, 24_000).unwrap(),
             )
@@ -43,7 +45,9 @@ async fn transcription_short_segments_have_only_own_audio_and_no_memory_owner() 
     .unwrap();
     let first = short_speech();
     let tail = first
-        .chunks_exact(600)
+        .as_chunks::<600>()
+        .0
+        .iter()
         .max_by_key(|samples| {
             samples
                 .iter()
