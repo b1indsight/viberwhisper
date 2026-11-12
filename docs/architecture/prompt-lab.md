@@ -1,138 +1,123 @@
-# Prompt Lab Architecture
+# STT Prompt Lab Architecture
 
-## Purpose and boundary
+## Purpose and Boundary
 
-Prompt lab collects a human-corrected WAV dataset and evaluates **the production recognition
-pipeline**, up to the editable, pre-delivery final result. Evaluation calls
-`core::recognition::RecognitionPipeline::recognize_wav`, the same assembly and finalization used
-by desktop recognition. Only the audio source and host feedback differ. It does not inject text,
-open a native preview, write normal `history.jsonl`, contact a Judge service, or persist candidate
-prompts into application configuration. One process owns a dataset at a time.
-
-`record` is deliberately different: it archives original audio and raw HTTP STT material for human
-correction. Its captured transcription is not a full-pipeline evaluation result and is never reused
-as a fresh hypothesis. This distinction also applies when capture and evaluation use the same model.
+Prompt lab builds a reusable, human-corrected audio dataset. Ordinary evaluation uses desktop
+recognition and scores its pre-edit final text, including configured cleanup and local corrections.
+It does not write normal `history.jsonl`, inject text, call a Judge service, or persist a candidate
+prompt into application configuration. One prompt-lab process owns a dataset at a time.
 
 ## Modules
 
-| Module | Responsibility |
-| --- | --- |
-| `capture.rs` | Session-owned archive worker and sample publication |
-| `dataset.rs` | Strict manifests/sidecars, correction, validation and scoring identity |
-| `metrics.rs` | Versioned WER alignment and proper-noun matching |
-| `production.rs` | Production runner, stage identity, safe evidence and pure validation |
-| `realtime.rs` | Explicit scenarios, feedback, stage assertions and historical report replay |
-| `regression.rs` | Evaluation/report contract, scoring, comparison and review gates |
-| `review.rs` | Coding-agent review identity, coverage and report completion |
-| `core::prompt_lab` | CLI and saved-configuration assembly |
+```text
+src/prompt_lab.rs
+src/prompt_lab/
+  capture.rs       — session-owned archive worker and sample publication
+  dataset.rs       — strict manifests/sidecars, correction, validation, scoring digest
+  metrics.rs       — versioned WER alignment and proper-noun matching
+  production.rs    — paced WAV input, isolated state and desktop recognition owners
+  regression.rs    — fresh WAV execution, report contract, shared review rules, comparison
+  review.rs        — coding-agent input identity/coverage validation and report completion
+src/core/prompt_lab.rs — CLI/config/backend assembly
+```
 
-The domain modules contain no winit or native platform types. There is no lab-specific recognizer,
-fixed-block recording lifecycle, alternative segmenter, or independent cleanup implementation.
-Historical schema-1/2 validation remains read-only; historical fixture generation is test-only.
+The domain modules contain no winit or native platform types. Ordinary evaluation resolves
+`ListenerConfig`, constructs the same `SessionOrchestrator` and `PostProcessor` as desktop, and calls
+their shared `core::recognition::finish_transcription`. Desktop's backend and cleanup selection,
+protocol, short-tail padding, failure fallback and confirmation behavior are unchanged.
 
-## Dataset and capture
+## Dataset and Capture
 
 An explicit dataset root contains `dataset.json`, `audio/<sample-id>.wav`,
-`samples/<sample-id>.json`, and `runs/<run-id>.json`. Owned directories are canonicalized; symlink
-storage, path escape, unexpected fields, invalid versions, malformed WAVs and digest mismatches are
-rejected or reported. IDs combine Unix milliseconds and a process sequence.
+`samples/<sample-id>.json`, and `runs/<run-id>.json`. The root and its three owned directories are
+canonicalized; symlink storage, path escape, unexpected fields, invalid versions, malformed WAVs,
+and digest mismatches are rejected or reported. IDs combine a Unix-millisecond timestamp and a
+process sequence.
 
-Only `record` creates dataset storage. Evaluation, validation and sample commands require the
-manifest and all owned directories; they do not create or repair missing storage. Sample commands
-check regular files and containment before reading or changing sidecars.
+Only `record` creates dataset storage. Evaluation, validation and sample commands require an
+existing manifest and all three owned directories; they fail without creating or repairing missing
+storage. Sample show/list/correct share the regular-file and dataset-containment checks, so a
+sidecar symlink is rejected before its contents are read or corrected.
 
-Capture clones complete immutable `WavChunk` values into a bounded archive worker. It validates
-the stable 16-bit integer WAV format, appends samples in session order, closes and hashes the WAV,
-then directly writes a sidecar with raw merged STT and sanitized request metadata. Valid audio is
-retained when STT fails or is partial. Only `sample correct` supplies a human reference and proper-
-noun annotations. Silence is archived without requesting hallucination-prone silent STT.
-Persistence is direct rather than transactional: interrupted files and orphans are diagnosed by
-`dataset validate`, not automatically repaired.
+Prompt-lab listener output clones complete immutable `WavChunk` values into a bounded archive
+worker. The worker validates a stable 16-bit integer WAV format and appends decoded samples in
+session order to one final WAV. Finalization closes that writer, hashes the WAV, and directly writes
+one sidecar containing raw merged STT output and sanitized endpoint/model/language/temperature/
+prompt metadata. A valid WAV is retained even when STT is partial or failed. Only `sample correct`
+can replace the pending reference with validated human text and proper-noun annotations.
 
-## Production execution
+Capture and evaluation use the shared pre-upload silent-chunk gate. A silent capture is still
+archived, but its empty STT result keeps the existing failed/pending diagnostic state rather than
+persisting provider hallucination text. Because ready samples require a non-empty human reference,
+silence can exercise the capture path manually but does not enter WER, proper-noun, or semantic
+scoring.
 
-Validation returns one ordered scoring snapshot, including WAV hashes and valid ready sidecars.
-The dataset digest covers scoring-policy version, IDs, WAV hashes, human references and proper-
-noun annotations; initial capture text is excluded. A run requires at least one ready sample,
-scoreable reference token and expected proper-noun occurrence.
+Persistence is intentionally direct rather than atomic. A process interruption can leave a
+truncated WAV/JSON or an unreferenced file; `dataset validate` reports it and performs no repair.
 
-Each WAV is a **single production session**. The shared audio adapter decodes mono PCM at its
-original rate, without applying recording gain again, and feeds production buffering, pause-aware
-packaging and stop-tail handling. Realtime frames are resampled and pause-segmented by the normal
-worker; file read blocks do not create independent recordings. Playback is paced at 1x by audio
-offset and the real monotonic clock. Production bounded queues, overflows, transport errors and
-convergence deadlines remain observable; lab neither floods the queue instantaneously nor waits
-privately for full queues to become writable.
+## Scoring Snapshot and Execution
 
-The saved configuration selects exactly the production stages:
+Validation and scoring share one ordered scan of the sidecars and their audio. The scan returns
+diagnostics and valid `ready` samples together, so evaluation does not reparse sidecars or rehash
+audio to construct its snapshot. Sample listing keeps its separate fail-fast behavior.
+The dataset digest covers only the scoring-policy version, IDs, WAV SHA-256 values, human
+references, and proper-noun annotations. Initial capture text is excluded. At least one ready sample,
+one scoreable reference token, and one expected proper-noun occurrence are required.
+The evaluation request's STT snapshot owns the language used for both HTTP chunk merging and
+Realtime segment merging, as well as the language persisted in the report.
 
-| Configuration | Execution mode |
-| --- | --- |
-| HTTP STT, cleanup disabled | HTTP transcription, pass-through final |
-| HTTP STT, cleanup enabled | HTTP transcription → structured text cleanup |
-| Realtime, cleanup disabled | Integrated structured dictation |
-| Realtime, cleanup enabled | Audio-only plain transcription → structured text cleanup |
+The selected audio recognizer receives an in-memory prompt override. Realtime evaluates the full
+integrated task instructions; `--prompt-file` replaces them and `--no-prompt` sends empty instructions.
+HTTP overrides only its audio prompt, leaving configured text cleanup unchanged. Candidates do not
+modify application configuration. Reports store the actual audio prompt.
+Realtime resolves the fixed-order `dictation.prompt_components` object, or the embedded JSON
+default components, through the same configuration-owned composition used by live requests.
+Full-string and no-prompt evaluation overrides clear the cloned component selection, so a saved
+component object cannot conflict with an invocation-scoped full override. Reports and prompt
+digests describe the actual composed or overridden instructions, never just one component.
+For each WAV, decoded PCM enters one production `ActiveRecording` at 1x audio time, using its
+buffer, ready-chunk and stop-tail logic. HTTP uses desktop pause segmentation; Realtime uses its
+existing streaming frames. Saved capture gain is not applied again. Input and queue failures take
+the existing incomplete-result path. Partial final text remains scoreable, but the run is marked
+`incomplete`, returns nonzero, and cannot be reviewed or used as a comparison baseline.
 
-Two-stage audio receives only its selected audio instructions and audio, not history, vocabulary,
-JSON examples or prior segment text. The text stage receives the actual merged raw transcription
-and its own production memory snapshot. Complete nonempty recognition can be cleaned up; empty,
-partial, failed or cancelled recognition follows the shared production skip policy. Cleanup failure,
-invalid JSON or empty text preserves raw text with an explicit fallback status. Shared preparation
-applies already confirmed local corrections before the pre-edit final is recorded.
+Ordinary runs preserve configured vocabulary and initialize a temporary memory file through
+production Memory load/prune/recovery, retaining hidden contexts and learned corrections. The source
+is read-only; disabled or unused memory is not read. One set of production owners and real system
+clocks serves all samples in stable ID order. Successful nonempty finals are confirmed unchanged in
+the private copy, simulating Enter; the serial owners handle feedback before their next job.
+References remain scoring-only and never enter recognition or feedback. No native preview or real
+delivery is performed. Existing `convert`, setup verification and raw capture keep their behavior.
 
-`--prompt-file` and `--no-prompt` affect **only the selected audio stage**, not cleanup or mode.
-HTTP no-prompt omits its field; Realtime sends empty instructions. With no candidate, the actual
-composed production instructions are used. Saved integrated `dictation.prompt` / components
-conflicts in two-stage mode are validated **before** applying an experimental override. A candidate
-cannot conceal an incompatible saved configuration and does not modify that configuration.
+## Realtime Context and Memory Scenarios
 
-References and annotations are passed only to scoring. Assertions and forbidden strings are local
-checks, never model inputs. The runner interface receives only WAV, resolved settings and explicit
-state/feedback; it cannot automatically turn the reference into confirmation text.
+`prompt-lab evaluate --realtime-cases cases.json` opts into seeded sequential Realtime evaluation.
+It requires the enabled Realtime backend. This retains the existing frozen-clock diagnostic
+execution and schema-2 report contract, separate from ordinary desktop-path evaluation. Migrating
+these explicit scenarios is deferred; they do not claim desktop-state or full delivery parity.
+Use the normal dataset, prompt, thresholds, output and agent-review arguments.
 
-## Production state and explicit diagnostic scenarios
-
-Ordinary evaluation uses main's resolved configuration, configured vocabulary and a read-only
-snapshot of `dictation-memory.json`, including retained history and learned corrections. The source
-is never rewritten. Disabled memory skips reading the file; missing or damaged storage uses the
-same canonical recovery as main. The captured state initializes a temporary copy, not a truncated
-visible-context reconstruction or the strict artificial scenario seed limits.
-
-One production pipeline and its connections live for the entire ordered dataset, using the same
-system clock as main. Each successful nonempty final is accepted unchanged, simulating Enter;
-learning writes only the temporary copy and is visible to the next sample. References never enter
-recognition or feedback. WAV playback replaces microphone capture, and real preview, focus, history
-and native delivery are not exercised. This assumed-success feedback is not proof of native delivery.
-Reports contain the initial memory snapshot and actual contexts: keep them private, especially
-before sharing a report or attaching evidence to a PR.
-
-`--realtime-cases cases.json` requires Realtime and cases **schema 3**. Every ready dataset sample
-must occur exactly once. Each scenario has a separate production pipeline and explicit temporary
-seed, reused by its ordered steps. These are explicitly diagnostic overrides, not ordinary
-main-equivalent evaluations. Seed long-term vocabulary replaces configured personal terms;
-observations are installed through production persistence, not a frozen-memory bypass. Seed
-validation uses production retention, budgets and limits and rejects observations initialization
-would silently discard. An isolated run is not evidence about the user's real personal state.
+The strict version-2 JSON file contains `cases`. Each case has an `id`, Unix-seconds `at`, optional
+`seed` and ordered `steps`. Every ready dataset ID must appear exactly once across all cases.
+Cases reset connection and memory; steps reuse them and learn only from successful recordings.
+`advance_seconds` moves the simulated clock before that step. No personal memory file is opened.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 2,
   "cases": [{
-    "id": "project",
-    "at": 100,
+    "id": "project", "at": 100,
     "seed": {"long_term": [
       {"context": "project", "kind": "proper_noun", "text": "ViberWhisper"}
     ]},
     "steps": [{
       "sample_id": "REPLACE_WITH_READY_ID",
-      "feedback": {"delivered": {"text": "使用ViberWhisper。"}},
       "expect": {
-        "audio": {"audio_only": true},
-        "cleanup": {
-          "input": {"contexts_present": ["project"]},
-          "context": "project",
-          "candidates_present": ["ViberWhisper"]
-        },
+        "input": {"contexts_present": ["project"]},
+        "context": "project",
+        "candidates_present": ["ViberWhisper"],
+        "memory": {"terms_present": [{"context": "project", "kind": "proper_noun",
+          "text": "ViberWhisper", "supporting_recordings": 1}]},
         "forbidden_text": ["history-only sentinel"]
       }
     }]
@@ -140,112 +125,117 @@ would silently discard. An isolated run is not evidence about the user's real pe
 }
 ```
 
-This example assumes the two-stage configuration and a matching recording. Replace the IDs and
-assertions, and include all ready samples. The [two-step fixture](../../tests/fixtures/prompt-lab/realtime-cases.json)
-also demonstrates expiration and failed delivery. `seed.observations` contains `recording`,
-`segment`, `at`, `context`, `text`, and `terms`; seed recording names cannot start with `sample:`.
+Replace the ID and assertions with the actual recording's requirements and include all ready IDs.
+A [two-step fixture](../../tests/fixtures/prompt-lab/realtime-cases.json) illustrates seeded history,
+learning support and expiration; replace its `first`/`second` IDs before running against your dataset.
+`seed.observations` entries have `recording`, `segment`, `at`, `context`, `text`, `terms` (the same
+shape as long-term terms). Seed recording names cannot begin with `sample:`. Future timestamps,
+invalid fields, excessive memory counts and initial snapshots over the production budget are rejected
+before networking. Validation checks that production initialization retains every seed observation;
+observations aged 24 hours or more are rejected, using production retention rather than copied rules.
+Production snapshot limits still expose the newest three histories per context.
 
-Feedback is `"discard"`, `"delivery_failed"`, or `{"delivered":{"text":"independent edit"}}`.
-Omission means discard. Only delivered feedback invokes the production single-use confirmation.
-An actual confirmation must exist; fallback, partial or memory-disabled text cleanup cannot invent
-one. Integrated mode retains its production confirmation behavior even with memory disabled.
-Unused handles are dropped before the snapshot barrier. Explicit feedback and that barrier finish
-before the next step, so discard/failure cannot learn and delivered text can affect later correction.
-These are simulated host outcomes, not proof of native application delivery. Scoring always uses
-the **pre-edit final**, never the explicit delivered text.
+Both `input` and `memory` accept `contexts_present/absent`, `terms_present/absent` and
+`history_present/absent`. History and `forbidden_text` use exact substring matching. Term assertions
+match context, kind and text; an optional `supporting_recordings` requires a short-term candidate with
+that exact independent-recording support count. `candidates_absent` complements `candidates_present`.
+Both candidate assertions contain strings and check the retained, correction/learning-eligible
+names across all segments, not every raw array entry; seed and snapshot term assertions retain
+`kind`. `context` checks the final segment's exact raw string. Omitting it or using null skips that
+assertion; `"未知语境"` explicitly asserts unknown context. This optional fixture assertion does not
+change the model protocol: model output must always use a string. Metadata validity is always
+checked using the production parser's verdict, including missing/wrong-type fields and discarded
+entries. The raw array must cover the supplied names' owned occurrences in source order, or contain
+their first eight when capped; client sorting cannot hide reordering. Nine mentions with eight
+strings therefore pass metadata while the incomplete name group remains absent from retained
+candidates. Invented names, ambiguous overlaps, overflow, shorter incomplete arrays and unknown
+context with nonempty candidates fail metadata even when production preserves the text.
 
-The injected memory clock advances by real monotonic elapsed seconds during playback and inference.
-`advance_seconds` is added before a step; after recognition the clock is frozen for explicit feedback
-and the barrier. The next step begins there. Production network/playback deadlines still use real
-monotonic time. Integrated traces retain the actual memory timestamp for each segment, including
-expiration within a recording; readers require nondecreasing timestamps within the sample interval.
-Pure ASR has no memory timestamp because that stage must not read a memory clock.
+The response uses the production declared vocabulary reference, audio reference and inline dynamic
+context, in that order. Segment traces retain both wire text parts and the reconstructed Snapshot;
+replay validates them against the seeded memory and the recording's frozen vocabulary. References,
+assertions and forbidden strings are never sent. Reports include seeds and history, so store them appropriately.
+Schema-2 reports replay traces through production Memory and recompute assertions on read and review.
+Malformed metadata or failed assertions preserve an awaiting-review report but fail `gates.realtime`;
+transport or transcription errors yield an incomplete report. Semantic review must also inspect
+history contamination beyond declared strings. Ordinary non-Realtime schema-1/schema-2 reports remain readable.
+`--compare-to` requires identical case IDs, order, clocks and assertions; seeds may differ, recorded
+by `comparison.realtime_inputs_changed` and per-case `realtime_seed_changes` with before/after seeds.
+Ordinary and scenario reports cannot compare directly. String topics no longer distinguish creating
+a topic from reusing a known label.
 
-Assertions name `audio` or `cleanup`; legacy ambiguous `input`, `context` and candidate assertions
-are rejected for new cases. Both stage inputs and feedback `memory` support context, term and
-history presence/absence. History and forbidden text use exact substrings. Term assertions match
-context/kind/text; optional `supporting_recordings` checks independent short-term support. Stage
-context checks the raw exact string; candidate assertions check production-retained eligible names,
-not invented or malformed raw array entries. Structured outputs receive strict metadata checks.
-`raw_text` and `final_text` assert exact respective results. Pure ASR is a string without a synthetic
-empty JSON context. Failed stage assertions remain visible and block final gates.
+Realtime policy `realtime-context-memory-v5` requires cases schema 2, topic strings and proper-noun
+occurrence strings, with the production NFKC/lowercase, full-name, count and overlap checks. It retains
+the stable-prefix / audio / dynamic input layout and requires its wire input evidence in every segment
+trace. Readers preflight versions before deserializing nested assertions, so old Realtime cases and
+policy-v1/v2/v3/v4 reports fail with migration/rerun guidance instead of being rescored under the new
+rules. Cross-policy comparisons are rejected before networking; migrate the cases and rerun the
+baseline to compare with policy v5. All new Realtime evaluations,
+including ordinary runs without scenarios, record `stt.input_layout=stable-prefix-audio-dynamic-v1`.
+Legacy reports omit that optional field; different layouts cannot compare as identical request
+identities. HTTP metadata retains its existing shape. Historical WER from context-before-audio
+does not establish the quality of this input order.
 
-## Schema-3 identity, evidence and comparison
+## Metrics
 
-All new reports have schema 3 and execution policy `production-recognition-v2`. Identity includes:
+The scoring policy is versioned as `stt-prompt-scoring-v2`:
 
-- selected HTTP/integrated/transcription mode and per-stage input layout;
-- sanitized endpoint, model, language, protocol temperature (absent for Realtime), actual composed
-  prompt and prompt digest for each selected stage, plus cleanup preheat policy;
-- explicit audio-candidate marker, production segmentation and 1x pacing policies;
-- memory enabled switch, isolation policy and seed digest, memory-clock and feedback policies;
-- scenario order/clock/assertion/feedback contract digest when applicable, and an overall digest.
+- WER applies NFKC first. A reference containing Han characters selects the bundled Jieba
+  dictionary with HMM disabled for both sides; other references use Unicode word boundaries.
+  Punctuation is excluded, tokens are case-folded, Levenshtein backtracking records every equal,
+  substitution, deletion, and insertion, and the aggregate is a micro-average.
+- Proper-noun matching applies NFKC, canonical plus accepted forms, each annotation's case policy,
+  expected-count caps, and global longest-first overlap consumption. Outer form edges use separate
+  Han and other Unicode-alphanumeric word classes, so an exact Latin/digit form can touch Han text
+  while a same-class character still blocks embedding in a larger token. The edge rule also applies
+  to dotted and multiword forms. The aggregate is matched expected occurrences divided by all
+  expected occurrences.
+- Semantic similarity is not computed locally. The coding agent applies rubric
+  `semantic-equivalence-v1` to each reference/hypothesis pair and supplies an integer score, reason,
+  and structured differences. The aggregate is the unweighted sample mean.
 
-Each sample preserves `raw_hypothesis`, pre-edit final `hypothesis`, recognition error and warning,
-cleanup status/safe error, playback duration, stop-to-ASR convergence wait and cleanup duration.
-Realtime evidence includes actual audio boundaries, stage instructions, input layout, per-segment
-memory inputs/timestamps when applicable, and verified plain or structured outputs. Cleanup evidence
-contains its actual input snapshot, structured output and prepared text. Before/after snapshots,
-feedback and confirmation availability bind the learning transition. Snapshot timestamps and the
-exact confirmation timestamp come from the production memory owner; ordinary time is never frozen
-or inferred from the later report completion time. A confirmation acknowledgment covers handling
-and a save attempt, not guaranteed durable storage. Reports omit audio
-base64 and credentials. The evidence digest also binds sample identities, references and traces.
+## Two-Phase JSON Report
 
-Report loading recomputes local metrics, validates identity/digests, stage/raw/final relationships,
-and replays production Memory preparation and confirmation without files or network. It rejects
-inconsistent final text, stage identity, feedback, trace inputs, clocks, snapshots and derived checks.
-A partial result retains reachable text and its scores but the run remains `incomplete`: it cannot
-be reviewed, become a successful baseline or pass final gates. Cleanup fallback keeps its raw
-score but explicitly blocks the execution gate; it cannot masquerade as two successful stages.
+A successful ordinary run writes schema-3 JSON with `execution.policy=desktop-recognition-v1`,
+credential-free saved-settings and normalized-initial-memory hashes, and the existing scoring fields.
+Only the candidate audio prompt is excluded from the saved-settings hash. This conservatively
+requires other saved settings to match, including settings unused by a selected backend. It adds
+no worker clocks, acknowledgment protocol, stage traces or Memory replay. Historical schema-1/2
+reports remain readable; schema-3 reports from the withdrawn broader implementation require a rerun.
+The new policy cannot compare with STT-only or explicit diagnostic execution, or with different
+settings/initial memory. These checks run before recognition requests; rerun a compatible baseline.
 
-`--compare-to` requires a complete compatible schema-3 baseline: same dataset/ready IDs, execution
-policy, mode, noncandidate stages, memory switch, replay policies and scenario contract. Only an
-explicit audio candidate may change in ordinary runs; a different initial memory snapshot requires
-a new baseline. Diagnostic seed changes are listed per case. Ordinary and diagnostic runs cannot compare.
-Later contexts may legitimately diverge after candidate outputs and their accepted feedback diverge;
-the before/after snapshots expose that rather than treating later requests as independent samples.
-Cross-mode ablations belong in separate reports, not in a same-pipeline comparison.
+Local success has status `awaiting_agent_review` and null LLM/gate fields. Agent review input
+retains schema 1 and must use the exact run ID and rubric, contain each sample ID once,
+use scores in `0..=100`, and provide non-empty reasons plus differences for every score below 100.
+The review module validates the entire input and unchanged report contract before any write. Metric
+counts, alignments, annotations, and matched forms must exactly equal fresh derivations; derived
+percentages and the LLM mean use a bounded floating-point comparison so JSON round trips cannot
+invalidate an otherwise unchanged report. The module then embeds the review content, calculates
+the mean and inclusive gates, and directly rewrites that report as `complete`. Invalid input
+leaves the report byte-for-byte unchanged.
 
-Historical ordinary schemas 1/2 and schema-2 `realtime-context-memory-v5` / cases-2 reports remain
-readable under their original scoring/replay contract. No missing production traces are fabricated.
-Old cases are rejected before networking with migration guidance. Historical and production reports
-cannot compare: rerun the baseline. Earlier incompatible Realtime policies still require reruns.
+The report-domain types in `regression.rs` own the shared rules: `AgentSampleReview::validate`
+checks review payloads, `EvaluationReport::review_aggregate` summarizes the validated sample
+reviews, and `GateResults::evaluate` / `all_passed` calculate the inclusive gates and overall
+result. Review application and completed-report loading both use these methods. Input document
+identity, duplicate IDs, and exact sample coverage remain the responsibility of `review.rs`.
+Loading a completed report independently validates each review and recomputes the aggregate and
+gates to check the stored values. Gate evaluation uses the validated persisted LLM mean so an
+accepted JSON rounding difference does not change an exact-threshold decision during loading.
 
-## Metrics and coding-agent review
+`meets_targets` is true only when WER is at or below its maximum and both 100-point metrics are at
+or above their minima. There is no combined score. Optional comparison requires a complete report
+with identical dataset identity, ready IDs, endpoint/model/language/temperature, scoring policy, and
+rubric before STT starts. Local deltas are written in phase one; semantic deltas are filled when the
+new agent review is applied.
 
-Scoring policy remains `stt-prompt-scoring-v2`:
+## Privacy
 
-- WER uses NFKC, bundled Jieba (HMM disabled) for Han references or Unicode word boundaries for
-  others, excludes punctuation, case-folds, and records full Levenshtein alignment; aggregate WER
-  is a micro-average.
-- Proper nouns use NFKC, canonical/accepted forms, annotation case rules and expected counts,
-  longest-first overlap consumption, and Han/non-Han word-edge rules. Aggregate accuracy is
-  matched expected occurrences divided by all expected occurrences.
-- Coding-agent semantic review uses `semantic-equivalence-v1`, integer scores in `0..=100`,
-  nonempty reasons, and structured differences for scores below 100; the mean is unweighted.
-
-A successful local run is `awaiting_agent_review`, with no semantic aggregate or final gates.
-Production review input uses schema **2**, exact `run_id`, rubric, `execution_sha256` (the execution
-identity's `sha256`), `evidence_sha256`, and every sample exactly once. Historical reviews retain
-schema 1 without production digests. The entire unchanged report and review are validated before
-writing; invalid input leaves the report untouched. Valid review completes the report and binds the
-same identities in its review summary. Completed-report reads independently recompute review and
-gates. Bounded floating-point equality permits JSON round trips without weakening exact counts or
-alignment checks. Local comparison deltas are present before review; semantic deltas are filled after.
-
-`meets_targets` requires WER at/below its maximum, semantic and proper-noun scores at/above their
-minima, and any execution/scenario gate passing. There is no combined accuracy score.
-
-## Privacy and evidence limits
-
-Audio, references, candidate prompts, seeds, histories and traces are local plaintext. Audio is sent
-to its configured audio service; optional cleanup sends real raw text and explicit test state to
-its configured text service. Endpoint metadata removes userinfo, query and fragments. Error evidence
-uses safe categories rather than provider bodies or private paths. Store reports appropriately:
-explicit candidates and seeds may themselves contain private information.
-
-No personal state/configuration changes, automatic reference confirmation, external Judge, native
-delivery, or installed-app restart is performed. Shared-pipeline fixture tests establish production
-execution contracts, not model quality, actual personal-state behavior or native preview/focus/
-delivery success; those require separately authorized real-service and desktop validation.
+Audio and all transcripts are plaintext. Audio and the same vocabulary/history used by desktop are
+sent to the configured recognition services; HTTP cleanup receives the current recognized text and
+its usual memory context. Only the temporary copy receives confirmation learning. During an
+explicit tuning task the coding agent reads reference and hypothesis text from the local report.
+Endpoint metadata has userinfo, query, and fragment components removed, and neither dataset nor run
+JSON can contain `ApiAuth`. No external Judge request, credential, model setting, Markdown mirror,
+lock file, or automatic crash recovery exists.

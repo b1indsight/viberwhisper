@@ -15,8 +15,7 @@ use tracing::{debug, error, info, warn};
 use super::config::SecretValue;
 use crate::audio::WavChunk;
 use crate::dictation::{
-    Clock, DictationWorker, Progress, RealtimeMode, RealtimeSession, SegmentTrace, Snapshot,
-    Transcript, config::DictationConfig,
+    DictationWorker, Progress, RealtimeSession, Transcript, config::DictationConfig,
 };
 use crate::session::SessionId;
 use crate::text::merge_texts;
@@ -238,9 +237,6 @@ impl SessionOrchestrator {
         key: Option<SecretValue>,
         memory_path: Option<std::path::PathBuf>,
         language: Option<String>,
-        mode: RealtimeMode,
-        clock: Clock,
-        asr_prompt_override: Option<String>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             backend: SessionBackend::Realtime(DictationWorker::new(
@@ -248,40 +244,9 @@ impl SessionOrchestrator {
                 key,
                 memory_path,
                 language,
-                mode,
-                clock,
-                asr_prompt_override,
             )?),
             inner: Mutex::new(None),
         })
-    }
-
-    /// Wait for accepted preview feedback, then read the production memory owner.
-    /// HTTP and pure ASR have no Realtime memory; their owners must be queried separately.
-    #[cfg(test)]
-    pub(crate) fn snapshot(&self) -> anyhow::Result<Snapshot> {
-        match &self.backend {
-            SessionBackend::Realtime(worker) => worker.snapshot(),
-            SessionBackend::Http { .. } => anyhow::bail!("HTTP recognition does not own memory"),
-        }
-    }
-
-    /// Observe the serial memory owner and the exact Unix-seconds time of its snapshot.
-    /// HTTP and pure ASR return the same no-memory error as `snapshot`.
-    pub(crate) fn snapshot_with_time(&self) -> anyhow::Result<(Snapshot, u64)> {
-        match &self.backend {
-            SessionBackend::Realtime(worker) => worker.snapshot_with_time(),
-            SessionBackend::Http { .. } => anyhow::bail!("HTTP recognition does not own memory"),
-        }
-    }
-
-    /// Drain actual audio-stage observations after finish, including completed partial segments.
-    /// Read before starting the next recording, which replaces the previous session's trace.
-    pub(crate) fn take_traces(&self) -> Vec<SegmentTrace> {
-        match &self.backend {
-            SessionBackend::Realtime(worker) => worker.take_traces(),
-            SessionBackend::Http { .. } => Vec::new(),
-        }
     }
 
     pub fn start_session(&self, session_id: SessionId) -> Result<(), SessionStartError> {
@@ -738,9 +703,7 @@ mod tests {
             format!("http://{}/transcriptions", listener.local_addr().unwrap());
         let config =
             crate::core::recognition::RecognitionConfig::from_config(&document, false).unwrap();
-        let orchestrator = config
-            .build(None, crate::dictation::system_clock())
-            .unwrap();
+        let orchestrator = config.build().unwrap();
         orchestrator.start_session(SessionId(1)).unwrap();
         for samples in [30 * 16_000, 16_000] {
             orchestrator.on_chunk_ready(

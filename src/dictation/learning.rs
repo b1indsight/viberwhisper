@@ -11,7 +11,6 @@ use tokio::sync::mpsc as async_mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Clock,
     config::MemoryConfig,
     feedback::{Confirmation, Transcript},
     memory::{Memory, Snapshot},
@@ -19,7 +18,7 @@ use super::{
 };
 
 enum Command {
-    Snapshot(mpsc::SyncSender<(Snapshot, u64)>),
+    Snapshot(mpsc::SyncSender<Snapshot>),
     Prepare(DictationResult, mpsc::SyncSender<Transcript>),
 }
 
@@ -35,7 +34,6 @@ impl LearningWorker {
         settings: MemoryConfig,
         path: Option<PathBuf>,
         language: Option<String>,
-        clock: Clock,
     ) -> Result<Self> {
         settings.validate()?;
         let (commands, receiver) = async_mpsc::channel(1);
@@ -44,9 +42,7 @@ impl LearningWorker {
         let runtime = tokio::runtime::Builder::new_current_thread().build()?;
         let thread = std::thread::Builder::new()
             .name("http-cleanup-memory".into())
-            .spawn(move || {
-                runtime.block_on(worker(settings, path, language, clock, receiver, stop))
-            })?;
+            .spawn(move || runtime.block_on(worker(settings, path, language, receiver, stop)))?;
         Ok(Self {
             commands,
             shutdown,
@@ -55,14 +51,7 @@ impl LearningWorker {
     }
 
     /// Called on the finalization thread, never on the UI thread.
-    #[cfg(test)]
     pub fn snapshot(&self) -> Result<Snapshot> {
-        self.snapshot_with_time().map(|(snapshot, _)| snapshot)
-    }
-
-    /// Capture the snapshot and its Unix-seconds retention time together on the owner.
-    /// Like `snapshot`, this waits for any pending confirmation on a finalization thread.
-    pub fn snapshot_with_time(&self) -> Result<(Snapshot, u64)> {
         let (sender, receiver) = mpsc::sync_channel(1);
         self.commands
             .blocking_send(Command::Snapshot(sender))
@@ -99,11 +88,14 @@ async fn worker(
     settings: MemoryConfig,
     path: Option<PathBuf>,
     language: Option<String>,
-    clock: Clock,
     mut receiver: async_mpsc::Receiver<Command>,
     stop: CancellationToken,
 ) {
-    let mut memory = Memory::load_or_ephemeral(path, settings, clock());
+    // Match engine::worker recovery: never overwrite damaged or unknown-version storage.
+    let mut memory = Memory::load(path, settings.clone(), now()).unwrap_or_else(|error| {
+        tracing::warn!(%error, "Cleanup memory unavailable; using ephemeral memory without overwriting the file");
+        Memory::load(None, settings, now()).expect("empty memory")
+    });
     loop {
         let command = tokio::select! {
             biased;
@@ -112,8 +104,7 @@ async fn worker(
         };
         match command {
             Some(Command::Snapshot(reply)) => {
-                let at = clock();
-                let _ = reply.send((memory.snapshot(at), at));
+                let _ = reply.send(memory.snapshot(now()));
             }
             Some(Command::Prepare(result, reply)) => {
                 let prepared = memory.prepare(vec![result], language.clone());
@@ -122,9 +113,9 @@ async fn worker(
                     text: prepared.text.clone(),
                     confirmation: Some(confirmation),
                 });
-                let feedback = tokio::select! {
+                let text = tokio::select! {
                     biased;
-                    feedback = &mut feedback => feedback.ok(),
+                    text = &mut feedback => text.ok(),
                     _ = stop.cancelled() => {
                         // As in engine::worker, close before draining so a racing
                         // successful send is persisted, while an open preview cannot block exit.
@@ -132,7 +123,7 @@ async fn worker(
                         feedback.try_recv().ok()
                     }
                 };
-                if let Some(feedback) = feedback {
+                if let Some(text) = text {
                     let recording = format!(
                         "http-{}-{}",
                         std::process::id(),
@@ -141,12 +132,10 @@ async fn worker(
                             .unwrap_or_default()
                             .as_nanos()
                     );
-                    let at = clock();
-                    memory.confirm(&recording, &prepared, &feedback.text, at);
+                    memory.confirm(&recording, &prepared, &text, now());
                     if let Err(error) = memory.save() {
                         tracing::warn!(%error, "Could not save confirmed cleanup memory");
                     }
-                    feedback.acknowledge(at);
                 }
             }
             None => break,
@@ -154,72 +143,17 @@ async fn worker(
     }
 }
 
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    fn now() -> u64 {
-        super::super::system_clock()()
-    }
-
-    #[test]
-    fn injected_clock_orders_confirmed_cleanup_and_retention() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicU64, Ordering},
-        };
-        // A later lab snapshot must not supply the feedback time. Advance on
-        // every read as well, so a second clock read cannot fabricate an ACK.
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("memory.json");
-        let seed: super::super::MemorySeed = serde_json::from_value(json!({
-            "observations":[{"recording":"seed", "segment":0,"at":99,"context":"project","text":"seed history","terms":[]}]
-        })).unwrap();
-        seed.write(&path, 100).unwrap();
-        let time = Arc::new(AtomicU64::new(100));
-        let clock_time = Arc::clone(&time);
-        let worker = LearningWorker::new(
-            MemoryConfig::default(),
-            Some(path.clone()),
-            None,
-            Arc::new(move || clock_time.fetch_add(1, Ordering::SeqCst)),
-        )
-        .unwrap();
-        let (snapshot, snapshot_at) = worker.snapshot_with_time().unwrap();
-        assert_eq!(snapshot.contexts[0].history, vec!["seed history"]);
-        assert_eq!(snapshot_at, 101);
-        assert_eq!(time.load(Ordering::SeqCst), 102);
-        let result = worker
-            .prepare(
-                DictationResult::parse(
-                    &json!({"text":"confirmed text", "context":"project", "memory_candidates":[]})
-                        .to_string(),
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        time.store(200, Ordering::SeqCst);
-        assert_eq!(
-            result
-                .confirmation
-                .unwrap()
-                .confirm_with_ack(result.text)
-                .unwrap(),
-            200
-        );
-        assert_eq!(time.load(Ordering::SeqCst), 201);
-        time.store(300, Ordering::SeqCst);
-        let (snapshot, snapshot_at) = worker.snapshot_with_time().unwrap();
-        assert_eq!(snapshot.contexts[0].history[0], "confirmed text");
-        assert_eq!(snapshot_at, 300);
-        assert_eq!(time.load(Ordering::SeqCst), 301);
-        let saved: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(saved["observations"][1]["at"], 200);
-        time.store(86_600, Ordering::SeqCst);
-        assert!(worker.snapshot().unwrap().history_is_empty());
-    }
 
     #[test]
     fn http_and_realtime_memory_share_confirmed_rules_without_relearning() {
@@ -240,13 +174,8 @@ mod tests {
         let prepared = realtime.prepare(vec![source.clone()], Some("zh".into()));
         realtime.confirm("realtime-source", &prepared, "使用ViberWhisper。", now());
         realtime.save().unwrap();
-        let worker = LearningWorker::new(
-            settings.clone(),
-            Some(path.clone()),
-            Some("zh".into()),
-            super::super::system_clock(),
-        )
-        .unwrap();
+        let worker =
+            LearningWorker::new(settings.clone(), Some(path.clone()), Some("zh".into())).unwrap();
         assert_eq!(
             worker.snapshot().unwrap().contexts[0].corrections[0].to,
             "ViberWhisper"
@@ -264,13 +193,8 @@ mod tests {
             "ViberWhisper"
         );
 
-        let worker = LearningWorker::new(
-            MemoryConfig::default(),
-            Some(path.clone()),
-            None,
-            super::super::system_clock(),
-        )
-        .unwrap();
+        let worker =
+            LearningWorker::new(MemoryConfig::default(), Some(path.clone()), None).unwrap();
         let unconfirmed = worker
             .prepare(
                 DictationResult::parse(
@@ -285,7 +209,7 @@ mod tests {
             unconfirmed
                 .confirmation
                 .unwrap()
-                .confirm_with_ack("不能提交".into())
+                .confirm("不能提交".into())
                 .is_err()
         );
         assert_eq!(std::fs::read(path).unwrap(), before);

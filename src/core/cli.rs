@@ -56,17 +56,15 @@ pub enum PromptLabCommand {
         #[command(subcommand)]
         action: PromptLabDatasetCommand,
     },
-    /// Replay ready WAVs through production recognition using a private copy of personal memory
+    /// Evaluate ready WAVs through desktop recognition, accepting finals in a private memory copy
     Evaluate {
         #[arg(long)]
         dataset: PathBuf,
-        /// Override only the selected audio-stage instructions; saved prompt conflicts still fail
         #[arg(long, conflicts_with = "no_prompt")]
         prompt_file: Option<PathBuf>,
-        /// Explicitly omit the HTTP STT prompt, or send empty Realtime audio instructions
         #[arg(long, conflicts_with = "prompt_file")]
         no_prompt: bool,
-        /// Diagnostic scenarios with explicit seeds, simulated clock and delivered feedback
+        /// Use the separate frozen-clock Realtime diagnostic policy instead of desktop evaluation
         #[arg(long)]
         realtime_cases: Option<PathBuf>,
         #[arg(long)]
@@ -75,7 +73,6 @@ pub enum PromptLabCommand {
         min_llm_score: f64,
         #[arg(long)]
         min_proper_noun_percent: f64,
-        /// Complete schema-3 baseline with the same mode, noncandidate stages and replay policy
         #[arg(long)]
         compare_to: Option<PathBuf>,
         #[arg(long)]

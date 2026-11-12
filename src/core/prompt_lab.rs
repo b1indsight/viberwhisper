@@ -11,7 +11,7 @@ use crate::core::cli::{
 };
 use crate::prompt_lab::{
     DatasetStore, EvaluationReport, EvaluationRequest, ProperNounAnnotation, ReferenceStatus,
-    RunStatus, Thresholds, apply_review, evaluate,
+    RunStatus, SttSnapshot, Thresholds, apply_review, evaluate,
 };
 
 pub(super) fn handle(action: PromptLabCommand) -> Result<()> {
@@ -56,6 +56,19 @@ struct EvaluateCommand {
     output: Option<PathBuf>,
 }
 
+/// Freeze personal memory and select invocation-scoped instructions without mutating the saved config.
+fn dictation_evaluation_settings(
+    mut settings: crate::dictation::config::DictationConfig,
+    prompt: Option<String>,
+) -> crate::dictation::config::DictationConfig {
+    settings.memory.enabled = false;
+    if let Some(prompt) = prompt {
+        settings.prompt = Some(prompt);
+        settings.prompt_components = None;
+    }
+    settings
+}
+
 fn evaluate_command(command: EvaluateCommand) -> Result<()> {
     let candidate_from_file = command
         .prompt_file
@@ -81,33 +94,52 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
         )
         .into());
     }
-    let cases = command
-        .realtime_cases
-        .as_deref()
-        .map(crate::prompt_lab::realtime::RealtimeCases::read)
-        .transpose()?;
-    if cases.is_none() && document.dictation.memory.enabled {
-        eprintln!(
-            "注意：评估使用个人记忆的只读快照，报告可能包含词库、历史与纠错，请勿直接公开。学习只写隔离副本。"
-        );
-    }
-    let outcome = evaluate(
-        &dataset,
-        EvaluationRequest {
-            document,
-            memory_path: crate::core::config::config_dir()
-                .map(|path| path.join("dictation-memory.json")),
-            asr_prompt_override: if command.no_prompt {
-                Some(String::new())
-            } else {
-                candidate_from_file
+    let prompt = if command.no_prompt {
+        Some(String::new())
+    } else {
+        candidate_from_file
+    };
+    let outcome = if let Some(path) = command.realtime_cases.as_deref() {
+        // Explicit frozen-clock scenarios retain their separate diagnostic contract.
+        let settings = dictation_evaluation_settings(document.dictation.clone(), prompt);
+        let realtime = Some(crate::prompt_lab::realtime::RealtimeRun {
+            cases: crate::prompt_lab::realtime::RealtimeCases::read(path)?,
+            settings: settings.clone(),
+            key: document.dictation_key(),
+        });
+        let transcriber = crate::dictation::OfflineDictation::new(
+            settings,
+            document.dictation_key(),
+            document.transcription.language.clone(),
+        )?;
+        let mut stt = SttSnapshot::from(transcriber.metadata());
+        stt.input_layout = Some(crate::dictation::INPUT_LAYOUT.into());
+        evaluate(
+            &dataset,
+            &transcriber,
+            EvaluationRequest {
+                stt,
+                thresholds: command.thresholds,
+                output: command.output,
+                compare_to: prior,
+                realtime,
             },
-            thresholds: command.thresholds,
-            output: command.output,
-            compare_to: prior,
-            cases,
-        },
-    )?;
+        )?
+    } else {
+        let source = super::config::config_dir().map(|path| path.join("dictation-memory.json"));
+        let runner = crate::prompt_lab::production::Runner::new(&document, prompt, source)?;
+        crate::prompt_lab::evaluate_production(
+            &dataset,
+            &runner,
+            EvaluationRequest {
+                stt: runner.stt.clone(),
+                thresholds: command.thresholds,
+                output: command.output,
+                compare_to: prior,
+                realtime: None,
+            },
+        )?
+    };
     println!("report: {}", outcome.path.display());
     println!("status: {}", outcome.report.status.as_str());
     if let Some(realtime) = &outcome.report.realtime {
@@ -238,6 +270,7 @@ fn dataset(action: PromptLabDatasetCommand) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dictation::config::{DictationConfig, PromptComponents};
 
     #[test]
     fn validation_does_not_create_or_repair_a_dataset() {
@@ -270,5 +303,27 @@ mod tests {
             .is_err()
         );
         assert!(!root.join("runs").exists());
+    }
+
+    #[test]
+    fn realtime_evaluation_keeps_components_unless_a_full_override_is_requested() {
+        let source = DictationConfig {
+            prompt_components: Some(PromptComponents::default()),
+            ..Default::default()
+        };
+        let original = serde_json::to_value(&source).unwrap();
+        let unchanged = dictation_evaluation_settings(source.clone(), None);
+        assert!(!unchanged.memory.enabled);
+        assert!(unchanged.prompt_components.is_some());
+        assert_eq!(unchanged.prompt(), source.prompt());
+        // Prompt-file and no-prompt must override a user's component object, including empty instructions.
+        for text in ["  candidate\n", ""] {
+            let settings = dictation_evaluation_settings(source.clone(), Some(text.into()));
+            settings.validate().unwrap();
+            assert!(!settings.memory.enabled);
+            assert!(settings.prompt_components.is_none());
+            assert_eq!(settings.prompt(), text);
+        }
+        assert_eq!(serde_json::to_value(source).unwrap(), original);
     }
 }

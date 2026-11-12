@@ -8,29 +8,11 @@ use std::sync::{
 use anyhow::Result;
 use tracing::{debug, error};
 
-use crate::dictation::Confirmation;
+pub(super) use crate::core::recognition::FinalizedTranscription as PreviewTranscription;
 use crate::history::HistoryStore;
 use crate::input::typer::TextTyper;
 use crate::platform::{DeliveryTarget, PreviewRect};
 use crate::session::SessionId;
-
-/// Preview content and the optional capability to learn after successful delivery.
-#[derive(Debug)]
-pub(super) struct PreviewTranscription {
-    pub text: String,
-    pub warning: Option<String>,
-    pub confirmation: Option<Confirmation>,
-}
-
-impl From<(String, Option<String>)> for PreviewTranscription {
-    fn from((text, warning): (String, Option<String>)) -> Self {
-        Self {
-            text,
-            warning,
-            confirmation: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub(super) enum PreviewUpdate {
@@ -516,6 +498,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::dictation::Confirmation;
     use crate::platform::DeliveryTarget;
 
     struct Target(Cell<bool>);
@@ -1004,7 +987,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(feedback.text, "最终修改 🎙️\nViberWhisper");
+        assert_eq!(feedback, "最终修改 🎙️\nViberWhisper");
         worker.join().unwrap();
         assert_eq!(
             history.load_recent().unwrap(),
@@ -1229,16 +1212,12 @@ mod tests {
             if candidate.trim().is_empty() {
                 let _ = commands.send(PreviewCommand::Cancel);
             }
-            let learned = feedback
-                .blocking_recv()
-                .ok()
-                .map(|feedback| feedback.text)
-                .inspect(|feedback| {
-                    assert_eq!(
-                        typer.0.lock().unwrap().as_slice(),
-                        std::slice::from_ref(feedback)
-                    );
-                });
+            let learned = feedback.blocking_recv().ok().inspect(|feedback| {
+                assert_eq!(
+                    typer.0.lock().unwrap().as_slice(),
+                    std::slice::from_ref(feedback)
+                );
+            });
             worker.join().unwrap();
             assert_eq!(*typer.0.lock().unwrap(), expected);
             assert_eq!(history.load_recent().unwrap(), expected);

@@ -1,9 +1,11 @@
 //! Isolated seeded memory and structured observations through the production recording path.
 use super::{
     config::{DictationConfig, LongTerm, MemoryConfig},
-    correction::Correction,
+    engine::Recording,
     memory::{Memory, Observation, Snapshot},
+    transport::Connection,
 };
+use crate::core::config::SecretValue;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,27 +19,9 @@ use std::{
 pub(crate) struct MemorySeed {
     pub long_term: Vec<LongTerm>,
     pub observations: Vec<Observation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub corrections: Vec<Correction>,
 }
 
 impl MemorySeed {
-    /// Read an explicit production file, retaining canonical state and the original vocabulary.
-    /// Disabled memory skips filesystem reads; failed reads recover to ephemeral state as in main.
-    /// No source path is retained and no source bytes are written or renamed.
-    pub fn capture(path: &Path, settings: MemoryConfig, at: u64) -> Self {
-        Memory::load_or_ephemeral(Some(path.to_owned()), settings, at).into_seed()
-    }
-
-    /// Initialize an isolated destination using production retention and persistence.
-    /// Artificial scenarios must call `validate` separately; captured state may exceed visible limits.
-    /// Long-term vocabulary is configuration, so the host must install it separately.
-    pub fn write(&self, path: &Path, at: u64) -> Result<()> {
-        let mut memory = self.memory(at);
-        memory.set_seed_path(path.to_owned());
-        memory.save()
-    }
-
     /// Reject seeds that production would silently discard or truncate before the first request.
     pub fn validate(&self, at: u64) -> Result<()> {
         let settings = DictationConfig {
@@ -68,26 +52,18 @@ impl MemorySeed {
             );
             counts.entry(o.context.clone()).or_insert(0);
         }
-        for correction in &self.corrections {
-            counts.entry(correction.context.clone()).or_insert(0);
-        }
         ensure!(counts.len() <= 4, "seed contexts exceed snapshot limits");
         let memory = self.memory(at);
+        // Production owns retention, including expiration and per-context limits.
+        ensure!(
+            memory.observation_count() == self.observations.len(),
+            "seed observations would be discarded by production memory retention"
+        );
         // Validate the untrimmed visible snapshot: raising the budget here would change production policy.
         let size = serde_json::to_string(&memory.untrimmed_snapshot(at))?
             .chars()
             .count();
         ensure!(size <= 6000, "seed snapshot exceeds memory budget");
-        // Production owns retention, including expiration, correction deduplication and per-context limits.
-        let retained = memory.into_seed();
-        ensure!(
-            retained.observations.len() == self.observations.len(),
-            "seed observations would be discarded by production memory retention"
-        );
-        ensure!(
-            retained.corrections.len() == self.corrections.len(),
-            "seed corrections would be discarded by production memory retention"
-        );
         Ok(())
     }
 
@@ -98,7 +74,6 @@ impl MemorySeed {
                 long_term: self.long_term.clone(),
             },
             self.observations.clone(),
-            self.corrections.clone(),
             at,
         )
     }
@@ -108,30 +83,10 @@ impl MemorySeed {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SegmentTrace {
     pub index: usize,
-    /// Absent only for pure ASR; never synthesize structured metadata for audio-only input.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<Snapshot>,
+    pub input: Snapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_input: Option<super::memory::PromptInput>,
-    #[serde(default = "integrated_layout")]
-    pub input_layout: String,
-    /// Actual Unix-seconds prompt time; historical traces use the recording's supplied time.
-    /// Pure ASR omits it because that stage never reads the memory clock.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub at: Option<u64>,
-    /// Legacy traces did not retain instructions or 24 kHz source-audio boundaries.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audio_start_sample: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audio_end_sample: Option<usize>,
-    /// Integrated: actual JSON object. Transcription: verified plain-text string.
     pub output: Value,
-}
-
-fn integrated_layout() -> String {
-    super::INPUT_LAYOUT.into()
 }
 
 /// Replays recording outputs using production memory, without any file or network access.
@@ -145,39 +100,6 @@ impl MemoryReplay {
             memory: seed.memory(at),
         }
     }
-
-    /// Recompute production preparation/feedback with the actual configured memory switch.
-    /// This is pure validation, with no connection, file or alternative recognizer.
-    pub fn production(seed: &MemorySeed, at: u64, enabled: bool) -> Self {
-        Self {
-            memory: Memory::seeded(
-                MemoryConfig {
-                    enabled,
-                    long_term: seed.long_term.clone(),
-                },
-                seed.observations.clone(),
-                seed.corrections.clone(),
-                at,
-            ),
-        }
-    }
-
-    /// Return the pre-edit preview; only independently supplied delivered text commits feedback.
-    pub fn prepare_and_confirm(
-        &mut self,
-        id: &str,
-        results: Vec<super::result::DictationResult>,
-        language: Option<String>,
-        delivered: Option<&str>,
-        at: u64,
-    ) -> String {
-        let prepared = self.memory.prepare(results, language);
-        if let Some(text) = delivered {
-            self.memory.confirm(id, &prepared, text, at);
-        }
-        prepared.text
-    }
-
     pub fn snapshot(&self, at: u64) -> Snapshot {
         self.memory.snapshot(at)
     }
@@ -193,7 +115,6 @@ impl MemoryReplay {
         let stable = memory.stable_prefix();
         let mut previous = None;
         for trace in traces {
-            let at = trace.at.unwrap_or(at);
             ensure!(
                 previous.is_none_or(|index| trace.index > index),
                 "segment indices out of order"
@@ -202,9 +123,7 @@ impl MemoryReplay {
                 anyhow::anyhow!("Realtime trace lacks the current prompt input; rerun evaluation")
             })?;
             ensure!(
-                trace.input_layout == super::INPUT_LAYOUT
-                    && *input == memory.prompt_input(&stable, at)
-                    && trace.input.as_ref() == Some(&input.snapshot()),
+                *input == memory.prompt_input(&stable, at) && trace.input == input.snapshot(),
                 "trace prompt input differs from replayed memory"
             );
             let result = super::result::DictationResult::parse(&trace.output.to_string())?;
@@ -214,6 +133,75 @@ impl MemoryReplay {
         Ok(Self {
             memory: if success { memory } else { self.memory.clone() },
         })
+    }
+}
+
+/// Owns an ephemeral connection and memory for exactly one explicitly seeded scenario.
+pub(crate) struct RealtimeEvaluator {
+    settings: DictationConfig,
+    key: Option<SecretValue>,
+    runtime: tokio::runtime::Runtime,
+    memory: Memory,
+    connection: Option<Connection>,
+}
+
+impl RealtimeEvaluator {
+    pub fn new(
+        settings: DictationConfig,
+        key: Option<SecretValue>,
+        seed: &MemorySeed,
+        at: u64,
+    ) -> Result<Self> {
+        settings.validate()?;
+        seed.validate(at)?;
+        Ok(Self {
+            settings,
+            key,
+            runtime: tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?,
+            memory: seed.memory(at),
+            connection: None,
+        })
+    }
+
+    pub fn snapshot(&self, at: u64) -> Snapshot {
+        self.memory.snapshot(at)
+    }
+
+    /// A failed recording rolls back its memory updates and resets its connection, as the live worker does.
+    pub fn transcribe(
+        &mut self,
+        path: &Path,
+        id: &str,
+        at: u64,
+        language: Option<String>,
+    ) -> (Result<String>, Vec<SegmentTrace>) {
+        let mut recording = Recording::for_evaluation(format!("sample:{id}"), at);
+        let mut memory = self.memory.clone();
+        let result = self.runtime.block_on(async {
+            let reader = crate::audio::WavChunkReader::open(path)?;
+            if self.connection.is_none() {
+                self.connection = Some(
+                    Connection::connect(&self.settings, self.key.as_ref().map(SecretValue::expose))
+                        .await?,
+                );
+            }
+            let connection = self.connection.as_mut().unwrap();
+            for frame in reader {
+                recording.push(connection, &mut memory, &frame?).await?;
+            }
+            recording.finish(connection, &mut memory).await?;
+            let text = recording.text(language);
+            ensure!(!text.is_empty(), "STT returned empty text");
+            Ok(text)
+        });
+        if result.is_ok() {
+            self.memory = memory;
+        } else {
+            self.connection = None;
+        }
+        (result, recording.traces())
     }
 }
 

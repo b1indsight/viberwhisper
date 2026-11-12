@@ -14,6 +14,7 @@ use super::platform_session_event;
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
 use crate::core::config::ConfigStore;
 use crate::core::orchestrator::{SessionError, SessionOrchestrator};
+use crate::core::recognition::finish_transcription;
 use crate::core::recording_session::{
     RecordingSessionMachine, RecordingState, SessionEffect, SessionEvent,
 };
@@ -28,8 +29,8 @@ use crate::postprocess::PostProcessor;
 use crate::prompt_lab::{CaptureTranscription, PromptLabCapture, SttSnapshot};
 use crate::session::SessionId;
 use crate::ui::preview::{
-    CaptureStage, FinalizationGate, PendingPreview, PreviewCommand, PreviewTranscription,
-    PreviewUpdate, run_preview_session,
+    CaptureStage, FinalizationGate, PendingPreview, PreviewCommand, PreviewUpdate,
+    run_preview_session,
 };
 
 #[derive(Debug, Clone)]
@@ -136,12 +137,12 @@ pub(super) enum ListenerOutput {
 impl ListenerOutput {
     pub(super) fn delivery(
         typer: Arc<dyn TextTyper>,
-        post_processor: Arc<PostProcessor>,
+        post_processor: PostProcessor,
         history: Option<HistoryStore>,
     ) -> Self {
         Self::Delivery {
             typer,
-            post_processor,
+            post_processor: Arc::new(post_processor),
             history,
         }
     }
@@ -939,19 +940,6 @@ impl ApplicationHandler<AppEvent> for ListenerApplication {
     }
 }
 
-/// Prepare the shared desktop preview, retaining warnings when no text can be delivered.
-pub(in crate::ui) fn finish_transcription(
-    result: Result<crate::dictation::Transcript, SessionError>,
-    post_processor: &PostProcessor,
-) -> Option<PreviewTranscription> {
-    let outcome = crate::core::recognition::finalize(result, post_processor);
-    outcome.transcript.map(|transcript| PreviewTranscription {
-        text: transcript.text,
-        warning: outcome.warning,
-        confirmation: transcript.confirmation,
-    })
-}
-
 fn capture_transcription(
     result: Result<String, SessionError>,
     stt: SttSnapshot,
@@ -1077,12 +1065,11 @@ mod tests {
         let config = ListenerConfig::from_config(&document).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("dictation-memory.json");
-        let processor = PostProcessor::with_memory(
+        let processor = PostProcessor::new_desktop(
             config.post_process,
             config.memory,
             Some(path.clone()),
             config.language,
-            crate::dictation::system_clock(),
         )
         .unwrap();
         let finish =
@@ -1109,20 +1096,7 @@ mod tests {
         let fallback = finish();
         assert_eq!(fallback.text, wrong);
         assert!(fallback.confirmation.is_none());
-        // CLI/setup use the same algorithm with explicitly empty initial state.
-        let isolated = crate::core::recognition::RecognitionPipeline::from_config(
-            &document,
-            None,
-            crate::dictation::system_clock(),
-            None,
-        )
-        .unwrap();
-        let isolated_result =
-            super::finish_transcription(Ok(wrong.to_owned().into()), &isolated.post_processor)
-                .unwrap();
-        assert_eq!(isolated_result.text, wrong);
-        drop(isolated_result);
-        isolated.shutdown();
+        assert_eq!(processor.process_text(wrong).unwrap(), wrong); // CLI/setup stay isolated.
         processor.shutdown();
 
         let inputs: Vec<serde_json::Value> = (0..7)
@@ -1141,7 +1115,7 @@ mod tests {
         assert_eq!(
             inputs[6]["contexts"],
             json!([]),
-            "isolated host must not upload personal memory"
+            "plain-text entry must not upload personal memory"
         );
         let stored: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();

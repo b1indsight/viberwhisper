@@ -3,31 +3,6 @@
 
 use serde::de::IgnoredAny;
 
-/// Pure ASR deltas are already body text; do not decode, repair or trim them.
-#[derive(Default)]
-pub(super) struct PlainTextStream {
-    text: String,
-    seen_delta: bool,
-}
-
-impl PlainTextStream {
-    pub fn push(&mut self, delta: &str) -> anyhow::Result<&str> {
-        self.seen_delta = true;
-        self.text.push_str(delta);
-        super::result::validate_plain_text(&self.text)?;
-        Ok(&self.text)
-    }
-
-    pub fn verify(&self, text: &str) -> anyhow::Result<()> {
-        super::result::validate_plain_text(text)?;
-        anyhow::ensure!(
-            !self.seen_delta || self.text == text,
-            "Realtime delta/text mismatch"
-        );
-        Ok(())
-    }
-}
-
 #[derive(Default)]
 enum Phase {
     #[default]

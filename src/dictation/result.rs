@@ -30,19 +30,6 @@ pub(crate) struct DictationResult {
 }
 
 impl DictationResult {
-    /// Pure ASR output has no metadata and can never qualify for learning.
-    /// Keep its exact text, including whitespace and JSON-looking spoken content.
-    pub fn parse_plain(text: &str) -> Result<Self> {
-        validate_plain_text(text)?;
-        Ok(Self {
-            text: text.to_owned(),
-            context: None,
-            memory_candidates: Vec::new(),
-            metadata_valid: false,
-            raw: Value::String(text.to_owned()),
-        })
-    }
-
     /// Validate a Realtime segment within its JSON and UTF-8 text budgets.
     pub fn parse(text: &str) -> Result<Self> {
         ensure!(text.len() <= 64 * 1024, "dictation response is too large");
@@ -96,12 +83,6 @@ impl DictationResult {
             raw,
         })
     }
-}
-
-pub(super) fn validate_plain_text(text: &str) -> Result<()> {
-    ensure!(text.len() <= 16_384, "dictation text is too long");
-    ensure!(!text.contains('\0'), "invalid text");
-    Ok(())
 }
 
 /// Locate all mentions of a supplied name, or none when its occurrence count is ambiguous.

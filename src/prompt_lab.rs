@@ -1,7 +1,7 @@
 mod capture;
 mod dataset;
 mod metrics;
-mod production;
+pub(crate) mod production;
 pub(crate) mod realtime;
 mod regression;
 mod review;
@@ -12,5 +12,7 @@ pub(crate) use dataset::{
     SttSnapshot,
 };
 pub(crate) use metrics::{ProperNounScore, WerScore, score_proper_nouns, score_wer};
-pub(crate) use regression::{EvaluationReport, EvaluationRequest, RunStatus, Thresholds, evaluate};
+pub(crate) use regression::{
+    EvaluationReport, EvaluationRequest, RunStatus, Thresholds, evaluate, evaluate_production,
+};
 pub(crate) use review::apply_review;

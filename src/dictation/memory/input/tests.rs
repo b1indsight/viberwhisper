@@ -29,7 +29,6 @@ fn dynamic_context_cannot_evict_a_frozen_prefix_at_the_joint_budget_limit() {
             &"历史".repeat(512),
             Vec::new(),
         )],
-        Vec::new(),
         100,
     );
     let stable = memory.stable_prefix();

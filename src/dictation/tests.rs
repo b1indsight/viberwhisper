@@ -378,7 +378,7 @@ fn realtime_settings_ignore_unused_http_and_cleanup_settings() {
         serde_json::from_str(include_str!("../../config.example.json")).unwrap();
     document.dictation.enabled = true;
     document.inference.api.transcription.api_url = "not a URL".into();
-    document.post_process.enabled = false;
+    document.post_process.enabled = true;
     document.inference.api.post_process.api_url = None;
     let config = crate::core::listener::ListenerConfig::from_config(&document).unwrap();
     assert!(config.recording.recognition.is_realtime());

@@ -7,7 +7,6 @@ const PAUSE_FRAMES: usize = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Segmentation {
-    #[cfg(test)]
     Fixed,
     PauseAware,
 }

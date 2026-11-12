@@ -17,9 +17,9 @@ pub(crate) struct Replacement {
     pub to: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Correction {
+pub(super) struct Correction {
     pub context: String,
     pub rule: Replacement,
     pub recording: String,

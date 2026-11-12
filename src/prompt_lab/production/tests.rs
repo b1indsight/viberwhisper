@@ -1,7 +1,7 @@
 use super::*;
 use crate::prompt_lab::{
     CaptureTranscription, DatasetStore, EvaluationReport, EvaluationRequest, ProperNounAnnotation,
-    RunStatus, Thresholds, apply_review, evaluate, score_wer,
+    RunStatus, Thresholds, evaluate_production,
 };
 use serde_json::{Value, json};
 use std::{
@@ -9,44 +9,40 @@ use std::{
     net::TcpListener,
     sync::mpsc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+const SPEECH: &[u8] = include_bytes!("../../../tests/fixtures/audio/speech.wav");
 const RAW: &str = "音频原文";
 const CLEANED: &str = "使用维伯耳语。";
+const FINAL: &str = "使用ViberWhisper。";
 const REFERENCE: &str = "ReferenceOnly Codex";
-const SPEECH: &[u8] = include_bytes!("../../../tests/fixtures/audio/speech.wav");
 
 struct Service {
     url: String,
     requests: mpsc::Receiver<(String, Vec<u8>)>,
-    thread: thread::JoinHandle<()>,
+    server: thread::JoinHandle<()>,
 }
 
-/// A bounded local HTTP peer, not a replacement recognizer: PCM still traverses WAV replay,
-/// production buffering/orchestration, the real multipart client and real structured cleanup.
-fn service(request_count: usize, fail_last_audio: bool) -> Service {
+/// Bounded transport peer: real PCM, production clients, parsing and finalization run normally.
+fn service(count: usize, fail_last: bool) -> Service {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (sent, received) = mpsc::channel();
-    let thread = thread::spawn(move || {
-        for index in 0..request_count {
-            let deadline = Instant::now() + Duration::from_secs(10);
+    let server = thread::spawn(move || {
+        for index in 0..count {
+            let deadline = Instant::now() + Duration::from_secs(15);
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(
-                            Instant::now() < deadline,
-                            "production request did not reach local service"
-                        );
+                        assert!(Instant::now() < deadline, "missing production request");
                         thread::sleep(Duration::from_millis(2));
                     }
                     Err(error) => panic!("{error}"),
                 }
             };
-            // macOS can inherit the listener's nonblocking flag on accepted sockets.
             stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
@@ -57,7 +53,7 @@ fn service(request_count: usize, fail_last_audio: bool) -> Service {
                 let length = stream.read(&mut buffer).unwrap();
                 assert_ne!(length, 0);
                 bytes.extend_from_slice(&buffer[..length]);
-                if let Some(index) = bytes.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                if let Some(index) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
                     break index + 4;
                 }
                 assert!(bytes.len() <= 16 * 1024);
@@ -84,26 +80,27 @@ fn service(request_count: usize, fail_last_audio: bool) -> Service {
                 .split_whitespace()
                 .nth(1)
                 .unwrap()
-                .to_string();
-            let body = bytes[header_end..header_end + length].to_vec();
-            let failed = fail_last_audio && index + 1 == request_count;
+                .to_owned();
+            let failed = fail_last && index + 1 == count;
             let response = if failed {
                 assert_eq!(route, "/stt");
                 json!({"error":"private-provider-body"})
-            } else if route == "/stt" { json!({"text":RAW}) }
-                else {
-                    assert_eq!(route, "/cleanup");
-                    json!({"choices":[{"message":{"content":json!({"text":CLEANED, "context":"项目", "memory_candidates":["维伯耳语"]}).to_string()}}]})
-                }.to_string();
+            } else if route == "/stt" {
+                json!({"text":RAW})
+            } else {
+                assert_eq!(route, "/cleanup");
+                json!({"choices":[{"message":{"content":json!({"text":CLEANED,"context":"项目","memory_candidates":["维伯耳语"]}).to_string()}}]})
+            }.to_string();
             let status = if failed { "400 Bad Request" } else { "200 OK" };
-            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
-            sent.send((route, body)).unwrap();
+            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            sent.send((route, bytes[header_end..header_end + length].to_vec()))
+                .unwrap();
         }
     });
     Service {
         url,
         requests: received,
-        thread,
+        server,
     }
 }
 
@@ -111,306 +108,174 @@ fn document(url: &str) -> ConfigDocument {
     let mut document = ConfigDocument::default();
     document.inference.api.transcription.api_url = format!("{url}/stt");
     document.inference.api.transcription.model = "audio-fixture".into();
+    document.transcription.prompt = Some("main audio instructions".into());
+    document.transcription.temperature = 0.25;
     document.post_process.enabled = true;
     document.post_process.preheat_enabled = false;
     document.inference.api.post_process.api_url = Some(format!("{url}/cleanup"));
     document.inference.api.post_process.model = Some("text-fixture".into());
     document.dictation.memory.long_term = vec![crate::dictation::config::LongTerm {
-        context: "private".into(),
+        context: "项目".into(),
         kind: crate::dictation::config::TermKind::ProperNoun,
         text: "ConfiguredPersonalSentinel".into(),
     }];
     document
 }
 
-fn wav(path: &Path) {
-    // A sine wave is audible but correctly rejected by production speech detection. Use the
-    // existing real-speech fixture rather than bypassing that gate to exercise both API stages.
-    std::fs::write(path, SPEECH).unwrap();
+fn seed(path: &Path) {
+    let at = super::super::regression::unix_time_ms().unwrap() / 1000;
+    std::fs::write(
+        path,
+        serde_json::to_vec(&json!({
+            "schema_version":2,
+            "observations":[{"recording":"previous","segment":0,"at":at - 10,
+                "context":"项目","text":"先前使用ViberWhisper。","terms":[]}],
+            "corrections":[{"context":"项目","rule":{"from":"维伯耳语","to":"ViberWhisper"},
+                "recording":"previous-edit","at":at - 10}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 }
 
-fn ready_store(root: &Path, audio: &[u8]) -> DatasetStore {
+fn dataset(root: &Path, count: u64, audio: &[u8]) -> DatasetStore {
     let store = DatasetStore::open_or_create(root.join("dataset")).unwrap();
-    add_ready(&store, 1, audio);
+    for at in 1..=count {
+        let reservation = store.reserve_sample(at).unwrap();
+        std::fs::write(&reservation.audio_path, audio).unwrap();
+        let id = reservation.id.clone();
+        store
+            .complete_capture(
+                reservation,
+                CaptureTranscription::success(
+                    "captured text must not be reused",
+                    SttSnapshot {
+                        endpoint: "http://capture.invalid/stt".into(),
+                        model: "capture-only".into(),
+                        language: None,
+                        prompt: None,
+                        temperature: 0.0,
+                        input_layout: None,
+                    },
+                ),
+            )
+            .unwrap();
+        store
+            .correct_sample(
+                &id,
+                REFERENCE,
+                vec![ProperNounAnnotation {
+                    canonical: "Codex".into(),
+                    accepted: vec![],
+                    case_sensitive: true,
+                    expected_occurrences: 1,
+                }],
+            )
+            .unwrap();
+    }
     store
 }
 
-fn add_ready(store: &DatasetStore, at: u64, audio: &[u8]) -> String {
-    let reservation = store.reserve_sample(at).unwrap();
-    std::fs::write(&reservation.audio_path, audio).unwrap();
-    let id = reservation.id.clone();
-    store
-        .complete_capture(
-            reservation,
-            CaptureTranscription::success(
-                "captured text must never be reused",
-                SttSnapshot {
-                    endpoint: "http://capture.invalid/stt".into(),
-                    model: "capture-only".into(),
-                    language: None,
-                    prompt: None,
-                    temperature: 0.0,
-                    input_layout: None,
-                },
-            ),
-        )
-        .unwrap();
-    store
-        .correct_sample(
-            &id,
-            REFERENCE,
-            vec![ProperNounAnnotation {
-                canonical: "Codex".into(),
-                accepted: vec![],
-                case_sensitive: true,
-                expected_occurrences: 1,
-            }],
-        )
-        .unwrap();
-    id
-}
-
-fn request(document: ConfigDocument, path: PathBuf) -> EvaluationRequest {
+fn request(runner: &Runner, output: PathBuf) -> EvaluationRequest {
     EvaluationRequest {
-        document,
-        memory_path: None,
-        asr_prompt_override: None,
+        stt: runner.stt.clone(),
         thresholds: Thresholds {
             max_wer_percent: 1000.0,
             min_llm_score: 0.0,
             min_proper_noun_percent: 0.0,
         },
-        output: Some(path),
+        output: Some(output),
         compare_to: None,
-        cases: None,
+        realtime: None,
     }
 }
 
-fn identity(
-    document: &ConfigDocument,
-    candidate: Option<&str>,
-    seed: &MemorySeed,
-) -> Result<Identity> {
-    let recognition = RecognitionConfig::from_config(document, false)?
-        .with_prompt_override(candidate.map(str::to_owned));
-    let post_process = PostProcessConfig::from_config(document)?;
-    Identity::from_resolved(
-        (&recognition, &post_process),
-        document.dictation.memory.enabled,
-        candidate.is_some(),
-        None,
-        seed,
-    )
-}
-
 #[test]
-fn plain_http_without_cleanup_ignores_unused_memory_during_report_replay() {
-    // A saved vocabulary must not make plain HTTP evaluation fail: this production mode
-    // owns no memory, even when the configuration enables it for other recognition modes.
+fn ordinary_http_matches_desktop_pcm_cleanup_and_learning_except_audio_prompt() {
+    // Distinct raw, corrected final and reference detect a skipped cleanup/correction stage,
+    // lost feedback, or a lab that learns/scores the reference instead of main's final.
     let directory = tempfile::tempdir().unwrap();
-    let store = ready_store(directory.path(), SPEECH);
-    let Service {
-        url,
-        requests,
-        thread: server,
-    } = service(1, false);
-    let mut document = document(&url);
-    document.post_process.enabled = false;
-    assert!(document.dictation.memory.enabled);
-    assert!(!document.dictation.memory.long_term.is_empty());
-    let path = directory.path().join("run.json");
-    let report = evaluate(&store, request(document, path.clone()))
-        .unwrap()
-        .report;
-    server.join().unwrap();
-    let execution = report.samples[0].execution.as_ref().unwrap();
-    assert_eq!(report.samples[0].hypothesis.as_deref(), Some(RAW));
-    assert_eq!(execution.cleanup, Cleanup::Disabled);
-    assert_eq!(execution.before, Snapshot::default());
-    assert_eq!(execution.after, Snapshot::default());
-    assert!(!execution.confirmation_available && !execution.feedback_applied);
-    assert!(EvaluationReport::read(&path).is_ok());
-    assert_eq!(
-        requests
-            .try_iter()
-            .map(|(route, _)| route)
-            .collect::<Vec<_>>(),
-        ["/stt"]
-    );
-}
-
-#[test]
-fn full_production_evaluation_scores_cleaned_final_and_rejects_report_and_review_tampering() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = ready_store(directory.path(), SPEECH);
-    let Service {
-        url,
-        requests,
-        thread: server,
-    } = service(2, false);
-    let path = directory.path().join("run.json");
-    let result = evaluate(&store, request(document(&url), path.clone())).unwrap();
-    server.join().unwrap();
-    let report = result.report;
-    assert_eq!(report.schema_version, 3);
-    assert_eq!(report.status, RunStatus::AwaitingAgentReview);
-    let sample = &report.samples[0];
-    assert_eq!(sample.raw_hypothesis.as_deref(), Some(RAW));
-    assert_eq!(sample.hypothesis.as_deref(), Some(CLEANED));
-    assert_eq!(
-        sample.wer.as_ref().unwrap().alignment,
-        score_wer(REFERENCE, CLEANED).alignment
-    );
-    assert_ne!(
-        sample.wer.as_ref().unwrap().alignment,
-        score_wer(REFERENCE, RAW).alignment
-    );
-    let execution = sample.execution.as_ref().unwrap();
-    assert_eq!(execution.cleanup, Cleanup::Applied);
-    assert_eq!(execution.text.as_ref().unwrap().output["text"], CLEANED);
-    // Ordinary lab must keep main's vocabulary and confirm the actual final in its private copy.
-    assert_eq!(
-        execution.before.contexts[0].long_term[0].text,
-        "ConfiguredPersonalSentinel"
-    );
-    assert!(
-        execution
-            .after
-            .contexts
-            .iter()
-            .any(|context| context.history.contains(&CLEANED.to_owned()))
-    );
-    assert!(execution.confirmation_available && execution.feedback_applied);
-    assert!(EvaluationReport::read(&path).is_ok());
-    for (route, body) in requests.try_iter() {
-        let bytes = String::from_utf8_lossy(&body);
-        assert!(!bytes.contains(REFERENCE));
-        if route == "/cleanup" {
-            assert!(bytes.contains("ConfiguredPersonalSentinel"));
-            let request: Value = serde_json::from_slice(&body).unwrap();
-            let input: Value =
-                serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
-            assert_eq!(input["text"], RAW);
-            assert!(!input["contexts"].as_array().unwrap().is_empty());
-        }
-    }
-    let bytes = serde_json::to_value(&report).unwrap();
-    // Each attack changes a different trust boundary, not only its aggregate score.
-    for (pointer, value) in [
-        ("/samples/0/hypothesis", json!("forged final")),
-        ("/execution/cleanup/model", json!("other-text-model")),
-        (
-            "/samples/0/execution/feedback",
-            json!({"delivered":{"text":"reference must not become feedback"}}),
-        ),
-    ] {
-        let mut tampered = bytes.clone();
-        *tampered.pointer_mut(pointer).unwrap() = value;
-        std::fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
-        assert!(EvaluationReport::read(&path).is_err(), "{pointer}");
-    }
-    report.write(&path).unwrap();
-    let review_path = directory.path().join("review.json");
-    let mut review = json!({ "schema_version":2, "run_id":report.run_id,
-        "rubric_version":"semantic-equivalence-v1", "execution_sha256": report.execution.as_ref().unwrap().sha256,
-        "evidence_sha256": report.evidence_sha256,
-        "samples":[{"sample_id":sample.sample_id, "score":50, "reason":"distinct reference", "differences":[{"category":"meaning", "explanation":"different words"}]}] });
-    review["evidence_sha256"] = json!("wrong-evidence");
-    std::fs::write(&review_path, serde_json::to_vec(&review).unwrap()).unwrap();
-    assert!(apply_review(&path, &review_path).is_err());
-    review["evidence_sha256"] = json!(report.evidence_sha256);
-    std::fs::write(&review_path, serde_json::to_vec(&review).unwrap()).unwrap();
-    assert_eq!(
-        apply_review(&path, &review_path).unwrap().status,
-        RunStatus::Complete
-    );
-    assert!(EvaluationReport::read(&path).is_ok());
-}
-
-#[test]
-fn normal_lab_matches_main_requests_and_learning_except_candidate_prompt() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = ready_store(directory.path(), SPEECH);
-    add_ready(&store, 2, SPEECH);
-    let Service {
-        url,
-        requests,
-        thread: server,
-    } = service(8, false);
-    let mut document = document(&url);
-    document.transcription.prompt = Some("main audio instructions".into());
-    document.transcription.temperature = 0.25;
-    document.post_process.temperature = 0.375;
-    let now = crate::dictation::system_clock()();
     let source = directory.path().join("personal-memory.json");
-    let bytes = serde_json::to_vec(&json!({
-        "schema_version":2,
-        "observations":[{"recording":"previous","segment":0,"at":now - 10,
-            "context":"项目","text":"历史输入","terms":[]}],
-        "corrections":[{"context":"项目","rule":{"from":"维伯耳语","to":"ViberWhisper"},
-            "recording":"previous-edit","at":now - 10}]
-    }))
-    .unwrap();
-    std::fs::write(&source, &bytes).unwrap();
+    seed(&source);
+    let bytes = std::fs::read(&source).unwrap();
     let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
-    let main_memory = directory.path().join("main-copy.json");
+    let audio = directory.path().join("input.wav");
+    std::fs::write(&audio, SPEECH).unwrap();
+    let Service {
+        url,
+        requests,
+        server,
+    } = service(8, false);
+    let document = document(&url);
+    let main_memory = directory.path().join("main-memory.json");
     std::fs::copy(&source, &main_memory).unwrap();
-    // Assemble exactly as the desktop host, without native delivery. Its accepted output is the
-    // independent oracle for the lab's stateful requests; the peer only returns fixed responses.
-    let main = RecognitionPipeline::from_resolved(
-        RecognitionConfig::from_config(&document, false).unwrap(),
-        PostProcessConfig::from_config(&document).unwrap(),
-        document.dictation.memory.clone(),
-        document.transcription.language.clone(),
-        Some(main_memory),
-        crate::dictation::system_clock(),
+    let config = ListenerConfig::from_config(&document).unwrap();
+    let post = PostProcessor::new_desktop(
+        config.post_process,
+        config.memory,
+        Some(main_memory.clone()),
+        config.language,
     )
     .unwrap();
-    let audio = directory.path().join("input.wav");
-    wav(&audio);
-    let mut main_finals = Vec::new();
-    for index in 1..=2 {
-        let outcome = main
-            .recognize_wav(&audio, SessionId(index), &CancellationToken::new())
-            .unwrap();
-        let transcript = outcome.transcript.unwrap();
-        assert_eq!(transcript.text, "使用ViberWhisper。");
-        transcript
+    let main = config
+        .recording
+        .recognition
+        .build_with_memory_path(Some(main_memory))
+        .unwrap();
+    let mut expected = Vec::new();
+    for id in 1..=2 {
+        let id = SessionId(id);
+        main.start_session(id).unwrap();
+        crate::audio::replay_wav(
+            &audio,
+            id,
+            false,
+            &tokio_util::sync::CancellationToken::new(),
+            |chunk| main.on_chunk_ready(id, chunk),
+        )
+        .unwrap();
+        let result = finish_transcription(main.finish_for_delivery(id), &post).unwrap();
+        assert_eq!(result.text, FINAL);
+        result
             .confirmation
             .unwrap()
-            .confirm_with_ack(transcript.text.clone())
+            .confirm(result.text.clone())
             .unwrap();
-        main_finals.push(transcript.text);
+        expected.push(Some(result.text));
     }
     main.shutdown();
-    let path = directory.path().join("run.json");
-    let mut request = request(document, path.clone());
-    request.memory_path = Some(source.clone());
-    request.asr_prompt_override = Some("candidate audio instructions".into());
-    let report = evaluate(&store, request).unwrap().report;
+    post.shutdown();
+    let store = dataset(directory.path(), 2, SPEECH);
+    let runner = Runner::new(
+        &document,
+        Some("candidate audio instructions".into()),
+        Some(source.clone()),
+    )
+    .unwrap();
+    let output = directory.path().join("run.json");
+    let report = evaluate_production(&store, &runner, request(&runner, output.clone()))
+        .unwrap()
+        .report;
+    drop(runner);
     server.join().unwrap();
+    assert_eq!(
+        report
+            .samples
+            .iter()
+            .map(|s| s.hypothesis.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(report.status, RunStatus::AwaitingAgentReview);
+    assert_eq!(
+        report.samples[0].wer.as_ref().unwrap().wer_percent,
+        crate::prompt_lab::score_wer(REFERENCE, FINAL).wer_percent
+    );
+    assert!(EvaluationReport::read(&output).is_ok());
     assert_eq!(std::fs::read(&source).unwrap(), bytes);
     assert_eq!(
         std::fs::metadata(&source).unwrap().modified().unwrap(),
         modified
-    );
-    assert!(EvaluationReport::read(&path).is_ok());
-    let finals = report
-        .samples
-        .iter()
-        .map(|sample| sample.hypothesis.clone().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(finals, main_finals);
-    let first = report.samples[0].execution.as_ref().unwrap();
-    let second = report.samples[1].execution.as_ref().unwrap();
-    assert!(first.started_at >= now && first.feedback_at.is_some());
-    assert_eq!(first.after, second.before);
-    assert!(
-        second
-            .before
-            .contexts
-            .iter()
-            .any(|context| context.history.contains(&"使用ViberWhisper。".into()))
     );
     let requests = requests.try_iter().collect::<Vec<_>>();
     let cleanup = requests
@@ -418,35 +283,33 @@ fn normal_lab_matches_main_requests_and_learning_except_candidate_prompt() {
         .filter(|(route, _)| route == "/cleanup")
         .map(|(_, body)| serde_json::from_slice::<Value>(body).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(cleanup.len(), 4);
     assert_eq!(cleanup[..2], cleanup[2..]);
-    let identity = report.execution.as_ref().unwrap();
-    assert_eq!(
-        identity.audio.prompt.as_deref(),
-        Some("candidate audio instructions")
+    let first: Value =
+        serde_json::from_str(cleanup[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    let second: Value =
+        serde_json::from_str(cleanup[3]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(first["text"], RAW);
+    assert!(first.to_string().contains("ConfiguredPersonalSentinel"));
+    assert!(first.to_string().contains("先前使用ViberWhisper。"));
+    assert!(
+        !first["contexts"][0]["history"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(FINAL))
     );
-    assert_eq!(identity.audio.temperature, Some(0.25));
-    let text_stage = identity.cleanup.as_ref().unwrap();
-    assert_eq!(text_stage.temperature, Some(0.375));
-    for sent in &cleanup[2..] {
-        assert_eq!(sent["model"], text_stage.model);
-        assert_eq!(
-            sent["messages"][0]["content"],
-            text_stage.prompt.as_deref().unwrap()
-        );
-        assert_eq!(sent["temperature"], 0.375);
-    }
-    let audio = requests
+    assert!(
+        second["contexts"][0]["history"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(FINAL))
+    );
+    assert!(!serde_json::to_string(&cleanup).unwrap().contains(REFERENCE));
+    let mut pcm = Vec::new();
+    for (index, (_, body)) in requests
         .iter()
         .filter(|(route, _)| route == "/stt")
-        .map(|(_, body)| body)
-        .collect::<Vec<_>>();
-    assert_eq!(audio.len(), 4);
-    let source_audio = hound::WavReader::new(std::io::Cursor::new(SPEECH)).unwrap();
-    let source_spec = source_audio.spec();
-    let source_samples = source_audio.len() as usize;
-    let mut sent_pcm = Vec::new();
-    for (index, body) in audio.iter().enumerate() {
+        .enumerate()
+    {
         let text = String::from_utf8_lossy(body);
         assert!(text.contains(if index < 2 {
             "main audio instructions"
@@ -455,49 +318,69 @@ fn normal_lab_matches_main_requests_and_learning_except_candidate_prompt() {
         }));
         assert!(text.contains("name=\"temperature\"\r\n\r\n0.25"));
         assert!(!text.contains(REFERENCE));
-        let start = body.windows(4).position(|bytes| bytes == b"RIFF").unwrap();
+        let start = body.windows(4).position(|b| b == b"RIFF").unwrap();
         let length =
             u32::from_le_bytes(body[start + 4..start + 8].try_into().unwrap()) as usize + 8;
-        // Production adjusts loudness. Compare its actual main/lab uploads, not raw fixture PCM.
-        let sent_audio =
-            hound::WavReader::new(std::io::Cursor::new(&body[start..start + length])).unwrap();
-        assert_eq!(sent_audio.spec(), source_spec);
-        let pcm = sent_audio
-            .into_samples::<i16>()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(pcm.len(), source_samples);
-        sent_pcm.push(pcm);
+        pcm.push(
+            hound::WavReader::new(std::io::Cursor::new(&body[start..start + length]))
+                .unwrap()
+                .into_samples::<i16>()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+        );
     }
-    assert_eq!(sent_pcm[..2], sent_pcm[2..]);
-    assert!(!serde_json::to_string(&cleanup).unwrap().contains(REFERENCE));
-    let mut forged = report.clone();
-    let sample = &mut forged.samples[0];
-    let execution = sample.execution.as_mut().unwrap();
-    execution.final_text = Some(CLEANED.into());
-    execution.text.as_mut().unwrap().prepared_text = CLEANED.into();
-    execution.feedback = Feedback::Delivered {
-        text: CLEANED.into(),
-    };
-    sample.hypothesis = Some(CLEANED.into());
-    forged.evidence_sha256 = forged.evidence_digest().unwrap();
-    forged.write(&path).unwrap();
-    assert!(
-        EvaluationReport::read(&path)
-            .unwrap_err()
-            .to_string()
-            .contains("local correction")
-    );
+    assert_eq!(pcm.len(), 4);
+    assert_eq!(pcm[..2], pcm[2..]);
+
+    // Baselines must not silently compare old STT-only execution, different cleanup rules
+    // or different initial memory with this run, even when the audio metadata is unchanged.
+    let review = directory.path().join("review.json");
+    std::fs::write(
+        &review,
+        serde_json::to_vec(&json!({
+            "schema_version":1,"run_id":report.run_id,"rubric_version":"semantic-equivalence-v1",
+            "samples":report.samples.iter().map(|sample| json!({
+                "sample_id":sample.sample_id,"score":50,"reason":"distinct reference",
+                "differences":[{"category":"meaning","explanation":"different words"}]
+            })).collect::<Vec<_>>()
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let complete = crate::prompt_lab::apply_review(&output, &review).unwrap();
+    for variant in 0..3 {
+        let runner = Runner::new(&document, None, Some(source.clone())).unwrap();
+        let mut prior = complete.clone();
+        match variant {
+            0 => {
+                prior.schema_version = 2;
+                prior.execution = None;
+            }
+            1 => prior.execution.as_mut().unwrap().config_sha256 = "1".repeat(64),
+            _ => prior.execution.as_mut().unwrap().memory_sha256 = "2".repeat(64),
+        }
+        let mut next = request(
+            &runner,
+            directory.path().join(format!("next-{variant}.json")),
+        );
+        next.compare_to = Some(prior);
+        assert!(
+            evaluate_production(&store, &runner, next)
+                .unwrap_err()
+                .to_string()
+                .contains("same execution policy")
+        );
+    }
 }
 
 #[test]
-fn production_partial_keeps_successful_text_but_remains_incomplete_and_skips_cleanup() {
-    // The pause creates two production HTTP segments. The second fails after the first succeeds;
-    // retaining that first text must not accidentally turn this into a reviewable successful run.
-    let mut reader = hound::WavReader::new(std::io::Cursor::new(SPEECH)).unwrap();
+fn partial_audio_retains_main_final_but_cannot_be_reviewed_or_learned() {
+    // A real pause makes two production chunks; failure of the second must retain the first
+    // as incomplete text and skip cleanup, rather than accidentally reporting a successful run.
+    let reader = hound::WavReader::new(std::io::Cursor::new(SPEECH)).unwrap();
     let spec = reader.spec();
     let samples = reader
-        .samples::<i16>()
+        .into_samples::<i16>()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     let mut audio = std::io::Cursor::new(Vec::new());
@@ -514,25 +397,23 @@ fn production_partial_keeps_successful_text_but_remains_incomplete_and_skips_cle
         writer.finalize().unwrap();
     }
     let directory = tempfile::tempdir().unwrap();
-    let store = ready_store(directory.path(), &audio.into_inner());
+    let store = dataset(directory.path(), 1, &audio.into_inner());
     let Service {
         url,
         requests,
-        thread: server,
+        server,
     } = service(2, true);
+    let runner = Runner::new(&document(&url), None, None).unwrap();
+    let memory = runner._directory.path().join("dictation-memory.json");
+    let initial = std::fs::read(&memory).unwrap();
     let path = directory.path().join("partial.json");
-    let result = evaluate(&store, request(document(&url), path.clone())).unwrap();
+    let report = evaluate_production(&store, &runner, request(&runner, path.clone()))
+        .unwrap()
+        .report;
     server.join().unwrap();
-    let report = result.report;
     assert_eq!(report.status, RunStatus::Incomplete);
-    assert_eq!(report.samples[0].raw_hypothesis.as_deref(), Some(RAW));
     assert_eq!(report.samples[0].hypothesis.as_deref(), Some(RAW));
-    assert!(report.samples[0].wer.is_some());
-    let execution = report.samples[0].execution.as_ref().unwrap();
-    assert_eq!(execution.cleanup, Cleanup::Skipped);
-    assert!(execution.recognition_error.is_some() && execution.warning.is_some());
-    assert!(!execution.confirmation_available && !execution.feedback_applied);
-    assert!(execution.text.is_none() && execution.after == execution.before);
+    assert!(report.samples[0].error.is_some());
     assert_eq!(
         requests
             .try_iter()
@@ -540,137 +421,217 @@ fn production_partial_keeps_successful_text_but_remains_incomplete_and_skips_cle
             .collect::<Vec<_>>(),
         ["/stt", "/stt"]
     );
+    assert_eq!(std::fs::read(&memory).unwrap(), initial);
     assert!(EvaluationReport::read(&path).is_ok());
     assert!(
         !std::fs::read_to_string(&path)
             .unwrap()
             .contains("private-provider-body")
     );
-    let review = directory.path().join("missing-review.json");
-    assert!(
-        apply_review(&path, &review)
-            .unwrap_err()
-            .to_string()
-            .contains("awaiting_agent_review")
-    );
-    let mut next = request(document(&url), directory.path().join("next.json"));
-    next.compare_to = Some(report);
-    assert!(
-        evaluate(&store, next)
-            .unwrap_err()
-            .to_string()
-            .contains("not compatible")
-    );
+    assert!(crate::prompt_lab::apply_review(&path, &directory.path().join("absent.json")).is_err());
 }
 
 #[test]
-fn explicit_delivery_alone_learns_and_next_production_result_uses_local_correction() {
+fn memory_copy_preserves_hidden_state_and_uses_production_recovery() {
+    // A visible Snapshot is truncated; copy the actual canonical store so hidden contexts and
+    // correction rules are not lost. Disabled/corrupt input follows main's ephemeral recovery.
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("audio.wav");
-    wav(&path);
-    let Service {
-        url,
-        requests,
-        thread: server,
-    } = service(8, false);
-    let document = document(&url);
-    let identity = identity(&document, None, &MemorySeed::default()).unwrap();
-    let stages = (
-        RecognitionConfig::from_config(&document, false).unwrap(),
-        PostProcessConfig::from_config(&document).unwrap(),
-    );
-    let runner = Runner::new(&document, stages, &MemorySeed::default(), 100).unwrap();
-    let feedback = [
-        Feedback::Discard,
-        Feedback::DeliveryFailed,
-        Feedback::Delivered {
-            text: "使用ViberWhisper。".into(),
-        },
-        Feedback::Discard,
-    ];
-    let mut executions = Vec::new();
-    for (index, feedback) in feedback.iter().enumerate() {
-        let execution = runner
-            .recognize(&path, SessionId(index as u64 + 1), 0, Some(feedback))
-            .unwrap();
-        if index < 2 {
-            assert!(execution.after.contexts.is_empty());
-        } else {
-            assert_eq!(
-                execution.after.contexts[0].corrections[0].to,
-                "ViberWhisper"
-            );
-        }
-        assert_eq!(
-            execution.final_text.as_deref(),
-            Some(if index == 3 {
-                "使用ViberWhisper。"
-            } else {
-                CLEANED
-            })
-        );
-        executions.push(execution);
+    let source = directory.path().join("source.json");
+    seed(&source);
+    let bytes = std::fs::read(&source).unwrap();
+    let mut stored: Value = serde_json::from_slice(&bytes).unwrap();
+    let original = stored["observations"][0].clone();
+    for i in 0..6 {
+        let mut observation = original.clone();
+        observation["recording"] = json!(format!("hidden-{i}"));
+        observation["context"] = json!(format!("hidden-{i}"));
+        stored["observations"]
+            .as_array_mut()
+            .unwrap()
+            .push(observation);
     }
-    server.join().unwrap();
-    assert_eq!(requests.try_iter().count(), 8);
-    validate_replay(&identity, &MemorySeed::default(), &executions).unwrap();
-    let mut tampered = executions.clone();
-    tampered[2].feedback = Feedback::Discard;
-    tampered[2].feedback_applied = false;
-    assert!(validate_replay(&identity, &MemorySeed::default(), &tampered).is_err());
-    let mut tampered = executions.clone();
-    tampered[3].final_text = Some(CLEANED.into());
-    tampered[3].text.as_mut().unwrap().prepared_text = CLEANED.into();
-    assert!(validate_replay(&identity, &MemorySeed::default(), &tampered).is_err());
+    std::fs::write(&source, serde_json::to_vec(&stored).unwrap()).unwrap();
+    let destination = directory.path().join("copy.json");
+    let settings = document("http://unused.invalid").dictation.memory;
+    let at = super::super::regression::unix_time_ms().unwrap() / 1000;
+    crate::dictation::copy_memory(
+        Some(source.clone()),
+        destination.clone(),
+        settings.clone(),
+        at,
+    )
+    .unwrap();
+    let copied: Value = serde_json::from_slice(&std::fs::read(&destination).unwrap()).unwrap();
+    assert_eq!(copied, stored);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&source).unwrap()).unwrap(),
+        stored
+    );
+    for disabled in [false, true] {
+        std::fs::write(&source, "broken private memory").unwrap();
+        let mut settings = settings.clone();
+        settings.enabled = !disabled;
+        crate::dictation::copy_memory(Some(source.clone()), destination.clone(), settings, at)
+            .unwrap();
+        let copied: Value = serde_json::from_slice(&std::fs::read(&destination).unwrap()).unwrap();
+        assert_eq!(copied["observations"], json!([]));
+        assert_eq!(copied["corrections"], json!([]));
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "broken private memory"
+        );
+    }
 }
 
 #[test]
-fn comparison_allows_audio_candidate_but_rejects_cleanup_mode_and_policy_changes() {
-    let document = document("http://127.0.0.1:1");
-    let baseline = identity(&document, None, &MemorySeed::default()).unwrap();
-    let candidate = identity(&document, Some("candidate ASR"), &MemorySeed::default()).unwrap();
-    let changes = candidate.compare(&baseline).unwrap();
-    assert_eq!(changes.len(), 1);
-    assert_eq!(changes[0].field, "audio.prompt");
-    let changed_seed = MemorySeed {
-        long_term: document.dictation.memory.long_term.clone(),
-        ..Default::default()
-    };
-    assert!(
-        identity(&document, Some("candidate ASR"), &changed_seed)
-            .unwrap()
-            .compare(&baseline)
-            .unwrap_err()
-            .to_string()
-            .contains("same initial production memory")
+fn ordinary_realtime_keeps_main_protocol_memory_and_one_connection() {
+    // Realtime still owns integrated JSON/learning, even if cleanup is enabled in config.
+    // An invalid unused cleanup URL detects accidental two-stage assembly/startup rejection.
+    use std::net::TcpStream;
+    use tokio_tungstenite::tungstenite::{Message, WebSocket};
+    fn send(socket: &mut WebSocket<TcpStream>, value: Value) {
+        socket.send(Message::text(value.to_string())).unwrap();
+    }
+    fn event(socket: &mut WebSocket<TcpStream>, expected: &str) -> Value {
+        loop {
+            let message = socket.read().unwrap();
+            let text = message.to_text().unwrap();
+            assert!(!text.contains(REFERENCE));
+            let value: Value = serde_json::from_str(text).unwrap();
+            if value["type"] == "input_audio_buffer.append" {
+                continue;
+            }
+            assert_eq!(value["type"], expected);
+            return value;
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("ws://{}/v1/realtime", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut socket = tokio_tungstenite::tungstenite::accept(stream).unwrap();
+        send(&mut socket, json!({"type":"session.created"}));
+        let mut requests = vec![event(&mut socket, "session.update")];
+        send(&mut socket, json!({"type":"session.updated"}));
+        for index in 0..3 {
+            let declaration = event(&mut socket, "conversation.item.create");
+            let prefix = format!("prefix-{index}");
+            let mut item = declaration["item"].clone();
+            requests.push(declaration);
+            item["id"] = json!(prefix);
+            item["status"] = json!("completed");
+            for kind in ["conversation.item.added", "conversation.item.done"] {
+                send(&mut socket, json!({"type":kind,"item":item}));
+            }
+            event(&mut socket, "input_audio_buffer.commit");
+            let audio = format!("audio-{index}");
+            send(
+                &mut socket,
+                json!({"type":"input_audio_buffer.committed","item_id":audio}),
+            );
+            let request = event(&mut socket, "response.create");
+            let text = json!({"text":if index == 2 { " \t\n" } else { CLEANED },
+                "context":"项目","memory_candidates":["维伯耳语"]})
+            .to_string();
+            let id = format!("response-{index}");
+            for response in [
+                json!({"type":"response.created","response":{"id":id,"metadata":request["response"]["metadata"]}}),
+                json!({"type":"response.output_text.done","response_id":id,"output_index":0,"content_index":0,"text":text}),
+                json!({"type":"response.done","response":{"id":id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]}}),
+            ] {
+                send(&mut socket, response);
+            }
+            requests.push(request);
+            for id in [&audio, &prefix] {
+                assert_eq!(
+                    event(&mut socket, "conversation.item.delete")["item_id"],
+                    *id
+                );
+                send(
+                    &mut socket,
+                    json!({"type":"conversation.item.deleted","item_id":id}),
+                );
+            }
+        }
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+        requests
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let store = dataset(directory.path(), 3, SPEECH);
+    let source = directory.path().join("source.json");
+    seed(&source);
+    let bytes = std::fs::read(&source).unwrap();
+    let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
+    let mut document = document("http://unused.invalid");
+    document.dictation.enabled = true;
+    document.dictation.url = url;
+    document.dictation.prompt = Some("saved integrated instructions".into());
+    document.inference.api.post_process.api_url = Some("unused invalid URL".into());
+    let runner = Runner::new(
+        &document,
+        Some("candidate integrated instructions".into()),
+        Some(source.clone()),
+    )
+    .unwrap();
+    let path = directory.path().join("realtime.json");
+    let report = evaluate_production(&store, &runner, request(&runner, path.clone()))
+        .unwrap()
+        .report;
+    drop(runner);
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests[0]["session"]["instructions"],
+        "candidate integrated instructions"
     );
-    let mut different = document.clone();
-    different.post_process.prompt = Some("other cleanup".into());
-    assert!(
-        identity(&different, None, &MemorySeed::default())
-            .unwrap()
-            .compare(&baseline)
-            .is_err()
+    assert_eq!(report.status, RunStatus::Incomplete);
+    assert_eq!(report.failures.len(), 1);
+    assert!(report.samples[2].hypothesis.is_none());
+    for sample in &report.samples[..2] {
+        assert_eq!(sample.hypothesis.as_deref(), Some(FINAL));
+    }
+    for (index, pair) in requests[1..].as_chunks::<2>().0.iter().enumerate() {
+        let prefix: Value =
+            serde_json::from_str(pair[0]["item"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(prefix.to_string().contains("ConfiguredPersonalSentinel"));
+        let input: Value = serde_json::from_str(
+            pair[1]["response"]["input"][2]["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(input.to_string().contains("先前使用ViberWhisper。"));
+        assert!(input.to_string().contains("维伯耳语"));
+        assert_eq!(
+            input["contexts"][0]["history"][0],
+            if index == 0 {
+                "先前使用ViberWhisper。"
+            } else {
+                FINAL
+            }
+        );
+    }
+    assert_eq!(std::fs::read(&source).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(&source).unwrap().modified().unwrap(),
+        modified
     );
-    different = document.clone();
-    different.dictation.enabled = true;
-    assert!(
-        identity(&different, None, &MemorySeed::default())
-            .unwrap()
-            .compare(&baseline)
-            .is_err()
-    );
-    let mut forged = baseline.clone();
-    forged.policy = "old-fixed-blocks".into();
-    assert!(candidate.compare(&forged).is_err());
-    different.dictation.prompt = Some("saved incompatible integrated rules".into());
-    assert!(
-        identity(&different, Some("candidate"), &MemorySeed::default())
-            .unwrap_err()
-            .to_string()
-            .contains("conflicts")
-    );
+    assert!(EvaluationReport::read(&path).is_ok());
 }
-
-#[path = "realtime_tests.rs"]
-mod realtime_tests;

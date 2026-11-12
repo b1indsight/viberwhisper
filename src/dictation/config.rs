@@ -298,4 +298,15 @@ mod prompt_tests {
         config.prompt_components.as_mut().unwrap().language = "中".into();
         assert!(config.validate().unwrap_err().to_string().contains("4096"));
     }
+
+    #[test]
+    fn offline_metadata_uses_the_same_composed_instructions() {
+        let config = DictationConfig {
+            prompt_components: Some(components()),
+            ..Default::default()
+        };
+        let expected = config.prompt();
+        let transcriber = crate::dictation::OfflineDictation::new(config, None, None).unwrap();
+        assert_eq!(transcriber.metadata().prompt, Some(expected));
+    }
 }

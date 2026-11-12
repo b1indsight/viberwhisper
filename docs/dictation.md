@@ -2,11 +2,11 @@
 
 [返回使用指南](../README.md) · [HTTP STT 与 LLM 配置](configuration.md) · [命令行参考](cli.md)
 
-默认使用 HTTP STT，可选的 LLM 后处理负责文字整理。Realtime 与 `post_process.enabled` 同时开启时，WebSocket 只做基础转写，再调用配置的文字后处理服务；后处理关闭时保留原一体式听写。气泡会流式显示基础转写，完成整理和最终校验后才能编辑。
+默认使用 HTTP STT，可选的 LLM 后处理负责文字整理。启用 Realtime 后，由兼容的 WebSocket 服务同时完成音频识别和整理，并在气泡中流式显示正文。
 应用不附带 Realtime 服务，需自行提供兼容 endpoint；默认的本机地址只有在服务已经运行时才能使用。
 
 两条桌面路径共用 `dictation.memory` 和 `dictation-memory.json`：HTTP 路径需要启用 LLM 后处理才能使用语境与确认学习。
-记忆默认启用；有界历史短句、术语和已确认纠错会发送到当前识别/后处理服务。两阶段模式只在文字阶段提供记忆，音频请求不包含历史、词库、前段转写或整理示例。
+记忆默认启用；有界历史短句、术语和已确认纠错会发送到当前识别/后处理服务。
 将配置文件中的 `dictation.memory.enabled` 设为 `false` 可同时关闭两条路径的记忆读取、学习和本地纠错。
 该设置不会删除已有文件。确认且成功输入目标应用后才提交本次学习；取消或失败不会提交。
 普通识别历史独立保存在 [`history.jsonl`](usage.md#识别历史与本地数据)。
@@ -44,20 +44,13 @@
 }
 ```
 
-`enabled` 缺省为 `false`，旧配置继续使用原路径。Realtime 忽略 HTTP STT 连接设置；是否使用文字后处理取决于 `post_process.enabled`。开启时还须配置 `inference.api.post_process`，应用不会从 WebSocket 地址推断另一个端点。鉴权读取 `api_key_env` 指定的环境变量；变量未设置则不发
+`enabled` 缺省为 `false`，旧配置继续使用原路径。启用后忽略旧 STT 和后处理的连接设置，
+不再发起第二次 LLM 清理请求。鉴权读取 `api_key_env` 指定的环境变量；变量未设置则不发
 Authorization。地址使用 `ws://` 或 `wss://`，不要在 URL 中放密钥、查询参数或片段。
-
-## 短音频与两阶段识别
-
-同时设置 `dictation.enabled=true` 和 `post_process.enabled=true`，音频阶段使用最小纯文本转写指令，文字阶段复用现有的结构化整理与确认学习。两个阶段串行执行，文字整理会增加停止后的等待时间；整理失败、非法 JSON 或空正文时保留基础转写。部分识别失败或超时继续保留已识别文字与不完整警告，不再请求整理。
-
-启用前备份配置，并将旧一体式 `dictation.prompt` 与 `dictation.prompt_components` 清为 `null`；非空旧覆盖会明确报错。整理自定义放在 `post_process.prompt`。应用不会自动改写个人配置。关闭后处理会恢复一体式模式，其中仍可能发生短音频复制提示词示例的问题。两阶段不能保证修复音频含糊、同音字或专名识别错误。
-
-桌面、`convert` 和 `prompt-lab evaluate` 共用识别、停顿分段及最终结果处理。文件以 1 倍音频时间回放，不重复应用麦克风增益。lab 默认从个人记忆的只读快照启动，保留配置词库，使用生产时钟并跨样本复用会话；成功 final 按不编辑确认，学习只写隔离副本，评分使用编辑前结果。显式场景可覆盖诊断种子、时钟和反馈；lab 不向当前应用输入测试文字。采集入口 `prompt-lab record` 仍只收集原音和原始 STT，不代表完整路径评估。
 
 ## 提示词组件
 
-以下组件用于后处理关闭时的一体式听写；两阶段音频提示词不使用这些组件。默认提示词正文维护在 [`assets/dictation-prompt.default.json`](../assets/dictation-prompt.default.json)，
+默认提示词正文维护在 [`assets/dictation-prompt.default.json`](../assets/dictation-prompt.default.json)，
 Rust 只负责读取和组合。要独立修改规则，将 [`config.example.json`](../config.example.json) 中完整的
 `dictation.prompt_components` 对象复制到本机配置，保持 `prompt` 为 `null`，然后编辑对应项：
 
@@ -164,7 +157,8 @@ Rust 只负责读取和组合。要独立修改规则，将 [`config.example.jso
 同连接可持续多轮且累计超过 60 秒。完整响应校验后交付，明确重复
 口述会保留。网络、录音或清理失败时保留已验证分段，不更新本次记忆；主动取消不交付文字。
 后端忙时输入有界排队，不承诺立即提交；断线不自动重放已提交音频，也不切换云端。
-`convert` 和 prompt-lab 回归共用上述停顿分段；旧固定分段报告只能作为历史记录，需重跑新路径基线。
+离线 `convert` 和显式场景诊断保留原固定分段；普通 prompt-lab 评估以 1 倍速 WAV 输入复用桌面停顿分段。
+旧固定分段成绩不能作为新路径的基线。
 
 服务需要支持[通用 Realtime 协议及生命周期要求](architecture/dictation.md#audio-and-lifecycle)。
 已记录的 Gemma 服务兼容性缺口、未验证范围及复测命令见[实现记录](plan/52-contextual-streaming-dictation.md#待完成)，
@@ -172,16 +166,23 @@ Rust 只负责读取和组合。要独立修改规则，将 [`config.example.jso
 
 ## 离线转写与 Prompt 回归
 
-`convert` 使用所选生产路径、空初始状态和丢弃确认策略。`prompt-lab evaluate` 默认保留配置中的记忆开关和长期词表，从个人历史与纠错的只读快照初始化隔离副本；所有样本共用生产会话、系统时钟与串行学习所有者。后续样本会看到前面实际 final 的确认反馈，不使用 reference 学习。报告包含初始记忆和实际上下文，请勿直接公开。比较候选 prompt 时初始记忆必须一致，否则应重跑基线。
-不加参数使用所选音频阶段的配置/内置默认值，`--prompt-file` 完整替换该音频阶段指令，`--no-prompt` 清空该指令；临时覆盖不改模式或保存配置。两阶段仍调用已配置的文字后处理，旧一体式自定义冲突须先显式清理。
-报告记录各阶段实际配置、原文、编辑前 final、分段、回退与耗时。纯 ASR 按纯文本校验，一体式及文字后处理按各自 JSON 合同校验。
+`convert` 使用所选 Realtime 路径，但默认禁用个人记忆。普通 `prompt-lab evaluate` 沿用桌面配置、
+生产系统时间和连接，读取规范化个人记忆初态，连续接受未经编辑的最终文字，但学习仅写临时副本。
+它不显示预览、不写普通历史、不向目标应用输入。用于迭代音频阶段提示词：
+不加参数使用配置/内置默认值，`--prompt-file` 完整替换提示词，
+`--no-prompt` 清空指令；这两种临时全文覆盖都会忽略配置组件，且不会写回配置。
+候选采用后可编辑 `dictation.prompt_components`，或清空组件并写入整段 `dictation.prompt`，
+重启客户端生效。
+报告记录实际使用的提示词；缺少约定 JSON 输出的结果会按识别失败记录。
 Realtime 多音频块评测、实际交付与离线转换统一使用 `transcription.language` 的拼接规则：
 中文不添加分隔符，其他语言或未指定时添加空格，保留重复口述。
-评测沿用 WER、专有词指标和语义审阅流程，新报告使用 schema 3 与 `production-recognition-v2`。
-需要验证语境和记忆时，添加 `--realtime-cases cases.json`，用显式种子和模拟时钟顺序
-播放 WAV。每个 ready 样本须恰好出现一次；场景之间独立，仅显式 `delivered {text}` 反馈学习，省略反馈、取消或投递失败不学习。反馈文字由场景独立提供，不从参考答案推导，评分仍使用编辑前 final。
-报告记录实际阶段输入/输出、快照、反馈、记忆变化和本地断言，并把断言纳入最终 gate。
-场景模式同样不接触个人记忆文件；场景历史会保存在评估报告中。
+评测沿用原 JSON 报告、WER、专有词指标和语义审阅流程。
+需要显式断言语境和记忆时，添加 `--realtime-cases cases.json`，沿用独立诊断路径，用种子和模拟时钟顺序
+播放 WAV。每个 ready 样本须恰好出现一次；场景之间独立，步骤之间学习记忆。
+报告记录实际发送的快照、原始结构化输出、记忆变化和本地断言，并把断言纳入最终 gate。
+该场景模式不接触个人记忆文件，保留旧固定分段与冻结时钟合同；场景历史会保存在报告中。
+它与普通生产路径评估、旧 STT-only 报告不能直接比较。
 格式和用法见[场景示例](architecture/prompt-lab.md#realtime-context-and-memory-scenarios)。
-新场景文件使用 `schema_version: 3`；旧版场景在联网前拒绝并提示迁移。已支持的旧报告按历史合同读取，不补造新阶段 trace，也不能与新完整路径直接比较。
+Realtime 场景文件使用 `schema_version: 2`，报告策略为 `realtime-context-memory-v5`；
+旧版场景需迁移话题和候选断言为字符串后重跑，不直接重计分或跨策略比较旧报告。
 原始录音采集 `prompt-lab record` 仍使用原 HTTP STT，避免把整理结果伪装成 raw-STT 样本。

@@ -15,7 +15,6 @@ use tokio_tungstenite::{
 };
 
 use super::{
-    RealtimeMode,
     config::DictationConfig,
     memory::{PromptInput, StablePrefix},
     result::DictationResult,
@@ -29,7 +28,6 @@ struct Segment {
 }
 
 enum PrefixState {
-    Absent,
     Pending { added_id: Option<String> },
     Ready(String),
     Deleting(String),
@@ -47,7 +45,6 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub(super) struct Connection {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    mode: RealtimeMode,
     instructions: String,
     response_id: Option<String>,
     segment: Option<Segment>,
@@ -60,20 +57,8 @@ pub(super) struct Connection {
 }
 
 impl Connection {
-    /// Compact integrated setup for protocol tests; production always selects its mode.
-    #[cfg(test)]
     pub async fn connect(settings: &DictationConfig, key: Option<&str>) -> Result<Self> {
-        Self::connect_with_mode(settings, key, RealtimeMode::Integrated, None).await
-    }
-
-    pub async fn connect_with_mode(
-        settings: &DictationConfig,
-        key: Option<&str>,
-        mode: RealtimeMode,
-        asr_prompt_override: Option<&str>,
-    ) -> Result<Self> {
         settings.validate()?;
-        let instructions = mode.instructions(settings, asr_prompt_override)?;
         let mut url = reqwest::Url::parse(&settings.url)?;
         url.query_pairs_mut().append_pair("model", &settings.model);
         let mut request = url.as_str().into_client_request()?;
@@ -99,8 +84,7 @@ impl Connection {
         })?;
         let mut connection = Self {
             socket,
-            mode,
-            instructions,
+            instructions: settings.prompt(),
             response_id: None,
             segment: None,
             response_pending: None,
@@ -123,10 +107,6 @@ impl Connection {
         .await
         .context("Realtime session configuration timeout")??;
         Ok(connection)
-    }
-
-    pub fn instructions(&self) -> &str {
-        &self.instructions
     }
 
     async fn send(&mut self, event: Value) -> Result<()> {
@@ -216,10 +196,6 @@ impl Connection {
     /// Declare the exact model prefix before uploading any part of this segment.
     pub async fn begin(&mut self, stable: &StablePrefix, correlation: &str) -> Result<()> {
         ensure!(
-            self.mode == RealtimeMode::Integrated,
-            "pure ASR cannot declare a text prefix"
-        );
-        ensure!(
             self.segment.is_none(),
             "previous Realtime segment has not been cleaned up"
         );
@@ -239,25 +215,6 @@ impl Connection {
         })
         .await
         .context("Realtime prefix declaration timeout")?
-    }
-
-    /// Pure ASR owns only audio, with no local or remote text prefix item.
-    pub fn begin_transcription(&mut self, correlation: &str) -> Result<()> {
-        ensure!(
-            self.mode == RealtimeMode::Transcription,
-            "integrated dictation requires a prefix"
-        );
-        ensure!(
-            self.segment.is_none(),
-            "previous Realtime segment has not been cleaned up"
-        );
-        self.segment = Some(Segment {
-            correlation: correlation.to_owned(),
-            prefix_text: String::new(),
-            prefix: PrefixState::Absent,
-            audio: AudioState::Recording,
-        });
-        Ok(())
     }
 
     /// Bind server-assigned IDs only after validating the complete echoed text item.
@@ -316,11 +273,11 @@ impl Connection {
 
     pub async fn append(&mut self, pcm: &[i16]) -> Result<()> {
         ensure!(
-            self.segment.as_ref().is_some_and(|s| matches!(
-                s.prefix,
-                PrefixState::Ready(_) | PrefixState::Absent
-            ) && matches!(s.audio, AudioState::Recording)),
-            "Realtime audio requires a declared segment"
+            self.segment
+                .as_ref()
+                .is_some_and(|s| matches!(s.prefix, PrefixState::Ready(_))
+                    && matches!(s.audio, AudioState::Recording)),
+            "Realtime audio requires an acknowledged prefix"
         );
         for frame in pcm.chunks(4800) {
             let bytes: Vec<_> = frame.iter().flat_map(|s| s.to_le_bytes()).collect();
@@ -428,10 +385,6 @@ impl Connection {
             let (id, pending) = match &self.segment.as_ref().unwrap().prefix {
                 PrefixState::Ready(id) => (id.clone(), false),
                 PrefixState::Deleting(id) => (id.clone(), true),
-                PrefixState::Absent => {
-                    self.segment = None;
-                    return Ok(());
-                }
                 PrefixState::Pending { .. } => unreachable!(),
             };
             self.segment.as_mut().unwrap().prefix = PrefixState::Deleting(id.clone());
@@ -459,7 +412,6 @@ impl Connection {
 
     /// Return a validated response independently of item cleanup (see `delete_segment`).
     /// Model input is the accepted prefix, this segment's audio, then its dynamic context.
-    #[cfg(test)]
     pub async fn finish(
         &mut self,
         input: &PromptInput,
@@ -478,20 +430,7 @@ impl Connection {
     ) -> Result<DictationResult> {
         timeout(
             RESPONSE_TIMEOUT,
-            self.finish_inner(Some(input), correlation, notify),
-        )
-        .await
-        .context("Realtime response timeout")?
-    }
-
-    pub async fn finish_transcription_streaming(
-        &mut self,
-        correlation: &str,
-        notify: &mut (dyn FnMut(&str) + Send),
-    ) -> Result<DictationResult> {
-        timeout(
-            RESPONSE_TIMEOUT,
-            self.finish_inner(None, correlation, notify),
+            self.finish_inner(input, correlation, notify),
         )
         .await
         .context("Realtime response timeout")?
@@ -499,7 +438,7 @@ impl Connection {
 
     async fn finish_inner(
         &mut self,
-        input: Option<&PromptInput>,
+        input: &PromptInput,
         correlation: &str,
         notify: &mut (dyn FnMut(&str) + Send),
     ) -> Result<DictationResult> {
@@ -508,32 +447,14 @@ impl Connection {
             .as_mut()
             .context("no declared Realtime segment")?;
         ensure!(
-            segment.correlation == correlation,
-            "Realtime response does not match declared segment"
+            segment.correlation == correlation
+                && segment.prefix_text == serde_json::to_string(&input.stable)?,
+            "Realtime response does not match the declared segment prefix"
         );
-        ensure!(
-            input.is_some() == (self.mode == RealtimeMode::Integrated),
-            "Realtime response input does not match connection mode"
-        );
-        let prefix_id = match input {
-            Some(input) => {
-                ensure!(
-                    segment.prefix_text == serde_json::to_string(&input.stable)?,
-                    "Realtime response does not match the declared segment prefix"
-                );
-                let PrefixState::Ready(id) = &segment.prefix else {
-                    bail!("Realtime prefix has not been acknowledged");
-                };
-                Some(id.clone())
-            }
-            None => {
-                ensure!(
-                    matches!(segment.prefix, PrefixState::Absent),
-                    "pure ASR cannot reference a text prefix"
-                );
-                None
-            }
+        let PrefixState::Ready(prefix_id) = &segment.prefix else {
+            bail!("Realtime prefix has not been acknowledged");
         };
+        let prefix_id = prefix_id.clone();
         ensure!(
             matches!(segment.audio, AudioState::Recording),
             "Realtime audio was already committed"
@@ -548,19 +469,13 @@ impl Connection {
             .to_owned();
         self.segment.as_mut().unwrap().audio = AudioState::Committed(audio_id.clone());
         self.response_pending = Some(correlation.to_owned());
-        let response_input = match input {
-            Some(input) => json!([
-                {"type":"item_reference","id":prefix_id.unwrap()},
-                {"type":"item_reference","id":audio_id},
-                {"type":"message","role":"user","content":[{"type":"input_text",
-                    "text":serde_json::to_string(&input.dynamic)?}]}
-            ]),
-            None => json!([{"type":"item_reference","id":audio_id}]),
-        };
         let request = json!({"type":"response.create", "response":{
             "conversation":"none", "output_modalities":["text"], "instructions":self.instructions,
             "max_output_tokens":4096, "metadata":{"dictation_id":correlation},
-            "input":response_input
+            "input":[{"type":"item_reference","id":prefix_id},
+                {"type":"item_reference","id":audio_id},
+                {"type":"message","role":"user","content":[{"type":"input_text",
+                    "text":serde_json::to_string(&input.dynamic)?}]}]
         }});
         #[cfg(feature = "diagnostic-logs")]
         logging::model_event(
@@ -568,7 +483,7 @@ impl Connection {
             correlation,
             "request",
             json!({
-                "model": self.diagnostic_model, "request": request
+                "model": self.diagnostic_model, "stable_prefix": input.stable, "request": request
             }),
             self.diagnostic_key.as_ref().map(SecretValue::expose),
         );
@@ -577,7 +492,6 @@ impl Connection {
         let mut seen = HashSet::new();
         let mut delta_bytes = 0;
         let mut stream = super::text_stream::TextStream::default();
-        let mut plain_stream = super::text_stream::PlainTextStream::default();
         let mut done_text = None;
         let complete = loop {
             let event = self.receive().await?;
@@ -634,21 +548,12 @@ impl Connection {
                         let delta = event["delta"].as_str().context("missing text delta")?;
                         delta_bytes += delta.len();
                         ensure!(delta_bytes <= 64 * 1024, "Realtime response too large");
-                        match self.mode {
-                            RealtimeMode::Transcription => notify(plain_stream.push(delta)?),
-                            RealtimeMode::Integrated => {
-                                if let Some(text) = stream.push(delta) {
-                                    notify(text);
-                                }
-                            }
+                        if let Some(text) = stream.push(delta) {
+                            notify(text);
                         }
                     } else {
-                        ensure!(done_text.is_none(), "duplicate Realtime text completion");
                         let text = event["text"].as_str().context("missing final text")?;
                         ensure!(text.len() <= 64 * 1024, "Realtime response too large");
-                        if self.mode == RealtimeMode::Transcription {
-                            plain_stream.verify(text)?;
-                        }
                         done_text = Some(text.to_owned());
                     }
                 }
@@ -708,10 +613,7 @@ impl Connection {
                 _ => {}
             }
         };
-        match self.mode {
-            RealtimeMode::Integrated => DictationResult::parse(&complete),
-            RealtimeMode::Transcription => DictationResult::parse_plain(&complete),
-        }
+        DictationResult::parse(&complete)
     }
 }
 

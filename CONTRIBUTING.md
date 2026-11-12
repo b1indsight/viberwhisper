@@ -142,7 +142,14 @@ WAV，并在 `samples/` 下保存同 ID 的 JSON；初始识别不是标准答�
 旧报告；不兼容会在任何 STT 请求前失败。报告默认直接写入数据集的 `runs/`，只生成 JSON，
 不生成 Markdown 或网页报告。
 
-Realtime 评估不读取个人记忆；`--realtime-cases cases.json` 可使用显式种子与模拟时钟检查语境、记忆学习和过期，场景历史保存在评估报告中。格式与示例见[场景回归说明](docs/architecture/prompt-lab.md#realtime-context-and-memory-scenarios)。
+普通评估复用桌面后端选择、停顿分段、解析、合并、后处理与失败回退，按 1 倍速播放 WAV，
+评分使用编辑前最终文字。它保留词库、生产系统时间与连续连接，只读取得完整规范化个人记忆初态，
+并在临时副本中确认未经编辑的 final；不显示预览、不写普通历史、不向活动应用输入。
+reference 仅参与评分，不用于识别或确认。新报告标记 `desktop-recognition-v1`；比较要求相同
+非候选配置和初态，旧 STT-only 报告须重跑基线。
+
+`--realtime-cases cases.json` 保留独立诊断路径，以显式种子与模拟时钟检查语境、学习和过期，
+不读取个人记忆，不能与普通评估直接比较。场景历史保存在报告中，格式见[场景说明](docs/architecture/prompt-lab.md#realtime-context-and-memory-scenarios)。
 
 三项指标各自独立，不合成加权总分：
 

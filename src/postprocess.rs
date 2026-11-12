@@ -2,20 +2,14 @@ mod llm;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use crate::core::{
-    config::{ApiAuth, ConfigDocument, fields},
-    recognition::StageMetadata,
-};
-use crate::dictation::{
-    Clock, DictationResult, LearningWorker, Snapshot, Transcript,
-    config::{MemoryConfig, PromptComponents},
-};
+use crate::core::config::{ApiAuth, ConfigDocument, fields};
+use crate::dictation::{LearningWorker, Transcript, config::MemoryConfig};
 use anyhow::Context;
 pub use llm::LlmPostProcessor;
 use std::fmt;
 use tracing::warn;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct LlmConfig {
     endpoint: reqwest::Url,
     auth: ApiAuth,
@@ -25,13 +19,7 @@ pub struct LlmConfig {
     preheat_enabled: bool,
 }
 
-impl LlmConfig {
-    fn instructions(&self) -> String {
-        PromptComponents::postprocess_prompt(self.prompt.as_deref())
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum PostProcessConfig {
     Disabled,
     Llm(LlmConfig),
@@ -69,26 +57,6 @@ impl PostProcessConfig {
                 }))
             },
         )
-    }
-
-    /// Report only resolved settings, using the same effective instructions as the client.
-    pub(crate) fn metadata(&self) -> anyhow::Result<Option<StageMetadata>> {
-        match self {
-            Self::Disabled => Ok(None),
-            Self::Llm(config) => StageMetadata::new(
-                config.endpoint.as_str(),
-                &config.model,
-                None,
-                Some(config.temperature),
-                Some(config.instructions()),
-                "structured-text-contexts-v1",
-            )
-            .map(Some),
-        }
-    }
-
-    pub(crate) fn preheat_enabled(&self) -> bool {
-        matches!(self, Self::Llm(config) if config.preheat_enabled)
     }
 }
 
@@ -152,30 +120,19 @@ pub enum PostProcessor {
     Llm(Box<LlmPostProcessor>),
 }
 
-/// Actual text-stage input and output, before and after confirmed local corrections.
-#[derive(Debug, Clone)]
-pub(crate) struct CleanupTrace {
-    pub input: Snapshot,
-    /// Unix-seconds time used by the memory owner to build `input`; absent without memory.
-    pub input_at: Option<u64>,
-    pub output: DictationResult,
-    pub prepared_text: String,
-}
-
 impl PostProcessor {
-    /// One serial learning owner; the host supplies personal or isolated storage and time.
-    pub(crate) fn with_memory(
+    /// Desktop-only memory ownership; disabled cleanup never loads personal memory.
+    pub(crate) fn new_desktop(
         config: PostProcessConfig,
         memory: MemoryConfig,
         path: Option<std::path::PathBuf>,
         language: Option<String>,
-        clock: Clock,
     ) -> anyhow::Result<Self> {
         let mut processor = Self::new(config);
         if let Self::Llm(processor) = &mut processor
             && memory.enabled
         {
-            processor.learning = Some(LearningWorker::new(memory, path, language, clock)?);
+            processor.learning = Some(LearningWorker::new(memory, path, language)?);
         }
         Ok(processor)
     }
@@ -194,28 +151,19 @@ impl PostProcessor {
         }
     }
 
-    /// Preserve validated recognition metadata until the user successfully delivers the result.
-    #[cfg(test)]
-    pub(crate) fn process_for_delivery(&self, text: &str) -> Result<Transcript, PostProcessError> {
-        self.process_with_trace(text)
-            .map(|(transcript, _)| transcript)
-    }
-
-    pub(crate) fn process_with_trace(
-        &self,
-        text: &str,
-    ) -> Result<(Transcript, Option<CleanupTrace>), PostProcessError> {
+    /// Processes a complete text input in one call.
+    pub fn process_text(&self, text: &str) -> Result<String, PostProcessError> {
         match self {
-            Self::Disabled => Ok((text.to_owned().into(), None)),
-            Self::Llm(processor) => processor.process_with_trace(text),
+            Self::Disabled => Ok(text.to_string()),
+            Self::Llm(processor) => processor.process_text(text),
         }
     }
 
-    /// Capture state with its owner's Unix-seconds time; no memory means no timestamp.
-    pub(crate) fn snapshot_with_time(&self) -> anyhow::Result<(Snapshot, Option<u64>)> {
+    /// Preserve validated recognition metadata until the user successfully delivers the result.
+    pub(crate) fn process_for_delivery(&self, text: &str) -> Result<Transcript, PostProcessError> {
         match self {
-            Self::Llm(processor) => processor.snapshot_with_time(),
-            Self::Disabled => Ok((Snapshot::default(), None)),
+            Self::Disabled => Ok(text.to_owned().into()),
+            Self::Llm(processor) => processor.process_for_delivery(text),
         }
     }
 
@@ -233,6 +181,13 @@ impl PostProcessor {
 mod tests {
     use super::*;
     use crate::core::config::SecretSource;
+
+    #[test]
+    fn test_noop_process_text() {
+        let p = PostProcessor::new(PostProcessConfig::Disabled);
+        assert_eq!(p.process_text("hello").unwrap(), "hello");
+        assert_eq!(p.process_text("").unwrap(), "");
+    }
 
     #[test]
     fn disabled_delivery_has_no_confirmation_feedback() {

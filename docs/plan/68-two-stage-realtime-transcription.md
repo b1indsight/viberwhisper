@@ -1,9 +1,9 @@
 # 68 - Realtime 纯转写与文字后处理 — Feature record
 
-**Stage:** Draft implementation；初始两阶段方案、修订 002/004 及 HTTP 报告边界修正 005 已完成隔离实现与本地检查。连续生产状态实测仍复现文字后处理复制示例，质量验收未通过，PR 须保持草稿。真实桌面交付和 Windows 验收另行执行；发布审查与 CI 结果随 PR 记录。
+**Stage:** Scope reduction validated; draft review；按用户“先收敛”的要求落实[修订 010](#010--2026-11-12--缩减为沿用-master-行为的-prompt-lab-复用)，恢复 master 产品行为，执行证据见 [011](#011--2026-11-12--本地落实最小复用并验证连续状态)。按后续“推 PR 看看”的要求，仅在缩减版重新审查通过后更新原草稿，发布和 CI 状态以 PR 为准；不合并、不切换个人应用。连续生产状态的文字污染仍未解决。
 **PR:** [草稿 #177](https://github.com/b1indsight/viberwhisper/pull/177)，`feat/production-recognition-parity` → `master`。合并、部署、个人配置激活和实际应用切换不在授权中。
 
-**当前设计：** 已批准的[修订 002](#002--2026-11-12--prompt-lab-复用完整生产识别路径)取代下文初始方案中“prompt-lab 保留旧协议”的安排；[修订 004](#004--2026-11-12--普通评估复用生产初态时钟会话和确认学习)进一步取代普通评估的空初态、逐样本重建与丢弃反馈。初始方案及既有时间线保留作为历史。实际实施与验证见 [003](#003--2026-11-12--共享生产识别与隔离评估的本地实现)及 004。
+**当前设计：** 普通 lab 复用 master 现有识别行为，仅保留必要的文件输入、候选 prompt、共享收尾与隔离存储接口。显式 `--realtime-cases` 保留既有独立诊断合同，其迁移暂缓。原初始方案及 002–009 的实施记录保留为历史，旧两阶段、时钟 ACK 和全链路报告设计不属于当前本地交付范围。
 
 ## 1. Initial plan
 
@@ -392,3 +392,29 @@ impl RecognitionPipeline {
 **决策与实施。** 在本分支以合并子提交纳入已发布的 `master`，不 rebase 或强推旧历史。保留共享 `RecognitionPipeline` 和 raw capture 的装配，历史菜单改用 master 的 `platform.tray.set_history`，两条 changelog 均保留。其余增益代码按 master 原样继承，不改原生控件、自动保存或录音增益规则；共用 default 工作区的混合差异不参与合并或推送。
 
 **验证与发布边界。** 合并结果的 Rust 1.99.1 全特性完整测试、CI 同命令 Clippy、fmt 和差异检查通过；该机械兼容不新增行为测试，原有识别、学习及已合入的增益测试一起运行。[完整测试](../../.amp/in/artifacts/pr177-master-integration-tests.log)、[Clippy](../../.amp/in/artifacts/pr177-master-integration-clippy.log)。合并子提交另经同一 1800 秒双路门禁，只有有效通过后才推进原 bookmark 和草稿 PR，并重新订阅新 head；不手动触发发布或切换应用，文字污染的质量阻塞仍保留。
+
+### [010] — 2026-11-12 — 缩减为沿用 master 行为的 prompt-lab 复用
+
+**需求与状态。** 用户指出 PR 对主流程修改过多。对照 master 确认，当前实现同时改变了 Realtime 的后处理选择、旧一体式 prompt 的启动校验、短有声尾段补齐，并迁移 `convert` 和设置验证。这些改动承担独立产品行为，不能全部归为让 lab 复用生产流程所必需的整理。下述是范围修订提案，等待批准；本轮没有修改产品代码或推送原 PR。[反馈来源](https://ampcode.com/threads/T-01a1cbe1-2afc-7223-aefb-f732ddfbddcf)、[当前草稿差异](https://github.com/b1indsight/viberwhisper/pull/177/files)。
+
+**拟保留的范围。** 以当前 master 为行为基准，普通 lab 使用相同的后端选择、录音封包、会话、解析、合并、已有后处理规则、失败回退和确认学习。已约定的宿主差异仍为 WAV 输入、候选音频 prompt、模拟接受未经编辑的 final，且只写隔离记忆、不做真实投递；保留生产词库、规范化初态、系统时间与连续连接。不能靠关闭记忆或复制一份主流程来缩小表面差异。
+
+**生产侧允许的最小改动。** 仅对现有装配和 `finish_transcription` 做保持行为的共享提取；WAV 从 `ActiveRecording` 的同一缓冲、封包和 stop 逻辑进入已有 `SessionOrchestrator`。候选只覆盖音频 prompt；隔离存储需要的路径或状态查询只在原所有者上增加必要接口，默认桌面调用与确认合同不变。逐项说明每处生产改动的真实调用需要，不预设新的通用 pipeline、强制 trace 或大结果对象。
+
+**拟移出与暂缓。** 从本 PR 移出 audio-only 两阶段模式、新增的一体式 prompt 启动冲突、短有声尾段补齐策略变更、`convert`/设置验证迁移和相应离线实现删除。暂缓为报告增加的全链路时钟注入、反馈时间 ACK、细粒度 trace 与严格 Memory 重放；lab 只增加评分和运行身份实际需要的证据，状态隔离不能因此缩水。两阶段污染修复仍需另行明确范围，当前方案不承诺解决 `.156` 的示例复制。
+
+**验收与取舍。** 先以 master 的原有测试保护正常桌面行为，再用相同输入、配置和隔离初态核对 main/lab 的实际请求、最终文字、回退和连续学习，只有候选音频 prompt 可变化；覆盖 Realtime、HTTP 与短尾、后处理失败，检查源记忆不变。`convert`、设置验证、传输协议、尾段和默认确认规则相对 master 不含行为变更。保持同一 feature record/bookmark/草稿 PR，不自动新开 PR，不强推已发布历史；实施前须批准此收缩范围，后续检查和审查不使用旧宽范围结果代替。方案参考 Opus 5.5 的无工具只读咨询，实际模型及工具边界已核对；咨询不是执行验证。
+
+### [011] — 2026-11-12 — 本地落实最小复用并验证连续状态
+
+**要求与实施。** 按用户“先收敛”的要求，在原专用 jj workspace 本地实现 [010]，未改混合 default 工作区。以 [master 基准](https://github.com/b1indsight/viberwhisper/commit/048e534df08e4fb8853ba7ad656c58ec48a3422f) 恢复后端/后处理选择、Realtime 一体式协议、短有声尾段补齐、`convert`、设置验证、异步确认和学习实现；移除 audio-only 模式、通用 `RecognitionPipeline`、注入时钟、确认 ACK、阶段 trace 和报告 Memory 重放。源码逐字核对确认这些所有者与 master 一致。[核对记录](../../.amp/in/artifacts/pr177-scope-source-parity.log)。
+
+**保留接口及必要性。** `RecognitionConfig::build_with_memory_path` 只让 lab 替换存储路径，桌面 `build` 沿用原配置目录。将现有 `finish_transcription` 和其数据对象移至 `core::recognition`，UI 以旧名称重导出，正文在类型限定/名称与空白归一后与 master 完全相同；这使后处理、空结果和失败回退只有一个所有者。`audio::replay_wav` 使用一个原有 `ActiveRecording`、共享缓冲/封包/stop，以 1 倍音频时间输入，不重复施加捕获增益。`dictation::copy_memory` 在原存储所有者内调用规范化 load/prune/recovery，只保存到临时目标，避免截断可见 Snapshot 丢掉隐藏历史和纠错。没有记忆所有者的 HTTP 路径不读取个人文件。
+
+**lab 与报告边界。** 普通 Runner 通过 `ListenerConfig::from_config`、既有生产构造器和共享收尾运行，候选只覆盖音频 prompt；保留配置词库、规范化初态、系统时间、连续连接，并在临时副本确认未经编辑的 final。reference 仅评分，不进入模型或反馈；不显示预览、不写普通历史、不投递文字。schema-3 报告只增加 `desktop-recognition-v1`、去凭证的非音频提示配置摘要和规范化初态摘要，评分使用最终文字，部分结果保留但标为 incomplete。不同执行策略、配置或初态须重跑相容基线；兼容判定保守地包含未使用设置，接受不必要重跑的成本，不再增加生产元数据接口。旧 schema-1/2 保持可读，宽范围 schema-3 需重跑。显式 `--realtime-cases` 原有诊断源码与 fixture 恢复为 master，仍为冻结时钟/独立种子，不宣称完整生产一致性。
+
+**新的验证证据。** 本地 HTTP 对端通过桌面装配与公开普通评估分别处理相同两段音频，实际上传 PCM、cleanup 请求、最终纠错和下一段学习一致，只有候选音频指令不同；raw、final、reference 刻意取不同值，检查评分使用 final、源记忆字节及 mtime 不变。Realtime 对端验证一条连接、生产一体式协议、词库/历史/纠错和连续反馈；启用但无效的未使用 cleanup 配置不引入两阶段行为，空白输出保存为 incomplete。另验证停顿分段后的部分失败不清理/学习、保持成功文字，完整记忆复制保留隐藏状态并遵循损坏/禁用恢复。已有短尾、取消、预览和后处理测试保持不变。
+
+**状态消融。** 每次只修改 Runner 一个机制，运行 `cargo +1.99.1 test --locked --lib prompt_lab::production::tests::ordinary_http_matches_desktop_pcm_cleanup_and_learning_except_audio_prompt -- --exact --nocapture`。取消源初态时，lab final 保留错误专名，和桌面已纠正 final 不同；保留初态但丢弃确认时，第二次 cleanup 请求缺少上次 final 和候选，与桌面请求不同。两次均因实际可观察结果失败，保留这两项机制；恢复代码后完整默认及全特性测试通过。[初态消融](../../.amp/in/artifacts/pr177-scope-seed-ablation.log)、[确认消融](../../.amp/in/artifacts/pr177-scope-feedback-ablation.log)。不额外引入可移除的生产模式/时钟/trace 层。
+
+**完整检查与未交付事项。** Rust 1.99.1 的 `cargo test --locked`、`cargo test --locked --all-features`、`cargo clippy --locked --all-targets --all-features -- -D warnings`、fmt 和实际 evaluate help 通过；vendor rdev 既有警告保留。[默认测试](../../.amp/in/artifacts/pr177-scope-tests-default.log)、[全特性测试](../../.amp/in/artifacts/pr177-scope-tests-all-features.log)、[Clippy](../../.amp/in/artifacts/pr177-scope-clippy.log)、[CLI help](../../.amp/in/artifacts/pr177-scope-evaluate-help.log)。本地缩减未推送、未重新执行发布审查或远端 CI；此前审查不覆盖本版本。旧 head 的 Windows 原生 smoke 坐标失败仍未确认原因，本轮没有修改原生实现。`.156` 质量、麦克风与真实投递未复测，个人配置/记忆/服务/应用未修改；范围收缩不代表短音频污染已经修复。

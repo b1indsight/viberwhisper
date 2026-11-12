@@ -53,7 +53,11 @@ impl ListenerConfig {
     pub(crate) fn from_config(document: &ConfigDocument) -> Result<Self> {
         Ok(Self {
             recording: RecordingConfig::build(document, false)?,
-            post_process: PostProcessConfig::from_config(document)?,
+            post_process: if document.dictation.enabled {
+                PostProcessConfig::Disabled
+            } else {
+                PostProcessConfig::from_config(document)?
+            },
             memory: document.dictation.memory.clone(),
             language: document.transcription.language.clone(),
         })

@@ -13,11 +13,30 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::core::cli::{Cli, Commands, ConfigAction};
-use crate::core::config::{ConfigDocument, ConfigStore};
+use crate::core::config::{ConfigDocument, ConfigStore, fields};
 use crate::ui::setup;
+use crate::{audio, postprocess, text, transcriber};
+
+/// Settings consumed by offline transcription and final text cleanup.
+#[derive(Debug)]
+struct ConvertConfig {
+    transcriber: transcriber::TranscriberConfig,
+    post_process: postprocess::PostProcessConfig,
+    language: Option<String>,
+}
+
+impl ConvertConfig {
+    fn from_config(document: &ConfigDocument) -> Result<Self> {
+        Ok(Self {
+            transcriber: transcriber::TranscriberConfig::from_config(document)?,
+            post_process: postprocess::PostProcessConfig::from_config(document)?,
+            language: document.select(fields::TranscriptionLanguage, std::convert::identity),
+        })
+    }
+}
 
 /// Initializes process-wide services, parses the CLI, and runs the selected workflow.
 pub fn run() -> Result<()> {
@@ -132,36 +151,62 @@ fn handle_config(action: ConfigAction) -> Result<()> {
 }
 
 fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
+    use postprocess::PostProcessor;
     use std::path::Path;
-    use tokio_util::sync::CancellationToken;
+    use transcriber::{ApiTranscriber, Transcriber};
 
     info!(input, "Transcribing audio file");
 
-    let (_, mut document) = load_config()?;
-    // Conversion has empty initial state and never confirms learning. It still
-    // uses production memory switches and correction/finalization algorithms.
-    document.dictation.memory.long_term.clear();
-    let pipeline = recognition::RecognitionPipeline::from_config(
-        &document,
-        None,
-        crate::dictation::system_clock(),
-        None,
-    )?;
-    let result = pipeline.recognize_wav(
-        Path::new(input),
-        crate::session::SessionId(1),
-        &CancellationToken::new(),
-    )?;
-    let text = result
-        .transcript
-        .map(|transcript| transcript.text)
-        .unwrap_or_default();
-    pipeline.shutdown();
-    if let Some(error) = &result.recognition_error
-        && text.is_empty()
-    {
-        return Err(anyhow::anyhow!("{error}"));
+    let (_, document) = load_config()?;
+    if document.dictation.enabled {
+        let mut settings = document.dictation.clone();
+        // Offline conversion is reproducible and does not use personal memory by default.
+        settings.memory = crate::dictation::config::MemoryConfig {
+            enabled: false,
+            long_term: Vec::new(),
+        };
+        let recognizer = crate::dictation::OfflineDictation::new(
+            settings,
+            document.dictation_key(),
+            document.transcription.language.clone(),
+        )?;
+        let text = recognizer.convert(Path::new(input))?;
+        match output {
+            Some(path) => {
+                std::fs::write(path, text)?;
+                println!("Saved to: {path}");
+            }
+            None => println!("{text}"),
+        }
+        return Ok(());
     }
+    let config = ConvertConfig::from_config(&document)?;
+    let transcriber = ApiTranscriber::new(config.transcriber)?;
+    let post_processor = PostProcessor::new(config.post_process);
+
+    let chunk_reader = audio::WavChunkReader::open(Path::new(input))?;
+    let mut chunk_texts = Vec::new();
+    for chunk in chunk_reader {
+        chunk_texts.push(transcriber.transcribe(&chunk?)?);
+    }
+    let stt_text = text::merge_texts(&chunk_texts, config.language.clone());
+    let text = if stt_text.is_empty() {
+        stt_text
+    } else {
+        match post_processor.process_text(&stt_text) {
+            Ok(processed) if !processed.is_empty() => processed,
+            Ok(_) => {
+                // Empty post-process output is not useful; keep the STT text.
+                warn!("Post-processing returned empty text, using original STT text");
+                stt_text
+            }
+            Err(e) => {
+                // Runtime LLM errors should not discard a successful STT result.
+                warn!(error = %e, "Post-processing failed, using original STT text");
+                stt_text
+            }
+        }
+    };
     match output {
         Some(path) => {
             if let Err(e) = std::fs::write(path, &text) {
@@ -171,9 +216,6 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
             println!("Saved to: {}", path);
         }
         None => println!("{}", text),
-    }
-    if let Some(error) = result.recognition_error {
-        return Err(anyhow::anyhow!("{error}"));
     }
     Ok(())
 }
@@ -202,11 +244,11 @@ mod tests {
         document.inference.api.post_process.model = Some(String::new());
         // Configuration constructs typed settings; HTTP transport and API model errors
         // belong to the request that uses them, including when cleanup is enabled.
-        let config = recognition::RecognitionConfig::from_config(&document, false).unwrap();
-        assert!(config.metadata().unwrap().model.is_empty());
+        let config = ConvertConfig::from_config(&document).unwrap();
+        assert!(config.transcriber.metadata().model.is_empty());
         assert!(matches!(
-            crate::postprocess::PostProcessConfig::from_config(&document).unwrap(),
-            crate::postprocess::PostProcessConfig::Llm(_)
+            config.post_process,
+            postprocess::PostProcessConfig::Llm(_)
         ));
     }
 
@@ -222,7 +264,11 @@ mod tests {
             Some("http://127.0.0.1:8080/v1/chat/completions".to_string());
         document.inference.api.post_process.model = Some("local-model".to_string());
         // WAV conversion uses STT and cleanup, without requiring a valid desktop hotkey binding.
-        let config = recognition::RecognitionConfig::from_config(&document, false).unwrap();
-        assert_eq!(config.metadata().unwrap().language.as_deref(), Some("zh"));
+        let config = ConvertConfig::from_config(&document).unwrap();
+        assert_eq!(config.language.as_deref(), Some("zh"));
+        assert_eq!(
+            config.transcriber.metadata().language.as_deref(),
+            Some("zh")
+        );
     }
 }

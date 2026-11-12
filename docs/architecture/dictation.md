@@ -3,8 +3,7 @@
 `dictation.enabled` selects the generic OpenAI Realtime WebSocket path. Configuration is
 file-only. `core::recognition` builds a `SessionOrchestrator` with an HTTP or Realtime worker.
 The orchestrator owns active-session identity, routing, start/finish/cancel and result delivery
-for both paths. `post_process.enabled` selects pure-audio Realtime transcription followed by
-the existing HTTP text processor; disabling it retains integrated structured dictation.
+for both paths. Delivery disables the old LLM postprocessor.
 Raw prompt-lab capture deliberately retains the HTTP transcriber.
 
 Realtime is disabled by default. An omitted URL resolves to
@@ -17,7 +16,7 @@ Realtime is disabled by default. An omitted URL resolves to
 - `engine`: one persistent async worker and reusable connection, recording-scoped I/O and cancellation,
   bounded backlog, ordered pause-aware response segments capped at 30 seconds, final text concatenation without deduplication.
 - `audio::PcmResampler`: shared stateful conversion with explicit output rate, filter-delay and final-tail compensation; Realtime output remains 24 kHz.
-- `audio::segment`: shared source-cursor cuts; desktop, conversion and evaluation use pause detection. WAV replay feeds the recorder's device-neutral buffer at 1× sample time, without capture gain.
+- `audio::segment`: shared source-cursor cuts; desktop uses pause detection, offline/evaluation explicitly retain fixed boundaries.
 - `transport`: standard session/response events, explicit audio-item references and context input,
   out-of-band responses, correlation, final-event consistency, completion status and item deletion.
 - `text_stream`: provisional top-level JSON `text` decoding across escaped strings and surrogate pairs;
@@ -40,15 +39,7 @@ Realtime is disabled by default. An omitted URL resolves to
   reversible preview and confirmation APIs without connecting to Realtime. The selected desktop
   recognition path owns the single writer; both paths use `dictation.memory` and the same schema-2
   file. See [post-processing](postprocess.md) for request and privacy boundaries.
-- `core::recognition`: shared stage assembly and pre-edit finalization, plus the WAV input adapter. Hosts explicitly supply storage and the memory clock. Conversion/setup use empty ephemeral state and discard feedback; ordinary lab runs retain configured vocabulary and a read-only production-memory snapshot, reuse a pipeline with the production clock, and confirm unedited finals into an isolated copy. Explicit scenarios override seeds, clock and feedback for diagnostics.
-
-Pure transcription uses `audio-only-v1`: minimal instructions and the current audio item only,
-with validated plain-text output. It never constructs a memory owner, creates text context items,
-or prepares/confirms a correction. JSON-looking speech remains literal text. The transport keeps
-the same ID/index/status/delta-final/size/NUL checks, cancellation and audio-item cleanup.
-Only the text stage owns `LearningWorker`, supplies contextual metadata and prepares corrections.
-Complete nonempty recognition enters cleanup; empty/failed cleanup falls back to the raw result.
-Input/partial/timeout failures preserve partial text and warnings and skip cleanup.
+- `offline`: conversion and regression with frozen context and no live-memory persistence.
 
 ## Prompt configuration
 
@@ -79,11 +70,9 @@ prompt, not byte-identical to it; historical recognition scores do not validate 
 the default components. A full-string `prompt`, including an empty string, replaces all components;
 explicitly configuring both sources is an error. Old full-string configs remain valid and are
 not rewritten on read. Config examples include complete editable default components.
-In integrated mode the same resolved string is used for session instructions, response instructions
-and report metadata. Two-stage mode rejects nonempty saved integrated overrides with an actionable
-migration error. Its audio instructions come from `ASR_PROMPT`, while the text stage uses
-`PromptComponents::postprocess_prompt`. Lab candidates override only the chosen audio stage at
-runtime, after saved-config validation; they do not change the mode or personal configuration.
+The same resolved string is used for session instructions, response instructions and offline
+report metadata. Prompt-lab overrides operate on a cloned configuration, clear component selection
+and disable personal memory; saved configuration is untouched.
 
 The default context component explicitly ties the JSON after audio to the same preceding audio.
 It also explains that stable and dynamic context fields combine by ID. Custom full prompts and
@@ -103,8 +92,7 @@ segment; 30 seconds (or the canonical byte capacity) always closes it first, and
 the nonempty tail. No overlap, trimming or text deduplication is introduced. Acoustic VAD does
 not determine sentence meaning or tone. Endpoint failures degrade to fixed cuts for that recording.
 `turn_detection` remains null: the client owns all commits, prefix declarations and cleanup.
-Raw capture remains fixed. Conversion and prompt-lab use the same pause-aware production session
-and finalization; their new report policy is separate from historical fixed-segmentation reports.
+Raw capture, offline conversion and prompt-lab evaluation remain fixed, preserving report identity.
 
 Recorder backlog and the 300-frame worker channel are bounded separately. Overflow is an explicit
 failure and stops recording on the next readiness event. Fault-triggered cancellation retains
@@ -260,8 +248,8 @@ cannot supply a spelling change; an intact name may still refresh memory. Newly 
 excluded from learned names; existing candidate
 punctuation and name symbols remain. Unedited or punctuation-only confirmations do not refresh
 manual evidence. Refreshed candidates are deduplicated and bounded to eight per segment. Disabling memory
-also disables correction loading, learning and application. Conversion and seeded evaluation never
-load the personal correction table; they use the production algorithms on explicit isolated state.
+also disables correction loading, learning and application. Offline and seeded evaluation retain
+their existing isolation and never load the personal correction table.
 
 While awaiting microphone frames, the existing worker also polls the connection for incoming
 control traffic. Ping receives Pong and server errors fail the recording before stop. Other
@@ -279,11 +267,11 @@ accuracy or performance. The current Gemma server rejects the standard 4096-toke
 and its source lacks further response controls; real quality/latency comparisons await that service.
 
 Realtime's sampling behavior is provider-owned. The legacy report's numeric temperature metadata
-does not imply that a Realtime temperature parameter is sent. New reports identify every actual
-stage, selected mode, prompts, isolated state, replay conditions and confirmation policy.
-Evaluation preserves the configured memory switch; only explicit test seeds initialize its state,
-and only explicit successful-delivery feedback learns. References are scoring-only inputs.
-HTTP and Realtime use the same production recognition, metrics, report writing and review flow.
+does not imply that a Realtime temperature parameter is sent. Prompt metadata includes the full
+the exact resolved task instructions. Realtime evaluation disables personal memory and overrides
+the whole prompt (including an empty prompt), rather than appending supplemental instructions.
+HTTP and Realtime use the same evaluation, metrics,
+report writing and review flow.
 Evaluation and report loading accept sanitized HTTP(S) and WS(S) endpoint metadata; userinfo,
 query strings and fragments remain forbidden. Live delivery, conversion, setup verification and
 prompt-lab use the shared `text::merge_texts` helper with `transcription.language`: Chinese

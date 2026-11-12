@@ -1,8 +1,11 @@
 //! Explicit, isolated Realtime scenarios and reproducible local assertions.
 use super::dataset::sha256_bytes;
-use crate::dictation::{
-    DictationResult, MemorySeed, Replay, SegmentTrace, Snapshot,
-    config::{TermKind, valid_label, valid_term},
+use crate::{
+    core::config::SecretValue,
+    dictation::{
+        DictationResult, MemorySeed, RealtimeEvaluator, Replay, SegmentTrace, Snapshot,
+        config::{DictationConfig, TermKind, valid_label, valid_term},
+    },
 };
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -13,12 +16,12 @@ use std::{
 };
 
 pub(super) const POLICY: &str = "realtime-context-memory-v5";
-const CASES_SCHEMA_VERSION: u32 = 3;
+const CASES_SCHEMA_VERSION: u32 = 2;
 
 fn validate_cases_version(version: Option<u64>) -> Result<()> {
     ensure!(
         version == Some(u64::from(CASES_SCHEMA_VERSION)),
-        "unsupported Realtime cases schema_version {version:?}; expected {CASES_SCHEMA_VERSION}; migrate stage-specific assertions and supply explicit delivered feedback (omitted feedback is discard), then rerun production evaluation"
+        "unsupported Realtime cases schema_version {version:?}; expected {CASES_SCHEMA_VERSION}; migrate context assertions and candidate names to strings, then rerun Realtime evaluation"
     );
     Ok(())
 }
@@ -28,18 +31,11 @@ pub(super) fn validate_report_version(
     policy: Option<&str>,
     cases_schema: Option<u64>,
 ) -> Result<()> {
-    if policy == Some(super::production::POLICY) {
-        return validate_cases_version(cases_schema);
-    }
     ensure!(
         policy == Some(POLICY),
         "unsupported Realtime report policy {policy:?}; expected {POLICY}; migrate Realtime cases to schema {CASES_SCHEMA_VERSION} and rerun evaluation instead of rescoring old reports"
     );
-    ensure!(
-        cases_schema == Some(2),
-        "unsupported historical Realtime cases schema_version {cases_schema:?}; {POLICY} requires 2; migrate to cases schema {CASES_SCHEMA_VERSION} and rerun production evaluation"
-    );
-    Ok(())
+    validate_cases_version(cases_schema)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,35 +63,6 @@ pub(crate) struct Step {
     pub advance_seconds: u64,
     #[serde(default)]
     pub expect: Expectations,
-    #[serde(default, skip_serializing_if = "Feedback::is_discard")]
-    pub feedback: Feedback,
-}
-
-/// Simulated host feedback is independent of reference text and never changes the scored final.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum Feedback {
-    #[default]
-    Discard,
-    DeliveryFailed,
-    Delivered {
-        text: String,
-    },
-}
-
-impl Feedback {
-    fn is_discard(&self) -> bool {
-        matches!(self, Self::Discard)
-    }
-    pub(super) fn validate(&self) -> Result<()> {
-        if let Self::Delivered { text } = self {
-            ensure!(
-                !text.trim().is_empty() && text.len() <= 64 * 1024 && !text.contains('\0'),
-                "invalid explicit delivered feedback text"
-            );
-        }
-        Ok(())
-    }
 }
 
 impl RealtimeCases {
@@ -113,10 +80,7 @@ impl RealtimeCases {
 
     /// Complete, unique coverage keeps the existing report's metric weights and review IDs stable.
     pub fn validate(&self, ready: &[String]) -> Result<()> {
-        ensure!(
-            matches!(self.schema_version, 2 | 3),
-            "unsupported Realtime cases schema_version; migrate to schema 3 and rerun"
-        );
+        validate_cases_version(Some(u64::from(self.schema_version)))?;
         ensure!(
             !self.cases.is_empty() && self.cases.len() <= ready.len(),
             "invalid Realtime case count"
@@ -139,19 +103,6 @@ impl RealtimeCases {
                     .checked_add(step.advance_seconds)
                     .ok_or_else(|| anyhow::anyhow!("scenario clock overflow"))?;
                 step.expect.validate()?;
-                step.feedback.validate()?;
-                if self.schema_version == 3 {
-                    step.expect.validate_production()?;
-                } else {
-                    ensure!(
-                        step.feedback == Feedback::Discard
-                            && step.expect.audio.is_none()
-                            && step.expect.cleanup.is_none()
-                            && step.expect.raw_text.is_none()
-                            && step.expect.final_text.is_none(),
-                        "historical cases cannot contain production feedback/stage assertions"
-                    );
-                }
             }
         }
         ensure!(
@@ -159,11 +110,6 @@ impl RealtimeCases {
             "Realtime cases do not cover every ready sample"
         );
         Ok(())
-    }
-
-    pub fn validate_new(&self, ready: &[String]) -> Result<()> {
-        validate_cases_version(Some(u64::from(self.schema_version)))?;
-        self.validate(ready)
     }
 
     pub fn digest(&self) -> Result<String> {
@@ -289,25 +235,6 @@ pub(crate) struct Expectations {
     pub candidates_absent: Vec<String>,
     pub memory: SnapshotExpectations,
     pub forbidden_text: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio: Option<StageExpectations>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cleanup: Option<StageExpectations>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub final_text: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct StageExpectations {
-    pub input: SnapshotExpectations,
-    pub audio_only: Option<bool>,
-    pub context: Option<String>,
-    pub candidates_present: Vec<String>,
-    pub candidates_absent: Vec<String>,
-    pub forbidden_text: Vec<String>,
 }
 
 impl Expectations {
@@ -332,123 +259,6 @@ impl Expectations {
             "invalid forbidden text assertion"
         );
         Ok(())
-    }
-
-    fn validate_production(&self) -> Result<()> {
-        ensure!(
-            self.input == SnapshotExpectations::default()
-                && self.context.is_none()
-                && self.candidates_present.is_empty()
-                && self.candidates_absent.is_empty(),
-            "schema 3 assertions must name audio or cleanup stage, not legacy input/context/candidates"
-        );
-        for stage in [&self.audio, &self.cleanup].into_iter().flatten() {
-            stage.input.validate()?;
-            let legacy = Expectations {
-                context: stage.context.clone(),
-                candidates_present: stage.candidates_present.clone(),
-                candidates_absent: stage.candidates_absent.clone(),
-                forbidden_text: stage.forbidden_text.clone(),
-                ..Default::default()
-            };
-            legacy.validate()?;
-        }
-        ensure!(
-            self.cleanup
-                .as_ref()
-                .is_none_or(|stage| stage.audio_only.is_none()),
-            "audio_only is an audio-stage assertion, not a cleanup assertion"
-        );
-        for text in [&self.raw_text, &self.final_text].into_iter().flatten() {
-            ensure!(
-                text.len() <= 64 * 1024 && !text.contains('\0'),
-                "invalid stage text assertion"
-            );
-        }
-        Ok(())
-    }
-
-    pub(super) fn check_production(
-        &self,
-        execution: &super::production::SampleExecution,
-    ) -> Vec<Check> {
-        let mut checks = Vec::new();
-        self.memory.check(&execution.after, "memory", &mut checks);
-        for (name, expected, actual) in [
-            (
-                "raw_text",
-                &self.raw_text,
-                Some(execution.raw_text.as_str()),
-            ),
-            (
-                "final_text",
-                &self.final_text,
-                execution.final_text.as_deref(),
-            ),
-        ] {
-            if let Some(expected) = expected {
-                checks.push(Check::new(name.into(), actual == Some(expected.as_str())));
-            }
-        }
-        if let Some(expected) = &self.audio {
-            let audio_only = execution.asr.iter().all(|trace| {
-                trace.input.is_none() && trace.prompt_input.is_none() && trace.output.is_string()
-            });
-            if let Some(value) = expected.audio_only {
-                checks.push(Check::new(
-                    "audio.audio_only".into(),
-                    !execution.asr.is_empty() && audio_only == value,
-                ));
-            }
-            for trace in &execution.asr {
-                if let Some(input) = &trace.input {
-                    expected.input.check(
-                        input,
-                        &format!("audio.{}.input", trace.index),
-                        &mut checks,
-                    );
-                } else if expected.input != SnapshotExpectations::default() {
-                    checks.push(Check::new(
-                        format!("audio.{}.context_input_available", trace.index),
-                        false,
-                    ));
-                }
-            }
-            check_stage(
-                expected,
-                "audio",
-                execution.asr.iter().map(|trace| &trace.output),
-                &execution.raw_text,
-                &mut checks,
-            );
-        }
-        if let Some(expected) = &self.cleanup {
-            if let Some(trace) = &execution.text {
-                expected
-                    .input
-                    .check(&trace.input, "cleanup.input", &mut checks);
-                check_stage(
-                    expected,
-                    "cleanup",
-                    std::iter::once(&trace.output),
-                    trace.output["text"].as_str().unwrap_or_default(),
-                    &mut checks,
-                );
-            } else {
-                checks.push(Check::new("cleanup.executed".into(), false));
-            }
-        }
-        for value in &self.forbidden_text {
-            checks.push(Check::new(
-                format!("final.forbidden_text:{value}"),
-                !execution
-                    .final_text
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains(value),
-            ));
-        }
-        checks
     }
 
     pub fn check(
@@ -495,52 +305,6 @@ impl Expectations {
             checks.push(Check::new(format!("forbidden_text:{v}"), !text.contains(v)));
         }
         checks
-    }
-}
-
-fn check_stage<'a>(
-    expected: &StageExpectations,
-    name: &str,
-    outputs: impl Iterator<Item = &'a serde_json::Value>,
-    text: &str,
-    checks: &mut Vec<Check>,
-) {
-    let outputs = outputs.collect::<Vec<_>>();
-    let mut candidates = Vec::new();
-    for (index, output) in outputs.iter().enumerate() {
-        if output.is_object() {
-            let result = DictationResult::parse_transcript(&output.to_string());
-            checks.push(Check::new(
-                format!("{name}.{index}.metadata"),
-                result.as_ref().is_ok_and(|result| result.metadata_valid),
-            ));
-            if let Ok(result) = result {
-                candidates.extend(result.memory_candidates);
-            }
-        }
-    }
-    if let Some(context) = &expected.context {
-        checks.push(Check::new(
-            format!("{name}.context"),
-            outputs.last().and_then(|value| value["context"].as_str()) == Some(context.as_str()),
-        ));
-    }
-    for (present, values) in [
-        (true, &expected.candidates_present),
-        (false, &expected.candidates_absent),
-    ] {
-        for value in values {
-            checks.push(Check::new(
-                format!("{name}.candidate:{value}"),
-                candidates.iter().any(|candidate| candidate.text == *value) == present,
-            ));
-        }
-    }
-    for value in &expected.forbidden_text {
-        checks.push(Check::new(
-            format!("{name}.forbidden_text:{value}"),
-            !text.contains(value),
-        ));
     }
 }
 
@@ -626,10 +390,10 @@ impl RealtimeReport {
     }
 }
 
-#[cfg(test)]
 pub(crate) struct RealtimeRun {
     pub cases: RealtimeCases,
-    pub settings: crate::dictation::config::DictationConfig,
+    pub settings: DictationConfig,
+    pub key: Option<SecretValue>,
 }
 
 impl RealtimeReport {
@@ -638,11 +402,10 @@ impl RealtimeReport {
     }
 
     /// Recompute traces, learning, expectations and derived checks before trusting a stored report.
-    pub(super) fn validate(
+    pub fn validate(
         &self,
         samples: &[super::regression::SampleResult],
         language: Option<String>,
-        identity: Option<&super::production::Identity>,
     ) -> Result<()> {
         validate_report_version(
             Some(&self.policy_version),
@@ -658,13 +421,6 @@ impl RealtimeReport {
             self.cases_sha256 == self.cases.digest()?
                 && self.contract_sha256 == self.cases.contract_digest()?,
             "Realtime report identity mismatch"
-        );
-        if let Some(identity) = identity {
-            return self.validate_production(samples, identity);
-        }
-        ensure!(
-            self.policy_version == POLICY,
-            "historical report cannot claim production policy"
         );
         let mut rows = self.steps.iter();
         for case in &self.cases.cases {
@@ -724,113 +480,56 @@ impl RealtimeReport {
         ensure!(rows.next().is_none(), "unexpected Realtime steps");
         Ok(())
     }
-
-    fn validate_production(
-        &self,
-        samples: &[super::regression::SampleResult],
-        identity: &super::production::Identity,
-    ) -> Result<()> {
-        ensure!(
-            self.policy_version == super::production::POLICY
-                && self.cases.schema_version == 3
-                && identity.cases_contract_sha256.as_deref() == Some(self.contract_sha256.as_str())
-                && identity.seed_sha256
-                    == super::production::digest(
-                        &self
-                            .cases
-                            .cases
-                            .iter()
-                            .map(|case| (&case.id, &case.seed))
-                            .collect::<Vec<_>>()
-                    )?,
-            "scenario execution identity mismatch"
-        );
-        let mut rows = self.steps.iter();
-        for case in &self.cases.cases {
-            let mut executions = Vec::new();
-            let mut at = case.at;
-            for step in &case.steps {
-                at = at
-                    .checked_add(step.advance_seconds)
-                    .ok_or_else(|| anyhow::anyhow!("scenario clock overflow"))?;
-                let row = rows
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("missing production step"))?;
-                let sample = samples
-                    .iter()
-                    .find(|sample| sample.sample_id == step.sample_id)
-                    .ok_or_else(|| anyhow::anyhow!("unknown production sample"))?;
-                let execution = sample
-                    .execution
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("missing production step evidence"))?;
-                ensure!(
-                    row.case_id == case.id
-                        && row.sample_id == step.sample_id
-                        && row.at == at
-                        && execution.started_at == at
-                        && execution.feedback == step.feedback
-                        && row.before == execution.before
-                        && row.after == execution.after
-                        && row.segments == execution.asr
-                        && row.checks == step.expect.check_production(execution),
-                    "scenario feedback, clock, trace or checks differ from evidence"
-                );
-                executions.push(execution.clone());
-                at = execution.finished_at;
-            }
-            super::production::validate_replay(identity, &case.seed, &executions)?;
-        }
-        ensure!(rows.next().is_none(), "unexpected production steps");
-        Ok(())
-    }
 }
 
-/// One real production pipeline per scenario; only explicit delivered feedback learns.
-pub(super) fn run_production(
-    cases: RealtimeCases,
-    document: &crate::core::config::ConfigDocument,
-    stages: (
-        crate::core::recognition::RecognitionConfig,
-        crate::postprocess::PostProcessConfig,
-    ),
-    audio: &[(String, PathBuf)],
-) -> Result<(RealtimeReport, super::production::Outcomes)> {
+pub(crate) type Outcomes = HashMap<String, std::result::Result<String, String>>;
+
+/// Execute only audio and explicit seed state; reference text and assertions never reach the recognizer.
+pub(crate) fn run(
+    run: RealtimeRun,
+    audio: &HashMap<String, PathBuf>,
+    language: Option<String>,
+) -> Result<(RealtimeReport, Outcomes)> {
     let mut outcomes = HashMap::new();
     let mut steps = Vec::new();
-    for case in &cases.cases {
-        let runner = super::production::Runner::new(document, stages.clone(), &case.seed, case.at)?;
-        for (index, step) in case.steps.iter().enumerate() {
-            let path = &audio
-                .iter()
-                .find(|(id, _)| id == &step.sample_id)
-                .expect("validated sample coverage")
-                .1;
-            let result = runner.recognize(
-                path,
-                crate::session::SessionId(index as u64 + 1),
-                step.advance_seconds,
-                Some(&step.feedback),
-            )?;
-            let checks = step.expect.check_production(&result);
+    for case in &run.cases.cases {
+        let mut evaluator =
+            RealtimeEvaluator::new(run.settings.clone(), run.key.clone(), &case.seed, case.at)?;
+        let mut at = case.at;
+        for step in &case.steps {
+            at += step.advance_seconds;
+            let before = evaluator.snapshot(at);
+            let (result, segments) = evaluator.transcribe(
+                &audio[&step.sample_id],
+                &step.sample_id,
+                at,
+                language.clone(),
+            );
+            let after = evaluator.snapshot(at);
+            let checks = step.expect.check(
+                &before,
+                &segments,
+                &after,
+                result.as_ref().map(String::as_str).unwrap_or_default(),
+            );
             steps.push(StepResult {
                 case_id: case.id.clone(),
                 sample_id: step.sample_id.clone(),
-                at: result.started_at,
-                before: result.before.clone(),
-                segments: result.asr.clone(),
-                after: result.after.clone(),
+                at,
+                before,
+                segments,
+                after,
                 checks,
             });
-            outcomes.insert(step.sample_id.clone(), result);
+            outcomes.insert(step.sample_id.clone(), result.map_err(|e| format!("{e:#}")));
         }
     }
     Ok((
         RealtimeReport {
-            policy_version: super::production::POLICY.into(),
-            cases_sha256: cases.digest()?,
-            contract_sha256: cases.contract_digest()?,
-            cases,
+            policy_version: POLICY.into(),
+            cases_sha256: run.cases.digest()?,
+            contract_sha256: run.cases.contract_digest()?,
+            cases: run.cases,
             steps,
         },
         outcomes,
