@@ -11,10 +11,10 @@ use super::{
     DatasetStore, ProperNounAnnotation, ProperNounScore, ScoringDataset, SttSnapshot, WerScore,
     score_proper_nouns, score_wer,
 };
-use crate::audio::WavChunkReader;
-use crate::transcriber::Transcriber;
+#[cfg(test)]
+use crate::{audio::WavChunkReader, transcriber::Transcriber};
 
-pub(crate) const REPORT_SCHEMA_VERSION: u32 = 2;
+pub(crate) const REPORT_SCHEMA_VERSION: u32 = 3;
 pub(crate) const SCORING_POLICY_VERSION: &str = "stt-prompt-scoring-v2";
 pub(crate) const AGENT_REVIEW_RUBRIC_VERSION: &str = "semantic-equivalence-v1";
 
@@ -98,6 +98,18 @@ impl Thresholds {
 }
 
 pub(crate) struct EvaluationRequest {
+    pub(crate) document: crate::core::config::ConfigDocument,
+    pub(crate) memory_path: Option<PathBuf>,
+    pub(crate) asr_prompt_override: Option<String>,
+    pub(crate) thresholds: Thresholds,
+    pub(crate) output: Option<PathBuf>,
+    pub(crate) compare_to: Option<EvaluationReport>,
+    pub(crate) cases: Option<super::realtime::RealtimeCases>,
+}
+
+// Fixture generator for historical schema-1/2 contract tests, never a runtime entry point.
+#[cfg(test)]
+struct HistoricalRequest {
     pub(crate) stt: SttSnapshot,
     pub(crate) thresholds: Thresholds,
     pub(crate) output: Option<PathBuf>,
@@ -224,6 +236,10 @@ pub(crate) struct ReviewSummary {
     pub(crate) source: String,
     pub(crate) rubric_version: String,
     pub(crate) reviewed_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) execution_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) evidence_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +283,10 @@ pub(crate) struct SampleResult {
     pub(crate) reference: String,
     pub(crate) proper_noun_annotations: Vec<ProperNounAnnotation>,
     pub(crate) hypothesis: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) raw_hypothesis: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) execution: Option<super::production::SampleExecution>,
     pub(crate) wer: Option<WerScore>,
     pub(crate) proper_nouns: Option<ProperNounScore>,
     pub(crate) agent_review: Option<AgentSampleReview>,
@@ -294,6 +314,10 @@ pub(crate) struct SampleComparison {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RunComparison {
     pub(crate) prior_run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) prior_execution: Option<super::production::Identity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) execution_changes: Option<Vec<super::production::IdentityChange>>,
     pub(crate) wer_percent_delta: f64,
     pub(crate) proper_noun_percent_delta: f64,
     pub(crate) llm_score_delta: Option<f64>,
@@ -309,6 +333,12 @@ pub(crate) struct RunComparison {
 #[serde(deny_unknown_fields)]
 pub(crate) struct EvaluationReport {
     pub(crate) schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) execution: Option<super::production::Identity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) memory_seed: Option<crate::dictation::MemorySeed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) evidence_sha256: Option<String>,
     pub(crate) run_id: String,
     pub(crate) created_at_unix_ms: u64,
     pub(crate) completed_at_unix_ms: Option<u64>,
@@ -368,7 +398,7 @@ impl EvaluationReport {
             )
             .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
         }
-        if ![1, REPORT_SCHEMA_VERSION].contains(&self.schema_version)
+        if ![1, 2, REPORT_SCHEMA_VERSION].contains(&self.schema_version)
             || (self.schema_version == 1 && self.realtime.is_some())
         {
             return Err(RegressionError::Invalid(format!(
@@ -385,6 +415,7 @@ impl EvaluationReport {
         }
         self.thresholds.validate()?;
         validate_stt(&self.stt)?;
+        self.validate_execution()?;
         let expected_prompt_digest = sha256_bytes(&serde_json::to_vec(&self.stt.prompt)?);
         if self.prompt_sha256 != expected_prompt_digest {
             return Err(RegressionError::Invalid(
@@ -431,13 +462,19 @@ impl EvaluationReport {
                     "Realtime report requires a WebSocket endpoint".into(),
                 ));
             }
-            if self.stt.input_layout.as_deref() != Some(crate::dictation::INPUT_LAYOUT) {
+            if self.schema_version < 3
+                && self.stt.input_layout.as_deref() != Some(crate::dictation::INPUT_LAYOUT)
+            {
                 return Err(RegressionError::Invalid(
                     "Realtime policy and input layout differ".into(),
                 ));
             }
             realtime
-                .validate(&self.samples, self.stt.language.clone())
+                .validate(
+                    &self.samples,
+                    self.stt.language.clone(),
+                    self.execution.as_ref(),
+                )
                 .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
             if let Some(comparison) = &self.comparison {
                 realtime
@@ -599,6 +636,12 @@ impl EvaluationReport {
         if review.source != "coding_agent"
             || review.rubric_version != AGENT_REVIEW_RUBRIC_VERSION
             || review.reviewed_at_unix_ms != self.completed_at_unix_ms.unwrap()
+            || review.execution_sha256
+                != self
+                    .execution
+                    .as_ref()
+                    .map(|identity| identity.sha256.clone())
+            || review.evidence_sha256 != self.evidence_digest()?
         {
             return Err(RegressionError::Invalid(
                 "complete report review metadata is invalid".to_string(),
@@ -642,13 +685,172 @@ impl EvaluationReport {
             .realtime
             .as_ref()
             .map(super::realtime::RealtimeReport::passed);
+        if self.execution.is_some()
+            && self.samples.iter().any(|sample| {
+                sample.execution.as_ref().is_some_and(|execution| {
+                    matches!(
+                        execution.cleanup,
+                        super::production::Cleanup::EmptyFallback
+                            | super::production::Cleanup::FailedFallback
+                    )
+                })
+            })
+        {
+            gates.realtime = Some(false);
+        }
         gates
+    }
+
+    fn validate_execution(&self) -> Result<()> {
+        let invalid = |message: String| RegressionError::Invalid(message);
+        let Some(identity) = &self.execution else {
+            if self.schema_version >= 3
+                || self.evidence_sha256.is_some()
+                || self
+                    .samples
+                    .iter()
+                    .any(|sample| sample.execution.is_some() || sample.raw_hypothesis.is_some())
+            {
+                return Err(invalid(
+                    "production report requires execution identity and stage evidence".into(),
+                ));
+            }
+            return Ok(());
+        };
+        if self.schema_version != 3 {
+            return Err(invalid(
+                "historical reports cannot claim production execution".into(),
+            ));
+        }
+        identity.validate().map_err(|e| invalid(format!("{e:#}")))?;
+        if self.evidence_sha256 != self.evidence_digest()? {
+            return Err(invalid("production evidence digest mismatch".into()));
+        }
+        if serde_json::to_value(identity.stt())? != serde_json::to_value(&self.stt)? {
+            return Err(invalid(
+                "STT summary differs from production audio stage".into(),
+            ));
+        }
+        if identity.cases_contract_sha256.is_some() != self.realtime.is_some() {
+            return Err(invalid(
+                "production scenario identity/report mismatch".into(),
+            ));
+        }
+        if self.realtime.is_some() {
+            if self.memory_seed.is_some() {
+                return Err(invalid(
+                    "diagnostic scenarios cannot claim a production memory seed".into(),
+                ));
+            }
+        } else {
+            let seed = self
+                .memory_seed
+                .as_ref()
+                .ok_or_else(|| invalid("missing initial production memory".into()))?;
+            if identity.seed_sha256
+                != super::production::digest(seed).map_err(|e| invalid(format!("{e:#}")))?
+            {
+                return Err(invalid("initial production memory digest mismatch".into()));
+            }
+        }
+        let mut executions = Vec::new();
+        for sample in &self.samples {
+            let execution = sample
+                .execution
+                .as_ref()
+                .ok_or_else(|| invalid("missing production sample evidence".into()))?;
+            execution
+                .validate(identity)
+                .map_err(|e| invalid(format!("sample {}: {e:#}", sample.sample_id)))?;
+            if sample.raw_hypothesis.as_deref() != Some(execution.raw_text.as_str())
+                || sample.hypothesis != execution.final_text
+                || sample.error != execution.failure()
+            {
+                return Err(invalid(
+                    "sample raw/final/error differs from production evidence".into(),
+                ));
+            }
+            if self.realtime.is_none() {
+                let expected_feedback = match &execution.final_text {
+                    Some(text)
+                        if execution.recognition_error.is_none() && !text.trim().is_empty() =>
+                    {
+                        super::realtime::Feedback::Delivered { text: text.clone() }
+                    }
+                    _ => super::realtime::Feedback::Discard,
+                };
+                if execution.feedback != expected_feedback {
+                    return Err(invalid(
+                        "ordinary samples must confirm their actual unedited final".into(),
+                    ));
+                }
+                executions.push(execution.clone());
+            }
+        }
+        if let Some(seed) = &self.memory_seed {
+            super::production::validate_replay(identity, seed, &executions)
+                .map_err(|e| invalid(format!("{e:#}")))?;
+        }
+        Ok(())
+    }
+
+    /// Stable across applying a review, but binds the review to all stage results and feedback.
+    pub(super) fn evidence_digest(&self) -> Result<Option<String>> {
+        if self.execution.is_none() {
+            return Ok(None);
+        }
+        let samples = self
+            .samples
+            .iter()
+            .map(|sample| {
+                (
+                    &sample.sample_id,
+                    &sample.audio_sha256,
+                    &sample.reference,
+                    &sample.proper_noun_annotations,
+                    &sample.raw_hypothesis,
+                    &sample.hypothesis,
+                    &sample.execution,
+                    &sample.error,
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(Some(sha256_bytes(&serde_json::to_vec(&(
+            &self.run_id,
+            &self.execution,
+            &self.memory_seed,
+            &self.dataset.digest,
+            samples,
+            &self.realtime,
+        ))?)))
     }
 
     fn validate_comparison_contract(&self) -> Result<()> {
         let Some(comparison) = &self.comparison else {
             return Ok(());
         };
+        match (
+            &self.execution,
+            &comparison.prior_execution,
+            &comparison.execution_changes,
+        ) {
+            (Some(current), Some(prior), Some(changes)) => {
+                let expected = current
+                    .compare(prior)
+                    .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
+                if &expected != changes {
+                    return Err(RegressionError::Invalid(
+                        "comparison execution changes do not match identities".into(),
+                    ));
+                }
+            }
+            (None, None, None) => {}
+            _ => {
+                return Err(RegressionError::Invalid(
+                    "comparison cannot cross historical/production execution policies".into(),
+                ));
+            }
+        }
         let ids = comparison
             .samples
             .iter()
@@ -759,10 +961,191 @@ fn float_eq(left: f64, right: f64) -> bool {
     (left - right).abs() <= f64::EPSILON * left.abs().max(right.abs()).max(1.0) * 8.0
 }
 
+/// Evaluate files through the same assembly, paced audio adapter and finalization as desktop.
+/// All identity, dataset, case and baseline checks happen before constructing a network owner.
 pub(crate) fn evaluate(
     store: &DatasetStore,
-    transcriber: &dyn Transcriber,
     request: EvaluationRequest,
+) -> Result<EvaluationOutcome> {
+    use super::production::{Identity, run_samples};
+    let invalid = |error: anyhow::Error| RegressionError::Invalid(format!("{error:#}"));
+    request.thresholds.validate()?;
+    let dataset = store.scoring_snapshot(SCORING_POLICY_VERSION)?;
+    validate_scoring_dataset(&dataset)?;
+    let ready = dataset
+        .samples
+        .iter()
+        .map(|sample| sample.id.clone())
+        .collect::<Vec<_>>();
+    if let Some(cases) = &request.cases {
+        if !request.document.dictation.enabled {
+            return Err(RegressionError::Invalid(
+                "--realtime-cases requires enabled Realtime backend".into(),
+            ));
+        }
+        cases.validate_new(&ready).map_err(invalid)?;
+    }
+    let created_at_unix_ms = unix_time_ms()?;
+    let seed = if request.cases.is_some() {
+        crate::dictation::MemorySeed::default()
+    } else if let Some(path) = &request.memory_path {
+        crate::dictation::MemorySeed::capture(
+            path,
+            request.document.dictation.memory.clone(),
+            created_at_unix_ms / 1000,
+        )
+    } else {
+        crate::dictation::MemorySeed {
+            long_term: request.document.dictation.memory.long_term.clone(),
+            ..Default::default()
+        }
+    };
+    let identity = Identity::from_config(
+        &request.document,
+        request.asr_prompt_override.as_deref(),
+        request.cases.as_ref(),
+        &seed,
+    )
+    .map_err(invalid)?;
+    let changes = if let Some(prior) = &request.compare_to {
+        prior.validate_contract()?;
+        let old = prior.execution.as_ref().ok_or_else(|| RegressionError::Invalid("historical STT-only reports cannot compare with the production recognition policy; rerun baseline".into()))?;
+        if prior.status != RunStatus::Complete
+            || prior.dataset.digest != dataset.digest
+            || prior.dataset.ready_sample_ids != ready
+            || !prior.failures.is_empty()
+        {
+            return Err(RegressionError::Invalid(
+                "comparison report is not compatible with this evaluation".into(),
+            ));
+        }
+        Some(identity.compare(old).map_err(invalid)?)
+    } else {
+        None
+    };
+    let run_id = next_run_id(created_at_unix_ms);
+    let path = request
+        .output
+        .unwrap_or_else(|| store.root().join("runs").join(format!("{run_id}.json")));
+    validate_new_output_path(&path)?;
+    let audio = dataset
+        .samples
+        .iter()
+        .map(|sample| (sample.id.clone(), store.root().join(&sample.audio.path)))
+        .collect::<Vec<_>>();
+    let (realtime, mut outcomes) = match request.cases {
+        Some(cases) => {
+            let (report, outcomes) = super::realtime::run_production(
+                cases,
+                &request.document,
+                request.asr_prompt_override,
+                &audio,
+            )
+            .map_err(invalid)?;
+            (Some(report), outcomes)
+        }
+        None => (
+            None,
+            run_samples(
+                &request.document,
+                request.asr_prompt_override,
+                &audio,
+                &seed,
+            )
+            .map_err(invalid)?,
+        ),
+    };
+    let mut samples = Vec::new();
+    let mut failures = Vec::new();
+    for sample in &dataset.samples {
+        let execution = outcomes
+            .remove(&sample.id)
+            .expect("validated exact sample coverage");
+        let reference = sample.reference.text.clone().expect("ready reference");
+        let hypothesis = execution.final_text.clone();
+        let error = execution.failure();
+        if let Some(message) = &error {
+            failures.push(RunFailure {
+                sample_id: sample.id.clone(),
+                message: message.clone(),
+            });
+        }
+        samples.push(SampleResult {
+            sample_id: sample.id.clone(),
+            audio_path: sample.audio.path.clone(),
+            audio_sha256: sample.audio.sha256.clone(),
+            wer: hypothesis.as_ref().map(|text| score_wer(&reference, text)),
+            proper_nouns: hypothesis
+                .as_ref()
+                .map(|text| score_proper_nouns(text, &sample.reference.proper_nouns)),
+            reference,
+            proper_noun_annotations: sample.reference.proper_nouns.clone(),
+            hypothesis,
+            raw_hypothesis: Some(execution.raw_text.clone()),
+            execution: Some(execution),
+            agent_review: None,
+            error,
+        });
+    }
+    let aggregates = aggregate_local_scores(&samples);
+    let mut comparison = request
+        .compare_to
+        .as_ref()
+        .map(|prior| build_comparison(prior, &samples, &aggregates));
+    if let (Some(comparison), Some(prior)) = (&mut comparison, &request.compare_to) {
+        comparison.prior_execution = prior.execution.clone();
+        comparison.execution_changes = changes;
+        if let (Some(current), Some(old)) = (&realtime, &prior.realtime) {
+            comparison.realtime_inputs_changed = Some(current.cases_sha256 != old.cases_sha256);
+            comparison.realtime_seed_changes = Some(current.seed_changes(old));
+        }
+    }
+    let stt = identity.stt();
+    let mut report = EvaluationReport {
+        schema_version: REPORT_SCHEMA_VERSION,
+        execution: Some(identity),
+        memory_seed: realtime.is_none().then_some(seed),
+        evidence_sha256: None,
+        run_id,
+        created_at_unix_ms,
+        completed_at_unix_ms: None,
+        status: if failures.is_empty() {
+            RunStatus::AwaitingAgentReview
+        } else {
+            RunStatus::Incomplete
+        },
+        scoring_policy_version: SCORING_POLICY_VERSION.into(),
+        agent_review_rubric_version: AGENT_REVIEW_RUBRIC_VERSION.into(),
+        dataset: DatasetSummary {
+            root: store.root().display().to_string(),
+            digest: dataset.digest,
+            ready_sample_ids: ready,
+            pending_count: dataset.pending_count,
+            invalid_count: dataset.invalid_count,
+        },
+        prompt_sha256: sha256_bytes(&serde_json::to_vec(&stt.prompt)?),
+        stt,
+        thresholds: request.thresholds,
+        aggregates,
+        review: None,
+        gates: None,
+        meets_targets: None,
+        samples,
+        failures,
+        comparison,
+        realtime,
+    };
+    report.evidence_sha256 = report.evidence_digest()?;
+    report.validate_contract()?;
+    report.write(&path)?;
+    Ok(EvaluationOutcome { report, path })
+}
+
+#[cfg(test)]
+fn evaluate_historical(
+    store: &DatasetStore,
+    transcriber: &dyn Transcriber,
+    request: HistoricalRequest,
 ) -> Result<EvaluationOutcome> {
     request.thresholds.validate()?;
     validate_stt(&request.stt)?;
@@ -822,18 +1205,11 @@ pub(crate) fn evaluate(
         .unwrap_or_else(|| store.root().join("runs").join(format!("{run_id}.json")));
     validate_new_output_path(&path)?;
 
-    let (realtime, mut outcomes) = if let Some(run) = request.realtime {
-        let audio = dataset
-            .samples
-            .iter()
-            .map(|s| (s.id.clone(), store.root().join(&s.audio.path)))
-            .collect();
-        let (report, outcomes) = super::realtime::run(run, &audio, request.stt.language.clone())
-            .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
-        (Some(report), outcomes)
-    } else {
-        (None, std::collections::HashMap::new())
-    };
+    if request.realtime.is_some() {
+        return Err(RegressionError::Invalid(
+            "historical execution is unavailable; migrate cases to schema 3 and rerun".into(),
+        ));
+    }
 
     let mut samples = Vec::with_capacity(dataset.samples.len());
     let mut failures = Vec::new();
@@ -844,19 +1220,15 @@ pub(crate) fn evaluate(
             .as_deref()
             .expect("scoring snapshots contain ready references")
             .to_string();
-        let result = if realtime.is_some() {
-            outcomes
-                .remove(&sample.id)
-                .expect("validated scenario coverage")
-        } else {
-            transcribe_sample(
-                &store.root().join(&sample.audio.path),
-                transcriber,
-                request.stt.language.clone(),
-            )
-        };
+        let result = transcribe_sample(
+            &store.root().join(&sample.audio.path),
+            transcriber,
+            request.stt.language.clone(),
+        );
         match result {
             Ok(hypothesis) => samples.push(SampleResult {
+                raw_hypothesis: None,
+                execution: None,
                 sample_id: sample.id.clone(),
                 audio_path: sample.audio.path.clone(),
                 audio_sha256: sample.audio.sha256.clone(),
@@ -877,6 +1249,8 @@ pub(crate) fn evaluate(
                     message: message.clone(),
                 });
                 samples.push(SampleResult {
+                    raw_hypothesis: None,
+                    execution: None,
                     sample_id: sample.id.clone(),
                     audio_path: sample.audio.path.clone(),
                     audio_sha256: sample.audio.sha256.clone(),
@@ -897,20 +1271,15 @@ pub(crate) fn evaluate(
     } else {
         RunStatus::Incomplete
     };
-    let mut comparison = request
+    let comparison = request
         .compare_to
         .as_ref()
         .map(|prior| build_comparison(prior, &samples, &aggregates));
-    if let (Some(comparison), Some(current), Some(prior)) =
-        (&mut comparison, &realtime, &request.compare_to)
-    {
-        comparison.realtime_inputs_changed =
-            Some(current.cases_sha256 != prior.realtime.as_ref().unwrap().cases_sha256);
-        comparison.realtime_seed_changes =
-            Some(current.seed_changes(prior.realtime.as_ref().unwrap()));
-    }
     let report = EvaluationReport {
-        schema_version: REPORT_SCHEMA_VERSION,
+        schema_version: 2,
+        execution: None,
+        memory_seed: None,
+        evidence_sha256: None,
         run_id,
         created_at_unix_ms,
         completed_at_unix_ms: None,
@@ -938,7 +1307,7 @@ pub(crate) fn evaluate(
         samples,
         failures,
         comparison,
-        realtime,
+        realtime: None,
     };
     report.validate_contract()?;
     report.write(&path)?;
@@ -991,7 +1360,10 @@ fn validate_stt(stt: &SttSnapshot) -> Result<()> {
         ));
     }
     if let Some(layout) = &stt.input_layout
-        && (layout != crate::dictation::INPUT_LAYOUT || !matches!(endpoint.scheme(), "ws" | "wss"))
+        && (!matches!(
+            layout.as_str(),
+            crate::dictation::INPUT_LAYOUT | crate::dictation::TRANSCRIPTION_INPUT_LAYOUT
+        ) || !matches!(endpoint.scheme(), "ws" | "wss"))
     {
         return Err(RegressionError::Invalid(
             "STT input layout is invalid for this endpoint".into(),
@@ -1034,6 +1406,7 @@ fn validate_scoring_dataset(dataset: &ScoringDataset) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn transcribe_sample(
     path: &Path,
     transcriber: &dyn Transcriber,
@@ -1100,6 +1473,7 @@ fn aggregate_local_scores(samples: &[SampleResult]) -> Aggregates {
     }
 }
 
+#[cfg(test)]
 fn validate_comparison(
     prior: &EvaluationReport,
     dataset: &ScoringDataset,
@@ -1171,6 +1545,8 @@ fn build_comparison(
         })
         .collect();
     RunComparison {
+        prior_execution: None,
+        execution_changes: None,
         realtime_inputs_changed: None,
         realtime_seed_changes: None,
         prior_run_id: prior.run_id.clone(),
@@ -1214,6 +1590,7 @@ mod tests {
     use hound::{SampleFormat, WavSpec, WavWriter};
     use tempfile::tempdir;
 
+    use super::evaluate_historical as evaluate;
     use super::*;
     use crate::prompt_lab::apply_review;
     use crate::prompt_lab::{CaptureTranscription, ProperNounAnnotation};
@@ -1294,8 +1671,8 @@ mod tests {
             .unwrap();
     }
 
-    fn request(output: std::path::PathBuf) -> EvaluationRequest {
-        EvaluationRequest {
+    fn request(output: std::path::PathBuf) -> HistoricalRequest {
+        HistoricalRequest {
             stt: snapshot(Some("candidate")),
             thresholds: Thresholds {
                 max_wer_percent: 20.0,
@@ -1366,6 +1743,8 @@ mod tests {
     fn dataset_wer_is_a_micro_average_of_edit_totals() {
         fn sample(id: &str, reference: &str, hypothesis: &str) -> SampleResult {
             SampleResult {
+                raw_hypothesis: None,
+                execution: None,
                 sample_id: id.to_string(),
                 audio_path: format!("audio/{id}.wav"),
                 audio_sha256: "digest".to_string(),
@@ -1540,10 +1919,11 @@ mod tests {
                 .unwrap(),
             ),
             index: 0,
-            input: empty.clone(),
+            input: Some(empty.clone()),
             output: serde_json::json!({
                 "text":"使用 Codex", "context":null, "memory_candidates":[]
             }),
+            ..serde_json::from_value(serde_json::json!({"index":0,"output":null})).unwrap()
         }];
         let checks = cases.cases[0].steps[0]
             .expect
@@ -1581,7 +1961,7 @@ mod tests {
                 .realtime
                 .as_ref()
                 .unwrap()
-                .validate(&legacy.samples, legacy.stt.language.clone())
+                .validate(&legacy.samples, legacy.stt.language.clone(), None)
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("realtime-context-memory-v5") && error.contains("rerun"));
@@ -1637,7 +2017,6 @@ mod tests {
                 prompt: next.stt.prompt.clone(),
                 ..Default::default()
             },
-            key: None,
         });
         next.compare_to = Some(legacy);
         let error = evaluate(&store, &SequenceTranscriber::new([]), next).unwrap_err();
@@ -1657,7 +2036,7 @@ mod tests {
         )
         .unwrap()
         .report;
-        for schema_version in [1, REPORT_SCHEMA_VERSION] {
+        for schema_version in [1, 2] {
             let mut value = serde_json::to_value(&report).unwrap();
             value["schema_version"] = schema_version.into();
             value.as_object_mut().unwrap().remove("realtime");

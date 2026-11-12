@@ -136,12 +136,12 @@ pub(super) enum ListenerOutput {
 impl ListenerOutput {
     pub(super) fn delivery(
         typer: Arc<dyn TextTyper>,
-        post_processor: PostProcessor,
+        post_processor: Arc<PostProcessor>,
         history: Option<HistoryStore>,
     ) -> Self {
         Self::Delivery {
             typer,
-            post_processor: Arc::new(post_processor),
+            post_processor,
             history,
         }
     }
@@ -913,91 +913,12 @@ pub(in crate::ui) fn finish_transcription(
     result: Result<crate::dictation::Transcript, SessionError>,
     post_processor: &PostProcessor,
 ) -> Option<PreviewTranscription> {
-    let (result, mut confirmation) = match result {
-        Ok(transcript) => (Ok(transcript.text), transcript.confirmation),
-        Err(error) => (Err(error), None),
-    };
-    let prepared = match result {
-        Ok(stt_text) => {
-            if stt_text.is_empty() {
-                info!("Transcription returned empty text");
-                return None;
-            }
-            let text = match post_processor.process_for_delivery(&stt_text) {
-                Ok(processed) if !processed.text.is_empty() => {
-                    confirmation = processed.confirmation.or(confirmation);
-                    processed.text
-                }
-                Ok(_) => {
-                    warn!("Post-processing returned empty text, using original STT text");
-                    stt_text
-                }
-                Err(error) => {
-                    warn!(error = %error, "Post-processing failed, using original STT text");
-                    stt_text
-                }
-            };
-            Some((text, None))
-        }
-        Err(SessionError::NoChunks) => {
-            warn!("No audio chunks to transcribe");
-            None
-        }
-        Err(SessionError::Routing(error)) => {
-            error!(error = %error, "Session routing failed while finalizing");
-            None
-        }
-        Err(SessionError::InputFailure {
-            error,
-            partial_text,
-        }) => {
-            error!(%error, "Recording input is incomplete");
-            let warning = if partial_text.trim().is_empty() {
-                "录音不完整，没有可输入的文字。\n按 Esc 关闭后重试。"
-            } else {
-                "录音不完整，请核对结果后输入。"
-            };
-            Some((partial_text, Some(warning.into())))
-        }
-        Err(SessionError::PartialFailure {
-            errors,
-            partial_text,
-        }) => {
-            error!(
-                failed_chunks = errors.len(),
-                "Partial transcription failure"
-            );
-            let warning = if partial_text.trim().is_empty() {
-                "识别失败，没有可输入的文字。\n按 Esc 关闭后重试。"
-            } else {
-                "部分识别失败，请核对结果后输入。"
-            };
-            Some((partial_text, Some(warning.into())))
-        }
-        Err(SessionError::ConvergenceTimeout {
-            pending_count,
-            partial_text,
-        }) => {
-            warn!(pending_count, "Convergence timeout");
-            let warning = if partial_text.trim().is_empty() {
-                "识别等待超时，没有可输入的文字。\n按 Esc 关闭后重试。"
-            } else {
-                "识别等待超时，结果可能不完整，请核对后输入。"
-            };
-            Some((partial_text, Some(warning.into())))
-        }
-    };
-    prepared
-        .filter(|(text, warning)| !text.trim().is_empty() || warning.is_some())
-        .map(|(text, warning)| PreviewTranscription {
-            text: if text.trim().is_empty() {
-                String::new()
-            } else {
-                text
-            },
-            warning,
-            confirmation,
-        })
+    let outcome = crate::core::recognition::finalize(result, post_processor);
+    outcome.transcript.map(|transcript| PreviewTranscription {
+        text: transcript.text,
+        warning: outcome.warning,
+        confirmation: transcript.confirmation,
+    })
 }
 
 fn capture_transcription(
@@ -1125,11 +1046,12 @@ mod tests {
         let config = ListenerConfig::from_config(&document).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("dictation-memory.json");
-        let processor = PostProcessor::new_desktop(
+        let processor = PostProcessor::with_memory(
             config.post_process,
             config.memory,
             Some(path.clone()),
             config.language,
+            crate::dictation::system_clock(),
         )
         .unwrap();
         let finish =
@@ -1156,7 +1078,20 @@ mod tests {
         let fallback = finish();
         assert_eq!(fallback.text, wrong);
         assert!(fallback.confirmation.is_none());
-        assert_eq!(processor.process_text(wrong).unwrap(), wrong); // CLI/setup stay isolated.
+        // CLI/setup use the same algorithm with explicitly empty initial state.
+        let isolated = crate::core::recognition::RecognitionPipeline::from_config(
+            &document,
+            None,
+            crate::dictation::system_clock(),
+            None,
+        )
+        .unwrap();
+        let isolated_result =
+            super::finish_transcription(Ok(wrong.to_owned().into()), &isolated.post_processor)
+                .unwrap();
+        assert_eq!(isolated_result.text, wrong);
+        drop(isolated_result);
+        isolated.shutdown();
         processor.shutdown();
 
         let inputs: Vec<serde_json::Value> = (0..7)
@@ -1175,7 +1110,7 @@ mod tests {
         assert_eq!(
             inputs[6]["contexts"],
             json!([]),
-            "plain-text entry must not upload personal memory"
+            "isolated host must not upload personal memory"
         );
         let stored: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();

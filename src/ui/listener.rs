@@ -5,10 +5,10 @@ use tracing::{info, warn};
 
 use crate::audio;
 use crate::core::listener::{ListenerConfig, RecordingConfig};
+use crate::core::recognition::RecognitionPipeline;
 use crate::core::recording_session::{RecordingState, SessionEvent};
 use crate::history::HistoryStore;
 use crate::platform::PlatformAction;
-use crate::postprocess::PostProcessor;
 use crate::prompt_lab::{DatasetStore, PromptLabCapture, SttSnapshot};
 
 mod event_loop;
@@ -41,25 +41,58 @@ fn toggle_session_event(state: &RecordingState) -> Option<SessionEvent> {
 
 /// Runs the listener using an already resolved workflow configuration.
 pub(crate) fn run_with_config(config: ListenerConfig) -> Result<()> {
-    let post_processor = PostProcessor::new_desktop(
+    let pipeline = RecognitionPipeline::from_resolved(
+        config.recording.recognition,
         config.post_process,
         config.memory,
-        crate::core::config::config_dir().map(|path| path.join("dictation-memory.json")),
         config.language,
+        crate::core::config::config_dir().map(|path| path.join("dictation-memory.json")),
+        crate::dictation::system_clock(),
     )?;
-    run_with_mode(config.recording, ListenerMode::Delivery(post_processor))
+    run_with_mode(
+        config.recording.hotkeys,
+        config.recording.audio,
+        ListenerMode::Delivery(pipeline),
+    )
 }
 
 pub(crate) fn run_capture(config: RecordingConfig, store: DatasetStore) -> Result<()> {
-    run_with_mode(config, ListenerMode::Capture(Arc::new(store)))
+    let stt = SttSnapshot::from(
+        config
+            .recognition
+            .metadata()
+            .expect("raw capture uses HTTP STT"),
+    );
+    let orchestrator = Arc::new(
+        config
+            .recognition
+            .build(None, crate::dictation::system_clock())?,
+    );
+    run_with_mode(
+        config.hotkeys,
+        config.audio,
+        ListenerMode::Capture {
+            store: Arc::new(store),
+            stt,
+            orchestrator,
+        },
+    )
 }
 
 enum ListenerMode {
-    Delivery(PostProcessor),
-    Capture(Arc<DatasetStore>),
+    Delivery(RecognitionPipeline),
+    Capture {
+        store: Arc<DatasetStore>,
+        stt: SttSnapshot,
+        orchestrator: Arc<crate::core::orchestrator::SessionOrchestrator>,
+    },
 }
 
-fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
+fn run_with_mode(
+    hotkeys: crate::input::hotkey::HotkeyConfig,
+    audio_config: audio::AudioConfig,
+    mode: ListenerMode,
+) -> Result<()> {
     use std::sync::Arc;
 
     use audio::AudioRecorder;
@@ -70,29 +103,24 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
 
     info!("ViberWhisper voice-to-text listener starting");
 
-    let capture_stt = match &mode {
-        ListenerMode::Delivery(_) => None,
-        ListenerMode::Capture(_) => Some(SttSnapshot::from(
-            config
-                .recognition
-                .metadata()
-                .expect("raw capture uses HTTP STT"),
-        )),
+    let (streaming, orchestrator) = match &mode {
+        ListenerMode::Delivery(pipeline) => {
+            (pipeline.streaming, Arc::clone(&pipeline.orchestrator))
+        }
+        ListenerMode::Capture { orchestrator, .. } => (false, Arc::clone(orchestrator)),
     };
-    let streaming = config.recognition.is_realtime();
     let pause_aware = !streaming && matches!(mode, ListenerMode::Delivery(_));
 
     let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    let orchestrator = Arc::new(config.recognition.build()?);
 
     let platform_proxy = proxy.clone();
-    let mut platform = NativePlatform::start(&config.hotkeys, move |event| {
+    let mut platform = NativePlatform::start(&hotkeys, move |event| {
         let _ = platform_proxy.send_event(AppEvent::Platform(event));
     })?;
     let output = match mode {
-        ListenerMode::Delivery(post_process) => {
+        ListenerMode::Delivery(pipeline) => {
             let history_store = HistoryStore::discover()
                 .inspect_err(|error| warn!(%error, "Transcription history is unavailable"))
                 .ok();
@@ -108,16 +136,19 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
                 })
                 .unwrap_or_default();
             platform.set_history(recent_history);
-            ListenerOutput::delivery(platform.text_typer(), post_process, history_store)
+            ListenerOutput::delivery(
+                platform.text_typer(),
+                pipeline.post_processor,
+                history_store,
+            )
         }
-        ListenerMode::Capture(store) => ListenerOutput::capture(
-            PromptLabCapture::new(store),
-            capture_stt.expect("capture mode snapshots STT metadata"),
-        ),
+        ListenerMode::Capture { store, stt, .. } => {
+            ListenerOutput::capture(PromptLabCapture::new(store), stt)
+        }
     };
 
     let audio_proxy = proxy.clone();
-    let mut recorder = AudioRecorder::with_config(&config.audio, move |session_id| {
+    let mut recorder = AudioRecorder::with_config(&audio_config, move |session_id| {
         let _ = audio_proxy.send_event(AppEvent::AudioChunkAvailable { session_id });
     });
     if streaming {
@@ -134,14 +165,14 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
         );
     }
 
-    if let Some(binding) = config.hotkeys.hold {
+    if let Some(binding) = hotkeys.hold {
         info!(
             mode = "hold",
             hotkey = binding.canonical,
             "Recording hotkey enabled"
         );
     }
-    if let Some(binding) = config.hotkeys.toggle {
+    if let Some(binding) = hotkeys.toggle {
         info!(
             mode = "toggle",
             hotkey = binding.canonical,

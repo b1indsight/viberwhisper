@@ -1,9 +1,13 @@
 use super::*;
 use serde_json::json;
 
+fn trace_defaults() -> SegmentTrace {
+    serde_json::from_value(json!({"index":0, "output":null})).unwrap()
+}
+
 fn fixture() -> RealtimeCases {
     serde_json::from_value(json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "cases": [{"id":"project", "at":100, "seed":{}, "steps":[
             {"sample_id":"first"},
             {"sample_id":"second", "advance_seconds":86400}
@@ -96,9 +100,10 @@ fn discarded_metadata_and_history_leaks_fail_local_checks() {
     let segments = vec![crate::dictation::SegmentTrace {
         prompt_input: None,
         index: 0,
-        input: crate::dictation::Snapshot { contexts: vec![] },
+        input: Some(crate::dictation::Snapshot { contexts: vec![] }),
         output: json!({"text":"old secret", "context":{"kind":"existing","id":"invented"},
             "memory_candidates":[{"kind":"proper_noun","text":"invented"}]}),
+        ..trace_defaults()
     }];
     let checks = expected.check(
         &crate::dictation::Snapshot { contexts: vec![] },
@@ -127,10 +132,11 @@ fn a_topic_string_can_reuse_an_existing_snapshot_label_without_a_kind() {
     let traces = vec![SegmentTrace {
         prompt_input: None,
         index: 0,
-        input: snapshot.clone(),
+        input: Some(snapshot.clone()),
         output: json!({
             "text":"ready", "context":"project", "memory_candidates":[]
         }),
+        ..trace_defaults()
     }];
     assert!(
         Expectations::default()
@@ -151,11 +157,12 @@ fn ungrounded_candidates_fail_metadata_checks_even_when_text_is_valid() {
             .unwrap(),
         ),
         index: 0,
-        input: empty.clone(),
+        input: Some(empty.clone()),
         output: json!({
             "text":"使用Redis缓存。", "context":"开发",
             "memory_candidates":["Redis", "3核38都是无统的"]
         }),
+        ..trace_defaults()
     }];
     let learned = Replay::new(&MemorySeed::default(), 100)
         .replay("first", 100, &traces, true)
@@ -196,8 +203,9 @@ fn metadata_passed(output: serde_json::Value) -> bool {
             &[SegmentTrace {
                 prompt_input: None,
                 index: 0,
-                input: empty.clone(),
+                input: Some(empty.clone()),
                 output,
+                ..trace_defaults()
             }],
             &empty,
             "",
@@ -237,8 +245,9 @@ fn context_assertions_round_trip_and_compare_exact_raw_strings() {
                 &[SegmentTrace {
                     prompt_input: None,
                     index: 0,
-                    input: empty.clone(),
+                    input: Some(empty.clone()),
                     output: json!({"text":"ready", "context":actual, "memory_candidates":[]}),
+                    ..trace_defaults()
                 }],
                 &empty,
                 "ready",
@@ -410,23 +419,25 @@ fn raw_candidate_order_is_checked_before_parser_sorting_can_hide_it() {
 fn old_cases_are_rejected_before_deserializing_legacy_assertions() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cases.json");
-    fs::write(
-        &path,
-        serde_json::to_vec(&json!({
-            "schema_version":1,
-            "cases":[{"id":"case", "at":100, "steps":[{
-                "sample_id":"first", "expect":{
-                    "context":{"kind":"uncertain"},
-                    "candidates_present":[{"kind":"proper_noun", "text":"Codex"}]
-                }
-            }]}]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let error = RealtimeCases::read(&path).unwrap_err().to_string();
-    assert!(error.contains("schema_version") && error.contains('2'));
-    assert!(error.contains("migrate") && error.contains("rerun"));
+    for version in [1, 2] {
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "schema_version":version,
+                "cases":[{"id":"case", "at":100, "steps":[{
+                    "sample_id":"first", "expect":{
+                        "context":{"kind":"uncertain"},
+                        "candidates_present":[{"kind":"proper_noun", "text":"Codex"}]
+                    }
+                }]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = RealtimeCases::read(&path).unwrap_err().to_string();
+        assert!(error.contains("schema_version") && error.contains('3'));
+        assert!(error.contains("migrate") && error.contains("rerun"));
+    }
     let mut cases = fixture();
     cases.schema_version = 1;
     let error = cases

@@ -1004,7 +1004,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(feedback, "最终修改 🎙️\nViberWhisper");
+        assert_eq!(feedback.text, "最终修改 🎙️\nViberWhisper");
         worker.join().unwrap();
         assert_eq!(
             history.load_recent().unwrap(),
@@ -1229,12 +1229,16 @@ mod tests {
             if candidate.trim().is_empty() {
                 let _ = commands.send(PreviewCommand::Cancel);
             }
-            let learned = feedback.blocking_recv().ok().inspect(|feedback| {
-                assert_eq!(
-                    typer.0.lock().unwrap().as_slice(),
-                    std::slice::from_ref(feedback)
-                );
-            });
+            let learned = feedback
+                .blocking_recv()
+                .ok()
+                .map(|feedback| feedback.text)
+                .inspect(|feedback| {
+                    assert_eq!(
+                        typer.0.lock().unwrap().as_slice(),
+                        std::slice::from_ref(feedback)
+                    );
+                });
             worker.join().unwrap();
             assert_eq!(*typer.0.lock().unwrap(), expected);
             assert_eq!(history.load_recent().unwrap(), expected);

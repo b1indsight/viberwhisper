@@ -71,13 +71,13 @@ async fn pause_commits_contiguous_audio_while_fixed_conversion_keeps_one_segment
             segments
         });
         let mut connection = Connection::connect(&settings, None).await.unwrap();
-        let mut recording = Recording::new(mode);
+        let mut recording = Recording::new(mode, super::super::system_clock());
         let mut memory = Memory::frozen(Default::default());
         for packet in pcm.chunks(8191) {
             recording
                 .push(
                     &mut connection,
-                    &mut memory,
+                    Some(&mut memory),
                     &crate::audio::chunk::encode_i16_wav(packet, 24_000).unwrap(),
                 )
                 .await
@@ -91,7 +91,7 @@ async fn pause_commits_contiguous_audio_while_fixed_conversion_keeps_one_segment
             );
         }
         recording
-            .finish(&mut connection, &mut memory)
+            .finish(&mut connection, Some(&mut memory))
             .await
             .unwrap();
         let segments = server.await.unwrap();
@@ -135,7 +135,16 @@ async fn failed_recording_reconnects_with_a_complete_prefix_and_fresh_audio() {
     timeout(
         Duration::from_secs(10),
         tokio::task::spawn_blocking(move || {
-            let engine = SessionOrchestrator::new_realtime(settings, None, None, None).unwrap();
+            let engine = SessionOrchestrator::new_realtime(
+                settings,
+                None,
+                None,
+                None,
+                RealtimeMode::Integrated,
+                super::super::system_clock(),
+                None,
+            )
+            .unwrap();
             for turn in 0..2 {
                 let id = SessionId(turn);
                 engine.start_session(id).unwrap();
@@ -188,7 +197,16 @@ async fn silence_and_empty_recordings_leave_no_prefix_for_the_next_recording() {
     timeout(
         Duration::from_secs(10),
         tokio::task::spawn_blocking(move || {
-            let engine = SessionOrchestrator::new_realtime(settings, None, None, None).unwrap();
+            let engine = SessionOrchestrator::new_realtime(
+                settings,
+                None,
+                None,
+                None,
+                RealtimeMode::Integrated,
+                super::super::system_clock(),
+                None,
+            )
+            .unwrap();
             for turn in 0..3 {
                 let id = SessionId(turn);
                 engine.start_session(id).unwrap();
@@ -251,9 +269,16 @@ async fn feedback_commits_only_confirmed_text_before_the_next_recording() {
     });
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("memory.json");
-    let engine =
-        SessionOrchestrator::new_realtime(settings, None, Some(path.clone()), Some("zh".into()))
-            .unwrap();
+    let engine = SessionOrchestrator::new_realtime(
+        settings,
+        None,
+        Some(path.clone()),
+        Some("zh".into()),
+        RealtimeMode::Integrated,
+        super::super::system_clock(),
+        None,
+    )
+    .unwrap();
     timeout(
         Duration::from_secs(10),
         tokio::task::spawn_blocking(move || {
@@ -316,7 +341,16 @@ async fn shutdown_drains_confirmation_without_another_recording() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("memory.json");
         let engine = Arc::new(
-            SessionOrchestrator::new_realtime(settings, None, Some(path.clone()), None).unwrap(),
+            SessionOrchestrator::new_realtime(
+                settings,
+                None,
+                Some(path.clone()),
+                None,
+                RealtimeMode::Integrated,
+                super::super::system_clock(),
+                None,
+            )
+            .unwrap(),
         );
         let delivery_owner = Arc::clone(&engine);
         timeout(
@@ -344,7 +378,7 @@ async fn shutdown_drains_confirmation_without_another_recording() {
                     assert_eq!(file["corrections"][0]["rule"]["to"], "Codex");
                 } else {
                     engine.shutdown();
-                    assert!(confirmation.confirm("Use Codex.".into()).is_err());
+                    assert!(confirmation.confirm_with_ack("Use Codex.".into()).is_err());
                     assert!(!path.exists(), "shutdown must not learn unconfirmed text");
                 }
             }),
@@ -371,7 +405,16 @@ async fn shutdown_does_not_wait_for_an_in_flight_recording_response() {
         waiting.send(()).unwrap();
         resume.await.unwrap();
     });
-    let engine = SessionOrchestrator::new_realtime(settings, None, None, None).unwrap();
+    let engine = SessionOrchestrator::new_realtime(
+        settings,
+        None,
+        None,
+        None,
+        RealtimeMode::Integrated,
+        super::super::system_clock(),
+        None,
+    )
+    .unwrap();
     let id = SessionId(1);
     engine.start_session(id).unwrap();
     let frame = WavChunk::from_encoded_bytes(
@@ -414,8 +457,16 @@ async fn disconnect_after_completed_response_preserves_only_validated_text() {
         });
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("memory.json");
-        let engine =
-            SessionOrchestrator::new_realtime(settings, None, Some(path.clone()), None).unwrap();
+        let engine = SessionOrchestrator::new_realtime(
+            settings,
+            None,
+            Some(path.clone()),
+            None,
+            RealtimeMode::Integrated,
+            super::super::system_clock(),
+            None,
+        )
+        .unwrap();
         let error = tokio::task::spawn_blocking(move || {
             let id = SessionId(1);
             engine.start_session(id).unwrap();
@@ -479,8 +530,16 @@ async fn completed_segment_survives_faults_but_not_user_cancellation() {
         });
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("memory.json");
-        let engine =
-            SessionOrchestrator::new_realtime(settings, None, Some(path.clone()), None).unwrap();
+        let engine = SessionOrchestrator::new_realtime(
+            settings,
+            None,
+            Some(path.clone()),
+            None,
+            RealtimeMode::Integrated,
+            super::super::system_clock(),
+            None,
+        )
+        .unwrap();
         let id = SessionId(9);
         engine.start_session(id).unwrap();
         // Feed the 3-second fixture until two 30-second commits are reached.
@@ -592,6 +651,9 @@ async fn provisional_text_precedes_completion_but_only_validated_final_text_is_d
                 None,
                 Some(path.clone()),
                 Some("zh".into()),
+                RealtimeMode::Integrated,
+                super::super::system_clock(),
+                None,
             )
             .unwrap(),
         );

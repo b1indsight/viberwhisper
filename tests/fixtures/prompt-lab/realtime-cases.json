@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "cases": [{
     "id": "project",
     "at": 100,
@@ -9,19 +9,23 @@
         "context": "project", "text": "history-only sentinel", "terms": []}]
     },
     "steps": [
-      {"sample_id": "first", "expect": {
-        "input": {"contexts_present": ["project"], "history_present": ["history-only sentinel"]},
-        "context": "project",
-        "candidates_present": ["ViberWhisper"],
+      {"sample_id": "first", "feedback": {"delivered": {"text": "使用ViberWhisper。"}}, "expect": {
+        "audio": {"audio_only": true, "forbidden_text": ["history-only sentinel"]},
+        "cleanup": {
+          "input": {"contexts_present": ["project"], "history_present": ["history-only sentinel"]},
+          "context": "project",
+          "candidates_present": ["ViberWhisper"]
+        },
         "memory": {"terms_present": [{"context": "project", "kind": "proper_noun",
           "text": "ViberWhisper", "supporting_recordings": 1}]},
         "forbidden_text": ["history-only sentinel"]
       }},
-      {"sample_id": "second", "advance_seconds": 86400, "expect": {
-        "input": {"history_absent": ["history-only sentinel"],
+      {"sample_id": "second", "advance_seconds": 86400, "feedback": "delivery_failed", "expect": {
+        "audio": {"audio_only": true},
+        "cleanup": {"input": {"history_absent": ["history-only sentinel"],
           "terms_present": [{"context": "project", "kind": "proper_noun", "text": "ViberWhisper"}],
           "terms_absent": [{"context": "project", "kind": "proper_noun",
-            "text": "ViberWhisper", "supporting_recordings": 1}]},
+            "text": "ViberWhisper", "supporting_recordings": 1}]}},
         "forbidden_text": ["history-only sentinel"]
       }}
     ]

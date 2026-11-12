@@ -11,14 +11,16 @@ use super::regression::{
 
 type Result<T> = std::result::Result<T, RegressionError>;
 
-const REVIEW_SCHEMA_VERSION: u32 = 1;
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentReviewInput {
     schema_version: u32,
     run_id: String,
     rubric_version: String,
+    #[serde(default)]
+    execution_sha256: Option<String>,
+    #[serde(default)]
+    evidence_sha256: Option<String>,
     samples: Vec<AgentReviewSampleInput>,
 }
 
@@ -98,6 +100,11 @@ pub(crate) fn apply_review(report_path: &Path, review_path: &Path) -> Result<Eva
         source: "coding_agent".to_string(),
         rubric_version: AGENT_REVIEW_RUBRIC_VERSION.to_string(),
         reviewed_at_unix_ms,
+        execution_sha256: report
+            .execution
+            .as_ref()
+            .map(|identity| identity.sha256.clone()),
+        evidence_sha256: report.evidence_digest()?,
     });
     report.gates = Some(gates);
     report.meets_targets = Some(meets_targets);
@@ -126,11 +133,23 @@ pub(crate) fn apply_review(report_path: &Path, review_path: &Path) -> Result<Eva
 }
 
 fn validate_input_identity(input: &AgentReviewInput, report: &EvaluationReport) -> Result<()> {
-    if input.schema_version != REVIEW_SCHEMA_VERSION {
+    let expected_schema = if report.execution.is_some() { 2 } else { 1 };
+    if input.schema_version != expected_schema {
         return Err(RegressionError::Invalid(format!(
-            "unsupported agent review schema_version {}; expected {REVIEW_SCHEMA_VERSION}",
+            "unsupported agent review schema_version {}; expected {expected_schema}",
             input.schema_version
         )));
+    }
+    if input.execution_sha256
+        != report
+            .execution
+            .as_ref()
+            .map(|identity| identity.sha256.clone())
+        || input.evidence_sha256 != report.evidence_digest()?
+    {
+        return Err(RegressionError::Invalid(
+            "agent review execution/evidence identity does not match the report".into(),
+        ));
     }
     if input.run_id != report.run_id {
         return Err(RegressionError::Invalid(format!(
@@ -159,8 +178,8 @@ mod tests {
     use super::*;
     use crate::prompt_lab::regression::{
         AGENT_REVIEW_RUBRIC_VERSION, Aggregates, DatasetSummary, EvaluationReport,
-        ProperNounAggregate, REPORT_SCHEMA_VERSION, RunStatus, SCORING_POLICY_VERSION,
-        SampleResult, Thresholds, WerAggregate,
+        ProperNounAggregate, RunStatus, SCORING_POLICY_VERSION, SampleResult, Thresholds,
+        WerAggregate,
     };
     use crate::prompt_lab::{ProperNounAnnotation, SttSnapshot, score_proper_nouns, score_wer};
 
@@ -168,7 +187,10 @@ mod tests {
         let reference = "使用 Codex".to_string();
         let hypothesis = "使用 Codex".to_string();
         EvaluationReport {
-            schema_version: REPORT_SCHEMA_VERSION,
+            schema_version: 2,
+            execution: None,
+            memory_seed: None,
+            evidence_sha256: None,
             realtime: None,
             run_id: "run-test-1".to_string(),
             created_at_unix_ms: 1,
@@ -218,6 +240,8 @@ mod tests {
             gates: None,
             meets_targets: None,
             samples: vec![SampleResult {
+                raw_hypothesis: None,
+                execution: None,
                 sample_id: "sample-1-1".to_string(),
                 audio_path: "audio/sample-1-1.wav".to_string(),
                 audio_sha256: "audio-digest".to_string(),

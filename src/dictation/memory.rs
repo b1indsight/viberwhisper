@@ -119,7 +119,7 @@ impl Snapshot {
     }
 }
 
-/// Only observations are persisted. User-owned long-term configuration is never rewritten.
+/// Only learned state is persisted. User-owned long-term configuration is never rewritten.
 #[derive(Clone)]
 pub(super) struct Memory {
     path: Option<PathBuf>,
@@ -130,6 +130,11 @@ pub(super) struct Memory {
 }
 
 impl Memory {
+    /// Only explicit seed initialization may attach a destination to ephemeral state.
+    pub(super) fn set_seed_path(&mut self, path: PathBuf) {
+        self.path = Some(path);
+    }
+
     pub fn load(path: Option<PathBuf>, settings: MemoryConfig, now: u64) -> Result<Self> {
         let path = path.filter(|_| settings.enabled);
         let mut observations = Vec::new();
@@ -163,6 +168,14 @@ impl Memory {
         Ok(memory)
     }
 
+    /// Recover unreadable or unsupported storage without attaching its path to future saves.
+    pub fn load_or_ephemeral(path: Option<PathBuf>, settings: MemoryConfig, now: u64) -> Self {
+        Self::load(path, settings.clone(), now).unwrap_or_else(|error| {
+            tracing::warn!(%error, "Dictation memory unavailable; using ephemeral memory without overwriting the file");
+            Self::load(None, settings, now).expect("empty memory")
+        })
+    }
+
     pub fn frozen(settings: MemoryConfig) -> Self {
         Self {
             path: None,
@@ -174,20 +187,30 @@ impl Memory {
     }
 
     /// Build isolated evaluation state; seed validation belongs to the explicit evaluation boundary.
-    pub(super) fn seeded(settings: MemoryConfig, observations: Vec<Observation>, at: u64) -> Self {
+    pub(super) fn seeded(
+        settings: MemoryConfig,
+        observations: Vec<Observation>,
+        corrections: Vec<Correction>,
+        at: u64,
+    ) -> Self {
         let mut memory = Self {
             path: None,
             settings,
             observations,
-            corrections: Vec::new(),
+            corrections,
             frozen: false,
         };
         memory.prune(at);
         memory
     }
 
-    pub(super) fn observation_count(&self) -> usize {
-        self.observations.len()
+    /// Capture retained canonical state without exposing or retaining its persistence path.
+    pub(super) fn into_seed(self) -> super::evaluation::MemorySeed {
+        super::evaluation::MemorySeed {
+            long_term: self.settings.long_term,
+            observations: self.observations,
+            corrections: self.corrections,
+        }
     }
 
     fn prune(&mut self, now: u64) {

@@ -4,7 +4,7 @@ use crate::core::logging;
 use crate::dictation::{
     DictationResult, LearningWorker, Snapshot, Transcript, config::PromptComponents,
 };
-use crate::postprocess::{LlmConfig, PostProcessError};
+use crate::postprocess::{CleanupTrace, LlmConfig, PostProcessError};
 use reqwest::blocking::Client;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -49,38 +49,41 @@ impl LlmPostProcessor {
         })
     }
 
-    pub(super) fn process_text(&self, text: &str) -> Result<String, PostProcessError> {
-        if text.is_empty() {
-            return Ok(text.to_string());
+    pub(super) fn snapshot_with_time(&self) -> anyhow::Result<(Snapshot, Option<u64>)> {
+        match &self.learning {
+            Some(learning) => learning
+                .snapshot_with_time()
+                .map(|(snapshot, at)| (snapshot, Some(at))),
+            None => Ok((Snapshot::default(), None)),
         }
-        info!(text_len = text.len(), "Post-processing text with LLM");
-        // CLI/setup deliberately use the empty snapshot even for a desktop-configured processor.
-        let result = self.request.run(text)?;
-        info!(
-            result_len = result.text.len(),
-            "LLM post-processing complete"
-        );
-        Ok(result.text)
     }
 
-    pub(super) fn process_for_delivery(&self, text: &str) -> Result<Transcript, PostProcessError> {
+    pub(super) fn process_with_trace(
+        &self,
+        text: &str,
+    ) -> Result<(Transcript, Option<CleanupTrace>), PostProcessError> {
         if text.is_empty() {
-            return Ok(String::new().into());
+            return Ok((String::new().into(), None));
         }
-        let snapshot = self
-            .learning
-            .as_ref()
-            .map(LearningWorker::snapshot)
-            .transpose()
-            .map_err(PostProcessError::Memory)?
-            .unwrap_or_default();
-        let mut session = self.session(snapshot);
+        let (snapshot, input_at) = self
+            .snapshot_with_time()
+            .map_err(PostProcessError::Memory)?;
+        let mut session = self.session(snapshot.clone());
         session.push_stable_chunk(text);
         let result = session.finish()?.ok_or(PostProcessError::EmptyContent)?;
-        match &self.learning {
-            Some(learning) => learning.prepare(result).map_err(PostProcessError::Memory),
-            None => Ok(result.text.into()),
-        }
+        let transcript = match &self.learning {
+            Some(learning) => learning
+                .prepare(result.clone())
+                .map_err(PostProcessError::Memory)?,
+            None => result.text.clone().into(),
+        };
+        let trace = CleanupTrace {
+            input: snapshot,
+            input_at,
+            output: result,
+            prepared_text: transcript.text.clone(),
+        };
+        Ok((transcript, Some(trace)))
     }
 
     fn session(&self, snapshot: Snapshot) -> LlmSession {
@@ -383,7 +386,7 @@ mod tests {
             config.endpoint = endpoint;
             config.auth = auth;
             let processor = PostProcessor::new(PostProcessConfig::Llm(config));
-            assert_eq!(processor.process_text("raw").unwrap(), "clean");
+            assert_eq!(processor.process_for_delivery("raw").unwrap().text, "clean");
             let headers = requests.recv().unwrap().headers.to_ascii_lowercase();
             match expected_header {
                 Some(expected) => assert!(headers.contains(expected)),
@@ -414,18 +417,20 @@ mod tests {
 
     #[test]
     fn configured_processor_cleans_complete_text() {
-        // Convert and setup verification use the configured processor directly;
-        // an accidental pass-through here would silently skip enabled cleanup.
+        // All hosts finalize through this same processor; an accidental
+        // pass-through here would silently skip enabled cleanup.
         #[cfg(feature = "diagnostic-logs")]
         let (log, dispatch) = logging::test_support::capture();
         #[cfg(feature = "diagnostic-logs")]
         let _guard = tracing::dispatcher::set_default(&dispatch);
         let (endpoint, _requests) = stub(vec![json!({"text":"clean"}).to_string()]);
-        let mut config = config_with_postprocess(true, None);
+        // Scoped diagnostic capture stays on this thread; real CLI subscribers
+        // are process-global. The separate session test covers both preheat modes.
+        let mut config = config_with_postprocess(false, None);
         config.endpoint = endpoint;
         let processor = PostProcessor::new(PostProcessConfig::Llm(config));
 
-        assert_eq!(processor.process_text("raw").unwrap(), "clean");
+        assert_eq!(processor.process_for_delivery("raw").unwrap().text, "clean");
         #[cfg(feature = "diagnostic-logs")]
         assert!(log.as_file().metadata().unwrap().len() > 0);
     }
@@ -443,10 +448,10 @@ mod tests {
             for preheat in [false, true] {
                 for enabled in [false, true] {
                     let response = json!({"text":cleaned}).to_string();
-                    let (endpoint, _requests) = stub(vec![response.clone(), response]);
+                    let (endpoint, _requests) = stub(vec![response]);
                     let mut config = config_with_postprocess(preheat, None);
                     config.endpoint = endpoint;
-                    let processor = PostProcessor::new_desktop(
+                    let processor = PostProcessor::with_memory(
                         PostProcessConfig::Llm(config),
                         MemoryConfig {
                             enabled,
@@ -454,10 +459,10 @@ mod tests {
                         },
                         None,
                         Some("zh".into()),
+                        crate::dictation::system_clock(),
                     )
                     .unwrap();
 
-                    assert_eq!(processor.process_text(&raw).unwrap(), cleaned);
                     let transcript = processor.process_for_delivery(&raw).unwrap();
                     assert_eq!(transcript.text, cleaned);
                     assert_eq!(transcript.confirmation.is_some(), enabled);
@@ -469,12 +474,12 @@ mod tests {
     }
 
     #[test]
-    fn test_process_text_empty_input_bypasses_llm() {
+    fn empty_input_bypasses_llm() {
         let config = config_with_postprocess(true, None);
         let p = LlmPostProcessor::new(config).unwrap();
-        let result = p.process_text("");
+        let result = p.process_with_trace("");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "");
+        assert_eq!(result.unwrap().0.text, "");
     }
 
     #[test]
@@ -486,11 +491,63 @@ mod tests {
             let mut config = config_with_postprocess(preheat_enabled, None);
             config.endpoint = endpoint;
             let processor = PostProcessor::new(PostProcessConfig::Llm(config));
+            let (transcript, trace) = processor.process_with_trace("raw").unwrap();
             assert_eq!(
-                processor.process_for_delivery("raw").unwrap().text,
-                "clean",
+                transcript.text, "clean",
                 "preheat_enabled={preheat_enabled}"
             );
+            assert_eq!(trace.unwrap().input_at, None);
+            assert_eq!(processor.snapshot_with_time().unwrap().1, None);
+        }
+    }
+
+    #[test]
+    fn cleanup_trace_preserves_snapshot_and_confirmation_times() {
+        use crate::dictation::config::MemoryConfig;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // The lab can report state in a later second than feedback. Every clock
+        // read advances too, catching separately read snapshot or ACK timestamps.
+        for preheat in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("memory.json");
+            let time = Arc::new(AtomicU64::new(100));
+            let clock_time = Arc::clone(&time);
+            let response = json!({"text":"clean", "context":"project", "memory_candidates":[]});
+            let (endpoint, _requests) = stub(vec![response.to_string()]);
+            let mut config = config_with_postprocess(preheat, None);
+            config.endpoint = endpoint;
+            let processor = PostProcessor::with_memory(
+                PostProcessConfig::Llm(config),
+                MemoryConfig::default(),
+                Some(path.clone()),
+                None,
+                Arc::new(move || clock_time.fetch_add(1, Ordering::SeqCst)),
+            )
+            .unwrap();
+            let (transcript, trace) = processor.process_with_trace("raw").unwrap();
+            let trace = trace.unwrap();
+            assert_eq!(trace.input_at, Some(101));
+            assert_eq!(time.load(Ordering::SeqCst), 102);
+            assert_eq!(trace.output.text, "clean");
+            assert_eq!(trace.prepared_text, transcript.text);
+
+            time.store(200, Ordering::SeqCst);
+            let confirmed_at = transcript
+                .confirmation
+                .unwrap()
+                .confirm_with_ack(transcript.text)
+                .unwrap();
+            assert_eq!(confirmed_at, 200);
+            assert_eq!(time.load(Ordering::SeqCst), 201);
+            time.store(300, Ordering::SeqCst);
+            let (snapshot, snapshot_at) = processor.snapshot_with_time().unwrap();
+            assert_eq!(snapshot_at, Some(300));
+            assert_eq!(snapshot.contexts[0].history, vec!["clean"]);
+            assert_eq!(time.load(Ordering::SeqCst), 301);
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(saved["observations"][0]["at"], confirmed_at);
         }
     }
 
@@ -500,7 +557,7 @@ mod tests {
             let config = config_with_postprocess(preheat_enabled, None);
             let p = LlmPostProcessor::new(config).unwrap();
             assert_eq!(
-                p.process_for_delivery("").unwrap().text,
+                p.process_with_trace("").unwrap().0.text,
                 "",
                 "preheat_enabled={preheat_enabled}"
             );
@@ -533,11 +590,12 @@ mod tests {
             let build = || {
                 let mut config = config_with_postprocess(preheat, None);
                 config.endpoint = endpoint.clone();
-                PostProcessor::new_desktop(
+                PostProcessor::with_memory(
                     PostProcessConfig::Llm(config),
                     MemoryConfig::default(),
                     Some(path.clone()),
                     Some("zh".into()),
+                    crate::dictation::system_clock(),
                 )
                 .unwrap()
             };
@@ -612,7 +670,7 @@ mod tests {
         ]);
         let mut config = config_with_postprocess(false, Some("保留换行"));
         config.endpoint = endpoint;
-        let processor = PostProcessor::new_desktop(
+        let processor = PostProcessor::with_memory(
             PostProcessConfig::Llm(config),
             MemoryConfig {
                 enabled: false,
@@ -620,6 +678,7 @@ mod tests {
             },
             Some(path.clone()),
             None,
+            crate::dictation::system_clock(),
         )
         .unwrap();
         let result = processor.process_for_delivery("维伯耳语").unwrap();

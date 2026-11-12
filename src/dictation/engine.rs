@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
@@ -8,6 +8,7 @@ use tokio::sync::mpsc as async_mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{
+    Clock, RealtimeMode, SegmentTrace, Snapshot,
     config::DictationConfig,
     feedback::{Confirmation, Transcript},
     memory::Memory,
@@ -42,9 +43,15 @@ struct Job {
     progress: Option<Progress>,
 }
 
+enum Command {
+    Record(Job),
+    Snapshot(mpsc::SyncSender<Option<(Snapshot, u64)>>),
+}
+
 /// Keeps the Realtime connection and memory alive across recording sessions.
 pub(crate) struct DictationWorker {
-    jobs: async_mpsc::Sender<Job>,
+    jobs: async_mpsc::Sender<Command>,
+    traces: Arc<Mutex<Vec<SegmentTrace>>>,
     shutdown: CancellationToken,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -55,18 +62,28 @@ impl DictationWorker {
         key: Option<SecretValue>,
         memory_path: Option<PathBuf>,
         language: Option<String>,
+        mode: RealtimeMode,
+        clock: Clock,
+        asr_prompt_override: Option<String>,
     ) -> Result<Self> {
         settings.validate()?;
-        let memory = Memory::load(memory_path, settings.memory.clone(), now()).unwrap_or_else(|e| {
-            tracing::warn!(error=%e, "Dictation memory unavailable; using ephemeral memory without overwriting the file");
-            Memory::load(None, settings.memory.clone(), now()).expect("empty memory")
-        });
+        ensure!(
+            asr_prompt_override
+                .as_ref()
+                .is_none_or(|prompt| prompt.chars().count() <= 4096),
+            "dictation prompt exceeds 4096 characters"
+        );
+        // Pure ASR never constructs memory, even when a path and vocabulary are supplied.
+        let memory = (mode == RealtimeMode::Integrated)
+            .then(|| Memory::load_or_ephemeral(memory_path, settings.memory.clone(), clock()));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         let (jobs, receiver) = async_mpsc::channel(1);
         let shutdown = CancellationToken::new();
         let worker_shutdown = shutdown.clone();
+        let traces = Arc::new(Mutex::new(Vec::new()));
+        let worker_traces = Arc::clone(&traces);
         let thread = std::thread::Builder::new()
             .name("realtime-dictation".into())
             .spawn(move || {
@@ -77,15 +94,45 @@ impl DictationWorker {
                     receiver,
                     language,
                     worker_shutdown,
+                    mode,
+                    clock,
+                    asr_prompt_override,
+                    worker_traces,
                 ));
                 // The worker has finished; stalled blocking DNS must not delay thread exit.
                 runtime.shutdown_background();
             })?;
         Ok(Self {
             jobs,
+            traces,
             shutdown,
             thread: Mutex::new(Some(thread)),
         })
+    }
+
+    /// Barrier on the serial memory owner, ordered after pending preview feedback.
+    /// Call on a finalization thread; a pending confirmation deliberately blocks it.
+    #[cfg(test)]
+    pub fn snapshot(&self) -> Result<Snapshot> {
+        self.snapshot_with_time().map(|(snapshot, _)| snapshot)
+    }
+
+    /// Return the memory snapshot with the exact Unix-seconds time used to build it.
+    /// This has the same confirmation barrier and pure-ASR error as `snapshot`.
+    pub fn snapshot_with_time(&self) -> Result<(Snapshot, u64)> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.jobs
+            .blocking_send(Command::Snapshot(sender))
+            .context("Realtime worker stopped")?;
+        receiver
+            .recv()
+            .context("Realtime worker stopped")?
+            .context("pure ASR does not own memory")
+    }
+
+    /// Drain actual observations from the most recently finished recording, including partial failures.
+    pub fn take_traces(&self) -> Vec<SegmentTrace> {
+        std::mem::take(&mut *self.traces.lock().unwrap())
     }
 
     /// Close pending previews and finish accepted feedback before the process exits.
@@ -110,13 +157,13 @@ impl DictationWorker {
         let failure = Arc::new(Mutex::new(None));
         if self
             .jobs
-            .try_send(Job {
+            .try_send(Command::Record(Job {
                 frames,
                 result: result_tx,
                 cancelled: cancelled.clone(),
                 failure: Arc::clone(&failure),
                 progress,
-            })
+            }))
             .is_err()
         {
             *failure.lock().unwrap() = Some("Realtime worker unavailable".into());
@@ -178,20 +225,18 @@ fn failed(error: String, partial_text: String) -> SessionError {
     }
 }
 
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
+#[allow(clippy::too_many_arguments)]
 async fn worker(
     settings: DictationConfig,
     key: Option<SecretValue>,
-    mut memory: Memory,
-    mut jobs: async_mpsc::Receiver<Job>,
+    mut memory: Option<Memory>,
+    mut jobs: async_mpsc::Receiver<Command>,
     language: Option<String>,
     shutdown: CancellationToken,
+    mode: RealtimeMode,
+    clock: Clock,
+    asr_prompt_override: Option<String>,
+    traces: Arc<Mutex<Vec<SegmentTrace>>>,
 ) {
     let mut connection: Option<Connection> = None;
     loop {
@@ -209,11 +254,20 @@ async fn worker(
                 job = jobs.recv() => job,
             }
         };
-        let Some(mut job) = next else {
-            break;
+        let mut job = match next {
+            Some(Command::Record(job)) => job,
+            Some(Command::Snapshot(reply)) => {
+                let _ = reply.send(memory.as_ref().map(|memory| {
+                    let at = clock();
+                    (memory.snapshot(at), at)
+                }));
+                continue;
+            }
+            None => break,
         };
+        traces.lock().unwrap().clear();
         let mut working_memory = memory.clone();
-        let mut recording = Recording::new(Segmentation::PauseAware);
+        let mut recording = Recording::new(Segmentation::PauseAware, Arc::clone(&clock));
         recording.progress = job
             .progress
             .take()
@@ -224,7 +278,7 @@ async fn worker(
             _ = shutdown.cancelled() => break,
             _ = job.cancelled.cancelled() => Err(anyhow::anyhow!("dictation cancelled")),
             result = async {
-                if connection.is_none() { connection = Some(Connection::connect(&settings, key.as_ref().map(SecretValue::expose)).await?); }
+                if connection.is_none() { connection = Some(Connection::connect_with_mode(&settings, key.as_ref().map(SecretValue::expose), mode, asr_prompt_override.as_deref()).await?); }
                 let socket = connection.as_mut().unwrap();
                 loop {
                     let frame = tokio::select! {
@@ -232,22 +286,26 @@ async fn worker(
                         event = socket.receive_while_recording() => { event?; continue; }
                     };
                     let Some(frame) = frame else { break; };
-                    recording.push(socket, &mut working_memory, &frame).await?;
+                    recording.push(socket, working_memory.as_mut(), &frame).await?;
                 }
-                recording.finish(socket, &mut working_memory).await
+                recording.finish(socket, working_memory.as_mut()).await
             } => result,
         };
         let result = match result {
             Ok(()) if !job.cancelled.is_cancelled() => {
-                let prepared =
-                    memory.prepare(std::mem::take(&mut recording.results), language.clone());
-                let (confirmation, receiver) = Confirmation::channel();
-                let text = prepared.text.clone();
-                pending = Some((prepared, receiver));
-                Ok(Transcript {
-                    text,
-                    confirmation: Some(confirmation),
-                })
+                if let Some(memory) = &memory {
+                    let prepared =
+                        memory.prepare(std::mem::take(&mut recording.results), language.clone());
+                    let (confirmation, receiver) = Confirmation::channel();
+                    let text = prepared.text.clone();
+                    pending = Some((prepared, receiver));
+                    Ok(Transcript {
+                        text,
+                        confirmation: Some(confirmation),
+                    })
+                } else {
+                    Ok(recording.text(language.clone()).into())
+                }
             }
             other => {
                 if job.cancelled.is_cancelled()
@@ -286,6 +344,7 @@ async fn worker(
                 ))
             }
         };
+        *traces.lock().unwrap() = std::mem::take(&mut recording.traces);
         let _ = job.result.send(result);
         if let Some((prepared, mut receiver)) = pending {
             // Keep answering control traffic while the user edits, without accepting
@@ -312,10 +371,15 @@ async fn worker(
                 }
             };
             if let Some(feedback) = feedback {
-                memory.confirm(&recording.id, &prepared, &feedback, now());
+                let memory = memory
+                    .as_mut()
+                    .expect("only integrated results await confirmation");
+                let at = clock();
+                memory.confirm(&recording.id, &prepared, &feedback.text, at);
                 if let Err(error) = memory.save() {
                     tracing::warn!(%error, "Could not save confirmed dictation memory");
                 }
+                feedback.acknowledge(at);
             }
         }
     }
@@ -328,13 +392,15 @@ pub(super) struct Recording {
     segment: Vec<i16>,
     results: Vec<super::result::DictationResult>,
     index: usize,
-    evaluation: Option<(u64, Vec<super::evaluation::SegmentTrace>)>,
+    clock: Clock,
+    traces: Vec<SegmentTrace>,
+    segment_start: usize,
     stable: Option<super::memory::StablePrefix>,
     progress: Option<(Progress, Option<String>)>,
 }
 
 impl Recording {
-    pub fn new(mode: Segmentation) -> Self {
+    pub fn new(mode: Segmentation, clock: Clock) -> Self {
         let limit = crate::audio::max_frames_per_chunk(hound::WavSpec {
             channels: 1,
             sample_rate: 24_000,
@@ -356,24 +422,12 @@ impl Recording {
             segment: Vec::new(),
             results: Vec::new(),
             index: 0,
-            evaluation: None,
+            clock,
+            traces: Vec::new(),
+            segment_start: 0,
             stable: None,
             progress: None,
         }
-    }
-
-    pub(super) fn for_evaluation(id: String, at: u64) -> Self {
-        let mut recording = Self::new(Segmentation::Fixed);
-        recording.id = id;
-        recording.evaluation = Some((at, Vec::new()));
-        recording
-    }
-
-    pub(super) fn traces(&self) -> Vec<super::evaluation::SegmentTrace> {
-        self.evaluation
-            .as_ref()
-            .map(|(_, traces)| traces.clone())
-            .unwrap_or_default()
     }
 
     pub fn text(&self, language: Option<String>) -> String {
@@ -389,7 +443,7 @@ impl Recording {
     pub async fn push(
         &mut self,
         connection: &mut Connection,
-        memory: &mut Memory,
+        memory: Option<&mut Memory>,
         frame: &WavChunk,
     ) -> Result<()> {
         let (rate, samples) = crate::audio::decode_mono(frame)?;
@@ -402,13 +456,19 @@ impl Recording {
         self.push_pcm(connection, memory, &pcm).await
     }
 
-    pub async fn finish(&mut self, connection: &mut Connection, memory: &mut Memory) -> Result<()> {
+    pub async fn finish(
+        &mut self,
+        connection: &mut Connection,
+        mut memory: Option<&mut Memory>,
+    ) -> Result<()> {
         if let Some(mut filter) = self.resampler.take() {
             let tail = filter.push(&[], true)?;
-            self.push_pcm(connection, memory, &tail).await?;
+            self.push_pcm(connection, memory.as_deref_mut(), &tail)
+                .await?;
         }
         if self.segmenter.finish().is_some() {
             self.finish_segment(connection, memory).await?;
+            self.segment_start += self.segment.len();
             self.segment.clear();
             self.index += 1;
         }
@@ -418,7 +478,7 @@ impl Recording {
     async fn push_pcm(
         &mut self,
         connection: &mut Connection,
-        memory: &mut Memory,
+        mut memory: Option<&mut Memory>,
         pcm: &[i16],
     ) -> Result<()> {
         let cuts = self.segmenter.push(pcm);
@@ -430,10 +490,13 @@ impl Recording {
         {
             if start < end {
                 if self.segment.is_empty() {
-                    let stable = self.stable.get_or_insert_with(|| memory.stable_prefix());
-                    connection
-                        .begin(stable, &format!("{}-{}", self.id, self.index))
-                        .await?;
+                    let correlation = format!("{}-{}", self.id, self.index);
+                    if let Some(memory) = &memory {
+                        let stable = self.stable.get_or_insert_with(|| memory.stable_prefix());
+                        connection.begin(stable, &correlation).await?;
+                    } else {
+                        connection.begin_transcription(&correlation)?;
+                    }
                 }
                 connection.append(&pcm[start..end]).await?;
                 self.segment.extend_from_slice(&pcm[start..end]);
@@ -445,7 +508,9 @@ impl Recording {
                     samples = self.segment.len(),
                     "Closing Realtime recognition segment"
                 );
-                self.finish_segment(connection, memory).await?;
+                self.finish_segment(connection, memory.as_deref_mut())
+                    .await?;
+                self.segment_start += self.segment.len();
                 self.segment.clear();
                 self.index += 1;
             }
@@ -457,7 +522,7 @@ impl Recording {
     async fn finish_segment(
         &mut self,
         connection: &mut Connection,
-        memory: &mut Memory,
+        memory: Option<&mut Memory>,
     ) -> Result<()> {
         // Silence is uploaded to preserve the stream timeline, but cannot invent a final transcript.
         let wav = crate::audio::chunk::encode_i16_wav(&self.segment, 24_000)?;
@@ -468,48 +533,59 @@ impl Recording {
         if !speech {
             return connection.clear().await;
         }
-        // Preserve a short voiced tail rather than discarding it; padding is silence, not source audio.
-        if self.segment.len() < 2400 {
-            connection
-                .append(&vec![0; 2400 - self.segment.len()])
-                .await?;
-        }
-        let at = self
-            .evaluation
-            .as_ref()
-            .map(|(at, _)| *at)
-            .unwrap_or_else(now);
-        let input = memory.prompt_input(
-            self.stable.as_ref().expect("uploaded audio has a prefix"),
-            at,
-        );
+        let at = memory.as_ref().map(|_| (self.clock)());
+        let input = memory.as_ref().map(|memory| {
+            memory.prompt_input(
+                self.stable.as_ref().expect("integrated audio has a prefix"),
+                at.unwrap(),
+            )
+        });
         let correlation = format!("{}-{}", self.id, self.index);
-        let result = if let Some((progress, language)) = &self.progress {
-            let prefix = self.text(language.clone());
-            connection
-                .finish_streaming(&input, &correlation, &mut |text| {
-                    progress.publish(crate::text::merge_texts(
-                        &[prefix.clone(), text.into()],
-                        language.clone(),
-                    ));
-                })
-                .await?
-        } else {
-            connection.finish(&input, &correlation).await?
+        let prefix = self
+            .progress
+            .as_ref()
+            .map(|(_, language)| self.text(language.clone()));
+        let mut notify = |text: &str| {
+            if let Some((progress, language)) = &self.progress {
+                progress.publish(crate::text::merge_texts(
+                    &[prefix.as_ref().unwrap().clone(), text.into()],
+                    language.clone(),
+                ));
+            }
+        };
+        let result = match &input {
+            Some(input) => {
+                connection
+                    .finish_streaming(input, &correlation, &mut notify)
+                    .await?
+            }
+            None => {
+                connection
+                    .finish_transcription_streaming(&correlation, &mut notify)
+                    .await?
+            }
         };
         // Log lengths without exposing dictation contents.
         tracing::debug!(
             final_chars = result.text.chars().count(),
             "Dictation completed"
         );
-        if let Some((_, traces)) = &mut self.evaluation {
-            traces.push(super::evaluation::SegmentTrace {
-                index: self.index,
-                input: input.snapshot(),
-                prompt_input: Some(input),
-                output: result.raw.clone(),
-            });
-        }
+        self.traces.push(super::evaluation::SegmentTrace {
+            index: self.index,
+            input_layout: if input.is_some() {
+                super::INPUT_LAYOUT
+            } else {
+                super::TRANSCRIPTION_INPUT_LAYOUT
+            }
+            .into(),
+            at,
+            instructions: Some(connection.instructions().to_owned()),
+            audio_start_sample: Some(self.segment_start),
+            audio_end_sample: Some(self.segment_start + self.segment.len()),
+            input: input.as_ref().map(|input| input.snapshot()),
+            prompt_input: input,
+            output: result.raw.clone(),
+        });
         self.results.push(result);
         if let Some((progress, language)) = &self.progress {
             progress.publish(self.text(language.clone()));
@@ -517,10 +593,20 @@ impl Recording {
         // Cleanup is fallible even after the model has completed and passed validation.
         // Keep the text for partial delivery, but learn only once cleanup succeeds.
         connection.delete_segment().await?;
-        memory.learn(&self.id, self.index, self.results.last().unwrap(), at);
+        if let Some(memory) = memory {
+            memory.learn(
+                &self.id,
+                self.index,
+                self.results.last().unwrap(),
+                at.unwrap(),
+            );
+        }
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod transcription_tests;

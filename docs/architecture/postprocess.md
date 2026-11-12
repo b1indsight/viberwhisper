@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Optional LLM cleanup after HTTP STT: punctuation, explicit self-correction and conservative
+Optional LLM cleanup after HTTP STT or pure-audio Realtime transcription: punctuation, explicit self-correction and conservative
 filler removal. Desktop cleanup also supplies validated context and term candidates to the
 same confirmation-driven correction and memory implementation used by Realtime dictation.
 
@@ -30,22 +30,24 @@ pub enum PostProcessor {
 
 impl PostProcessor {
     pub fn new(config: PostProcessConfig) -> Self;
-    pub fn process_text(&self, text: &str) -> Result<String, PostProcessError>;
-    // Crate-internal desktop entry points:
-    pub(crate) fn new_desktop(
+    // Shared production entry points; the host supplies personal or isolated state:
+    pub(crate) fn with_memory(
         config: PostProcessConfig,
         memory: MemoryConfig,
         path: Option<PathBuf>,
         language: Option<String>,
+        clock: Clock,
     ) -> anyhow::Result<Self>;
-    pub(crate) fn process_for_delivery(&self, text: &str) -> Result<Transcript, PostProcessError>;
+    pub(crate) fn process_with_trace(&self, text: &str) -> Result<(Transcript, Option<CleanupTrace>), PostProcessError>;
+    pub(crate) fn snapshot_with_time(&self) -> anyhow::Result<(Snapshot, Option<u64>)>;
     pub(crate) fn shutdown(&self);
 }
 ```
 
-`new`/`process_text` serve CLI conversion and setup with an empty snapshot and no personal-memory
-I/O. `new_desktop` adds a memory worker only when both LLM cleanup and memory are enabled.
-`process_for_delivery` returns text plus an optional single-use confirmation capability.
+Desktop, conversion, setup and lab use `with_memory`, adding a worker only when cleanup and memory are enabled. Conversion and setup supply empty ephemeral state instead of a separate text-only bypass.
+`process_with_trace` returns text, an optional single-use confirmation capability, and the actual
+snapshot/model result/prepared text. Shared `core::recognition::finalize` owns success, partial-result,
+empty-result and cleanup-fallback policy for all hosts.
 The listener preserves this capability through finalization and submits the user's final text
 only after successful destination delivery. Disabled cleanup passes text through without a worker.
 
@@ -98,11 +100,17 @@ It supplies snapshots, prepares reversible previews using `Memory::prepare`, the
 shown candidate spans and the final edited text. It does not infer evidence from raw STT diffs.
 Snapshots for later recordings cannot overtake accepted feedback.
 
-Realtime and HTTP recognition are mutually exclusive within the listener. The selected path owns
+Integrated Realtime and text cleanup are mutually exclusive. In two-stage Realtime the audio worker
+does not load memory at all, and the text processor is the single learning owner. The selected path owns
 the only writer, so switching transports after restart reuses existing corrections without a schema
 change or migration. HTTP memory validates vocabulary independently of unused Realtime URL settings.
 `dictation.memory.enabled=false` disables loading, personal context upload, learning and local repair.
-CLI/setup and raw capture do not create this worker.
+Conversion/setup use empty ephemeral workers and discard confirmation. Ordinary lab runs initialize
+a temporary copy from configured vocabulary and a read-only production-memory snapshot, reuse the
+production clock/worker, and confirm each successful unedited final into that copy. Explicit diagnostic
+scenarios supply their own seed, clock and feedback. Snapshot and confirmation timestamps come from
+the serial memory owner; acknowledgment waits for handling and a save attempt, not guaranteed durable
+storage. Raw capture never creates a learning worker.
 
 Dropping a preview discards feedback. Failed injection can retry without submitting learning;
 only its last successful revision is confirmed. On shutdown the listener cancels previews and

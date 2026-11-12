@@ -61,7 +61,16 @@ async fn recording_declares_prefix_before_audio_and_orders_final_input() {
         delete_audio(&mut socket, "prefix").await;
     });
     let client = tokio::task::spawn_blocking(move || {
-        let engine = SessionOrchestrator::new_realtime(settings, None, None, None).unwrap();
+        let engine = SessionOrchestrator::new_realtime(
+            settings,
+            None,
+            None,
+            None,
+            RealtimeMode::Integrated,
+            super::super::system_clock(),
+            None,
+        )
+        .unwrap();
         let id = SessionId(0);
         engine.start_session(id).unwrap();
         engine.on_chunk_ready(
@@ -165,8 +174,16 @@ async fn recording_answers_heartbeat_and_reports_server_error_before_stop() {
     });
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("memory.json");
-    let engine =
-        SessionOrchestrator::new_realtime(settings, None, Some(path.clone()), None).unwrap();
+    let engine = SessionOrchestrator::new_realtime(
+        settings,
+        None,
+        Some(path.clone()),
+        None,
+        RealtimeMode::Integrated,
+        super::super::system_clock(),
+        None,
+    )
+    .unwrap();
     let id = SessionId(42);
     engine.start_session(id).unwrap();
     engine.on_chunk_ready(
@@ -378,8 +395,18 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
         ),
         ..settings
     };
-    let engine =
-        std::sync::Arc::new(SessionOrchestrator::new_realtime(settings, None, None, None).unwrap());
+    let engine = std::sync::Arc::new(
+        SessionOrchestrator::new_realtime(
+            settings,
+            None,
+            None,
+            None,
+            RealtimeMode::Integrated,
+            super::super::system_clock(),
+            None,
+        )
+        .unwrap(),
+    );
     let mut reader = hound::WavReader::new(std::io::Cursor::new(include_bytes!(
         "../../../tests/fixtures/audio/speech.wav"
     )))

@@ -62,8 +62,8 @@ viberwhisper convert input.wav --output output.txt
 ```
 
 使用当前配置选择的识别路径：默认 HTTP STT，若启用 `dictation.enabled` 则使用 Realtime。
-HTTP 路径按 `post_process.enabled` 决定是否整理文字；失败时回退原始 STT。Realtime 不再调用第二个后处理服务。
-长 WAV 自动分段，静音分段会在请求前过滤。语言相关的分段拼接规则由 `transcription.language` 决定。
+两者均按 `post_process.enabled` 决定是否整理文字；Realtime 开启整理时使用纯 ASR → 文字后处理，关闭时保留一体式模式。整理失败时回退原文。
+WAV 以 1 倍音频时间进入与桌面相同的 PCM 缓冲、停顿分段和尾段处理，不重复应用麦克风增益。静音分段会在请求前过滤。语言相关的分段拼接规则由 `transcription.language` 决定。输入或识别部分失败时输出已识别文字并以非零状态退出。
 
 离线转写不显示确认气泡、不输入活动窗口、不写普通识别历史，也不读取、上传或更新个人语境记忆。
 `--output` 写入指定文件并覆盖其原有内容。
@@ -82,6 +82,7 @@ viberwhisper prompt-lab evaluate --help
 ```
 
 `prompt-lab` 提供录音采集、参考文本校正、数据集验证、全量重跑和编码代理语义复核。
+`evaluate` 使用完整生产识别路径，分别记录原始转写与编辑前最终结果；默认读取个人记忆的只读快照，保留配置词库，使用生产系统时钟并在整个数据集复用会话。成功 final 按不编辑确认，学习只写隔离副本；参考答案只评分。报告包含记忆及上下文，请勿直接公开。`--prompt-file` / `--no-prompt` 仅覆盖当前音频阶段，不关闭文字后处理。`--realtime-cases` 是使用显式种子和模拟时钟的诊断场景，不冒充普通生产状态评估。`record` 保持原音与原始 STT 采集入口，不能代替完整路径评估。
 完整命令及评分流程见[贡献指南](../CONTRIBUTING.md#stt-prompt-回归调试)，数据格式见[Prompt-lab 架构](architecture/prompt-lab.md)。
 Realtime 的临时提示词覆盖与场景评估见[Realtime 回归说明](dictation.md#离线转写与-prompt-回归)。
-采集仍使用 HTTP raw-STT；评估可使用所选 HTTP 或 Realtime 路径，且不接触个人记忆文件。
+采集仍使用 HTTP raw-STT；普通评估可使用所选 HTTP 或 Realtime 路径，只读初始化个人记忆，后续写入均使用隔离副本。

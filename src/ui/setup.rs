@@ -18,16 +18,15 @@ use rdev::EventType;
 #[cfg(not(target_os = "windows"))]
 use tinyfiledialogs::{MessageBoxIcon, YesNo};
 
+use crate::audio;
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
 use crate::core::config::{
     ConfigDocument, ConfigStore,
     fields::{self, SecretStatus},
 };
 use crate::core::listener::ListenerConfig;
-use crate::postprocess::PostProcessor;
+use crate::core::recognition::RecognitionPipeline;
 use crate::session::SessionId;
-use crate::transcriber::ApiTranscriber;
-use crate::{audio, text};
 
 const TITLE: &str = "ViberWhisper 设置";
 const DEFAULT_POST_PROCESS_URL: &str = "https://api.openai.com/v1/chat/completions";
@@ -294,28 +293,21 @@ impl SetupVerifier for NativeVerifier {
         _ui: &mut dyn SetupUi,
     ) -> Result<VerificationResult, String> {
         let config = ListenerConfig::from_config(document).map_err(|error| format!("{error:#}"))?;
-        let transcriber: Box<dyn crate::transcriber::Transcriber> = if document.dictation.enabled {
-            let mut settings = document.dictation.clone();
-            settings.memory.enabled = false;
-            Box::new(
-                crate::dictation::OfflineDictation::new(
-                    settings,
-                    document.dictation_key(),
-                    document.transcription.language.clone(),
-                )
-                .map_err(|error| error.to_string())?,
-            )
-        } else {
-            Box::new(
-                ApiTranscriber::new(
-                    crate::transcriber::TranscriberConfig::from_config(document)
-                        .map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?,
-            )
-        };
-        let post_processor = PostProcessor::new(config.post_process);
+        let mut isolated = document.clone();
+        isolated.dictation.memory.long_term.clear();
+        let pipeline = RecognitionPipeline::from_config(
+            &isolated,
+            None,
+            crate::dictation::system_clock(),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
         let mut recorder = AudioRecorder::with_config(&config.recording.audio, |_| {});
+        if pipeline.streaming {
+            recorder.enable_streaming_frames();
+        } else {
+            recorder.enable_pause_aware_segments();
+        }
         let session_id = SessionId(1);
         let mut hotkeys = hotkey::VerificationListener::spawn(&document.input)?;
 
@@ -333,10 +325,15 @@ impl SetupVerifier for NativeVerifier {
             }
         }
 
-        let mut chunks = Vec::new();
+        pipeline
+            .orchestrator
+            .start_session(session_id)
+            .map_err(|error| error.to_string())?;
         loop {
             while let Some(ready) = recorder.take_ready_chunk() {
-                chunks.push(ready.chunk);
+                pipeline
+                    .orchestrator
+                    .on_chunk_ready(session_id, ready.chunk);
             }
             match hotkeys.receive(Duration::from_millis(50)) {
                 Ok(Some(hotkey::VerificationAction::Stop)) => break,
@@ -356,7 +353,9 @@ impl SetupVerifier for NativeVerifier {
                 if let Some(warning) = warning {
                     return Err(warning);
                 }
-                chunks.extend(final_chunks);
+                for chunk in final_chunks {
+                    pipeline.orchestrator.on_chunk_ready(session_id, chunk);
+                }
             }
             RecorderStopOutcome::StillRecording { error, .. } => return Err(error),
             RecorderStopOutcome::NotRecording { .. } => {
@@ -364,25 +363,19 @@ impl SetupVerifier for NativeVerifier {
             }
         }
         hotkeys.finish()?;
-        if chunks.is_empty() {
-            return Err("没有录到音频数据".to_string());
+        let outcome = pipeline.finish(session_id, Instant::now());
+        let final_text = outcome
+            .transcript
+            .map(|transcript| transcript.text)
+            .unwrap_or_default();
+        pipeline.shutdown();
+        if let Some(error) = outcome.recognition_error {
+            return Err(error.to_string());
         }
-
-        let mut texts = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            texts.push(
-                transcriber
-                    .transcribe(&chunk)
-                    .map_err(|error| error.to_string())?,
-            );
-        }
-        let raw = text::merge_texts(&texts, document.transcription.language.clone());
+        let raw = outcome.raw_text;
         if raw.trim().is_empty() {
             return Err("转写服务返回了空文本".to_string());
         }
-        let final_text = post_processor
-            .process_text(&raw)
-            .map_err(|error| error.to_string())?;
         Ok(VerificationResult { raw, final_text })
     }
 }
@@ -1013,7 +1006,9 @@ mod tests {
                     document.transcription.language = Some("en".into());
                     document.transcription.prompt = Some("  保留 'STT'\n提示  ".into());
                     document.transcription.temperature = 0.25;
-                    document.post_process.enabled = true;
+                    // Custom integrated prompts remain supported with cleanup off;
+                    // enabling cleanup now selects the separately validated two-stage path.
+                    document.post_process.enabled = !realtime;
                     document.post_process.preheat_enabled = false;
                     document.post_process.prompt = Some(String::new());
                     document.post_process.temperature = 0.4;
@@ -1057,7 +1052,7 @@ mod tests {
         let mut document = ConfigDocument::new(RealtimeSecrets);
         document.inference.api.transcription.api_url = "invalid dormant HTTP URL".into();
         document.inference.api.post_process.api_url = Some("invalid dormant LLM URL".into());
-        document.post_process.enabled = true;
+        document.post_process.enabled = false;
         let mut ui = ScriptedUi {
             inputs: VecDeque::from([
                 Ok(Some("invalid mode".into())),
