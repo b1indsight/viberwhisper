@@ -103,3 +103,54 @@ pub(crate) fn show_text_delivery_permission_guidance() -> anyhow::Result<()> {
     #[cfg(not(target_os = "macos"))]
     Ok(())
 }
+
+/// Reports a failed device save without exposing configuration values in the dialog.
+pub(crate) fn show_input_device_error() -> anyhow::Result<()> {
+    const MESSAGE: &str =
+        "无法保存输入设备，已保留原来的选择。\n请检查配置文件是否存在且可写，或重新运行设置。";
+
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::{NSAlert, NSAlertStyle};
+        use objc2_foundation::NSString;
+
+        let main_thread = MainThreadMarker::new()
+            .ok_or_else(|| anyhow::anyhow!("input device error must run on the main thread"))?;
+        objc2::rc::autoreleasepool(|_| {
+            let alert = NSAlert::new(main_thread);
+            alert.setAlertStyle(NSAlertStyle::Warning);
+            alert.setMessageText(&NSString::from_str("ViberWhisper 输入设备"));
+            alert.setInformativeText(&NSString::from_str(MESSAGE));
+            alert.addButtonWithTitle(&NSString::from_str("确定"));
+            alert.runModal();
+        });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW,
+        };
+
+        let message: Vec<u16> = MESSAGE.encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = "ViberWhisper 输入设备"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: Both UTF-16 buffers remain live and NUL-terminated throughout the modal call.
+        if unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                message.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    eprintln!("{MESSAGE}");
+    Ok(())
+}

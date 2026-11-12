@@ -138,6 +138,12 @@ The setup wizard uses the recorder module's device enumeration and the same reso
 verification recording. Its hotkey-controlled verification loop drains ready chunks while the
 session remains active, matching the normal listener's bounded PCM-buffer behavior.
 
+The tray's input-device submenu uses the same enumeration. After persistence succeeds,
+`AudioRecorder::set_input_device` changes only the reusable next-recording choice; it does not
+rebuild the active stream, clear PCM, change the session ID or alter chunk mode. Each new start
+resolves the updated name (or the then-current system default). This applies to both desktop
+dictation and prompt-lab capture without changing their segmentation/archive contracts.
+
 `AudioRecorder` keeps persistent configuration separately from `Option<ActiveRecording>`, which
 owns the session ID, stream, and chunk progress. Each session gets its own shared `RecordingBuffer`,
 which fixes its sample rate and chunk capacity at construction and owns the PCM samples, callback

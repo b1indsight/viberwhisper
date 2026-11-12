@@ -39,11 +39,13 @@ impl PlatformEvent {
 }
 
 /// Platform-neutral user intent returned to the listener application.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PlatformAction {
     HoldPressed,
     HoldReleased,
     ToggleRecording,
+    SelectInputDevice(Option<String>),
+    RefreshInputDevices,
     PointerReleased {
         point: (f64, f64),
         occurred_at: Instant,
@@ -69,6 +71,12 @@ where
 pub(crate) trait PlatformTray {
     fn handle_event(&mut self, event: TrayEvent) -> Option<TrayAction>;
     fn set_recording(&mut self, recording: bool);
+    fn set_input_devices(
+        &mut self,
+        devices: Result<Vec<String>, String>,
+        selected: Option<&str>,
+    ) -> Result<()>;
+    fn set_selected_input_device(&mut self, selected: Option<&str>);
     fn set_history(&mut self, entries: Vec<String>);
     fn push_history(&mut self, text: String);
 }
@@ -80,6 +88,18 @@ impl<P: crate::input::tray::TrayPolicy> PlatformTray for TrayManager<P> {
 
     fn set_recording(&mut self, recording: bool) {
         TrayManager::set_recording(self, recording);
+    }
+
+    fn set_input_devices(
+        &mut self,
+        devices: Result<Vec<String>, String>,
+        selected: Option<&str>,
+    ) -> Result<()> {
+        TrayManager::set_input_devices(self, devices, selected)
+    }
+
+    fn set_selected_input_device(&mut self, selected: Option<&str>) {
+        TrayManager::set_selected_input_device(self, selected);
     }
 
     fn set_history(&mut self, entries: Vec<String>) {
@@ -185,6 +205,18 @@ where
         self.tray.set_recording(recording);
     }
 
+    pub(crate) fn set_input_devices(
+        &mut self,
+        devices: Result<Vec<String>, String>,
+        selected: Option<&str>,
+    ) -> Result<()> {
+        self.tray.set_input_devices(devices, selected)
+    }
+
+    pub(crate) fn set_selected_input_device(&mut self, selected: Option<&str>) {
+        self.tray.set_selected_input_device(selected);
+    }
+
     pub(crate) fn set_history(&mut self, entries: Vec<String>) {
         self.tray.set_history(entries);
     }
@@ -210,6 +242,8 @@ fn action_from_hotkey(event: HotkeyEvent) -> Option<PlatformAction> {
 fn action_from_tray(action: TrayAction) -> PlatformAction {
     match action {
         TrayAction::ToggleRecording => PlatformAction::ToggleRecording,
+        TrayAction::SelectInputDevice(device) => PlatformAction::SelectInputDevice(device),
+        TrayAction::RefreshInputDevices => PlatformAction::RefreshInputDevices,
         TrayAction::CopyHistory(_) => unreachable!("history copy is handled by PlatformRuntime"),
         TrayAction::Exit => PlatformAction::ExitRequested,
     }
@@ -292,6 +326,16 @@ mod tests {
         fn set_recording(&mut self, recording: bool) {
             RECORDING.store(recording, Ordering::SeqCst);
         }
+
+        fn set_input_devices(
+            &mut self,
+            _devices: Result<Vec<String>, String>,
+            _selected: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_selected_input_device(&mut self, _selected: Option<&str>) {}
 
         fn set_history(&mut self, _entries: Vec<String>) {}
 

@@ -52,6 +52,19 @@ impl ConfigStore {
         self.write_atomic(document)
     }
 
+    /// Updates only the input choice in the latest document; never replaces a missing config.
+    pub(crate) fn set_input_device(&self, device: Option<&str>) -> Result<(), ConfigError> {
+        let mut document = self.load()?.ok_or_else(|| ConfigError::Io {
+            path: self.path.clone(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "configuration file is missing; run setup before saving a device",
+            ),
+        })?;
+        document.audio.input_device = device.map(str::to_owned);
+        self.save(&document)
+    }
+
     /// Persists absent Realtime fields after the desktop caller validates `document`.
     /// Explicit values and unrelated sections are retained; ordinary `load` stays read-only.
     pub(crate) fn materialize_dictation_defaults(

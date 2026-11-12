@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 #[cfg(not(test))]
 use tracing::warn;
 #[cfg(not(test))]
-use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::menu::{MenuEvent, MenuId};
 #[cfg(not(test))]
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -27,6 +27,8 @@ const STATUS_RECORDING_PNG: &[u8] = include_bytes!("../../assets/status-recordin
 pub enum TrayAction {
     ToggleRecording,
     CopyHistory(String),
+    SelectInputDevice(Option<String>),
+    RefreshInputDevices,
     Exit,
 }
 
@@ -156,6 +158,9 @@ pub struct TrayManager<P: TrayPolicy> {
     icon_idle: Icon,
     icon_recording: Icon,
     status_item: MenuItem,
+    input_device_menu: Submenu,
+    input_device_items: Vec<(CheckMenuItem, Option<String>)>,
+    refresh_input_devices_id: MenuId,
     history_items: Vec<MenuItem>,
     history: Vec<String>,
     exit_item_id: tray_icon::menu::MenuId,
@@ -185,6 +190,9 @@ impl<P: TrayPolicy> TrayManager<P> {
         let title_item = MenuItem::new("ViberWhisper", false, None);
         let status_item = MenuItem::new("状态：空闲", false, None);
         let separator = PredefinedMenuItem::separator();
+        let input_device_menu = Submenu::new("输入设备", true);
+        let refresh_input_devices_id = MenuId::new("refresh-input-devices");
+        let device_separator = PredefinedMenuItem::separator();
         let history_title_item = MenuItem::new("最近识别", false, None);
         let history_items: Vec<_> = (0..RECENT_HISTORY_LIMIT)
             .map(|index| MenuItem::new(if index == 0 { "暂无识别历史" } else { "" }, false, None))
@@ -196,6 +204,8 @@ impl<P: TrayPolicy> TrayManager<P> {
         menu.append(&title_item)?;
         menu.append(&status_item)?;
         menu.append(&separator)?;
+        menu.append(&input_device_menu)?;
+        menu.append(&device_separator)?;
         menu.append(&history_title_item)?;
         for item in &history_items {
             menu.append(item)?;
@@ -217,6 +227,9 @@ impl<P: TrayPolicy> TrayManager<P> {
             icon_idle,
             icon_recording,
             status_item,
+            input_device_menu,
+            input_device_items: Vec::new(),
+            refresh_input_devices_id,
             history_items,
             history: Vec::new(),
             exit_item_id: exit_id,
@@ -252,6 +265,81 @@ impl<P: TrayPolicy> TrayManager<P> {
         }
     }
 
+    /// Refreshes the native list using new IDs so queued events cannot select a different device.
+    pub fn set_input_devices(
+        &mut self,
+        devices: Result<Vec<String>, String>,
+        selected: Option<&str>,
+    ) -> Result<()> {
+        while self.input_device_menu.remove_at(0).is_some() {}
+        self.input_device_items.clear();
+
+        let default = CheckMenuItem::new("系统默认", true, selected.is_none(), None);
+        self.input_device_menu.append(&default)?;
+        self.input_device_items.push((default, None));
+        let enumeration_failed = devices.is_err();
+        let (names, diagnostic) = match devices {
+            Ok(names) if names.is_empty() => (names, Some("未发现输入设备")),
+            Ok(names) => (names, None),
+            Err(_) => (Vec::new(), Some("无法列出输入设备")),
+        };
+        for name in names {
+            if self
+                .input_device_items
+                .iter()
+                .any(|(_, device)| device.as_ref() == Some(&name))
+            {
+                continue;
+            }
+            let label = format_device_label(&name);
+            let item = CheckMenuItem::new(label, true, selected == Some(name.as_str()), None);
+            self.input_device_menu.append(&item)?;
+            self.input_device_items.push((item, Some(name)));
+        }
+        if let Some(selected) = selected
+            && !self
+                .input_device_items
+                .iter()
+                .any(|(_, device)| device.as_deref() == Some(selected))
+        {
+            let state = if enumeration_failed {
+                "当前配置，状态未知"
+            } else {
+                "未检测到"
+            };
+            let item = CheckMenuItem::new(
+                format!("{}（{state}）", format_device_label(selected)),
+                false,
+                true,
+                None,
+            );
+            self.input_device_menu.append(&item)?;
+            self.input_device_items.push((item, Some(selected.into())));
+        }
+        if let Some(diagnostic) = diagnostic {
+            self.input_device_menu
+                .append(&MenuItem::new(diagnostic, false, None))?;
+        }
+        self.input_device_menu
+            .append(&PredefinedMenuItem::separator())?;
+        self.input_device_menu
+            .append(&MenuItem::new("下次录音生效", false, None))?;
+        self.input_device_menu.append(&MenuItem::with_id(
+            self.refresh_input_devices_id.clone(),
+            "刷新设备列表",
+            true,
+            None,
+        ))?;
+        Ok(())
+    }
+
+    pub fn set_selected_input_device(&mut self, selected: Option<&str>) {
+        // Native check items toggle independently, including when the save fails.
+        for (item, device) in &self.input_device_items {
+            item.set_checked(device.as_deref() == selected);
+        }
+    }
+
     pub fn set_history(&mut self, entries: Vec<String>) {
         self.history = entries.into_iter().take(RECENT_HISTORY_LIMIT).collect();
         self.update_history_items();
@@ -279,6 +367,16 @@ impl<P: TrayPolicy> TrayManager<P> {
             TrayEvent::Menu(event) => {
                 if is_exit_menu_event(&self.exit_item_id, &event) {
                     return Some(TrayAction::Exit);
+                }
+                if event.id == self.refresh_input_devices_id {
+                    return Some(TrayAction::RefreshInputDevices);
+                }
+                if let Some((_, device)) = self
+                    .input_device_items
+                    .iter()
+                    .find(|(item, _)| item.id() == &event.id && item.is_enabled())
+                {
+                    return Some(TrayAction::SelectInputDevice(device.clone()));
                 }
                 self.history_items
                     .iter()
@@ -317,12 +415,33 @@ impl<P: TrayPolicy> TrayManager<P> {
 
     pub fn set_recording(&mut self, _recording: bool) {}
 
+    pub fn set_input_devices(
+        &mut self,
+        _devices: Result<Vec<String>, String>,
+        _selected: Option<&str>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn set_selected_input_device(&mut self, _selected: Option<&str>) {}
+
     pub fn set_history(&mut self, _entries: Vec<String>) {}
 
     pub fn push_history(&mut self, _text: String) {}
 
     pub fn handle_event(&mut self, _event: TrayEvent) -> Option<TrayAction> {
         None
+    }
+}
+
+#[cfg(not(test))]
+fn format_device_label(name: &str) -> String {
+    let label = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    // muda's macOS check-item constructor displays ampersands verbatim.
+    if cfg!(target_os = "macos") {
+        label
+    } else {
+        label.replace('&', "&&")
     }
 }
 

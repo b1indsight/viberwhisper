@@ -227,6 +227,32 @@ mod tests {
     }
 
     #[test]
+    fn device_selection_preserves_latest_settings_and_rejects_unusable_documents() {
+        // Tray selection must not overwrite edits made since startup or recreate a missing file.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let store = ConfigStore::at(path.clone());
+        assert!(store.set_input_device(Some("USB Mic")).is_err());
+        assert!(!path.exists());
+
+        let mut document = ConfigDocument::default();
+        store.save(&document).unwrap();
+        store.set_input_device(Some("USB & 会议\nMic")).unwrap();
+        document.audio.input_device = Some("USB & 会议\nMic".into());
+        assert_eq!(store.load().unwrap(), Some(document.clone()));
+
+        document.audio.mic_gain = 1.5;
+        store.save(&document).unwrap();
+        store.set_input_device(None).unwrap();
+        document.audio.input_device = None;
+        assert_eq!(store.load().unwrap(), Some(document));
+
+        std::fs::write(&path, "invalid json").unwrap();
+        assert!(store.set_input_device(Some("Other Mic")).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid json");
+    }
+
+    #[test]
     fn startup_materializes_missing_dictation_but_load_stays_read_only() {
         // Upgrading an existing v3 file must expose defaults without enabling Realtime.
         let temp = tempfile::tempdir().unwrap();

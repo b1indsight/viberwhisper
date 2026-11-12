@@ -216,6 +216,9 @@ pub struct TrayManager<P: TrayPolicy> {
     icon_idle: Icon,
     icon_recording: Icon,
     status_item: MenuItem,
+    input_device_menu: Submenu,
+    input_device_items: Vec<(CheckMenuItem, Option<String>)>,
+    refresh_input_devices_id: MenuId,
     history_items: Vec<MenuItem>,
     history: Vec<String>,
     exit_item_id: MenuId,
@@ -244,8 +247,8 @@ the asset's explicit red. `WindowsTray` uses the committed colors directly.
 
 **`TrayManager::<P>::new(notify) -> Result<Self>`**
 
-Decodes the embedded idle and recording PNGs, then builds the tray icon with title, status, a
-disabled `最近识别` heading, five fixed history slots, separators, and Exit.
+Decodes the embedded idle and recording PNGs, then builds the tray icon with title, status, an
+`输入设备` submenu, a disabled `最近识别` heading, five fixed history slots, separators, and Exit.
 Corrupt or non-RGBA assets fail tray construction with an error, while tests enforce the committed
 32×32 dimensions and transparency. Left-click menu opening is disabled so left click can toggle
 recording; right click retains the native context menu.
@@ -259,6 +262,23 @@ global cells, matching the application's single listener and process-lifetime ev
 Switches the icon, backend-selected template/color mode, tooltip, and menu status text based on
 recording state. Native icon/tooltip update failures are logged rather than silently discarded.
 
+**`set_input_devices(devices, selected)` / `set_selected_input_device(selected)`**
+
+Startup and manual refresh rebuild the native device submenu with system default, exact-name
+deduplicated devices, next-recording guidance and refresh. New device-item IDs reject queued events
+from older lists. Raw names stay separate from whitespace-normalized display labels; Windows
+mnemonic ampersands are escaped, while muda's macOS check-item constructor displays them verbatim.
+A missing configured device stays checked and disabled; enumeration failure explicitly reports
+unknown status instead of disconnection. Empty lists retain system default and refresh.
+
+Device actions pass through `PlatformRuntime` to `ListenerApplication` before recording-event
+normalization. The listener asks `ConfigStore::set_input_device` to reload the latest document,
+change only the input choice and save atomically; missing/invalid documents fail closed.
+Only a successful save updates the recorder's next-input field. Every selection resynchronizes
+all native check items, including repeated selections and failed saves. A failed save shows an
+AppKit/Win32 Unicode error dialog and retains the previous runtime choice. No background polling,
+hotplug listener or general configuration reload is introduced.
+
 **`set_history(&mut self, entries: Vec<String>)` / `push_history(&mut self, text: String)`**
 
 Startup moves in up to five entries; each later append prepends one string and truncates the cache
@@ -270,7 +290,9 @@ whitespace, escape mnemonic ampersands, and truncate after 40 Unicode characters
 
 Filters raw events by tray/menu ID and maps a matching left-button-up event to `ToggleRecording`.
 A matching fixed history-item ID maps to `CopyHistory(full_text)`. `PlatformRuntime` performs
-the native copy immediately; unrelated IDs and mouse phases are discarded.
+the native copy immediately. Enabled device IDs map to `SelectInputDevice(raw_name)` (`None` for
+system default), and the refresh ID maps to `RefreshInputDevices`; unrelated IDs and mouse phases
+are discarded.
 
 The main-thread winit loop owns AppKit/Win32 dispatch in `ControlFlow::Wait` mode. `TrayManager` no
 longer exposes a polling receiver or a manual platform event pump. `MacTray` still enforces
