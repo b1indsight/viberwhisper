@@ -15,7 +15,7 @@ mod event_loop;
 mod permission;
 
 #[cfg(feature = "integration")]
-pub(super) use event_loop::finish_transcription;
+pub(super) use crate::core::recognition::finish_transcription;
 
 fn platform_session_event(action: PlatformAction, state: &RecordingState) -> Option<SessionEvent> {
     match action {

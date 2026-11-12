@@ -157,7 +157,8 @@ Rust 只负责读取和组合。要独立修改规则，将 [`config.example.jso
 同连接可持续多轮且累计超过 60 秒。完整响应校验后交付，明确重复
 口述会保留。网络、录音或清理失败时保留已验证分段，不更新本次记忆；主动取消不交付文字。
 后端忙时输入有界排队，不承诺立即提交；断线不自动重放已提交音频，也不切换云端。
-离线 convert 和 prompt-lab 回归保留固定分段，不以其历史成绩宣称在线停顿分段质量。
+离线 `convert` 和显式场景诊断保留原固定分段；普通 prompt-lab 评估以 1 倍速 WAV 输入复用桌面停顿分段。
+旧固定分段成绩不能作为新路径的基线。
 
 服务需要支持[通用 Realtime 协议及生命周期要求](architecture/dictation.md#audio-and-lifecycle)。
 已记录的 Gemma 服务兼容性缺口、未验证范围及复测命令见[实现记录](plan/52-contextual-streaming-dictation.md#待完成)，
@@ -165,8 +166,10 @@ Rust 只负责读取和组合。要独立修改规则，将 [`config.example.jso
 
 ## 离线转写与 Prompt 回归
 
-`convert` 使用所选 Realtime 路径，但默认禁用个人记忆。`prompt-lab evaluate` 关闭个人记忆输入，
-用于迭代完整任务提示词：不加参数使用配置/内置默认值，`--prompt-file` 完整替换提示词，
+`convert` 使用所选 Realtime 路径，但默认禁用个人记忆。普通 `prompt-lab evaluate` 沿用桌面配置、
+生产系统时间和连接，读取规范化个人记忆初态，连续接受未经编辑的最终文字，但学习仅写临时副本。
+它不显示预览、不写普通历史、不向目标应用输入。用于迭代音频阶段提示词：
+不加参数使用配置/内置默认值，`--prompt-file` 完整替换提示词，
 `--no-prompt` 清空指令；这两种临时全文覆盖都会忽略配置组件，且不会写回配置。
 候选采用后可编辑 `dictation.prompt_components`，或清空组件并写入整段 `dictation.prompt`，
 重启客户端生效。
@@ -174,10 +177,11 @@ Rust 只负责读取和组合。要独立修改规则，将 [`config.example.jso
 Realtime 多音频块评测、实际交付与离线转换统一使用 `transcription.language` 的拼接规则：
 中文不添加分隔符，其他语言或未指定时添加空格，保留重复口述。
 评测沿用原 JSON 报告、WER、专有词指标和语义审阅流程。
-需要验证语境和记忆时，添加 `--realtime-cases cases.json`，用显式种子和模拟时钟顺序
+需要显式断言语境和记忆时，添加 `--realtime-cases cases.json`，沿用独立诊断路径，用种子和模拟时钟顺序
 播放 WAV。每个 ready 样本须恰好出现一次；场景之间独立，步骤之间学习记忆。
 报告记录实际发送的快照、原始结构化输出、记忆变化和本地断言，并把断言纳入最终 gate。
-场景模式同样不接触个人记忆文件；场景历史会保存在评估报告中。
+该场景模式不接触个人记忆文件，保留旧固定分段与冻结时钟合同；场景历史会保存在报告中。
+它与普通生产路径评估、旧 STT-only 报告不能直接比较。
 格式和用法见[场景示例](architecture/prompt-lab.md#realtime-context-and-memory-scenarios)。
 Realtime 场景文件使用 `schema_version: 2`，报告策略为 `realtime-context-memory-v5`；
 旧版场景需迁移话题和候选断言为字符串后重跑，不直接重计分或跨策略比较旧报告。

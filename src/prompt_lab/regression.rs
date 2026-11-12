@@ -294,6 +294,8 @@ pub(crate) struct SampleComparison {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RunComparison {
     pub(crate) prior_run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prior_execution: Option<super::production::Identity>,
     pub(crate) wer_percent_delta: f64,
     pub(crate) proper_noun_percent_delta: f64,
     pub(crate) llm_score_delta: Option<f64>,
@@ -309,6 +311,8 @@ pub(crate) struct RunComparison {
 #[serde(deny_unknown_fields)]
 pub(crate) struct EvaluationReport {
     pub(crate) schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) execution: Option<super::production::Identity>,
     pub(crate) run_id: String,
     pub(crate) created_at_unix_ms: u64,
     pub(crate) completed_at_unix_ms: Option<u64>,
@@ -368,13 +372,29 @@ impl EvaluationReport {
             )
             .map_err(|e| RegressionError::Invalid(format!("{e:#}")))?;
         }
-        if ![1, REPORT_SCHEMA_VERSION].contains(&self.schema_version)
+        if ![1, REPORT_SCHEMA_VERSION, 3].contains(&self.schema_version)
             || (self.schema_version == 1 && self.realtime.is_some())
+            || (self.schema_version == 3) != self.execution.is_some()
+            || (self.execution.is_some() && self.realtime.is_some())
         {
             return Err(RegressionError::Invalid(format!(
                 "unsupported report schema_version {}; expected {REPORT_SCHEMA_VERSION}",
                 self.schema_version
             )));
+        }
+        if let Some(execution) = &self.execution {
+            execution
+                .validate()
+                .map_err(|error| RegressionError::Invalid(error.to_string()))?;
+        }
+        if self
+            .comparison
+            .as_ref()
+            .is_some_and(|comparison| comparison.prior_execution != self.execution)
+        {
+            return Err(RegressionError::Invalid(
+                "comparison execution policies, settings or initial memory differ".into(),
+            ));
         }
         if self.scoring_policy_version != SCORING_POLICY_VERSION
             || self.agent_review_rubric_version != AGENT_REVIEW_RUBRIC_VERSION
@@ -764,6 +784,38 @@ pub(crate) fn evaluate(
     transcriber: &dyn Transcriber,
     request: EvaluationRequest,
 ) -> Result<EvaluationOutcome> {
+    let language = request.stt.language.clone();
+    evaluate_with(store, request, None, |path| {
+        match transcribe_sample(path, transcriber, language.clone()) {
+            Ok(text) => (Some(text), None),
+            Err(error) => (None, Some(error)),
+        }
+    })
+}
+
+/// Ordinary runs score the same final text main presents, not the historical STT-only path.
+pub(crate) fn evaluate_production(
+    store: &DatasetStore,
+    runner: &super::production::Runner,
+    mut request: EvaluationRequest,
+) -> Result<EvaluationOutcome> {
+    if request.realtime.is_some() {
+        return Err(RegressionError::Invalid(
+            "explicit Realtime cases use their existing diagnostic policy".into(),
+        ));
+    }
+    request.stt = runner.stt.clone();
+    evaluate_with(store, request, Some(runner.identity.clone()), |path| {
+        runner.recognize(path)
+    })
+}
+
+fn evaluate_with(
+    store: &DatasetStore,
+    request: EvaluationRequest,
+    execution: Option<super::production::Identity>,
+    mut recognize: impl FnMut(&Path) -> (Option<String>, Option<String>),
+) -> Result<EvaluationOutcome> {
     request.thresholds.validate()?;
     validate_stt(&request.stt)?;
     let dataset = store.scoring_snapshot(SCORING_POLICY_VERSION)?;
@@ -793,6 +845,11 @@ pub(crate) fn evaluate(
     }
     if let Some(prior) = request.compare_to.as_ref() {
         validate_comparison(prior, &dataset, &request.stt)?;
+        if prior.execution != execution {
+            return Err(RegressionError::Invalid(
+                "comparison requires the same execution policy, saved settings and initial memory; rerun the baseline".into(),
+            ));
+        }
         let compatible = match (&prior.realtime, &request.realtime) {
             (None, None) => true,
             (Some(old), Some(new)) => {
@@ -844,52 +901,37 @@ pub(crate) fn evaluate(
             .as_deref()
             .expect("scoring snapshots contain ready references")
             .to_string();
-        let result = if realtime.is_some() {
-            outcomes
+        let (hypothesis, error) = if realtime.is_some() {
+            match outcomes
                 .remove(&sample.id)
                 .expect("validated scenario coverage")
-        } else {
-            transcribe_sample(
-                &store.root().join(&sample.audio.path),
-                transcriber,
-                request.stt.language.clone(),
-            )
-        };
-        match result {
-            Ok(hypothesis) => samples.push(SampleResult {
-                sample_id: sample.id.clone(),
-                audio_path: sample.audio.path.clone(),
-                audio_sha256: sample.audio.sha256.clone(),
-                proper_noun_annotations: sample.reference.proper_nouns.clone(),
-                wer: Some(score_wer(&reference, &hypothesis)),
-                proper_nouns: Some(score_proper_nouns(
-                    &hypothesis,
-                    &sample.reference.proper_nouns,
-                )),
-                reference,
-                hypothesis: Some(hypothesis),
-                agent_review: None,
-                error: None,
-            }),
-            Err(message) => {
-                failures.push(RunFailure {
-                    sample_id: sample.id.clone(),
-                    message: message.clone(),
-                });
-                samples.push(SampleResult {
-                    sample_id: sample.id.clone(),
-                    audio_path: sample.audio.path.clone(),
-                    audio_sha256: sample.audio.sha256.clone(),
-                    proper_noun_annotations: sample.reference.proper_nouns.clone(),
-                    reference,
-                    hypothesis: None,
-                    wer: None,
-                    proper_nouns: None,
-                    agent_review: None,
-                    error: Some(message),
-                });
+            {
+                Ok(text) => (Some(text), None),
+                Err(error) => (None, Some(error)),
             }
+        } else {
+            recognize(&store.root().join(&sample.audio.path))
+        };
+        if let Some(message) = &error {
+            failures.push(RunFailure {
+                sample_id: sample.id.clone(),
+                message: message.clone(),
+            });
         }
+        samples.push(SampleResult {
+            sample_id: sample.id.clone(),
+            audio_path: sample.audio.path.clone(),
+            audio_sha256: sample.audio.sha256.clone(),
+            proper_noun_annotations: sample.reference.proper_nouns.clone(),
+            wer: hypothesis.as_ref().map(|text| score_wer(&reference, text)),
+            proper_nouns: hypothesis
+                .as_ref()
+                .map(|text| score_proper_nouns(text, &sample.reference.proper_nouns)),
+            reference,
+            hypothesis,
+            agent_review: None,
+            error,
+        });
     }
     let aggregates = aggregate_local_scores(&samples);
     let status = if failures.is_empty() {
@@ -910,7 +952,12 @@ pub(crate) fn evaluate(
             Some(current.seed_changes(prior.realtime.as_ref().unwrap()));
     }
     let report = EvaluationReport {
-        schema_version: REPORT_SCHEMA_VERSION,
+        schema_version: if execution.is_some() {
+            3
+        } else {
+            REPORT_SCHEMA_VERSION
+        },
+        execution,
         run_id,
         created_at_unix_ms,
         completed_at_unix_ms: None,
@@ -1174,6 +1221,7 @@ fn build_comparison(
         realtime_inputs_changed: None,
         realtime_seed_changes: None,
         prior_run_id: prior.run_id.clone(),
+        prior_execution: prior.execution.clone(),
         wer_percent_delta: aggregates.wer.wer_percent - prior.aggregates.wer.wer_percent,
         proper_noun_percent_delta: aggregates.proper_nouns.accuracy_percent
             - prior.aggregates.proper_nouns.accuracy_percent,

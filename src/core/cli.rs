@@ -56,7 +56,7 @@ pub enum PromptLabCommand {
         #[command(subcommand)]
         action: PromptLabDatasetCommand,
     },
-    /// Evaluate all ready samples with a candidate STT prompt
+    /// Evaluate ready WAVs through desktop recognition, accepting finals in a private memory copy
     Evaluate {
         #[arg(long)]
         dataset: PathBuf,
@@ -64,7 +64,7 @@ pub enum PromptLabCommand {
         prompt_file: Option<PathBuf>,
         #[arg(long, conflicts_with = "prompt_file")]
         no_prompt: bool,
-        /// Replay explicit context and memory scenarios through the Realtime backend
+        /// Use the separate frozen-clock Realtime diagnostic policy instead of desktop evaluation
         #[arg(long)]
         realtime_cases: Option<PathBuf>,
         #[arg(long)]

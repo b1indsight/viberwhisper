@@ -39,6 +39,7 @@ pub use chunk::WavChunk;
 pub(crate) use chunk::max_frames_per_chunk;
 pub(crate) use preprocess::contains_speech_for_dictation;
 pub(crate) use preprocess::prepare_for_transcription;
+pub(crate) use recorder::replay_wav;
 pub use recorder::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
 pub(crate) use signal::contains_audible_window;
 pub use wav_file::WavChunkReader;

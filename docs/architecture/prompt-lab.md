@@ -2,10 +2,10 @@
 
 ## Purpose and Boundary
 
-Prompt lab builds a reusable, human-corrected audio dataset and evaluates the prompt sent directly
-to the configured STT endpoint. It does not construct `PostProcessor`, write normal
-`history.jsonl`, inject text, call a Judge service, or persist a candidate prompt into application
-configuration. One prompt-lab process owns a dataset at a time.
+Prompt lab builds a reusable, human-corrected audio dataset. Ordinary evaluation uses desktop
+recognition and scores its pre-edit final text, including configured cleanup and local corrections.
+It does not write normal `history.jsonl`, inject text, call a Judge service, or persist a candidate
+prompt into application configuration. One prompt-lab process owns a dataset at a time.
 
 ## Modules
 
@@ -15,14 +15,16 @@ src/prompt_lab/
   capture.rs       — session-owned archive worker and sample publication
   dataset.rs       — strict manifests/sidecars, correction, validation, scoring digest
   metrics.rs       — versioned WER alignment and proper-noun matching
+  production.rs    — paced WAV input, isolated state and desktop recognition owners
   regression.rs    — fresh WAV execution, report contract, shared review rules, comparison
   review.rs        — coding-agent input identity/coverage validation and report completion
 src/core/prompt_lab.rs — CLI/config/backend assembly
 ```
 
-The domain modules contain no winit or native platform types. `core::prompt_lab` reuses
-`ui::listener` only for capture controls and assembles offline regression from the resolved STT
-configuration, `WavChunkReader`, `ApiTranscriber`, and the shared language-aware merge helper.
+The domain modules contain no winit or native platform types. Ordinary evaluation resolves
+`ListenerConfig`, constructs the same `SessionOrchestrator` and `PostProcessor` as desktop, and calls
+their shared `core::recognition::finish_transcription`. Desktop's backend and cleanup selection,
+protocol, short-tail padding, failure fallback and confirmation behavior are unchanged.
 
 ## Dataset and Capture
 
@@ -64,25 +66,35 @@ one scoreable reference token, and one expected proper-noun occurrence are requi
 The evaluation request's STT snapshot owns the language used for both HTTP chunk merging and
 Realtime segment merging, as well as the language persisted in the report.
 
-The selected recognizer receives an in-memory prompt override. Realtime evaluates the full task
-instructions, including the initial meta instructions and base prompt. `--prompt-file` replaces them;
-`--no-prompt` sends empty instructions. Personal memory is disabled, and reports store the actual
-prompt without embedding context data. Candidates do not modify application configuration.
+The selected audio recognizer receives an in-memory prompt override. Realtime evaluates the full
+integrated task instructions; `--prompt-file` replaces them and `--no-prompt` sends empty instructions.
+HTTP overrides only its audio prompt, leaving configured text cleanup unchanged. Candidates do not
+modify application configuration. Reports store the actual audio prompt.
 Realtime resolves the fixed-order `dictation.prompt_components` object, or the embedded JSON
 default components, through the same configuration-owned composition used by live requests.
 Full-string and no-prompt evaluation overrides clear the cloned component selection, so a saved
 component object cannot conflict with an invocation-scoped full override. Reports and prompt
 digests describe the actual composed or overridden instructions, never just one component.
-For each snapshot WAV,
-the runner recreates production-sized chunks, makes fresh sequential STT requests, merges ordered
-results, and computes local metrics. It continues after a sample failure so one `incomplete` report
-contains all reachable outcomes, but returns nonzero and cannot be reviewed or compared as a
-baseline. References never enter an STT request.
+For each WAV, decoded PCM enters one production `ActiveRecording` at 1x audio time, using its
+buffer, ready-chunk and stop-tail logic. HTTP uses desktop pause segmentation; Realtime uses its
+existing streaming frames. Saved capture gain is not applied again. Input and queue failures take
+the existing incomplete-result path. Partial final text remains scoreable, but the run is marked
+`incomplete`, returns nonzero, and cannot be reviewed or used as a comparison baseline.
+
+Ordinary runs preserve configured vocabulary and initialize a temporary memory file through
+production Memory load/prune/recovery, retaining hidden contexts and learned corrections. The source
+is read-only; disabled or unused memory is not read. One set of production owners and real system
+clocks serves all samples in stable ID order. Successful nonempty finals are confirmed unchanged in
+the private copy, simulating Enter; the serial owners handle feedback before their next job.
+References remain scoring-only and never enter recognition or feedback. No native preview or real
+delivery is performed. Existing `convert`, setup verification and raw capture keep their behavior.
 
 ## Realtime Context and Memory Scenarios
 
 `prompt-lab evaluate --realtime-cases cases.json` opts into seeded sequential Realtime evaluation.
-It requires the enabled Realtime backend. Without this flag, evaluation retains frozen empty memory.
+It requires the enabled Realtime backend. This retains the existing frozen-clock diagnostic
+execution and schema-2 report contract, separate from ordinary desktop-path evaluation. Migrating
+these explicit scenarios is deferred; they do not claim desktop-state or full delivery parity.
 Use the normal dataset, prompt, thresholds, output and agent-review arguments.
 
 The strict version-2 JSON file contains `cases`. Each case has an `id`, Unix-seconds `at`, optional
@@ -184,8 +196,17 @@ The scoring policy is versioned as `stt-prompt-scoring-v2`:
 
 ## Two-Phase JSON Report
 
-A successful local run directly writes schema-v1 JSON with status `awaiting_agent_review` and null
-LLM/gate fields. Agent review input must use the exact run ID and rubric, contain each sample ID once,
+A successful ordinary run writes schema-3 JSON with `execution.policy=desktop-recognition-v1`,
+credential-free saved-settings and normalized-initial-memory hashes, and the existing scoring fields.
+Only the candidate audio prompt is excluded from the saved-settings hash. This conservatively
+requires other saved settings to match, including settings unused by a selected backend. It adds
+no worker clocks, acknowledgment protocol, stage traces or Memory replay. Historical schema-1/2
+reports remain readable; schema-3 reports from the withdrawn broader implementation require a rerun.
+The new policy cannot compare with STT-only or explicit diagnostic execution, or with different
+settings/initial memory. These checks run before recognition requests; rerun a compatible baseline.
+
+Local success has status `awaiting_agent_review` and null LLM/gate fields. Agent review input
+retains schema 1 and must use the exact run ID and rubric, contain each sample ID once,
 use scores in `0..=100`, and provide non-empty reasons plus differences for every score below 100.
 The review module validates the entire input and unchanged report contract before any write. Metric
 counts, alignments, annotations, and matched forms must exactly equal fresh derivations; derived
@@ -211,7 +232,9 @@ new agent review is applied.
 
 ## Privacy
 
-Audio and all transcripts are plaintext. Audio is sent to the configured STT service; during an
+Audio and all transcripts are plaintext. Audio and the same vocabulary/history used by desktop are
+sent to the configured recognition services; HTTP cleanup receives the current recognized text and
+its usual memory context. Only the temporary copy receives confirmation learning. During an
 explicit tuning task the coding agent reads reference and hypothesis text from the local report.
 Endpoint metadata has userinfo, query, and fragment components removed, and neither dataset nor run
 JSON can contain `ApiAuth`. No external Judge request, credential, model setting, Markdown mirror,

@@ -84,4 +84,6 @@ viberwhisper prompt-lab evaluate --help
 `prompt-lab` 提供录音采集、参考文本校正、数据集验证、全量重跑和编码代理语义复核。
 完整命令及评分流程见[贡献指南](../CONTRIBUTING.md#stt-prompt-回归调试)，数据格式见[Prompt-lab 架构](architecture/prompt-lab.md)。
 Realtime 的临时提示词覆盖与场景评估见[Realtime 回归说明](dictation.md#离线转写与-prompt-回归)。
-采集仍使用 HTTP raw-STT；评估可使用所选 HTTP 或 Realtime 路径，且不接触个人记忆文件。
+采集仍使用 HTTP raw-STT。普通评估以 1 倍速 WAV 输入复用桌面 HTTP/Realtime 识别与收尾，
+只读取得个人记忆初态，确认学习仅写临时副本；候选只覆盖音频提示词，不改变主流程行为。
+`--realtime-cases` 保留独立的冻结时钟诊断合同，不读取个人记忆，不能与普通评估直接比较。

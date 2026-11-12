@@ -169,6 +169,7 @@ mod tests {
         let hypothesis = "使用 Codex".to_string();
         EvaluationReport {
             schema_version: REPORT_SCHEMA_VERSION,
+            execution: None,
             realtime: None,
             run_id: "run-test-1".to_string(),
             created_at_unix_ms: 1,

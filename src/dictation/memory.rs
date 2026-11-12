@@ -15,6 +15,22 @@ const DAY: u64 = 86_400;
 mod input;
 pub(crate) use input::{PromptInput, StablePrefix};
 
+/// Normalize all retained state into isolated storage, without saving to the source.
+/// Recovery matches the live recognition and cleanup owners, including disabled memory.
+pub(crate) fn copy_memory(
+    source: Option<PathBuf>,
+    destination: PathBuf,
+    settings: MemoryConfig,
+    at: u64,
+) -> Result<()> {
+    let mut memory = Memory::load(source, settings.clone(), at).unwrap_or_else(|error| {
+        tracing::warn!(%error, "Evaluation memory unavailable; using ephemeral memory without overwriting the source");
+        Memory::load(None, settings, at).expect("empty memory")
+    });
+    memory.path = Some(destination);
+    memory.save()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Observation {

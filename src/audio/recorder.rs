@@ -14,6 +14,9 @@ use super::segment::{Segmentation, Segmenter};
 use super::{AudioConfig, max_frames_per_chunk};
 use crate::session::SessionId;
 
+mod replay;
+pub(crate) use replay::replay_wav;
+
 #[derive(Debug)]
 enum RecorderError {
     Chunk(ChunkError),

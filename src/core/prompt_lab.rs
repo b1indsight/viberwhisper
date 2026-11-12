@@ -13,7 +13,6 @@ use crate::prompt_lab::{
     DatasetStore, EvaluationReport, EvaluationRequest, ProperNounAnnotation, ReferenceStatus,
     RunStatus, SttSnapshot, Thresholds, apply_review, evaluate,
 };
-use crate::transcriber::{Transcriber, TranscriberConfig};
 
 pub(super) fn handle(action: PromptLabCommand) -> Result<()> {
     match action {
@@ -71,8 +70,6 @@ fn dictation_evaluation_settings(
 }
 
 fn evaluate_command(command: EvaluateCommand) -> Result<()> {
-    use crate::transcriber::ApiTranscriber;
-
     let candidate_from_file = command
         .prompt_file
         .as_ref()
@@ -97,21 +94,19 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
         )
         .into());
     }
-    let mut realtime = None;
-    let (transcriber, stt): (Box<dyn Transcriber>, SttSnapshot) = if document.dictation.enabled {
-        let prompt = if command.no_prompt {
-            Some(String::new())
-        } else {
-            candidate_from_file
-        };
+    let prompt = if command.no_prompt {
+        Some(String::new())
+    } else {
+        candidate_from_file
+    };
+    let outcome = if let Some(path) = command.realtime_cases.as_deref() {
+        // Explicit frozen-clock scenarios retain their separate diagnostic contract.
         let settings = dictation_evaluation_settings(document.dictation.clone(), prompt);
-        if let Some(path) = command.realtime_cases.as_deref() {
-            realtime = Some(crate::prompt_lab::realtime::RealtimeRun {
-                cases: crate::prompt_lab::realtime::RealtimeCases::read(path)?,
-                settings: settings.clone(),
-                key: document.dictation_key(),
-            });
-        }
+        let realtime = Some(crate::prompt_lab::realtime::RealtimeRun {
+            cases: crate::prompt_lab::realtime::RealtimeCases::read(path)?,
+            settings: settings.clone(),
+            key: document.dictation_key(),
+        });
         let transcriber = crate::dictation::OfflineDictation::new(
             settings,
             document.dictation_key(),
@@ -119,31 +114,32 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
         )?;
         let mut stt = SttSnapshot::from(transcriber.metadata());
         stt.input_layout = Some(crate::dictation::INPUT_LAYOUT.into());
-        (Box::new(transcriber), stt)
+        evaluate(
+            &dataset,
+            &transcriber,
+            EvaluationRequest {
+                stt,
+                thresholds: command.thresholds,
+                output: command.output,
+                compare_to: prior,
+                realtime,
+            },
+        )?
     } else {
-        let mut config = TranscriberConfig::from_config(&document)?;
-        let prompt = if command.no_prompt {
-            None
-        } else if let Some(prompt) = candidate_from_file {
-            Some(prompt)
-        } else {
-            config.metadata().prompt
-        };
-        config = config.with_prompt(prompt);
-        let stt = SttSnapshot::from(config.metadata());
-        (Box::new(ApiTranscriber::new(config)?), stt)
+        let source = super::config::config_dir().map(|path| path.join("dictation-memory.json"));
+        let runner = crate::prompt_lab::production::Runner::new(&document, prompt, source)?;
+        crate::prompt_lab::evaluate_production(
+            &dataset,
+            &runner,
+            EvaluationRequest {
+                stt: runner.stt.clone(),
+                thresholds: command.thresholds,
+                output: command.output,
+                compare_to: prior,
+                realtime: None,
+            },
+        )?
     };
-    let outcome = evaluate(
-        &dataset,
-        transcriber.as_ref(),
-        EvaluationRequest {
-            stt,
-            thresholds: command.thresholds,
-            output: command.output,
-            compare_to: prior,
-            realtime,
-        },
-    )?;
     println!("report: {}", outcome.path.display());
     println!("status: {}", outcome.report.status.as_str());
     if let Some(realtime) = &outcome.report.realtime {

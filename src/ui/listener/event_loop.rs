@@ -14,6 +14,7 @@ use super::platform_session_event;
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
 use crate::core::config::ConfigStore;
 use crate::core::orchestrator::{SessionError, SessionOrchestrator};
+use crate::core::recognition::finish_transcription;
 use crate::core::recording_session::{
     RecordingSessionMachine, RecordingState, SessionEffect, SessionEvent,
 };
@@ -28,8 +29,8 @@ use crate::postprocess::PostProcessor;
 use crate::prompt_lab::{CaptureTranscription, PromptLabCapture, SttSnapshot};
 use crate::session::SessionId;
 use crate::ui::preview::{
-    CaptureStage, FinalizationGate, PendingPreview, PreviewCommand, PreviewTranscription,
-    PreviewUpdate, run_preview_session,
+    CaptureStage, FinalizationGate, PendingPreview, PreviewCommand, PreviewUpdate,
+    run_preview_session,
 };
 
 #[derive(Debug, Clone)]
@@ -937,98 +938,6 @@ impl ApplicationHandler<AppEvent> for ListenerApplication {
             post_processor.shutdown();
         }
     }
-}
-
-/// Prepare the shared desktop preview, retaining warnings when no text can be delivered.
-pub(in crate::ui) fn finish_transcription(
-    result: Result<crate::dictation::Transcript, SessionError>,
-    post_processor: &PostProcessor,
-) -> Option<PreviewTranscription> {
-    let (result, mut confirmation) = match result {
-        Ok(transcript) => (Ok(transcript.text), transcript.confirmation),
-        Err(error) => (Err(error), None),
-    };
-    let prepared = match result {
-        Ok(stt_text) => {
-            if stt_text.is_empty() {
-                info!("Transcription returned empty text");
-                return None;
-            }
-            let text = match post_processor.process_for_delivery(&stt_text) {
-                Ok(processed) if !processed.text.is_empty() => {
-                    confirmation = processed.confirmation.or(confirmation);
-                    processed.text
-                }
-                Ok(_) => {
-                    warn!("Post-processing returned empty text, using original STT text");
-                    stt_text
-                }
-                Err(error) => {
-                    warn!(error = %error, "Post-processing failed, using original STT text");
-                    stt_text
-                }
-            };
-            Some((text, None))
-        }
-        Err(SessionError::NoChunks) => {
-            warn!("No audio chunks to transcribe");
-            None
-        }
-        Err(SessionError::Routing(error)) => {
-            error!(error = %error, "Session routing failed while finalizing");
-            None
-        }
-        Err(SessionError::InputFailure {
-            error,
-            partial_text,
-        }) => {
-            error!(%error, "Recording input is incomplete");
-            let warning = if partial_text.trim().is_empty() {
-                "录音不完整，没有可输入的文字。\n按 Esc 关闭后重试。"
-            } else {
-                "录音不完整，请核对结果后输入。"
-            };
-            Some((partial_text, Some(warning.into())))
-        }
-        Err(SessionError::PartialFailure {
-            errors,
-            partial_text,
-        }) => {
-            error!(
-                failed_chunks = errors.len(),
-                "Partial transcription failure"
-            );
-            let warning = if partial_text.trim().is_empty() {
-                "识别失败，没有可输入的文字。\n按 Esc 关闭后重试。"
-            } else {
-                "部分识别失败，请核对结果后输入。"
-            };
-            Some((partial_text, Some(warning.into())))
-        }
-        Err(SessionError::ConvergenceTimeout {
-            pending_count,
-            partial_text,
-        }) => {
-            warn!(pending_count, "Convergence timeout");
-            let warning = if partial_text.trim().is_empty() {
-                "识别等待超时，没有可输入的文字。\n按 Esc 关闭后重试。"
-            } else {
-                "识别等待超时，结果可能不完整，请核对后输入。"
-            };
-            Some((partial_text, Some(warning.into())))
-        }
-    };
-    prepared
-        .filter(|(text, warning)| !text.trim().is_empty() || warning.is_some())
-        .map(|(text, warning)| PreviewTranscription {
-            text: if text.trim().is_empty() {
-                String::new()
-            } else {
-                text
-            },
-            warning,
-            confirmation,
-        })
 }
 
 fn capture_transcription(

@@ -21,7 +21,7 @@ mod offline;
 pub(crate) use offline::OfflineDictation;
 mod evaluation;
 pub(crate) use evaluation::{MemorySeed, RealtimeEvaluator, Replay, SegmentTrace};
-pub(crate) use memory::Snapshot;
+pub(crate) use memory::{Snapshot, copy_memory};
 pub(crate) use result::DictationResult;
 
 #[cfg(test)]
