@@ -46,6 +46,7 @@ pub(crate) enum PlatformAction {
     ToggleRecording,
     SelectInputDevice(Option<String>),
     RefreshInputDevices,
+    SelectMicGain(f32),
     PointerReleased {
         point: (f64, f64),
         occurred_at: Instant,
@@ -77,6 +78,8 @@ pub(crate) trait PlatformTray {
         selected: Option<&str>,
     ) -> Result<()>;
     fn set_selected_input_device(&mut self, selected: Option<&str>);
+    fn set_mic_gain(&mut self, gain: f32, save_failed: bool);
+    fn mic_gain_is_open(&self) -> bool;
     fn set_history(&mut self, entries: Vec<String>);
     fn push_history(&mut self, text: String);
 }
@@ -100,6 +103,14 @@ impl<P: crate::input::tray::TrayPolicy> PlatformTray for TrayManager<P> {
 
     fn set_selected_input_device(&mut self, selected: Option<&str>) {
         TrayManager::set_selected_input_device(self, selected);
+    }
+
+    fn set_mic_gain(&mut self, gain: f32, save_failed: bool) {
+        TrayManager::set_mic_gain(self, gain, save_failed);
+    }
+
+    fn mic_gain_is_open(&self) -> bool {
+        TrayManager::mic_gain_is_open(self)
     }
 
     fn set_history(&mut self, entries: Vec<String>) {
@@ -217,6 +228,14 @@ where
         self.tray.set_selected_input_device(selected);
     }
 
+    pub(crate) fn set_mic_gain(&mut self, gain: f32, save_failed: bool) {
+        self.tray.set_mic_gain(gain, save_failed);
+    }
+
+    pub(crate) fn mic_gain_is_open(&self) -> bool {
+        self.tray.mic_gain_is_open()
+    }
+
     pub(crate) fn set_history(&mut self, entries: Vec<String>) {
         self.tray.set_history(entries);
     }
@@ -244,6 +263,7 @@ fn action_from_tray(action: TrayAction) -> PlatformAction {
         TrayAction::ToggleRecording => PlatformAction::ToggleRecording,
         TrayAction::SelectInputDevice(device) => PlatformAction::SelectInputDevice(device),
         TrayAction::RefreshInputDevices => PlatformAction::RefreshInputDevices,
+        TrayAction::SelectMicGain(gain) => PlatformAction::SelectMicGain(gain),
         TrayAction::CopyHistory(_) => unreachable!("history copy is handled by PlatformRuntime"),
         TrayAction::Exit => PlatformAction::ExitRequested,
     }
@@ -320,6 +340,7 @@ mod tests {
             match event {
                 TrayEvent::Menu(_) => Some(TrayAction::Exit),
                 TrayEvent::Icon(_) => Some(TrayAction::ToggleRecording),
+                TrayEvent::MicGain(gain) => Some(TrayAction::SelectMicGain(gain)),
             }
         }
 
@@ -336,6 +357,12 @@ mod tests {
         }
 
         fn set_selected_input_device(&mut self, _selected: Option<&str>) {}
+
+        fn set_mic_gain(&mut self, _gain: f32, _save_failed: bool) {}
+
+        fn mic_gain_is_open(&self) -> bool {
+            false
+        }
 
         fn set_history(&mut self, _entries: Vec<String>) {}
 

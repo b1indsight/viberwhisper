@@ -294,6 +294,15 @@ impl AudioRecorder {
         self.input_device = device;
     }
 
+    pub(crate) fn mic_gain(&self) -> f32 {
+        self.gain
+    }
+
+    /// Changes only future input callbacks; the active recording retains its captured gain.
+    pub(crate) fn set_mic_gain(&mut self, gain: f32) {
+        self.gain = gain;
+    }
+
     /// Keeps the WAV envelope, but emits bounded 200 ms frames for Realtime.
     pub(crate) fn enable_streaming_frames(&mut self) {
         self.chunk_mode = ChunkMode::Frames;
@@ -1007,6 +1016,42 @@ mod tests {
             [400, i16::MAX, i16::MIN, 0, i16::MAX, -32767, 0, 16383]
         );
         assert_eq!(*notifications.lock().unwrap(), [SessionId(1), SessionId(1)]);
+    }
+
+    #[test]
+    fn gain_changes_leave_active_audio_unchanged_and_apply_to_new_callbacks() {
+        // Editing gain mid-recording must not change the remaining samples in that recording.
+        let mut recorder = recorder_for_buffer(Vec::new(), 16);
+        let mut old_callback = recorder.active.as_ref().unwrap().input_callback(
+            1,
+            recorder.mic_gain(),
+            Arc::clone(&recorder.chunk_notifier),
+            scale_i16,
+        );
+        old_callback(&[1200i16, -3400]);
+        recorder.set_mic_gain(0.5);
+        old_callback(&[5600i16, -7800]);
+        let RecorderStopOutcome::Stopped { chunks, .. } = recorder.stop_recording(SessionId(1))
+        else {
+            panic!("recording did not stop");
+        };
+        assert_eq!(decode_chunks(chunks), [1200, -3400, 5600, -7800]);
+
+        let next = ActiveRecording::new(SessionId(2), 16_000, ChunkMode::Fixed).unwrap();
+        next.shared.recording.store(true, Ordering::Relaxed);
+        let mut new_callback = next.input_callback(
+            1,
+            recorder.mic_gain(),
+            Arc::clone(&recorder.chunk_notifier),
+            scale_i16,
+        );
+        new_callback(&[1200i16, -3400]);
+        recorder.active = Some(next);
+        let RecorderStopOutcome::Stopped { chunks, .. } = recorder.stop_recording(SessionId(2))
+        else {
+            panic!("next recording did not stop");
+        };
+        assert_eq!(decode_chunks(chunks), [600, -1700]);
     }
 
     #[test]

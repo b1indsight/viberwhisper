@@ -15,6 +15,8 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent, TrayIconId};
 
 use crate::history::RECENT_HISTORY_LIMIT;
+#[cfg(not(test))]
+use crate::platform::gain::{NativeGain, gain_label};
 
 #[cfg(not(test))]
 const MIN_DEBOUNCE_WINDOW: Duration = Duration::from_millis(300);
@@ -22,13 +24,14 @@ const HISTORY_LABEL_GRAPHEME_LIMIT: usize = 40;
 const STATUS_IDLE_PNG: &[u8] = include_bytes!("../../assets/status-idle.png");
 const STATUS_RECORDING_PNG: &[u8] = include_bytes!("../../assets/status-recording.png");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(test, allow(dead_code))]
 pub enum TrayAction {
     ToggleRecording,
     CopyHistory(String),
     SelectInputDevice(Option<String>),
     RefreshInputDevices,
+    SelectMicGain(f32),
     Exit,
 }
 
@@ -37,6 +40,7 @@ pub enum TrayAction {
 pub enum TrayEvent {
     Icon(TrayIconEvent),
     Menu(MenuEvent),
+    MicGain(f32),
 }
 
 /// Target policy for native application setup, timing, and icon presentation.
@@ -161,6 +165,8 @@ pub struct TrayManager<P: TrayPolicy> {
     input_device_menu: Submenu,
     input_device_items: Vec<(CheckMenuItem, Option<String>)>,
     refresh_input_devices_id: MenuId,
+    gain_item: MenuItem,
+    gain: NativeGain,
     history_items: Vec<MenuItem>,
     history: Vec<String>,
     exit_item_id: tray_icon::menu::MenuId,
@@ -192,6 +198,7 @@ impl<P: TrayPolicy> TrayManager<P> {
         let separator = PredefinedMenuItem::separator();
         let input_device_menu = Submenu::new("输入设备", true);
         let refresh_input_devices_id = MenuId::new("refresh-input-devices");
+        let gain_item = MenuItem::new("音频增益…", true, None);
         let device_separator = PredefinedMenuItem::separator();
         let history_title_item = MenuItem::new("最近识别", false, None);
         let history_items: Vec<_> = (0..RECENT_HISTORY_LIMIT)
@@ -205,6 +212,7 @@ impl<P: TrayPolicy> TrayManager<P> {
         menu.append(&status_item)?;
         menu.append(&separator)?;
         menu.append(&input_device_menu)?;
+        menu.append(&gain_item)?;
         menu.append(&device_separator)?;
         menu.append(&history_title_item)?;
         for item in &history_items {
@@ -213,7 +221,16 @@ impl<P: TrayPolicy> TrayManager<P> {
         menu.append(&history_separator)?;
         menu.append(&exit_item)?;
 
-        install_native_handlers(notify);
+        let notify = Arc::new(notify);
+        let gain_notify = Arc::clone(&notify);
+        let gain = NativeGain::new(
+            &menu,
+            &gain_item,
+            Arc::new(move |gain| {
+                gain_notify(TrayEvent::MicGain(gain));
+            }),
+        )?;
+        install_native_handlers(move |event| notify(event));
         let tray_icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
@@ -230,6 +247,8 @@ impl<P: TrayPolicy> TrayManager<P> {
             input_device_menu,
             input_device_items: Vec::new(),
             refresh_input_devices_id,
+            gain_item,
+            gain,
             history_items,
             history: Vec::new(),
             exit_item_id: exit_id,
@@ -340,6 +359,23 @@ impl<P: TrayPolicy> TrayManager<P> {
         }
     }
 
+    pub fn set_mic_gain(&mut self, gain: f32, save_failed: bool) {
+        self.gain_item.set_text(format!(
+            "音频增益（{}）{}",
+            gain_label(gain),
+            if save_failed {
+                " — 保存失败"
+            } else {
+                "…"
+            }
+        ));
+        self.gain.set_gain(gain, save_failed);
+    }
+
+    pub fn mic_gain_is_open(&self) -> bool {
+        self.gain.is_visible()
+    }
+
     pub fn set_history(&mut self, entries: Vec<String>) {
         self.history = entries.into_iter().take(RECENT_HISTORY_LIMIT).collect();
         self.update_history_items();
@@ -364,12 +400,19 @@ impl<P: TrayPolicy> TrayManager<P> {
 
     pub fn handle_event(&mut self, event: TrayEvent) -> Option<TrayAction> {
         match event {
+            TrayEvent::MicGain(gain) => Some(TrayAction::SelectMicGain(gain)),
             TrayEvent::Menu(event) => {
                 if is_exit_menu_event(&self.exit_item_id, &event) {
                     return Some(TrayAction::Exit);
                 }
                 if event.id == self.refresh_input_devices_id {
                     return Some(TrayAction::RefreshInputDevices);
+                }
+                if event.id == *self.gain_item.id() {
+                    if let Err(error) = self.gain.show() {
+                        warn!(%error, "Could not show microphone gain control");
+                    }
+                    return None;
                 }
                 if let Some((_, device)) = self
                     .input_device_items
@@ -424,6 +467,12 @@ impl<P: TrayPolicy> TrayManager<P> {
     }
 
     pub fn set_selected_input_device(&mut self, _selected: Option<&str>) {}
+
+    pub fn set_mic_gain(&mut self, _gain: f32, _save_failed: bool) {}
+
+    pub fn mic_gain_is_open(&self) -> bool {
+        false
+    }
 
     pub fn set_history(&mut self, _entries: Vec<String>) {}
 

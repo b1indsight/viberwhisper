@@ -59,3 +59,4 @@
 | [听写审查修复](plan/63-audit-fixes.md) | 重复删除学习、URL 日志脱敏、无文字失败提示与 CLI 输出分流（已实现） |
 | [测试包诊断日志](plan/65-diagnostic-test-package-logs.md) | 发布表单开关、配置同目录当天日志与模型输入/输出记录 |
 | [停顿分段](plan/67-pause-aware-recognition-segments.md) | 两条桌面路径已本地实现停顿提前提交与 30 秒上限；真实语料及服务验收待完成 |
+| [托盘音频增益](plan/70-tray-microphone-gain.md) | −10～+10 dB 原生滑块、自动保存、下一次录音生效与旧值兼容 |

@@ -201,6 +201,16 @@ mode does not construct the archive channel or worker. Closing a completed sessi
 before its digest and JSON sidecar are written; an interrupted process may leave a partial or
 unreferenced WAV for dataset validation to report.
 
+## Capture Gain
+
+The tray's gain slider automatically saves on mouse release or a keyboard adjustment and changes
+only `AudioRecorder`'s next-input gain after a successful config save. Each active I16/F32
+callback already captures its gain by value, so the current recording retains its original gain
+throughout. dB conversion belongs to the native editor's shared draft
+state; the existing downmix/scale/clamp callback remains the single capture-gain stage. Saved
+WAV replay does not apply capture gain again. This control is independent of upload loudness
+preprocessing described above.
+
 ## Local WAV Reader
 
 `WavChunkReader::open(path)` opens the source once. The reader itself

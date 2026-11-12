@@ -253,6 +253,29 @@ mod tests {
     }
 
     #[test]
+    fn gain_selection_preserves_latest_settings_and_rejects_unusable_documents() {
+        // A tray edit must change only the gain, not restore the startup device or other settings.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let store = ConfigStore::at(path.clone());
+        assert!(store.set_mic_gain(0.5).is_err());
+        assert!(!path.exists());
+
+        let mut document = ConfigDocument::default();
+        store.save(&document).unwrap();
+        document.audio.input_device = Some("USB 会议麦克风".into());
+        document.transcription.prompt = Some("外部修改的提示词".into());
+        store.save(&document).unwrap();
+        store.set_mic_gain(0.5).unwrap();
+        document.audio.mic_gain = 0.5;
+        assert_eq!(store.load().unwrap(), Some(document));
+
+        std::fs::write(&path, "invalid json").unwrap();
+        assert!(store.set_mic_gain(2.0).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid json");
+    }
+
+    #[test]
     fn startup_materializes_missing_dictation_but_load_stays_read_only() {
         // Upgrading an existing v3 file must expose defaults without enabling Realtime.
         let temp = tempfile::tempdir().unwrap();
