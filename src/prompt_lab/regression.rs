@@ -968,6 +968,7 @@ pub(crate) fn evaluate(
     request: EvaluationRequest,
 ) -> Result<EvaluationOutcome> {
     use super::production::{Identity, run_samples};
+    use crate::{core::recognition::RecognitionConfig, postprocess::PostProcessConfig};
     let invalid = |error: anyhow::Error| RegressionError::Invalid(format!("{error:#}"));
     request.thresholds.validate()?;
     let dataset = store.scoring_snapshot(SCORING_POLICY_VERSION)?;
@@ -1000,9 +1001,17 @@ pub(crate) fn evaluate(
             ..Default::default()
         }
     };
-    let identity = Identity::from_config(
-        &request.document,
-        request.asr_prompt_override.as_deref(),
+    let candidate_override = request.asr_prompt_override.is_some();
+    // Resolve and validate production settings before applying the candidate exactly once.
+    // The identity borrows these values; execution consumes them rather than resolving again.
+    let recognition = RecognitionConfig::from_config(&request.document, false)
+        .map_err(invalid)?
+        .with_prompt_override(request.asr_prompt_override);
+    let post_process = PostProcessConfig::from_config(&request.document).map_err(invalid)?;
+    let identity = Identity::from_resolved(
+        (&recognition, &post_process),
+        request.document.dictation.memory.enabled,
+        candidate_override,
         request.cases.as_ref(),
         &seed,
     )
@@ -1038,7 +1047,7 @@ pub(crate) fn evaluate(
             let (report, outcomes) = super::realtime::run_production(
                 cases,
                 &request.document,
-                request.asr_prompt_override,
+                (recognition, post_process),
                 &audio,
             )
             .map_err(invalid)?;
@@ -1048,7 +1057,7 @@ pub(crate) fn evaluate(
             None,
             run_samples(
                 &request.document,
-                request.asr_prompt_override,
+                (recognition, post_process),
                 &audio,
                 &seed,
             )

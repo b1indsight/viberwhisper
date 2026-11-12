@@ -790,14 +790,16 @@ impl RealtimeReport {
 pub(super) fn run_production(
     cases: RealtimeCases,
     document: &crate::core::config::ConfigDocument,
-    candidate: Option<String>,
+    stages: (
+        crate::core::recognition::RecognitionConfig,
+        crate::postprocess::PostProcessConfig,
+    ),
     audio: &[(String, PathBuf)],
 ) -> Result<(RealtimeReport, super::production::Outcomes)> {
     let mut outcomes = HashMap::new();
     let mut steps = Vec::new();
     for case in &cases.cases {
-        let runner =
-            super::production::Runner::new(document, candidate.clone(), &case.seed, case.at)?;
+        let runner = super::production::Runner::new(document, stages.clone(), &case.seed, case.at)?;
         for (index, step) in case.steps.iter().enumerate() {
             let path = &audio
                 .iter()

@@ -374,3 +374,13 @@ impl RecognitionPipeline {
 **失败与修正。** [首轮 macOS CI](https://github.com/b1indsight/viberwhisper/actions/runs/43181427563/job/131058081588) 的构建及两组测试通过，但 Rust 1.99.1 的诊断模式 Clippy 拒绝三个测试中的常量大小 `chunks_exact`；此前本地 Rust 1.94 不含该检查。使用已安装的 1.99.1 和完全相同的 CI 命令复现三个错误后，将调用改为 `as_chunks::<N>().0.iter()`，保留块大小、顺序和忽略不足整块尾部的行为。语音选择谓词解引用一次以适配数组引用，避免直接应用自动建议产生的类型错误。不关闭 lint、不改变 CI 或工具链配置，不改生产识别行为；两个既有审查发现和文字污染均未在本轮修改。
 
 **验证与发布边界。** 同一 `cargo +1.99.1 clippy --locked --all-targets --features diagnostic-logs -- -D warnings` 先红后绿；1.99.1 的诊断模式完整测试、1.94 的全特性完整测试与 fmt 通过。现有回归不变，无新增行为或额外状态，消融不适用。本补丁作为已发布提交的子提交独立审查，门禁通过后仅更新同一草稿 PR，不改写已发布历史；远端结果由新一轮 CI 决定。[复现日志](../../.amp/in/artifacts/pr177-clippy-199-red.log)、[修正后 Clippy](../../.amp/in/artifacts/pr177-clippy-199-green.log)、[1.99.1 测试](../../.amp/in/artifacts/pr177-test-199-green.log)、[1.94 测试](../../.amp/in/artifacts/pr177-test-194-green.log)。
+
+### [008] — 2026-11-12 — 空白结果报告与已解析阶段身份修正
+
+**已授权的审查返工。** 修复 [006] 所报告的 medium、low 两项发现。公开 `evaluate` 回归在合法 Realtime 纯空白输出下先复现 `pass-through final differs from raw text`；报告校验现允许空白 raw 对应生产省略的 final，保留精确原文，仍将运行标为不完整、不后处理、不确认学习。该条件不允许非空 raw 缺失 final，或空白 raw 被改成其他 final；回归重算证据摘要后分别篡改，读取仍在正文一致性校验处拒绝。纯 ASR 和 Integrated 均覆盖。[修改前](../../.amp/in/artifacts/pr177-whitespace-red.log)、[修改后](../../.amp/in/artifacts/pr177-whitespace-green.log)。
+
+**生产配置为同一份值。** `evaluate` 只解析一次生产音频配置与后处理配置，先执行保存的一体式提示冲突校验，再应用一次候选覆盖；报告从这些已解析配置的安全元数据取得阶段身份，执行随后消费同一份配置。普通运行不再从配置文档重新装配，显式场景只复制已解析配置并替换约定的隔离记忆。Realtime 的默认/候选指令与长度限制共用连接所调用的解析方法，文字指令共用 LLM 配置的方法；报告层仅转换元数据、计算摘要并校验，不另选模型或拼接 prompt。保留现有 schema、序列化字段、HTTP 空候选省略和 Realtime 空候选按空串发送的合同。
+
+**取舍与验证。** 仅暴露无凭证的阶段元数据，不把 lab 报告类型引入生产所有者，也不新增另一套识别装配对象。显式场景复制已经解析的设置，避免为每个场景重新查询凭证或应用候选覆盖。原有 main/lab 实际请求和连续学习回归继续通过，并核对报告中的音频候选、模型、文字指令及两个不同的 temperature 与实际请求一致。Rust 1.99.1 全特性完整测试和 CI 同命令 Clippy、Rust 1.94 默认完整测试、fmt 均通过；无 prompt 内容、个人状态或生产行为变更。[全特性测试](../../.amp/in/artifacts/pr177-review-fixes-test-199.log)、[兼容测试](../../.amp/in/artifacts/pr177-review-fixes-test-194.log)、[Clippy](../../.amp/in/artifacts/pr177-review-fixes-clippy.log)。
+
+**交付限制。** 以已发布提交的子提交执行一次 1800 秒双路审查，结果有效且无 critical 后才更新原草稿 PR；任何新发现完整报告，不由本次授权继续返工。[004] 的真实文字污染仍阻塞质量验收，不合并、不部署、不切换个人应用。

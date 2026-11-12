@@ -1,9 +1,9 @@
 use crate::core::config::ApiAuth;
 #[cfg(feature = "diagnostic-logs")]
 use crate::core::logging;
-use crate::dictation::{
-    DictationResult, LearningWorker, Snapshot, Transcript, config::PromptComponents,
-};
+#[cfg(test)]
+use crate::dictation::config::PromptComponents;
+use crate::dictation::{DictationResult, LearningWorker, Snapshot, Transcript};
 use crate::postprocess::{CleanupTrace, LlmConfig, PostProcessError};
 use reqwest::blocking::Client;
 use std::sync::{Arc, Condvar, Mutex};
@@ -34,12 +34,13 @@ struct LlmRequest {
 
 impl LlmPostProcessor {
     pub(crate) fn new(config: LlmConfig) -> Result<Self, reqwest::Error> {
+        let prompt = config.instructions();
         Ok(Self {
             request: LlmRequest {
                 auth: config.auth,
                 api_url: config.endpoint,
                 model: config.model,
-                prompt: PromptComponents::postprocess_prompt(config.prompt.as_deref()),
+                prompt,
                 temperature: config.temperature,
                 client: Client::builder().timeout(LLM_REQUEST_TIMEOUT).build()?,
                 snapshot: Snapshot::default(),

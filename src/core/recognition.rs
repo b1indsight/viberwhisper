@@ -21,7 +21,42 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
-#[derive(Debug)]
+/// Credential-free identity of a resolved inference stage, independent of report serialization.
+pub(crate) struct StageMetadata {
+    pub endpoint: String,
+    pub model: String,
+    pub language: Option<String>,
+    pub temperature: Option<f32>,
+    pub prompt: Option<String>,
+    pub input_layout: String,
+}
+
+impl StageMetadata {
+    pub(crate) fn new(
+        endpoint: &str,
+        model: &str,
+        language: Option<String>,
+        temperature: Option<f32>,
+        prompt: Option<String>,
+        layout: &str,
+    ) -> Result<Self> {
+        let mut endpoint = reqwest::Url::parse(endpoint)?;
+        let _ = endpoint.set_username("");
+        let _ = endpoint.set_password(None);
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
+        Ok(Self {
+            endpoint: endpoint.to_string(),
+            model: model.into(),
+            language,
+            temperature,
+            prompt,
+            input_layout: layout.into(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum RecognitionConfig {
     Http {
         transcriber: TranscriberConfig,
@@ -83,6 +118,41 @@ impl RecognitionConfig {
             _ => None,
         }
     }
+
+    /// Describe the effective audio settings that `build` will consume, without credentials.
+    pub fn stage_metadata(&self) -> Result<StageMetadata> {
+        match self {
+            Self::Http { transcriber, .. } => {
+                let metadata = transcriber.metadata();
+                StageMetadata::new(
+                    &metadata.endpoint,
+                    &metadata.model,
+                    metadata.language,
+                    Some(metadata.temperature),
+                    metadata.prompt,
+                    "http-multipart-wav-v1",
+                )
+            }
+            Self::Realtime {
+                settings,
+                language,
+                mode,
+                asr_prompt_override,
+                ..
+            } => StageMetadata::new(
+                &settings.url,
+                &settings.model,
+                language.clone(),
+                None,
+                Some(mode.instructions(settings, asr_prompt_override.as_deref())?),
+                match mode {
+                    RealtimeMode::Integrated => crate::dictation::INPUT_LAYOUT,
+                    RealtimeMode::Transcription => crate::dictation::TRANSCRIPTION_INPUT_LAYOUT,
+                },
+            ),
+        }
+    }
+
     /// Candidate instructions affect only the selected audio stage, never saved settings.
     pub fn with_prompt_override(self, prompt: Option<String>) -> Self {
         match self {

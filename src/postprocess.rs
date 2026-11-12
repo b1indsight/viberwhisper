@@ -2,16 +2,20 @@ mod llm;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use crate::core::config::{ApiAuth, ConfigDocument, fields};
+use crate::core::{
+    config::{ApiAuth, ConfigDocument, fields},
+    recognition::StageMetadata,
+};
 use crate::dictation::{
-    Clock, DictationResult, LearningWorker, Snapshot, Transcript, config::MemoryConfig,
+    Clock, DictationResult, LearningWorker, Snapshot, Transcript,
+    config::{MemoryConfig, PromptComponents},
 };
 use anyhow::Context;
 pub use llm::LlmPostProcessor;
 use std::fmt;
 use tracing::warn;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LlmConfig {
     endpoint: reqwest::Url,
     auth: ApiAuth,
@@ -21,7 +25,13 @@ pub struct LlmConfig {
     preheat_enabled: bool,
 }
 
-#[derive(Debug)]
+impl LlmConfig {
+    fn instructions(&self) -> String {
+        PromptComponents::postprocess_prompt(self.prompt.as_deref())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum PostProcessConfig {
     Disabled,
     Llm(LlmConfig),
@@ -59,6 +69,26 @@ impl PostProcessConfig {
                 }))
             },
         )
+    }
+
+    /// Report only resolved settings, using the same effective instructions as the client.
+    pub(crate) fn metadata(&self) -> anyhow::Result<Option<StageMetadata>> {
+        match self {
+            Self::Disabled => Ok(None),
+            Self::Llm(config) => StageMetadata::new(
+                config.endpoint.as_str(),
+                &config.model,
+                None,
+                Some(config.temperature),
+                Some(config.instructions()),
+                "structured-text-contexts-v1",
+            )
+            .map(Some),
+        }
+    }
+
+    pub(crate) fn preheat_enabled(&self) -> bool {
+        matches!(self, Self::Llm(config) if config.preheat_enabled)
     }
 }
 

@@ -18,6 +18,27 @@ pub(crate) enum RealtimeMode {
     Transcription,
 }
 
+impl RealtimeMode {
+    /// Resolve the instructions shared by the connection and its reported stage identity.
+    pub(crate) fn instructions(
+        self,
+        settings: &config::DictationConfig,
+        prompt_override: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let instructions = prompt_override
+            .map(str::to_owned)
+            .unwrap_or_else(|| match self {
+                Self::Integrated => settings.prompt(),
+                Self::Transcription => ASR_PROMPT.to_owned(),
+            });
+        anyhow::ensure!(
+            instructions.chars().count() <= 4096,
+            "dictation prompt exceeds 4096 characters"
+        );
+        Ok(instructions)
+    }
+}
+
 /// Unix-seconds memory clock. Network deadlines continue to use monotonic time.
 pub(crate) type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 

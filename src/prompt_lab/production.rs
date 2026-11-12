@@ -21,11 +21,12 @@ use super::{
 use crate::{
     core::{
         config::ConfigDocument,
-        recognition::{CleanupStatus, RecognitionConfig, RecognitionOutcome, RecognitionPipeline},
+        recognition::{
+            CleanupStatus, RecognitionConfig, RecognitionOutcome, RecognitionPipeline,
+            StageMetadata,
+        },
     },
-    dictation::{
-        Clock, DictationResult, MemorySeed, SegmentTrace, Snapshot, config::PromptComponents,
-    },
+    dictation::{Clock, DictationResult, MemorySeed, RealtimeMode, SegmentTrace, Snapshot},
     postprocess::{PostProcessConfig, PostProcessError},
     session::SessionId,
 };
@@ -60,27 +61,15 @@ pub(super) struct StageIdentity {
 }
 
 impl StageIdentity {
-    fn new(
-        endpoint: &str,
-        model: &str,
-        language: Option<String>,
-        temperature: Option<f32>,
-        prompt: Option<String>,
-        layout: &str,
-    ) -> Result<Self> {
-        let mut endpoint = reqwest::Url::parse(endpoint)?;
-        let _ = endpoint.set_username("");
-        let _ = endpoint.set_password(None);
-        endpoint.set_query(None);
-        endpoint.set_fragment(None);
+    fn from_metadata(metadata: StageMetadata) -> Result<Self> {
         Ok(Self {
-            endpoint: endpoint.to_string(),
-            model: model.into(),
-            language,
-            temperature,
-            prompt_sha256: digest(&prompt)?,
-            prompt,
-            input_layout: layout.into(),
+            endpoint: metadata.endpoint,
+            model: metadata.model,
+            language: metadata.language,
+            temperature: metadata.temperature,
+            prompt_sha256: digest(&metadata.prompt)?,
+            prompt: metadata.prompt,
+            input_layout: metadata.input_layout,
         })
     }
 
@@ -126,92 +115,31 @@ pub(super) struct Identity {
 }
 
 impl Identity {
-    /// Resolve the same selected stages as production before applying a candidate. This prevents
-    /// an override from concealing an incompatible saved integrated prompt in two-stage mode.
-    pub fn from_config(
-        document: &ConfigDocument,
-        candidate: Option<&str>,
+    /// Describe the already-resolved production configurations that execution will consume.
+    pub fn from_resolved(
+        stages: (&RecognitionConfig, &PostProcessConfig),
+        memory_enabled: bool,
+        candidate_override: bool,
         cases: Option<&RealtimeCases>,
         seed: &MemorySeed,
     ) -> Result<Self> {
-        let _ = RecognitionConfig::from_config(document, false)?;
-        let _ = PostProcessConfig::from_config(document)?;
-        let mode = if !document.dictation.enabled {
-            Mode::Http
-        } else if document.post_process.enabled {
-            Mode::Transcription
-        } else {
-            Mode::Integrated
+        let (recognition, post_process) = stages;
+        let mode = match recognition {
+            RecognitionConfig::Http { .. } => Mode::Http,
+            RecognitionConfig::Realtime {
+                mode: RealtimeMode::Integrated,
+                ..
+            } => Mode::Integrated,
+            RecognitionConfig::Realtime {
+                mode: RealtimeMode::Transcription,
+                ..
+            } => Mode::Transcription,
         };
-        let language = document.transcription.language.clone();
-        let audio = match mode {
-            Mode::Http => {
-                let config = crate::transcriber::TranscriberConfig::from_config(document)?;
-                let mut meta = config.metadata();
-                if let Some(candidate) = candidate {
-                    meta.prompt = (!candidate.is_empty()).then(|| candidate.into());
-                }
-                StageIdentity::new(
-                    &meta.endpoint,
-                    &meta.model,
-                    meta.language,
-                    Some(meta.temperature),
-                    meta.prompt,
-                    "http-multipart-wav-v1",
-                )?
-            }
-            Mode::Integrated | Mode::Transcription => {
-                let prompt = candidate.map(str::to_owned).unwrap_or_else(|| {
-                    if mode == Mode::Transcription {
-                        crate::dictation::ASR_PROMPT.into()
-                    } else {
-                        document.dictation.prompt()
-                    }
-                });
-                ensure!(
-                    prompt.chars().count() <= 4096,
-                    "dictation prompt exceeds 4096 characters"
-                );
-                StageIdentity::new(
-                    &document.dictation.url,
-                    &document.dictation.model,
-                    language.clone(),
-                    None,
-                    Some(prompt),
-                    if mode == Mode::Transcription {
-                        crate::dictation::TRANSCRIPTION_INPUT_LAYOUT
-                    } else {
-                        crate::dictation::INPUT_LAYOUT
-                    },
-                )?
-            }
-        };
-        let cleanup = if document.post_process.enabled {
-            Some(StageIdentity::new(
-                document
-                    .inference
-                    .api
-                    .post_process
-                    .api_url
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("cleanup URL required"))?,
-                document
-                    .inference
-                    .api
-                    .post_process
-                    .model
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("cleanup model required"))?,
-                None,
-                Some(document.post_process.temperature),
-                Some(PromptComponents::postprocess_prompt(
-                    document.post_process.prompt.as_deref(),
-                )),
-                "structured-text-contexts-v1",
-            )?)
-        } else {
-            None
-        };
+        let audio = StageIdentity::from_metadata(recognition.stage_metadata()?)?;
+        let cleanup = post_process
+            .metadata()?
+            .map(StageIdentity::from_metadata)
+            .transpose()?;
         let seed_sha256 = match cases {
             Some(cases) => digest(
                 &cases
@@ -227,11 +155,11 @@ impl Identity {
             mode,
             audio,
             cleanup,
-            cleanup_preheat: document.post_process.enabled && document.post_process.preheat_enabled,
-            candidate_override: candidate.is_some(),
+            cleanup_preheat: post_process.preheat_enabled(),
+            candidate_override,
             segmentation: SEGMENTATION.into(),
             pacing: PACING.into(),
-            memory_enabled: document.dictation.memory.enabled,
+            memory_enabled,
             memory_policy: if cases.is_some() {
                 "isolated-explicit-scenario-v1"
             } else {
@@ -538,7 +466,8 @@ impl SampleExecution {
                 );
                 if identity.mode != Mode::Integrated || !complete {
                     ensure!(
-                        self.final_text.as_deref().unwrap_or_default() == self.raw_text,
+                        self.final_text.as_deref() == Some(self.raw_text.as_str())
+                            || (self.final_text.is_none() && self.raw_text.trim().is_empty()),
                         "pass-through final differs from raw text"
                     );
                 }
@@ -626,7 +555,7 @@ struct PlaybackClock {
 impl Runner {
     pub fn new(
         document: &ConfigDocument,
-        candidate: Option<String>,
+        stages: (RecognitionConfig, PostProcessConfig),
         seed: &MemorySeed,
         at: u64,
     ) -> Result<Self> {
@@ -644,12 +573,12 @@ impl Runner {
                 0
             })
         });
-        Self::with_clock(document, candidate, seed, clock, Some(base))
+        Self::with_clock(document, stages, seed, clock, Some(base))
     }
 
     fn with_clock(
         document: &ConfigDocument,
-        candidate: Option<String>,
+        stages: (RecognitionConfig, PostProcessConfig),
         seed: &MemorySeed,
         clock: Clock,
         base: Option<Arc<std::sync::Mutex<PlaybackClock>>>,
@@ -657,11 +586,21 @@ impl Runner {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("memory.json");
         seed.write(&path, clock())?;
-        let mut isolated = document.clone();
+        let (mut recognition, post_process) = stages;
+        let mut memory = document.dictation.memory.clone();
         // Ordinary seeds retain the configured vocabulary; only explicit cases replace it.
-        isolated.dictation.memory.long_term = seed.long_term.clone();
-        let pipeline =
-            RecognitionPipeline::from_config(&isolated, Some(path), Arc::clone(&clock), candidate)?;
+        memory.long_term = seed.long_term.clone();
+        if let RecognitionConfig::Realtime { settings, .. } = &mut recognition {
+            settings.memory = memory.clone();
+        }
+        let pipeline = RecognitionPipeline::from_resolved(
+            recognition,
+            post_process,
+            memory,
+            document.transcription.language.clone(),
+            Some(path),
+            Arc::clone(&clock),
+        )?;
         Ok(Self {
             pipeline,
             _directory: directory,
@@ -846,14 +785,14 @@ pub(super) type Outcomes = HashMap<String, SampleExecution>;
 /// Only WAV input and isolated writes differ from main; reuse its state, clock and session owner.
 pub(super) fn run_samples(
     document: &ConfigDocument,
-    candidate: Option<String>,
+    stages: (RecognitionConfig, PostProcessConfig),
     audio: &[(String, PathBuf)],
     seed: &MemorySeed,
 ) -> Result<Outcomes> {
     let mut outcomes = HashMap::new();
     let runner = Runner::with_clock(
         document,
-        candidate,
+        stages,
         seed,
         crate::dictation::system_clock(),
         None,

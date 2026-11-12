@@ -30,7 +30,7 @@ impl Transcriber for MockTranscriber {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TranscriberConfig {
     endpoint: reqwest::Url,
     auth: ApiAuth,

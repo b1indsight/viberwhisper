@@ -186,6 +186,23 @@ fn request(document: ConfigDocument, path: PathBuf) -> EvaluationRequest {
     }
 }
 
+fn identity(
+    document: &ConfigDocument,
+    candidate: Option<&str>,
+    seed: &MemorySeed,
+) -> Result<Identity> {
+    let recognition = RecognitionConfig::from_config(document, false)?
+        .with_prompt_override(candidate.map(str::to_owned));
+    let post_process = PostProcessConfig::from_config(document)?;
+    Identity::from_resolved(
+        (&recognition, &post_process),
+        document.dictation.memory.enabled,
+        candidate.is_some(),
+        None,
+        seed,
+    )
+}
+
 #[test]
 fn plain_http_without_cleanup_ignores_unused_memory_during_report_replay() {
     // A saved vocabulary must not make plain HTTP evaluation fail: this production mode
@@ -322,6 +339,8 @@ fn normal_lab_matches_main_requests_and_learning_except_candidate_prompt() {
     } = service(8, false);
     let mut document = document(&url);
     document.transcription.prompt = Some("main audio instructions".into());
+    document.transcription.temperature = 0.25;
+    document.post_process.temperature = 0.375;
     let now = crate::dictation::system_clock()();
     let source = directory.path().join("personal-memory.json");
     let bytes = serde_json::to_vec(&json!({
@@ -401,6 +420,22 @@ fn normal_lab_matches_main_requests_and_learning_except_candidate_prompt() {
         .collect::<Vec<_>>();
     assert_eq!(cleanup.len(), 4);
     assert_eq!(cleanup[..2], cleanup[2..]);
+    let identity = report.execution.as_ref().unwrap();
+    assert_eq!(
+        identity.audio.prompt.as_deref(),
+        Some("candidate audio instructions")
+    );
+    assert_eq!(identity.audio.temperature, Some(0.25));
+    let text_stage = identity.cleanup.as_ref().unwrap();
+    assert_eq!(text_stage.temperature, Some(0.375));
+    for sent in &cleanup[2..] {
+        assert_eq!(sent["model"], text_stage.model);
+        assert_eq!(
+            sent["messages"][0]["content"],
+            text_stage.prompt.as_deref().unwrap()
+        );
+        assert_eq!(sent["temperature"], 0.375);
+    }
     let audio = requests
         .iter()
         .filter(|(route, _)| route == "/stt")
@@ -418,6 +453,7 @@ fn normal_lab_matches_main_requests_and_learning_except_candidate_prompt() {
         } else {
             "candidate audio instructions"
         }));
+        assert!(text.contains("name=\"temperature\"\r\n\r\n0.25"));
         assert!(!text.contains(REFERENCE));
         let start = body.windows(4).position(|bytes| bytes == b"RIFF").unwrap();
         let length =
@@ -538,8 +574,12 @@ fn explicit_delivery_alone_learns_and_next_production_result_uses_local_correcti
         thread: server,
     } = service(8, false);
     let document = document(&url);
-    let identity = Identity::from_config(&document, None, None, &MemorySeed::default()).unwrap();
-    let runner = Runner::new(&document, None, &MemorySeed::default(), 100).unwrap();
+    let identity = identity(&document, None, &MemorySeed::default()).unwrap();
+    let stages = (
+        RecognitionConfig::from_config(&document, false).unwrap(),
+        PostProcessConfig::from_config(&document).unwrap(),
+    );
+    let runner = Runner::new(&document, stages, &MemorySeed::default(), 100).unwrap();
     let feedback = [
         Feedback::Discard,
         Feedback::DeliveryFailed,
@@ -587,14 +627,8 @@ fn explicit_delivery_alone_learns_and_next_production_result_uses_local_correcti
 #[test]
 fn comparison_allows_audio_candidate_but_rejects_cleanup_mode_and_policy_changes() {
     let document = document("http://127.0.0.1:1");
-    let baseline = Identity::from_config(&document, None, None, &MemorySeed::default()).unwrap();
-    let candidate = Identity::from_config(
-        &document,
-        Some("candidate ASR"),
-        None,
-        &MemorySeed::default(),
-    )
-    .unwrap();
+    let baseline = identity(&document, None, &MemorySeed::default()).unwrap();
+    let candidate = identity(&document, Some("candidate ASR"), &MemorySeed::default()).unwrap();
     let changes = candidate.compare(&baseline).unwrap();
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].field, "audio.prompt");
@@ -603,7 +637,7 @@ fn comparison_allows_audio_candidate_but_rejects_cleanup_mode_and_policy_changes
         ..Default::default()
     };
     assert!(
-        Identity::from_config(&document, Some("candidate ASR"), None, &changed_seed)
+        identity(&document, Some("candidate ASR"), &changed_seed)
             .unwrap()
             .compare(&baseline)
             .unwrap_err()
@@ -613,7 +647,7 @@ fn comparison_allows_audio_candidate_but_rejects_cleanup_mode_and_policy_changes
     let mut different = document.clone();
     different.post_process.prompt = Some("other cleanup".into());
     assert!(
-        Identity::from_config(&different, None, None, &MemorySeed::default())
+        identity(&different, None, &MemorySeed::default())
             .unwrap()
             .compare(&baseline)
             .is_err()
@@ -621,7 +655,7 @@ fn comparison_allows_audio_candidate_but_rejects_cleanup_mode_and_policy_changes
     different = document.clone();
     different.dictation.enabled = true;
     assert!(
-        Identity::from_config(&different, None, None, &MemorySeed::default())
+        identity(&different, None, &MemorySeed::default())
             .unwrap()
             .compare(&baseline)
             .is_err()
@@ -631,7 +665,7 @@ fn comparison_allows_audio_candidate_but_rejects_cleanup_mode_and_policy_changes
     assert!(candidate.compare(&forged).is_err());
     different.dictation.prompt = Some("saved incompatible integrated rules".into());
     assert!(
-        Identity::from_config(&different, Some("candidate"), None, &MemorySeed::default())
+        identity(&different, Some("candidate"), &MemorySeed::default())
             .unwrap_err()
             .to_string()
             .contains("conflicts")

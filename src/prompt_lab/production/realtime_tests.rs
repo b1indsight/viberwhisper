@@ -26,8 +26,11 @@ fn event(socket: &mut WebSocket<TcpStream>, expected: &str) -> Value {
     }
 }
 
-/// Serve two recordings on one accepted socket and retain their actual model inputs.
-fn integrated_service() -> (String, thread::JoinHandle<Vec<Value>>) {
+/// Serve the supplied recordings on one socket and retain their actual model inputs.
+fn realtime_service(
+    integrated: bool,
+    outputs: Vec<String>,
+) -> (String, thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("ws://{}/v1/realtime", listener.local_addr().unwrap());
@@ -57,15 +60,17 @@ fn integrated_service() -> (String, thread::JoinHandle<Vec<Value>>) {
         send(&mut socket, json!({"type":"session.created"}));
         let mut requests = vec![event(&mut socket, "session.update")];
         send(&mut socket, json!({"type":"session.updated"}));
-        for index in 0..2 {
+        for (index, output) in outputs.into_iter().enumerate() {
             let prefix = format!("prefix-{index}");
-            let declaration = event(&mut socket, "conversation.item.create");
-            let mut item = declaration["item"].clone();
-            requests.push(declaration);
-            item["id"] = json!(prefix);
-            item["status"] = json!("completed");
-            for kind in ["conversation.item.added", "conversation.item.done"] {
-                send(&mut socket, json!({"type":kind,"item":item}));
+            if integrated {
+                let declaration = event(&mut socket, "conversation.item.create");
+                let mut item = declaration["item"].clone();
+                requests.push(declaration);
+                item["id"] = json!(prefix);
+                item["status"] = json!("completed");
+                for kind in ["conversation.item.added", "conversation.item.done"] {
+                    send(&mut socket, json!({"type":kind,"item":item}));
+                }
             }
             event(&mut socket, "input_audio_buffer.commit");
             let audio = format!("audio-{index}");
@@ -74,8 +79,11 @@ fn integrated_service() -> (String, thread::JoinHandle<Vec<Value>>) {
                 json!({"type":"input_audio_buffer.committed","item_id":audio}),
             );
             let request = event(&mut socket, "response.create");
-            let text = json!({"text":CLEANED,"context":"项目","memory_candidates":["维伯耳语"]})
-                .to_string();
+            let text = if integrated {
+                json!({"text":output,"context":"项目","memory_candidates":["维伯耳语"]}).to_string()
+            } else {
+                output
+            };
             let id = format!("response-{index}");
             for response in [
                 json!({"type":"response.created","response":{"id":id,"metadata":request["response"]["metadata"]}}),
@@ -85,7 +93,7 @@ fn integrated_service() -> (String, thread::JoinHandle<Vec<Value>>) {
                 send(&mut socket, response);
             }
             requests.push(request);
-            for id in [&audio, &prefix] {
+            for id in std::iter::once(&audio).chain(integrated.then_some(&prefix)) {
                 assert_eq!(
                     event(&mut socket, "conversation.item.delete")["item_id"],
                     *id
@@ -106,13 +114,66 @@ fn integrated_service() -> (String, thread::JoinHandle<Vec<Value>>) {
 }
 
 #[test]
+fn whitespace_realtime_output_saves_incomplete_report_without_losing_raw_evidence() {
+    // Valid model whitespace has no deliverable final in main; the lab must still save its
+    // failure evidence rather than rejecting the entire run during report validation.
+    let raw = " \t\n\u{3000}";
+    for integrated in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ready_store(directory.path(), SPEECH);
+        let (url, server) = realtime_service(integrated, vec![raw.into()]);
+        let mut document = document("http://unused.invalid");
+        document.dictation.enabled = true;
+        document.dictation.url = url;
+        document.post_process.enabled = !integrated;
+        let path = directory.path().join("whitespace.json");
+        let report = evaluate(&store, request(document, path.clone()))
+            .unwrap()
+            .report;
+        server.join().unwrap();
+        let saved = EvaluationReport::read(&path).unwrap();
+        assert_eq!(saved.status, RunStatus::Incomplete);
+        assert_eq!(saved.failures.len(), 1);
+        assert!(saved.samples[0].hypothesis.is_none());
+        let execution = saved.samples[0].execution.as_ref().unwrap();
+        assert_eq!(execution.raw_text, raw);
+        assert!(execution.final_text.is_none());
+        assert_eq!(execution.cleanup, Cleanup::Skipped);
+        assert!(!execution.confirmation_available && !execution.feedback_applied);
+        assert_eq!(execution.before, execution.after);
+        assert_eq!(execution.feedback, Feedback::Discard);
+
+        // Missing final is allowed only for empty/whitespace raw; neither a fabricated
+        // nonempty final nor a nonempty raw without a final may pass report loading.
+        for forged_final in [false, true] {
+            let mut forged = report.clone();
+            let execution = forged.samples[0].execution.as_mut().unwrap();
+            if forged_final {
+                execution.final_text = Some("fabricated final".into());
+            } else {
+                execution.raw_text = "nonempty raw".into();
+                execution.recognition_error = Some("incomplete audio input".into());
+            }
+            forged.evidence_sha256 = forged.evidence_digest().unwrap();
+            forged.write(&path).unwrap();
+            assert!(
+                EvaluationReport::read(&path)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("pass-through final differs from raw text")
+            );
+        }
+    }
+}
+
+#[test]
 fn ordinary_integrated_evaluation_reuses_production_memory_and_connection_without_source_writes() {
     // Ordinary runs must keep main's live clock and memory across WAVs while confirming only
     // the displayed final in a temporary copy; dataset references remain scoring-only data.
     let directory = tempfile::tempdir().unwrap();
     let store = ready_store(directory.path(), SPEECH);
     add_ready(&store, 2, SPEECH);
-    let (url, server) = integrated_service();
+    let (url, server) = realtime_service(true, vec![CLEANED.into(); 2]);
     let mut document = document("http://unused.invalid");
     document.dictation.enabled = true;
     document.dictation.url = url;
@@ -153,6 +214,10 @@ fn ordinary_integrated_evaluation_reuses_production_memory_and_connection_withou
     assert_eq!(report.memory_seed.as_ref(), Some(&seed));
     assert!(EvaluationReport::read(&path).is_ok());
     let identity = report.execution.as_ref().unwrap();
+    assert_eq!(
+        requests[0]["session"]["instructions"],
+        identity.audio.prompt.as_deref().unwrap()
+    );
     assert_eq!(identity.clock, "production-system-clock-v1");
     assert_eq!(identity.feedback, "confirm-unedited-final-isolated-v1");
     assert!((wall_started..=wall_finished).contains(&(report.created_at_unix_ms / 1000)));
@@ -252,7 +317,7 @@ fn ordinary_integrated_evaluation_reuses_production_memory_and_connection_withou
 
 #[test]
 fn seeded_integrated_evaluation_preserves_raw_and_prepared_final_and_validates_clocks() {
-    let (url, server) = integrated_service();
+    let (url, server) = realtime_service(true, vec![CLEANED.into(); 2]);
     let directory = tempfile::tempdir().unwrap();
     let store = ready_store(directory.path(), SPEECH);
     let second = add_ready(&store, 2, SPEECH);

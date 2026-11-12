@@ -73,16 +73,7 @@ impl Connection {
         asr_prompt_override: Option<&str>,
     ) -> Result<Self> {
         settings.validate()?;
-        let instructions = asr_prompt_override
-            .map(str::to_owned)
-            .unwrap_or_else(|| match mode {
-                RealtimeMode::Integrated => settings.prompt(),
-                RealtimeMode::Transcription => super::ASR_PROMPT.to_owned(),
-            });
-        ensure!(
-            instructions.chars().count() <= 4096,
-            "dictation prompt exceeds 4096 characters"
-        );
+        let instructions = mode.instructions(settings, asr_prompt_override)?;
         let mut url = reqwest::Url::parse(&settings.url)?;
         url.query_pairs_mut().append_pair("model", &settings.model);
         let mut request = url.as_str().into_client_request()?;
