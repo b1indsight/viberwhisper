@@ -16,6 +16,8 @@ use crate::input::typer::TextTyper;
 use tracing::info;
 
 mod clipboard;
+#[cfg(not(test))]
+pub(super) mod gain;
 pub(super) mod preview;
 
 pub(crate) struct WindowsBackend;

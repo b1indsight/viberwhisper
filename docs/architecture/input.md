@@ -248,7 +248,8 @@ the asset's explicit red. `WindowsTray` uses the committed colors directly.
 **`TrayManager::<P>::new(notify) -> Result<Self>`**
 
 Decodes the embedded idle and recording PNGs, then builds the tray icon with title, status, an
-`输入设备` submenu, a disabled `最近识别` heading, five fixed history slots, separators, and Exit.
+`输入设备` submenu, an `音频增益` control, a disabled `最近识别` heading, five fixed history slots,
+separators, and Exit.
 Corrupt or non-RGBA assets fail tray construction with an error, while tests enforce the committed
 32×32 dimensions and transparency. Left-click menu opening is disabled so left click can toggle
 recording; right click retains the native context menu.
@@ -278,6 +279,27 @@ Only a successful save updates the recorder's next-input field. Every selection 
 all native check items, including repeated selections and failed saves. A failed save shows an
 AppKit/Win32 Unicode error dialog and retains the previous runtime choice. No background polling,
 hotplug listener or general configuration reload is introduced.
+
+**`set_mic_gain(gain, save_failed)` / `mic_gain_is_open()`**
+
+The tray owns one native gain editor: an `NSMenuItem` custom view with an `NSSlider` on macOS,
+or a modeless border-only Win32 popup with a native trackbar on Windows. Neither adds a separate
+message loop or changes system input volume. Positions 0–200 represent −10.0–+10.0 dB in 0.1 dB
+steps. `platform::gain::GainDraft` distinguishes the unedited original linear amplitude from
+a slider draft, so opening or clicking the unchanged thumb cannot quantize legacy values.
+Out-of-range, zero and negative originals remain visible and unchanged until actually adjusted.
+
+Mouse release or a keyboard adjustment automatically queues `TrayEvent::MicGain` through
+`PlatformAction::SelectMicGain`; there are no Save/Cancel buttons. AppKit uses a noncontinuous
+slider action; Windows previews `TB_THUMBTRACK` and commits other trackbar notifications.
+One save is in flight at a time, coalescing subsequent completed adjustments to the latest one
+without submitting an unfinished drag or resetting newer input on an older acknowledgement.
+The listener reloads the current config and atomically saves only `audio.mic_gain`; only success
+updates the recorder.
+Failed persistence keeps the old runtime gain and restores its slider position, with a nonmodal
+message inviting another adjustment. Saving does not close the editor. Esc, Enter and outside
+dismissal close it without reverting input. While the editor is visible, idle start actions are
+ignored so it cannot become a dictation destination; an active recording can still stop normally.
 
 **`set_history(&mut self, entries: Vec<String>)` / `push_history(&mut self, text: String)`**
 

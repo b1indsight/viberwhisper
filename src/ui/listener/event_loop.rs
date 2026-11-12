@@ -181,11 +181,12 @@ impl ListenerApplication {
     pub(super) fn new(
         recorder: AudioRecorder,
         orchestrator: Arc<SessionOrchestrator>,
-        platform: NativePlatform,
+        mut platform: NativePlatform,
         output: ListenerOutput,
         proxy: EventLoopProxy<AppEvent>,
     ) -> Self {
         let preview_proxy = proxy.clone();
+        platform.tray.set_mic_gain(recorder.gain, false);
         Self {
             machine: RecordingSessionMachine::new(),
             recorder,
@@ -208,6 +209,7 @@ impl ListenerApplication {
             .inspect_err(|error| warn!(%error, "Could not enumerate input devices"));
         if let Err(error) = self
             .platform
+            .tray
             .set_input_devices(devices, self.recorder.input_device())
         {
             error!(%error, "Could not update input device menu");
@@ -222,6 +224,7 @@ impl ListenerApplication {
             info!(device = ?self.recorder.input_device(), "Selected input for the next recording");
         }
         self.platform
+            .tray
             .set_selected_input_device(self.recorder.input_device());
         if let Err(error) = saved {
             error!(%error, "Could not save input device; keeping the previous selection");
@@ -231,16 +234,44 @@ impl ListenerApplication {
         }
     }
 
+    fn select_mic_gain(&mut self, gain: f32) {
+        let saved = ConfigStore::discover().and_then(|store| store.set_mic_gain(gain));
+        if saved.is_ok() {
+            self.recorder.gain = gain;
+            info!(gain, "Selected microphone gain for the next recording");
+        }
+        self.platform
+            .tray
+            .set_mic_gain(self.recorder.gain, saved.is_err());
+        if let Err(error) = saved {
+            error!(%error, "Could not save microphone gain; keeping the previous value");
+        }
+    }
+
     fn handle_app_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::Platform(event) => {
                 if let Some(action) = self.platform.handle_event(event) {
+                    if let PlatformAction::SelectMicGain(gain) = action {
+                        self.select_mic_gain(gain);
+                        return;
+                    }
                     if let PlatformAction::SelectInputDevice(device) = action {
                         self.select_input_device(device);
                         return;
                     }
                     if action == PlatformAction::RefreshInputDevices {
                         self.refresh_input_devices();
+                        return;
+                    }
+                    if self.platform.tray.mic_gain_is_open()
+                        && matches!(self.machine.state(), RecordingState::Idle)
+                        && matches!(
+                            action,
+                            PlatformAction::HoldPressed | PlatformAction::ToggleRecording
+                        )
+                    {
+                        // The settings control must never become a new dictation destination.
                         return;
                     }
                     if let PlatformAction::PointerReleased { point, occurred_at } = action {
@@ -313,7 +344,7 @@ impl ListenerApplication {
 
     fn handle_preview_update(&mut self, update: PreviewUpdate) {
         match update {
-            PreviewUpdate::HistorySaved(text) => self.platform.push_history(text),
+            PreviewUpdate::HistorySaved(text) => self.platform.tray.push_history(text),
             PreviewUpdate::PermissionRequired => self.show_permission_guidance_if_needed(),
             PreviewUpdate::Destination {
                 session_id,
@@ -559,7 +590,7 @@ impl ListenerApplication {
                         }
                     }
                     SessionEffect::SetTrayRecording(recording) => {
-                        self.platform.set_recording(recording);
+                        self.platform.tray.set_recording(recording);
                     }
                     SessionEffect::ReadyToExit => event_loop.exit(),
                 }

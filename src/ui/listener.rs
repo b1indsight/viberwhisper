@@ -107,7 +107,7 @@ fn run_with_mode(config: RecordingConfig, mode: ListenerMode) -> Result<()> {
                         .ok()
                 })
                 .unwrap_or_default();
-            platform.set_history(recent_history);
+            platform.tray.set_history(recent_history);
             ListenerOutput::delivery(platform.text_typer(), post_process, history_store)
         }
         ListenerMode::Capture(store) => ListenerOutput::capture(

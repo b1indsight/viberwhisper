@@ -65,6 +65,19 @@ impl ConfigStore {
         self.save(&document)
     }
 
+    /// Saves the slider's linear amplitude in the latest document, retaining unrelated edits.
+    pub(crate) fn set_mic_gain(&self, gain: f32) -> Result<(), ConfigError> {
+        let mut document = self.load()?.ok_or_else(|| ConfigError::Io {
+            path: self.path.clone(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "configuration file is missing; run setup before saving microphone gain",
+            ),
+        })?;
+        document.audio.mic_gain = gain;
+        self.save(&document)
+    }
+
     /// Persists absent Realtime fields after the desktop caller validates `document`.
     /// Explicit values and unrelated sections are retained; ordinary `load` stays read-only.
     pub(crate) fn materialize_dictation_defaults(
