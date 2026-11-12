@@ -38,6 +38,14 @@ const SS_LEFT: u32 = 0;
 const SS_CENTER: u32 = 1;
 const SS_RIGHT: u32 = 2;
 
+const ID_TITLE: i32 = 3;
+const ID_VALUE: i32 = 4;
+const ID_SLIDER: i32 = 5;
+const ID_TICK_MIN: i32 = 6;
+const ID_TICK_MID: i32 = 7;
+const ID_TICK_MAX: i32 = 8;
+const ID_NOTICE: i32 = 9;
+
 /// Like the preview font, this remains alive until every child switches fonts or is destroyed.
 struct GainFont(HFONT);
 
@@ -83,11 +91,6 @@ struct WindowState {
     notify: GainNotify,
     draft: RefCell<GainDraft>,
     window: Cell<HWND>,
-    title: Cell<HWND>,
-    value: Cell<HWND>,
-    slider: Cell<HWND>,
-    ticks: [Cell<HWND>; 3],
-    notice: Cell<HWND>,
     open: Cell<bool>,
     held_keys: Cell<u8>,
     dpi: Cell<u32>,
@@ -109,17 +112,10 @@ impl WindowState {
         }
         let font = GainFont::new(dpi)?;
         self.dpi.set(dpi);
+        let window = self.window.get();
         // SendMessage may re-enter a callback. Never retain a RefCell borrow across Win32.
-        for control in [
-            self.title.get(),
-            self.value.get(),
-            self.slider.get(),
-            self.ticks[0].get(),
-            self.ticks[1].get(),
-            self.ticks[2].get(),
-            self.notice.get(),
-        ] {
-            unsafe { SendMessageW(control, WM_SETFONT, font.0 as usize, 1) };
+        for id in ID_TITLE..=ID_NOTICE {
+            unsafe { SendMessageW(GetDlgItem(window, id), WM_SETFONT, font.0 as usize, 1) };
         }
         self.font.replace(Some(font));
         Ok(())
@@ -131,10 +127,11 @@ impl WindowState {
             return Ok(());
         }
         let result = (|| loop {
+            let window = self.window.get();
             let dpi = self
                 .pending_dpi
                 .take()
-                .unwrap_or_else(|| unsafe { GetDpiForWindow(self.window.get()) });
+                .unwrap_or_else(|| unsafe { GetDpiForWindow(window) });
             self.apply_dpi(dpi)?;
             let p = |logical| self.pixels(logical);
             let mut monitor = MONITORINFO {
@@ -182,7 +179,7 @@ impl WindowState {
             ensure!(
                 unsafe {
                     SetWindowPos(
-                        self.window.get(),
+                        window,
                         null_mut(),
                         x,
                         y,
@@ -195,36 +192,24 @@ impl WindowState {
             );
             let mut client = RECT::default();
             ensure!(
-                unsafe { GetClientRect(self.window.get(), &mut client) } != 0,
+                unsafe { GetClientRect(window, &mut client) } != 0,
                 "无法获取音频增益面板尺寸"
             );
             let content = (client.right - p(24)).max(1);
             let rows = [
-                (self.title.get(), p(12), p(10), content, p(22)),
-                (self.value.get(), p(12), p(34), content, p(22)),
-                (self.slider.get(), p(12), p(58), content, p(34)),
-                (self.ticks[0].get(), p(20), p(92), p(64), p(22)),
-                (
-                    self.ticks[1].get(),
-                    (client.right - p(64)) / 2,
-                    p(92),
-                    p(64),
-                    p(22),
-                ),
-                (
-                    self.ticks[2].get(),
-                    client.right - p(84),
-                    p(92),
-                    p(64),
-                    p(22),
-                ),
-                (self.notice.get(), p(12), p(118), content, p(24)),
+                (ID_TITLE, p(12), p(10), content, p(22)),
+                (ID_VALUE, p(12), p(34), content, p(22)),
+                (ID_SLIDER, p(12), p(58), content, p(34)),
+                (ID_TICK_MIN, p(20), p(92), p(64), p(22)),
+                (ID_TICK_MID, (client.right - p(64)) / 2, p(92), p(64), p(22)),
+                (ID_TICK_MAX, client.right - p(84), p(92), p(64), p(22)),
+                (ID_NOTICE, p(12), p(118), content, p(24)),
             ];
-            for (control, x, y, width, height) in rows {
+            for (id, x, y, width, height) in rows {
                 ensure!(
                     unsafe {
                         SetWindowPos(
-                            control,
+                            GetDlgItem(window, id),
                             null_mut(),
                             x,
                             y,
@@ -250,13 +235,10 @@ impl WindowState {
             let draft = self.draft.borrow();
             (draft.value_label(), draft.notice())
         };
-        for (control, text) in [
-            (self.value.get(), label.as_str()),
-            (self.notice.get(), notice),
-        ] {
+        for (id, text) in [(ID_VALUE, label.as_str()), (ID_NOTICE, notice)] {
             let text = super::nul_terminated_utf16(text);
             ensure!(
-                unsafe { SetWindowTextW(control, text.as_ptr()) } != 0,
+                unsafe { SetWindowTextW(GetDlgItem(self.window.get(), id), text.as_ptr()) } != 0,
                 "无法更新音频增益提示"
             );
         }
@@ -265,8 +247,9 @@ impl WindowState {
 
     fn sync(&self) -> Result<()> {
         let position = self.draft.borrow().position();
+        let slider = unsafe { GetDlgItem(self.window.get(), ID_SLIDER) };
         // TBM_SETPOS does not generate WM_HSCROLL or turn the clamped initial value into an edit.
-        unsafe { SendMessageW(self.slider.get(), TBM_SETPOS, 1, position as isize) };
+        unsafe { SendMessageW(slider, TBM_SETPOS, 1, position as isize) };
         self.refresh()
     }
 
@@ -358,8 +341,11 @@ unsafe extern "system" fn window_proc(
                 state.dismiss();
                 return 0;
             }
-            WM_HSCROLL if state.open.get() && lparam as HWND == state.slider.get() => {
-                let position = unsafe { SendMessageW(state.slider.get(), TBM_GETPOS, 0, 0) } as i32;
+            WM_HSCROLL
+                if state.open.get()
+                    && lparam as HWND == unsafe { GetDlgItem(window, ID_SLIDER) } =>
+            {
+                let position = unsafe { SendMessageW(lparam as HWND, TBM_GETPOS, 0, 0) } as i32;
                 state.draft.borrow_mut().change(position);
                 if let Err(error) = state.refresh() {
                     tracing::error!(%error, "Could not display microphone gain draft");
@@ -431,11 +417,6 @@ impl NativeGain {
                 notify,
                 draft: RefCell::new(GainDraft::new(1.0)),
                 window: Cell::new(null_mut()),
-                title: Cell::new(null_mut()),
-                value: Cell::new(null_mut()),
-                slider: Cell::new(null_mut()),
-                ticks: std::array::from_fn(|_| Cell::new(null_mut())),
-                notice: Cell::new(null_mut()),
                 open: Cell::new(false),
                 held_keys: Cell::new(0),
                 dpi: Cell::new(96),
@@ -506,7 +487,21 @@ impl NativeGain {
             "无法创建音频增益面板：{}",
             std::io::Error::last_os_error()
         );
-        let control = |class, text: &str, style, id: u16| -> Result<HWND> {
+        let static_class = super::nul_terminated_utf16("STATIC");
+        for (id, text, style) in [
+            (ID_TITLE, "音频增益", SS_LEFT),
+            (ID_VALUE, "", SS_LEFT),
+            (ID_SLIDER, "音频增益 (dB)", WS_TABSTOP | TBS_AUTOTICKS),
+            (ID_TICK_MIN, "−10 dB", SS_LEFT),
+            (ID_TICK_MID, "0", SS_CENTER),
+            (ID_TICK_MAX, "+10 dB", SS_RIGHT),
+            (ID_NOTICE, "", SS_LEFT),
+        ] {
+            let class = if id == ID_SLIDER {
+                TRACKBAR_CLASSW
+            } else {
+                static_class.as_ptr()
+            };
             let text = super::nul_terminated_utf16(text);
             let handle = unsafe {
                 CreateWindowExW(
@@ -536,41 +531,14 @@ impl NativeGain {
                     "无法处理音频增益面板按键"
                 );
             }
-            Ok(handle)
-        };
-        let static_class = super::nul_terminated_utf16("STATIC");
-        self.state
-            .title
-            .set(control(static_class.as_ptr(), "音频增益", 0, 3)?);
-        self.state
-            .value
-            .set(control(static_class.as_ptr(), "", 0, 4)?);
-        self.state.slider.set(control(
-            TRACKBAR_CLASSW,
-            "音频增益 (dB)",
-            WS_TABSTOP | TBS_AUTOTICKS,
-            5,
-        )?);
-        for (index, (label, style)) in [("−10 dB", SS_LEFT), ("0", SS_CENTER), ("+10 dB", SS_RIGHT)]
-            .into_iter()
-            .enumerate()
-        {
-            self.state.ticks[index].set(control(
-                static_class.as_ptr(),
-                label,
-                style,
-                6 + index as u16,
-            )?);
         }
-        self.state
-            .notice
-            .set(control(static_class.as_ptr(), "", 0, 9)?);
         unsafe {
-            SendMessageW(self.state.slider.get(), TBM_SETRANGEMIN, 0, 0);
-            SendMessageW(self.state.slider.get(), TBM_SETRANGEMAX, 1, 200);
-            SendMessageW(self.state.slider.get(), TBM_SETLINESIZE, 0, 1);
-            SendMessageW(self.state.slider.get(), TBM_SETPAGESIZE, 0, 10);
-            SendMessageW(self.state.slider.get(), TBM_SETTICFREQ, 100, 0);
+            let slider = GetDlgItem(window, ID_SLIDER);
+            SendMessageW(slider, TBM_SETRANGEMIN, 0, 0);
+            SendMessageW(slider, TBM_SETRANGEMAX, 1, 200);
+            SendMessageW(slider, TBM_SETLINESIZE, 0, 1);
+            SendMessageW(slider, TBM_SETPAGESIZE, 0, 10);
+            SendMessageW(slider, TBM_SETTICFREQ, 100, 0);
         }
         self.state.ready.set(true);
         self.state.sync()?;
@@ -621,7 +589,7 @@ impl NativeGain {
             }
             anyhow::bail!("无法激活音频增益面板，请重试");
         }
-        unsafe { SetFocus(self.state.slider.get()) };
+        unsafe { SetFocus(GetDlgItem(window, ID_SLIDER)) };
         Ok(())
     }
 

@@ -64,61 +64,19 @@ where
     B: PlatformBackend,
     D: RuntimeDrivers<B>,
 {
-    tray: D::Tray,
+    /// Main-thread tray controls; native events still pass through `handle_event`.
+    pub(crate) tray: D::Tray,
     typer: Arc<dyn TextTyper>,
     _backend: PhantomData<B>,
 }
 
 pub(crate) trait PlatformTray {
     fn handle_event(&mut self, event: TrayEvent) -> Option<TrayAction>;
-    fn set_recording(&mut self, recording: bool);
-    fn set_input_devices(
-        &mut self,
-        devices: Result<Vec<String>, String>,
-        selected: Option<&str>,
-    ) -> Result<()>;
-    fn set_selected_input_device(&mut self, selected: Option<&str>);
-    fn set_mic_gain(&mut self, gain: f32, save_failed: bool);
-    fn mic_gain_is_open(&self) -> bool;
-    fn set_history(&mut self, entries: Vec<String>);
-    fn push_history(&mut self, text: String);
 }
 
 impl<P: crate::input::tray::TrayPolicy> PlatformTray for TrayManager<P> {
     fn handle_event(&mut self, event: TrayEvent) -> Option<TrayAction> {
         TrayManager::handle_event(self, event)
-    }
-
-    fn set_recording(&mut self, recording: bool) {
-        TrayManager::set_recording(self, recording);
-    }
-
-    fn set_input_devices(
-        &mut self,
-        devices: Result<Vec<String>, String>,
-        selected: Option<&str>,
-    ) -> Result<()> {
-        TrayManager::set_input_devices(self, devices, selected)
-    }
-
-    fn set_selected_input_device(&mut self, selected: Option<&str>) {
-        TrayManager::set_selected_input_device(self, selected);
-    }
-
-    fn set_mic_gain(&mut self, gain: f32, save_failed: bool) {
-        TrayManager::set_mic_gain(self, gain, save_failed);
-    }
-
-    fn mic_gain_is_open(&self) -> bool {
-        TrayManager::mic_gain_is_open(self)
-    }
-
-    fn set_history(&mut self, entries: Vec<String>) {
-        TrayManager::set_history(self, entries);
-    }
-
-    fn push_history(&mut self, text: String) {
-        TrayManager::push_history(self, text);
     }
 }
 
@@ -210,38 +168,6 @@ where
                 action => action.map(action_from_tray),
             },
         }
-    }
-
-    pub(crate) fn set_recording(&mut self, recording: bool) {
-        self.tray.set_recording(recording);
-    }
-
-    pub(crate) fn set_input_devices(
-        &mut self,
-        devices: Result<Vec<String>, String>,
-        selected: Option<&str>,
-    ) -> Result<()> {
-        self.tray.set_input_devices(devices, selected)
-    }
-
-    pub(crate) fn set_selected_input_device(&mut self, selected: Option<&str>) {
-        self.tray.set_selected_input_device(selected);
-    }
-
-    pub(crate) fn set_mic_gain(&mut self, gain: f32, save_failed: bool) {
-        self.tray.set_mic_gain(gain, save_failed);
-    }
-
-    pub(crate) fn mic_gain_is_open(&self) -> bool {
-        self.tray.mic_gain_is_open()
-    }
-
-    pub(crate) fn set_history(&mut self, entries: Vec<String>) {
-        self.tray.set_history(entries);
-    }
-
-    pub(crate) fn push_history(&mut self, text: String) {
-        self.tray.push_history(text);
     }
 
     pub(crate) fn text_typer(&self) -> Arc<dyn TextTyper> {
@@ -343,30 +269,12 @@ mod tests {
                 TrayEvent::MicGain(gain) => Some(TrayAction::SelectMicGain(gain)),
             }
         }
+    }
 
+    impl FakeTray {
         fn set_recording(&mut self, recording: bool) {
             RECORDING.store(recording, Ordering::SeqCst);
         }
-
-        fn set_input_devices(
-            &mut self,
-            _devices: Result<Vec<String>, String>,
-            _selected: Option<&str>,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        fn set_selected_input_device(&mut self, _selected: Option<&str>) {}
-
-        fn set_mic_gain(&mut self, _gain: f32, _save_failed: bool) {}
-
-        fn mic_gain_is_open(&self) -> bool {
-            false
-        }
-
-        fn set_history(&mut self, _entries: Vec<String>) {}
-
-        fn push_history(&mut self, _text: String) {}
     }
 
     struct FakeDrivers;
@@ -431,7 +339,7 @@ mod tests {
             ]
         ));
 
-        runtime.set_recording(true);
+        runtime.tray.set_recording(true);
         assert!(RECORDING.load(Ordering::SeqCst));
 
         runtime.text_typer().type_text("hello").unwrap();

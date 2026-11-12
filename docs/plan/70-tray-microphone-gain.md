@@ -172,3 +172,17 @@
 **重新验证：** 独立工作区的 `cargo fmt --check`、`cargo build --offline --locked`、`cargo test --offline --locked`、`cargo test --offline --locked --features diagnostic-logs`、macOS `cargo clippy --offline --locked --all-targets --all-features -- -D warnings` 和 Windows GNU 同命令加 `--target x86_64-pc-windows-gnu` 均通过。新增持久化、旧/新回调和共享自动保存回归包含在完整测试中。修订 004 的共享工作区编译阻塞未带入本功能；已有 vendor/rdev 警告保留，不修改依赖。验证日志汇总于[音频增益菜单方案](https://ampcode.com/artifacts/670f4445-4e46-41f4-b0f8-1d0d0aa26ed6)。
 
 **原生证据与边界：** 三个共享/原生增益模块与修订 004 执行过原生 fixture 的生产源码逐字一致；重新检查默认、两端、旧值超范围及失败恢复截图，均无按钮、重叠或裁切。不将 Windows 交叉编译当作原生运行验收；物理拖动、完整托盘入口、麦克风/热键及 Windows 外观、焦点、混合 DPI 仍保持未实测状态。原生 MSVC CI 结果以独立 PR 的检查为准，本地完整 MSVC 仍未验证。
+
+### [006] — 2026-11-12 — 删除逐属性转发与重复控件状态
+
+**背景与决定：** 用户要求精简没有实际作用的 getter/setter 和转发方法，并追问 Windows 实现长度，见[本线程](https://ampcode.com/threads/T-01a1ce33-0c50-75bf-94bc-e7b4ab386556)。在修订 005 的独立 workspace、已发布功能提交的子 change 中进行行为保持重构，不修改 default 中其他线程的识别/prompt-lab 差异，也不重写已发布提交。
+
+**实际改动与取舍：**
+
+- `PlatformRuntime` 保留主线程所有权、事件转换、历史复制和 text-typer 句柄；listener 直接调用其 crate 内可见的 `tray` 组件。删除 runtime/trait 实现中重复的七组 UI 属性转发及无用途的测试桩，`PlatformTray` 仅要求事件处理。统一调整增益、设备、录音状态和历史的调用方式，避免为同一托盘保留两套入口；不新增控制器或 wrapper。
+- recorder 的增益改为 `pub(crate) gain`，删除只读写该字段的两个方法。下一次录音规则记录在字段文档上，流和回调的按值捕获保持不变。`ConfigStore::set_mic_gain` 的重载/原子保存、托盘的菜单和控件同步、`GainDraft` 的保存确认/连续输入合并都保留，这些方法承载实际行为。
+- Windows 改用既有子控件 ID 和 `GetDlgItem`，不再重复保存七个子 HWND 的 `Cell`；创建控件统一为局部表。控件顺序、文案、样式、布局表达式及滑块参数与已发布版本对照一致。保留窗口类、字体生命周期、monitor 工作区、DPI 重入、焦点、键盘和销毁顺序，不以新框架、拆文件或压缩格式减少表面行数。共享增益模型与 macOS 原生控件源码未改。
+
+**验证：** 完整普通测试、构建、格式检查、macOS 与 Windows GNU 全目标全特性 Clippy 均通过。诊断完整测试首次与普通构建并行时两个 CLI 日志断言失败，串行复跑同一完整测试通过；保留首次失败和最终通过日志，不修改日志产品代码或测试。额外的临时源码对照验证 Windows 七个控件的 ID/顺序/类型/文案/样式、全部布局和五个滑块参数均未改变。此次仅删除结构和状态，没有新增机制，不需要新的永久测试或消融实验；既有增益持久化、活动回调、旧值兼容及连续调整回归继续通过。
+
+**交付与限制：** 本轮仍为独立 workspace 的本地重构，尚未更新 [PR #176](https://github.com/b1indsight/viberwhisper/pull/176)。本机没有 Windows 运行环境，不能把交叉编译和源码对照记为 Windows 外观、焦点或混合 DPI 实测；此前的原生验收限制继续有效。

@@ -94,7 +94,8 @@ impl From<cpal::PlayStreamError> for RecorderError {
 pub struct AudioRecorder {
     active: Option<ActiveRecording>,
     input_device: Option<String>,
-    gain: f32,
+    /// Captured by value when building a stream; changes affect only the next recording.
+    pub(crate) gain: f32,
     chunk_mode: ChunkMode,
     chunk_notifier: Arc<dyn Fn(SessionId) + Send + Sync>,
 }
@@ -292,15 +293,6 @@ impl AudioRecorder {
     /// Selects the next recording's input without changing the active stream or its buffers.
     pub(crate) fn set_input_device(&mut self, device: Option<String>) {
         self.input_device = device;
-    }
-
-    pub(crate) fn mic_gain(&self) -> f32 {
-        self.gain
-    }
-
-    /// Changes only future input callbacks; the active recording retains its captured gain.
-    pub(crate) fn set_mic_gain(&mut self, gain: f32) {
-        self.gain = gain;
     }
 
     /// Keeps the WAV envelope, but emits bounded 200 ms frames for Realtime.
@@ -1024,12 +1016,12 @@ mod tests {
         let mut recorder = recorder_for_buffer(Vec::new(), 16);
         let mut old_callback = recorder.active.as_ref().unwrap().input_callback(
             1,
-            recorder.mic_gain(),
+            recorder.gain,
             Arc::clone(&recorder.chunk_notifier),
             scale_i16,
         );
         old_callback(&[1200i16, -3400]);
-        recorder.set_mic_gain(0.5);
+        recorder.gain = 0.5;
         old_callback(&[5600i16, -7800]);
         let RecorderStopOutcome::Stopped { chunks, .. } = recorder.stop_recording(SessionId(1))
         else {
@@ -1041,7 +1033,7 @@ mod tests {
         next.shared.recording.store(true, Ordering::Relaxed);
         let mut new_callback = next.input_callback(
             1,
-            recorder.mic_gain(),
+            recorder.gain,
             Arc::clone(&recorder.chunk_notifier),
             scale_i16,
         );
