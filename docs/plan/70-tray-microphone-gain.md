@@ -2,7 +2,7 @@
 
 当前实现：macOS 右键菜单内嵌增益滑块，Windows 菜单项打开无标题原生浮层，范围 −10～+10 dB；无保存/取消按钮，松开滑块或键盘调整即自动保存，从下一次录音生效，不中断当前录音。
 
-**阶段：** 自动保存交互已完成实现与 macOS 原生检查；独立工作区的构建、完整测试、诊断特性测试及 macOS/Windows GNU 全目标全特性 Clippy 均通过，详见修订 005。Windows 实机验收仍待进行。
+**阶段：** 自动保存交互已完成实现与 macOS 原生检查；独立工作区的构建、完整测试、诊断特性测试及 macOS/Windows GNU 全目标全特性 Clippy 均通过，详见修订 005。Windows 实机验收仍待进行。Windows 浮层外观改造按修订 007 和用户修订 008 在本地实现，仍待 Windows 实机确认。
 **PR 范围：** 用户已要求将本功能独立提交到 `master`，使用 `feat/tray-microphone-gain`；不包含共享工作区的识别/prompt-lab 改动。最新交付状态见[本线程](https://ampcode.com/threads/T-01a1ce33-0c50-75bf-94bc-e7b4ab386556)。合并、发行、替换已安装应用及修改个人配置不在本次授权内。
 
 **适用决策：** [修订 002](#002--2026-11-12--将滑块集成到菜单交互)取代修订 001 的独立窗口安排；[修订 004](#004--2026-11-12--移除按钮并自动保存调整)取代此前的显式保存/取消交互。初始方案和历史修订保留原文，不代表当前交互。
@@ -186,3 +186,72 @@
 **验证：** 完整普通测试、构建、格式检查、macOS 与 Windows GNU 全目标全特性 Clippy 均通过。诊断完整测试首次与普通构建并行时两个 CLI 日志断言失败，串行复跑同一完整测试通过；保留首次失败和最终通过日志，不修改日志产品代码或测试。额外的临时源码对照验证 Windows 七个控件的 ID/顺序/类型/文案/样式、全部布局和五个滑块参数均未改变。此次仅删除结构和状态，没有新增机制，不需要新的永久测试或消融实验；既有增益持久化、活动回调、旧值兼容及连续调整回归继续通过。
 
 **交付与限制：** 本轮仍为独立 workspace 的本地重构，尚未更新 [PR #176](https://github.com/b1indsight/viberwhisper/pull/176)。本机没有 Windows 运行环境，不能把交叉编译和源码对照记为 Windows 外观、焦点或混合 DPI 实测；此前的原生验收限制继续有效。
+
+### [007] — 2026-11-13 — Windows 浮层外观对齐 macOS 菜单滑块
+
+**背景：** 功能已随 [PR #176](https://github.com/b1indsight/viberwhisper/pull/176) 合入。用户在 Windows 上反馈调节浮层“有点难看”，要求“和 MacOS 调节成外表完全一样”，见[本线程](https://ampcode.com/threads/T-01a1d46e-e1ff-75d1-8aaf-7126dbe8ee9e)。当前 Windows 实现与 macOS 的差距来自三处：
+
+- 窗口是 `WS_POPUP | WS_BORDER` 加系统 `COLOR_MENU` 浅色背景，直角细边；“音频增益”标题和当前值分成两行，面板 320×150。
+- 仓库没有嵌入 Common Controls v6 清单，`TRACKBAR_CLASSW` 按 comctl32 v5 经典样式绘制：凹槽、凸起箭头形滑块、`TBS_AUTOTICKS` 刻度线，获得焦点后还有虚线框。
+- 文字使用系统菜单字体默认字号（96 DPI 约 12px），没有 macOS 的 13/11 两级字号。
+
+**目标规格：** 修订 004 的 macOS 默认状态截图转换为 sRGB 后取样，并对照 `macos/gain.rs` 的控件 frame。单位为 96 DPI 逻辑像素，与 macOS pt 一一对应。
+
+| 元素 | macOS 实测 | Windows 目标 |
+| --- | --- | --- |
+| 面板 | 视图 312×106，菜单上下各留 5；圆角约 12；背景 #121212；1px 边 #2D2D2D | 312×116 无标题面板，圆角 12，同色背景和边框 |
+| 数值行 | 单行“音频增益  +0.0 dB”，13pt，#DBDBDB，frame (18, 8, 276, 22) | 合并标题与数值为一行，13px，同色同位置 |
+| 轨道 | x 18–294，高 6，两端圆角；未填充 #292929，起点至滑块中心为 #1D7CFE | 相同尺寸与颜色 |
+| 滑块 | 20×16 胶囊形 #DCDCDC，中心行程 28–284 | 相同 |
+| 刻度 | “−10 dB”“0”“+10 dB”，11pt #DBDBDB，无刻度线 | 相同，去掉 trackbar 刻度线 |
+| 提示 | 11pt #DBDBDB，frame (18, 82, 276, 20) | 相同 |
+
+**选项：**
+
+1. **嵌入 comctl32 v6 清单，改用系统主题。** 改动最少，但只会变成 Windows 11 风格的 trackbar，并会同时改变 setup 等所有原生控件的外观，仍然不像 macOS。不采用。
+2. **保留原生 trackbar，用 `NM_CUSTOMDRAW` 自绘轨道和滑块；面板沿用 Windows 结果气泡已有的 macOS 深色自绘方式。** 鼠标拖动、键盘、`WM_HSCROLL` 自动保存、trackbar 的无障碍数值、DPI 和焦点逻辑都不变，只改像素。建议采用。
+3. **完全自绘新滑块窗口。** 外观同样可控，但需要重写已验证的鼠标捕获、键盘和自动保存路径，还会失去 trackbar 暴露的无障碍数值。风险更高，没有外观上的额外收益。
+
+**拟定做法（选项 2，待批准）：**
+
+- 面板：去掉 `WS_BORDER`。背景填 #121212，画 1px #2D2D2D 圆角边，再用 `CreateRoundRectRgn` 裁出圆角，做法与[结果气泡](../../src/platform/windows/preview.rs)相同。保留 `CS_DROPSHADOW`、置顶、单实例、鼠标附近定位以及多屏/DPI 处理。
+- 文字：删除独立标题控件，数值行显示“音频增益  +x.x dB”。`WM_CTLCOLORSTATIC` 返回 #DBDBDB 文字和 #121212 背景。数值用 13px，刻度和提示用 11px，字体族取系统菜单字体（Segoe UI / Microsoft YaHei UI），按 DPI 缩放。
+- 滑块：trackbar 改为 `TBS_NOTICKS`，并加大原生 thumb，使点击区域覆盖绘制出的滑块。在 `NM_CUSTOMDRAW` 的 channel 阶段，用 Direct2D DC render target 抗锯齿绘制轨道、蓝色填充和胶囊滑块，并跳过原生 channel/thumb/tics 的绘制。GDI 没有抗锯齿，16px 高的圆形滑块会出现锯齿，所以不用 GDI。位置变化时重绘整个控件，避免残留旧的填充，同时隐藏虚线焦点框。只为已有的 `windows` 依赖增加 `Win32_Graphics_Gdi` feature（`BindDC` 需要），不新增 crate。
+- 高对比度：与结果气泡一致，开启时改用系统颜色。
+- 不改：`GainDraft`、自动保存、Esc/Enter/失焦收起、下一次录音生效等交互，也不改 macOS 代码。
+
+**无法做到完全一致的部分（接受方案即接受这些差异）：**
+
+- 字体：Windows 没有 SF Pro 和苹方，改用 Segoe UI 与微软雅黑 UI。字号相同，字形不同。
+- 背景：macOS 菜单是半透明毛玻璃，会透出桌面；Windows 使用截图中的 #121212 纯色。
+- 主题：与 Windows 结果气泡一样固定为深色，系统切到浅色时不会变浅。蓝色固定为 macOS 默认强调色，不跟随 Windows 强调色。
+- 圆角：用窗口区域裁切，边缘没有抗锯齿，与气泡相同。Win11 的 DWM 圆角更平滑，但半径固定为 8，且 Win10 不支持。
+- 位置：macOS 滑块直接嵌在菜单里；Windows 菜单无法容纳控件，仍是点击菜单项后在鼠标旁弹出的独立面板。
+- 点击轨道空白处：trackbar 按 1 dB 分页移动，macOS 直接跳到点击位置。本次只改外观，不改这一行为。
+
+**验证与消融计划：**
+
+- 在 `integration` 特性预览 demo 的 `--artifacts` 路径中增加 Windows 增益浮层截图，覆盖默认 0 dB、−10、+10、超范围旧值和保存失败，分别在 96 DPI 和合成 144 DPI 下截取。截图复用结果气泡的 `WM_PRINT` 方法，并断言背景、轨道两侧颜色和滑块中心像素。CI 的 Windows 作业已经上传该目录，下载后与 macOS 截图并排逐张检查。
+- 消融：临时去掉“位置变化时重绘整个控件”，按键盘和拖动序列截图，确认会残留旧填充，以证明这一步必要；验证后恢复。
+- 检查：`cargo fmt --check`、本机 build/test/clippy、Windows GNU 交叉 Clippy，以及 PR 的 Windows MSVC CI。
+- 限制：CI 截图是真实的 Windows 渲染，但不包括用物理鼠标从托盘打开的完整操作。拖动手感和混合 DPI 仍需在 Windows 实机确认。
+
+**状态与交付：** 方案待批准，尚未修改产品或测试代码。实现将使用新 bookmark `feat/windows-gain-mac-look`，单独向 `master` 提交 PR；推送和创建 PR 需要另行授权。
+
+### [008] — 2026-11-13 — 沿用 Windows 菜单的字体与配色，滑块整体自绘
+
+**需求更新：** 用户在[本线程](https://ampcode.com/threads/T-01a1d46e-e1ff-75d1-8aaf-7126dbe8ee9e)回复修订 007：“字体用现在的字号和字体”“背景使用纯色的背景”“主题我们和 Windows 当前的右键栏主题颜色一样”“不要在 Windows CLI 里截图”。以下修改取代修订 007 中对应的部分，其余（macOS 布局、去掉标题行与刻度线、交互不变）照旧执行。
+
+**修改后的决定：**
+
+- **字体：** 保留原来的系统菜单字体和字号（`lfMenuFont`），不改为 13/11px。
+- **颜色：** 不再固定使用 macOS 深色。背景、文字和边框从本进程的 `MENU` 主题读取（`MENU_POPUPBACKGROUND`/`MENU_POPUPITEM`/`MENU_POPUPBORDERS`），读取失败时回退到系统菜单颜色；高对比度直接使用系统颜色。应用和 winit/muda 都没有调用 `SetPreferredAppMode`，所以托盘右键菜单在系统深色模式下也是浅色，浮层与它一致。主题变化时重新读取。轨道使用菜单文字色的淡色混合，填充使用系统高亮色 `COLOR_HIGHLIGHT`，滑块使用背景色加边框色描边。
+- **形状：** 取消 12px 区域裁切。Win11 按标准菜单的做法请求 DWM 小圆角（`DWMWCP_ROUNDSMALL`），边框由系统绘制；Win10 不支持该属性，保持直角，并按菜单边框色画 1px 边框，与 Win10 菜单一致。背景为纯色。
+- **验证：** 不在 Windows CI 或预览 CLI 中增加截图，相应的截图断言和消融对照一并取消。
+- **滑块实现（取代修订 007 的选项 2，改为选项 3）：** 不能截图后，trackbar 自绘依赖的原生 channel/thumb 几何、刻度和焦点框行为都无法观察。因此改为在浮层窗口内自行绘制并处理输入，几何完全由代码中的 macOS 尺寸决定：轨道 18–294、高 6，滑块 20×16，中心行程 28–284。Direct2D DC render target（软件渲染，无需 GPU 设备）负责抗锯齿，文字用 GDI 绘制，整窗经 buffered paint 绘制以避免拖动闪烁。随之移除 trackbar、子控件、子类化和 common controls 初始化。
+
+**交互影响：** 自动保存规则不变：拖动时只预览，松开或失去鼠标捕获时提交；方向键 ±0.1 dB、Home/End 到两端，立即提交；Enter/Esc/失焦只收起，收起时提交未结束的拖动。点击轨道直接跳到该位置，按住滑块拖动时保持抓取点，和 NSSlider 一致；原位点击滑块不会改写旧值。与原 trackbar 相比，去掉了 PageUp/PageDown、滚轮调节，以及屏幕阅读器识别的滑块控件角色。
+
+**依赖：** 只为已有依赖增加 feature：`windows-sys` 的 `Win32_Graphics_Dwm`，以及 `windows` 的 `Win32_Graphics_Gdi`（`BindDC` 需要），不新增 crate，`Cargo.lock` 不变。
+
+**验证与限制：** 本机通过 `cargo fmt --check`，以及 Windows GNU 目标的 `cargo check` 和全目标全特性 `cargo clippy -D warnings`。`ort-sys` 没有 GNU 预编译库，检查时用空的 `ORT_LIB_LOCATION` 跳过下载（只检查不链接）。本机没有 Windows，外观、主题取色（尤其是 Win11 `MENU` 主题是否提供这些颜色属性）、DWM 边框、拖动与键盘都未经实际运行，需要在 Windows 上确认；MSVC 构建以 PR CI 为准。

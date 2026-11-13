@@ -283,15 +283,19 @@ hotplug listener or general configuration reload is introduced.
 **`set_mic_gain(gain, save_failed)` / `mic_gain_is_open()`**
 
 The tray owns one native gain editor: an `NSMenuItem` custom view with an `NSSlider` on macOS,
-or a modeless border-only Win32 popup with a native trackbar on Windows. Neither adds a separate
-message loop or changes system input volume. Positions 0–200 represent −10.0–+10.0 dB in 0.1 dB
-steps. `platform::gain::GainDraft` distinguishes the unedited original linear amplitude from
-a slider draft, so opening or clicking the unchanged thumb cannot quantize legacy values.
+or a modeless Win32 popup on Windows. The popup repeats the macOS view's layout, paints its own
+antialiased slider, and takes its background, text and border colors from the app's popup-menu
+theme, so it matches the tray menu; it uses small Windows 11 menu corners, or a square bordered
+frame on Windows 10. Neither adds a separate message loop or changes system input volume.
+Positions 0–200 represent −10.0–+10.0 dB in 0.1 dB steps. `platform::gain::GainDraft`
+distinguishes the unedited original linear amplitude from a slider draft, so opening or
+clicking the unchanged thumb cannot quantize legacy values.
 Out-of-range, zero and negative originals remain visible and unchanged until actually adjusted.
 
 Mouse release or a keyboard adjustment automatically queues `TrayEvent::MicGain` through
 `PlatformAction::SelectMicGain`; there are no Save/Cancel buttons. AppKit uses a noncontinuous
-slider action; Windows previews `TB_THUMBTRACK` and commits other trackbar notifications.
+slider action; Windows previews a captured mouse drag and commits it on release or capture loss,
+and commits arrow and Home/End steps at once. Clicking either track jumps to that position.
 One save is in flight at a time, coalescing subsequent completed adjustments to the latest one
 without submitting an unfinished drag or resetting newer input on an older acknowledgement.
 The listener reloads the current config and atomically saves only `audio.mic_gain`; only success
