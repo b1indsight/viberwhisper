@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeMap, ops::Range};
@@ -38,8 +38,9 @@ impl DictationResult {
         Ok(result)
     }
 
-    /// Validate the first complete JSON object without applying Realtime segment budgets.
-    /// Trailing output is ignored; the object and its required text must still be valid.
+    /// Validate the first complete JSON object, optionally wrapped in a closed JSON code fence.
+    /// Trailing output inside the wrapper is ignored; the object and required text must be valid.
+    /// Realtime segment budgets are applied by `parse`, not here.
     pub fn parse_transcript(text: &str) -> Result<Self> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -50,6 +51,21 @@ impl DictationResult {
             #[serde(default)]
             memory_candidates: Value,
         }
+        let text = text.trim_matches([' ', '\t', '\r', '\n']);
+        let text = if text.starts_with("```") {
+            let (opening, body) = text
+                .split_once('\n')
+                .context("incomplete JSON code fence")?;
+            ensure!(
+                matches!(opening.trim_end_matches('\r'), "```json" | "```"),
+                "unsupported JSON code fence"
+            );
+            let (body, closing) = body.rsplit_once('\n').context("unclosed JSON code fence")?;
+            ensure!(closing == "```", "unclosed JSON code fence");
+            body
+        } else {
+            text
+        };
         // Decode the leading object once; trailing noise cannot replace text or metadata.
         let raw = Value::Object(serde_json::Map::deserialize(
             &mut serde_json::Deserializer::from_str(text),

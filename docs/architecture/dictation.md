@@ -67,12 +67,17 @@ Both final combinations retain the 4096-Unicode-character limit, including separ
 The bundled default distributes the rules across seven components and separates the examples.
 `task` protects short words, unfinished fragments and meaningful repetition; `cleanup` restricts
 self-correction to explicitly withdrawn values while preserving independent negation, operation
-objects and later clauses. `output_format` requests context, memory_candidates, then text in one
-JSON object. Context selection and memory extraction remain in their respective fields, with
-the first eight proper-noun occurrences requested, including repeated mentions. All 16 replacement
-examples and one repeated-name example follow the memory rules at the very end. Normal Realtime,
-HTTP and complete LLM text keep their wording; the short branch intentionally drops all independent
-examples and no longer appends an empty-result example. Other rules and JSON field order stay unchanged.
+objects and later clauses. `output_format` requests the complete text first, then context and
+memory_candidates in one JSON object; short topic labels and candidate limits must not shorten
+the body. Context selection and memory extraction remain in their respective fields, with
+the first eight proper-noun occurrences requested, including repeated mentions. `memory` names
+the eligible name categories, excludes generic categories and job titles, and requires candidates
+to occur in the completed text. The normal prompt retains seven representative examples:
+self-correction, independent negation, separate quantities, model suffixes, money units, quoted
+instructions and object replacement. The model example includes its complete name as a candidate;
+the other six have empty arrays. HTTP STT and complete LLM cleanup prompts are unchanged. The
+short branch omits all independent examples and appends no replacement, including an empty-result
+example. These instructions request the contract; runtime metadata checks still validate it.
 
 `prompt()` and `short_prompt()` compose only saved components; a connection can precompute both
 combinations before selecting by segment. Each Realtime segment strictly shorter than two seconds
@@ -185,8 +190,9 @@ then candidates, then corrections, before touching configured vocabulary. There 
 unexpired observations, persistent corrections and configured terms supply labels, including in long-running processes.
 Model-returned observations of already
 known terms refresh their short-term lifetime; merely including a term in the prompt does not.
-Topic selection remains a model decision, not proof of accurate classification. The output uses
-`context: String`, `memory_candidates: Vec<String>` and `text: String`, in that order. A topic label
+Topic selection remains a model decision, not proof of accurate classification. The bundled prompt
+requests `text: String`, `context: String` and `memory_candidates: Vec<String>`, in that order;
+the result parser validates the fields independently of their JSON order. A topic label
 can reuse a snapshot ID or name a new topic; the exact reserved string `"未知语境"` means unknown.
 `DictationResult.context: Option<String>` maps that sentinel to `None`; malformed null, missing or
 wrong-type context also degrades to `None`, but fails evaluation metadata checks. Unknown context
@@ -212,9 +218,14 @@ eight may be their grounded source-order prefix. Thus nine mentions with eight s
 are protocol-valid, but that incomplete name group still cannot authorize correction or learning.
 The first complete JSON object remains available for exact raw-context assertions. Realtime final
 results and HTTP cleanup ignore any output after that object, including a second object; only the
-first object's text and metadata participate in delivery and learning. Leading prose/code fences,
-malformed or incomplete objects, unknown fields and invalid required text still fail validation.
-Realtime's 64 KiB input limit includes the ignored suffix, and its 16 KiB text limit is unchanged.
+first object's text and metadata participate in delivery and learning. A complete outer Markdown
+fence is accepted when its opening line is three backticks, optionally followed by lowercase
+`json`, and its closing line is three backticks. LF and CRLF line endings are supported.
+Leading prose, other fence languages, missing closing
+fences, malformed or incomplete objects, unknown fields and invalid required text still fail
+validation. Realtime's 64 KiB input limit includes the fence and ignored suffix, and its 16 KiB
+text limit is unchanged. Raw model output remains in diagnostic logs; accepting a fence does not
+make the original response strict JSON or establish that its context or candidates are correct.
 These checks establish textual support, not acoustic truth or whether a returned string is
 semantically a proper noun.
 

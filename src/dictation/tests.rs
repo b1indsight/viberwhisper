@@ -38,10 +38,10 @@ fn string_metadata_preserves_repeated_names_in_source_order() {
 }
 
 #[test]
-fn complete_first_object_ignores_trailing_noise() {
+fn complete_first_object_accepts_json_fences_and_ignores_trailing_noise() {
     // Text-first responses can end in an extra quote or bracket after a valid object.
-    // Braces inside text and a second object must not change the first object's meaning.
-    let object = r#" {"text":"用 ViberWhisper，保留 \"}\"。","context":"Rust 项目","memory_candidates":["ViberWhisper"]}"#;
+    // Fences, including literal backticks in text, must not change the first object's meaning.
+    let object = r#" {"text":"用 ViberWhisper，保留 \"}\" 和 ```。","context":"Rust 项目","memory_candidates":["ViberWhisper"]}"#;
     for suffix in [
         "",
         "]",
@@ -49,17 +49,24 @@ fn complete_first_object_ignores_trailing_noise() {
         "\n多余说明",
         r#"{"text":"替换正文","context":"其他","memory_candidates":["替换"]}"#,
     ] {
-        let wire = format!("{object}{suffix}");
-        for parsed in [
-            DictationResult::parse(&wire),
-            DictationResult::parse_transcript(&wire),
+        for (opening, closing) in [
+            ("", ""),
+            ("```json\n", "\n```"),
+            ("```\n", "\n```"),
+            (" \r\n```json\r\n", "\r\n``` \r\n"),
         ] {
-            let result = parsed.unwrap();
-            assert_eq!(result.text, "用 ViberWhisper，保留 \"}\"。");
-            assert_eq!(result.context.as_deref(), Some("Rust 项目"));
-            assert_eq!(result.memory_candidates.len(), 1);
-            assert_eq!(result.memory_candidates[0].text, "ViberWhisper");
-            assert!(result.metadata_valid);
+            let wire = format!("{opening}{object}{suffix}{closing}");
+            for parsed in [
+                DictationResult::parse(&wire),
+                DictationResult::parse_transcript(&wire),
+            ] {
+                let result = parsed.unwrap();
+                assert_eq!(result.text, "用 ViberWhisper，保留 \"}\" 和 ```。");
+                assert_eq!(result.context.as_deref(), Some("Rust 项目"));
+                assert_eq!(result.memory_candidates.len(), 1);
+                assert_eq!(result.memory_candidates[0].text, "ViberWhisper");
+                assert!(result.metadata_valid);
+            }
         }
     }
 }
@@ -80,7 +87,13 @@ fn realtime_results_keep_segment_text_and_json_limits() {
         assert!(DictationResult::parse(&padded).is_err());
     }
     for wire in [
-        "```json\n{\"text\":\"ok\"}\n```",
+        "```json\n{\"text\":\"ok\"}",
+        "```python\n{\"text\":\"ok\"}\n```",
+        "```json\n{\"text\":\"ok\"}```",
+        "```json\n{\"text\":\"ok\"}\n```\nexplanation",
+        "```json\n{\"text\":\"ok\",}\n```",
+        "```json\n{\"text\":\"ok\",\"extra\":true}\n```",
+        "explanation\n```json\n{\"text\":\"ok\"}\n```",
         r#"prefix {"text":"ok"}"#,
         r#"[{"text":"ok"}]"#,
         r#"["ok",null,[]]"#,
