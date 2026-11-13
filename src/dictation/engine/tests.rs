@@ -11,65 +11,47 @@ use serde_json::json;
 use tokio::time::{Duration, timeout};
 
 #[tokio::test]
-async fn segment_source_duration_selects_examples_without_session_leakage_or_padding_bias() {
+async fn segment_duration_selects_saved_instructions_across_recordings() {
     use crate::dictation::test_support::accept;
     use base64::{Engine, engine::general_purpose::STANDARD};
     use futures_util::StreamExt;
+    const SHORT: &str = "saved instructions";
+    const NORMAL: &str = "saved instructions\nnormal-only example";
     // One connection must switch back to normal at exactly 2 s. The tiny tail
-    // is padded for the protocol, but its source length still selects short.
-    for source in ["example", "components", "literal", "empty"] {
-        let lengths = [48_001, 47_999, 48_000, 511, 48_001];
-        let (listener, settings) = listen().await;
-        let mut saved = serde_json::to_value(&settings).unwrap();
-        if source == "components" {
-            // Compose the supplied components, not an embedded default or replacement example.
-            saved["prompt_components"] = json!({
-                "task":"  diagnostic {literal}\n", "language":"language",
-                "numbers":"numbers", "cleanup":"cleanup", "output_format":"format",
-                "context":"context", "memory":"memory\n口述：not an example component",
-                "examples":"normal-only example"
-            });
-        }
-        let (normal, short) = if matches!(source, "literal" | "empty") {
-            // Isolated candidates use one exact text for every source duration.
-            let literal = if source == "literal" {
-                "  candidate {literal}\n"
-            } else {
-                ""
-            };
-            saved["prompt"] = json!(literal);
-            saved["prompt_components"] = serde_json::Value::Null;
-            (literal.to_owned(), literal.to_owned())
+    // is padded for the protocol and must still upload successfully with short instructions.
+    for candidate in [None, Some("  candidate {literal}\n"), Some("")] {
+        let (listener, mut settings) = listen().await;
+        let segments = if let Some(text) = candidate {
+            // Literal lab candidates need only one request on either side of the threshold.
+            settings.prompt = Some(text.into());
+            settings.prompt_components = None;
+            vec![(47_999, text), (48_001, text)]
         } else {
-            let components = &saved["prompt_components"];
-            let short = [
-                "task",
-                "language",
-                "numbers",
-                "cleanup",
-                "output_format",
-                "context",
-                "memory",
-            ]
-            .map(|key| components[key].as_str().unwrap().trim())
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-            let normal = format!(
-                "{short}\n{}",
-                components["examples"].as_str().unwrap().trim()
+            // Composition details belong to config::prompt_tests; here saved rules
+            // differ from defaults so a runtime replacement cannot pass unnoticed.
+            settings.prompt_components = Some(
+                serde_json::from_value(json!({
+                    "task":SHORT, "language":"", "numbers":"", "cleanup":"",
+                    "output_format":"", "context":"", "memory":"",
+                    "examples":"normal-only example"
+                }))
+                .unwrap(),
             );
-            assert_ne!(normal, short);
-            (normal, short)
+            vec![
+                (48_001, NORMAL),
+                (47_999, SHORT),
+                (48_000, NORMAL),
+                (511, SHORT),
+                (48_001, NORMAL),
+            ]
         };
-        let settings = serde_json::from_value(saved).unwrap();
+        let requests = segments.clone();
         let server = tokio::spawn(async move {
             let mut socket = accept(&listener).await;
             let session = expect_event(&mut socket, "session.update").await;
             assert_eq!(session["session"]["instructions"], "");
             send_json(&mut socket, json!({"type":"session.updated"})).await;
-            for (index, length) in lengths.into_iter().enumerate() {
+            for (index, (length, instructions)) in requests.into_iter().enumerate() {
                 let audio = format!("audio-{index}");
                 declare_prefix(&mut socket, &format!("prefix-{audio}")).await;
                 let mut uploaded = 0;
@@ -94,14 +76,7 @@ async fn segment_source_duration_selects_examples_without_session_leakage_or_pad
                 )
                 .await;
                 let request = expect_event(&mut socket, "response.create").await;
-                assert_eq!(
-                    request["response"]["instructions"],
-                    if length < 48_000 {
-                        short.as_str()
-                    } else {
-                        normal.as_str()
-                    }
-                );
+                assert_eq!(request["response"]["instructions"], instructions);
                 complete_response(
                     &mut socket,
                     &request,
@@ -122,7 +97,7 @@ async fn segment_source_duration_selects_examples_without_session_leakage_or_pad
             .push(&speech, true)
             .unwrap();
         let mut memory = Memory::frozen(Default::default());
-        for length in lengths {
+        for (length, _) in segments {
             let pcm: Vec<_> = if length < 768 {
                 vec![1_000; length]
             } else {
