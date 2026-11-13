@@ -32,10 +32,14 @@ pub(crate) struct Identity {
 impl Identity {
     pub(super) fn validate(&self) -> Result<()> {
         ensure!(
-            self.policy == "desktop-recognition-v1"
-                && [&self.config_sha256, &self.memory_sha256]
-                    .into_iter()
-                    .all(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())),
+            matches!(
+                self.policy.as_str(),
+                "desktop-recognition-v1"
+                    | "desktop-recognition-short-audio-v1"
+                    | "desktop-recognition-reference-text-v1"
+            ) && [&self.config_sha256, &self.memory_sha256]
+                .into_iter()
+                .all(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())),
             "unsupported production execution identity"
         );
         Ok(())
@@ -100,6 +104,7 @@ impl Runner {
                 model: settings.model.clone(),
                 language: language.clone(),
                 prompt: Some(settings.prompt()),
+                short_prompt: settings.short_prompt(),
                 temperature: 0.0,
                 input_layout: Some(crate::dictation::INPUT_LAYOUT.into()),
             },
@@ -123,7 +128,12 @@ impl Runner {
         settings.dictation.prompt = None;
         settings.dictation.prompt_components = None;
         let identity = Identity {
-            policy: "desktop-recognition-v1".into(),
+            policy: if recognition.is_realtime() {
+                "desktop-recognition-reference-text-v1"
+            } else {
+                "desktop-recognition-short-audio-v1"
+            }
+            .into(),
             config_sha256: sha256_bytes(&serde_json::to_vec(&settings)?),
             memory_sha256: sha256_bytes(&std::fs::read(&memory)?),
         };

@@ -15,7 +15,28 @@ const MODEL: &[u8] = include_bytes!("../../assets/vad/silero-v6.2.onnx");
 const SAMPLE_RATE: usize = 16_000;
 const FRAME: usize = 512;
 const CONTEXT: usize = 64;
-pub(super) const SPEECH_THRESHOLD: f32 = 0.3;
+pub(super) const SPEECH_THRESHOLD: f32 = 0.2;
+
+/// An analysis frame's source interval, independent of when resampling returns it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct FrameScore {
+    pub(super) source_start: u64,
+    pub(super) source_end: u64,
+    pub(super) probability: f32,
+}
+
+impl FrameScore {
+    fn new(index: u64, probability: f32, rate: u32, source_end: u64) -> Self {
+        let frame_samples = FRAME as u64 * u64::from(rate);
+        Self {
+            source_start: index * frame_samples / SAMPLE_RATE as u64,
+            source_end: ((index + 1) * frame_samples)
+                .div_ceil(SAMPLE_RATE as u64)
+                .min(source_end),
+            probability,
+        }
+    }
+}
 
 fn detector() -> Result<MutexGuard<'static, Detector>> {
     static DETECTOR: OnceLock<Result<Mutex<Detector>, String>> = OnceLock::new();
@@ -60,6 +81,7 @@ pub(super) struct StreamingVad {
     pending: VecDeque<i16>,
     state: [f32; 256],
     context: [f32; CONTEXT],
+    processed_frames: u64,
 }
 
 impl StreamingVad {
@@ -70,11 +92,12 @@ impl StreamingVad {
             pending: VecDeque::new(),
             state: [0.0; 256],
             context: [0.0; CONTEXT],
+            processed_frames: 0,
         })
     }
 
-    /// Consume only new source PCM. Stop is handled by the segmenter's unconditional tail cut.
-    pub(super) fn push(&mut self, pcm: &[i16]) -> Result<Vec<f32>> {
+    /// Consume only new source PCM; filter and inference state survive recognition cuts.
+    pub(super) fn push(&mut self, pcm: &[i16]) -> Result<Vec<FrameScore>> {
         self.pending.extend(self.resampler.push(pcm, false)?);
         let mut probabilities = Vec::new();
         while self.pending.len() >= FRAME {
@@ -82,13 +105,43 @@ impl StreamingVad {
             for (output, input) in frame.iter_mut().zip(self.pending.drain(..FRAME)) {
                 *output = f32::from(input) / 32768.0;
             }
-            probabilities.push(detector()?.predict_frame(
-                &frame,
-                &mut self.state,
-                &mut self.context,
-            )?);
+            let probability =
+                detector()?.predict_frame(&frame, &mut self.state, &mut self.context)?;
+            probabilities.push(FrameScore::new(
+                self.processed_frames,
+                probability,
+                self.resampler.rate(),
+                self.resampler.input_count as u64,
+            ));
+            self.processed_frames += 1;
         }
         Ok(probabilities)
+    }
+
+    /// Analyze only unfinished frames on copied inference state. `extra_source` is
+    /// the segmenter's small-step residual, which the live detector has not consumed.
+    pub(super) fn preview_tail(&self, extra_source: &[i16]) -> Result<Vec<FrameScore>> {
+        let mut pending = self.pending.clone();
+        pending.extend(self.resampler.preview_finish(extra_source)?);
+        let mut state = self.state;
+        let mut context = self.context;
+        let source_end = (self.resampler.input_count + extra_source.len()) as u64;
+        let mut scores = Vec::new();
+        while !pending.is_empty() {
+            let count = FRAME.min(pending.len());
+            let mut frame = [0.0; FRAME];
+            for (output, sample) in frame.iter_mut().zip(pending.drain(..count)) {
+                *output = f32::from(sample) / 32768.0;
+            }
+            let probability = detector()?.predict_frame(&frame, &mut state, &mut context)?;
+            scores.push(FrameScore::new(
+                self.processed_frames + scores.len() as u64,
+                probability,
+                self.resampler.rate(),
+                source_end,
+            ));
+        }
+        Ok(scores)
     }
 }
 
@@ -217,6 +270,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tail_preview_matches_terminal_inference_without_advancing_live_state() {
+        // The stop tail needs the preceding recurrent state, while an internal cut's
+        // padded analysis must not become part of the next segment's live context.
+        let wav = crate::audio::WavChunk::from_encoded_bytes(
+            include_bytes!("../../tests/fixtures/audio/speech.wav").to_vec(),
+        );
+        let (input_rate, speech) = crate::audio::decode_mono(&wav).unwrap();
+        for rate in [16_000, 24_000, 44_100, 48_000] {
+            let pcm = PcmResampler::new(input_rate, rate)
+                .unwrap()
+                .push(&speech, true)
+                .unwrap();
+            for cut in [1, rate as usize / 10 + 13, pcm.len() / 2 + 7] {
+                let mut live = StreamingVad::new(rate).unwrap();
+                let mut terminal = StreamingVad::new(rate).unwrap();
+                let mut uninterrupted = StreamingVad::new(rate).unwrap();
+                live.push(&pcm[..cut]).unwrap();
+                terminal.push(&pcm[..cut]).unwrap();
+                uninterrupted.push(&pcm[..cut]).unwrap();
+                let extra = &pcm[cut..cut + 701];
+                terminal
+                    .pending
+                    .extend(terminal.resampler.push(extra, true).unwrap());
+                let mut expected = Vec::new();
+                while !terminal.pending.is_empty() {
+                    let count = FRAME.min(terminal.pending.len());
+                    let mut frame = [0.0; FRAME];
+                    for (out, sample) in frame.iter_mut().zip(terminal.pending.drain(..count)) {
+                        *out = f32::from(sample) / 32768.0;
+                    }
+                    expected.push(
+                        detector()
+                            .unwrap()
+                            .predict_frame(&frame, &mut terminal.state, &mut terminal.context)
+                            .unwrap(),
+                    );
+                }
+                let preview = live.preview_tail(extra).unwrap();
+                assert_eq!(
+                    preview.iter().map(|s| s.probability).collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(live.preview_tail(extra).unwrap(), preview);
+                assert_eq!(
+                    live.push(&pcm[cut..]).unwrap(),
+                    uninterrupted.push(&pcm[cut..]).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn streaming_probabilities_survive_packetization_and_batch_interleaving() {
         let speech = crate::audio::WavChunk::from_encoded_bytes(
             include_bytes!("../../tests/fixtures/audio/speech.wav").to_vec(),
@@ -231,17 +336,23 @@ mod tests {
             assert!(contains_speech(&DecodedWav::read(&speech).unwrap()).unwrap());
         }
         assert_eq!(actual, expected);
-        assert!(actual.iter().any(|p| *p >= SPEECH_THRESHOLD));
+        assert!(actual.iter().any(|p| p.probability >= SPEECH_THRESHOLD));
         assert!(
             actual[actual.len() - 25..]
                 .iter()
-                .all(|p| *p < SPEECH_THRESHOLD)
+                .all(|p| p.probability < SPEECH_THRESHOLD)
         );
     }
 
     #[test]
     fn short_inputs_pass_and_partial_tail_speech_is_preserved() {
         assert!(classify_channel(&[0.0; 100], |_| panic!("too short for VAD")).unwrap());
+        for (probability, speech) in [(0.1999, false), (0.2, true), (0.3, true)] {
+            assert_eq!(
+                classify_channel(&[0.0; 512], |_| Ok(probability)).unwrap(),
+                speech
+            );
+        }
         let mut calls = 0;
         let result = classify_channel(&[0.0; 513], |frame| {
             assert_eq!(frame.len(), 512);

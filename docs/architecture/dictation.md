@@ -23,7 +23,7 @@ Realtime is disabled by default. An omitted URL resolves to
   nested metadata is skipped and complete-result validation remains authoritative.
 - `progress`: one latest-body snapshot and coalesced wake-up per recording; closing rejects late
   updates, while cancellation also interrupts a finalizer already detached from the orchestrator.
-- `result`: strict complete JSON boundary and independently validated optional context/term metadata.
+- `result`: validated leading JSON object with trailing output ignored, and independently validated optional context/term metadata.
   Delivery uses the returned final text; no separate verbatim transcript is requested.
 - `feedback`: a single-use confirmation capability; dropping it discards learning, successful
   delivery submits edited text without waiting for persistence; the serial worker commits it before its next job.
@@ -45,37 +45,41 @@ Realtime is disabled by default. An omitted URL resolves to
 
 `assets/dictation-prompt.default.json` is the source of default Realtime instruction text and the
 shared cleanup/protocol rules used by ordinary HTTP post-processing. The JSON resource is embedded
-for portable macOS/Windows packaging; Rust defines its strict seven-field type, source selection,
+for portable macOS/Windows packaging; Rust defines seven required fields and optional `examples`, source selection,
 validation, composition and a text-specific post-processing task. Users edit `dictation.prompt_components` in
 their existing config file and restart; no compilation or auxiliary files are needed.
 
 Components are joined in the fixed order task, language, numbers, cleanup, output_format, context,
-memory. Each string is trimmed at its edges; empty components are skipped; remaining components
+memory, examples. Each string is trimmed at its edges; empty components are skipped; remaining components
 are separated by a newline. Content is literal, with no template substitutions. All seven keys
 are required for a custom object; unknown keys and non-string values are rejected.
 The final instructions retain the 4096-Unicode-character limit, including separators.
 
-The bundled default distributes the selected candidate's rules across all seven components.
+The bundled default distributes the rules across seven components and separates the examples.
 `task` protects short words, unfinished fragments and meaningful repetition; `cleanup` restricts
 self-correction to explicitly withdrawn values while preserving independent negation, operation
 objects and later clauses. `output_format` requests context, memory_candidates, then text in one
 JSON object. Context selection and memory extraction remain in their respective fields, with
 the first eight proper-noun occurrences requested, including repeated mentions. All 16 replacement
-examples and one repeated-name example follow the memory rules at the very end, so no example
-appears before a later rule. The fixed composition order and
-stable/dynamic context guidance mean this default is an adaptation of the evaluated full-string
-prompt, not byte-identical to it; historical recognition scores do not validate the adapted string.
+examples and one repeated-name example follow the memory rules at the very end. Normal-length
+instructions and HTTP text post-processing retain the pre-split text byte for byte. For a Realtime
+segment strictly shorter than two seconds, explicit examples are replaced by one empty-result
+example; the remaining rules and JSON field order stay unchanged. Duration includes captured
+pauses and excludes protocol padding: at 24 kHz, 47,999 samples are short and 48,000 are normal.
+Legacy seven-field objects without `examples` stay literal, including examples inside `memory`.
 
 `prompt` and `prompt_components` default to null. With both absent/null, the embedded JSON provides
 the default components. A full-string `prompt`, including an empty string, replaces all components;
 explicitly configuring both sources is an error. Old full-string configs remain valid and are
 not rewritten on read. Config examples include complete editable default components.
-The same resolved string is used for session instructions, response instructions and offline
-report metadata. Prompt-lab overrides operate on a cloned configuration, clear component selection
-and disable personal memory; saved configuration is untouched.
+Session instructions are empty; each response carries its complete selected instructions, so a
+short segment cannot inherit normal examples from session setup. Full overrides never get rewritten
+based on duration. Ordinary prompt-lab reports record both effective branches and their selection
+policy, preserving production confirmation in private memory. Literal prompt-file/no-prompt
+overrides clear component selection; saved configuration is untouched.
 
-The default context component explicitly ties the JSON after audio to the same preceding audio.
-It also explains that stable and dynamic context fields combine by ID. Custom full prompts and
+The default context component explicitly ties the natural-language history after audio to the same preceding audio.
+It explains that matching topic names combine the configured vocabulary and runtime reference. Custom full prompts and
 saved component objects retain their exact text; authors should include equivalent guidance for
 the new input order. Default-component updates do not rewrite those user-owned overrides.
 
@@ -92,7 +96,8 @@ segment; 30 seconds (or the canonical byte capacity) always closes it first, and
 the nonempty tail. No overlap, trimming or text deduplication is introduced. Acoustic VAD does
 not determine sentence meaning or tone. Endpoint failures degrade to fixed cuts for that recording.
 `turn_detection` remains null: the client owns all commits, prefix declarations and cleanup.
-Raw capture, offline conversion and prompt-lab evaluation remain fixed, preserving report identity.
+Raw capture, offline conversion and explicit scenario diagnostics retain fixed boundaries;
+ordinary prompt-lab evaluation uses the desktop pause-aware path.
 
 Recorder backlog and the 300-frame worker channel are bounded separately. Overflow is an explicit
 failure and stops recording on the next readiness event. Fault-triggered cancellation retains
@@ -101,22 +106,27 @@ suppresses it. Both discard the recording's memory updates. The existing fault r
 these cases without introducing another cancellation state. During response generation, subsequent
 frames queue locally. No unbounded server or client queue is assumed. Audio up to each segment's
 end is uploaded before commit; stop flushes the resampler and retains short voiced tails. Complete
-segments are checked using the shared energy/VAD gate; silent segments clear the server buffer
+segments pass the energy gate, reuse settled streaming/tail evidence, and otherwise fall back to
+whole-segment VAD; silent segments clear the server buffer
 without generating text. Already-uploaded frames are not retrospectively normalized or removed.
 
 The service must accept `max_output_tokens=4096`, text item creation/acknowledgement, text delta/done
 events, cancellation and item deletion. Before the first audio append of every segment, the client
 creates a user text item containing configured vocabulary. It validates the returned content and
 server-assigned ID, waiting for matching `conversation.item.added` / `conversation.item.done`
-(or a completed `conversation.item.created`). Instructions are acknowledged at session setup.
+(or a completed `conversation.item.created`). Session configuration is acknowledged at setup;
+task instructions are supplied separately with every response.
 The vocabulary bytes remain frozen for the recording, including its later segments.
 
 After commit, `response.create` uses explicit `input` in this order: accepted vocabulary item
 reference, committed audio item reference, inline dynamic-context text. It retains
 `conversation=none`, correlation `metadata`, output settings and exactly the declared instructions.
-The suffix contains candidates, support counts, history and persistent confirmed corrections;
-matching context IDs combine the two text parts, and vocabulary content is sent only once.
-Empty parts consistently serialize as `{"contexts":[]}`. No timestamps or random IDs enter text.
+The prefix and suffix use natural-language topic and word lists. The suffix includes candidate
+spellings, numbered recent confirmed sentences and persistent confirmed word corrections;
+matching topic names combine both text parts, and configured vocabulary is sent only once.
+Candidate support counts still control retrieval internally but are not shown to the model, nor
+are `kind` or JSON envelopes. Empty references explicitly say that no vocabulary/history is available.
+No timestamps or random IDs enter text. Storage and business snapshots remain structured JSON.
 The joint business snapshot stays within four contexts / 6000 characters, reserving the frozen
 vocabulary before trimming runtime content. Empty dynamic-only topics cannot evict accepted terms.
 
@@ -183,8 +193,13 @@ degrade metadata without discarding valid text. The result boundary separately r
 validity: fewer than eight entries must cover the supplied names' owned occurrences, while exactly
 eight may be their grounded source-order prefix. Thus nine mentions with eight supplied strings
 are protocol-valid, but that incomplete name group still cannot authorize correction or learning.
-Original JSON remains available for exact raw-context assertions. These checks establish textual
-support, not acoustic truth or whether a returned string is semantically a proper noun.
+The first complete JSON object remains available for exact raw-context assertions. Realtime final
+results and HTTP cleanup ignore any output after that object, including a second object; only the
+first object's text and metadata participate in delivery and learning. Leading prose/code fences,
+malformed or incomplete objects, unknown fields and invalid required text still fail validation.
+Realtime's 64 KiB input limit includes the ignored suffix, and its 16 KiB text limit is unchanged.
+These checks establish textual support, not acoustic truth or whether a returned string is
+semantically a proper noun.
 
 Each name search builds a Unicode word-boundary table for constant-time lookups in its matching
 loop. Containment and crossing checks advance through source-ordered spans rather than restarting
@@ -267,9 +282,10 @@ accuracy or performance. The current Gemma server rejects the standard 4096-toke
 and its source lacks further response controls; real quality/latency comparisons await that service.
 
 Realtime's sampling behavior is provider-owned. The legacy report's numeric temperature metadata
-does not imply that a Realtime temperature parameter is sent. Prompt metadata includes the full
-the exact resolved task instructions. Realtime evaluation disables personal memory and overrides
-the whole prompt (including an empty prompt), rather than appending supplemental instructions.
+does not imply that a Realtime temperature parameter is sent. Prompt metadata includes the exact
+resolved instructions and any conditional short branch. Ordinary evaluation initializes private
+memory from read-only source state and confirms actual finals; explicit scenario diagnostics keep
+their frozen isolation. Literal candidates replace the whole prompt, including an empty prompt.
 HTTP and Realtime use the same evaluation, metrics,
 report writing and review flow.
 Evaluation and report loading accept sanitized HTTP(S) and WS(S) endpoint metadata; userinfo,

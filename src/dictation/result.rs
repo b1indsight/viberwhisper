@@ -38,8 +38,8 @@ impl DictationResult {
         Ok(result)
     }
 
-    /// Validate a complete HTTP transcript without applying Realtime segment budgets.
-    /// Text survives malformed optional metadata; invalid JSON never reaches the input field.
+    /// Validate the first complete JSON object without applying Realtime segment budgets.
+    /// Trailing output is ignored; the object and its required text must still be valid.
     pub fn parse_transcript(text: &str) -> Result<Self> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -50,7 +50,10 @@ impl DictationResult {
             #[serde(default)]
             memory_candidates: Value,
         }
-        let raw: Value = serde_json::from_str(text)?;
+        // Decode the leading object once; trailing noise cannot replace text or metadata.
+        let raw = Value::Object(serde_json::Map::deserialize(
+            &mut serde_json::Deserializer::from_str(text),
+        )?);
         let wire: Wire = serde_json::from_value(raw.clone())?;
         ensure!(!wire.text.contains('\0'), "invalid text");
         let context = wire

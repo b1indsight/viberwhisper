@@ -38,6 +38,33 @@ fn string_metadata_preserves_repeated_names_in_source_order() {
 }
 
 #[test]
+fn complete_first_object_ignores_trailing_noise() {
+    // Text-first responses can end in an extra quote or bracket after a valid object.
+    // Braces inside text and a second object must not change the first object's meaning.
+    let object = r#" {"text":"用 ViberWhisper，保留 \"}\"。","context":"Rust 项目","memory_candidates":["ViberWhisper"]}"#;
+    for suffix in [
+        "",
+        "]",
+        "\"",
+        "\n多余说明",
+        r#"{"text":"替换正文","context":"其他","memory_candidates":["替换"]}"#,
+    ] {
+        let wire = format!("{object}{suffix}");
+        for parsed in [
+            DictationResult::parse(&wire),
+            DictationResult::parse_transcript(&wire),
+        ] {
+            let result = parsed.unwrap();
+            assert_eq!(result.text, "用 ViberWhisper，保留 \"}\"。");
+            assert_eq!(result.context.as_deref(), Some("Rust 项目"));
+            assert_eq!(result.memory_candidates.len(), 1);
+            assert_eq!(result.memory_candidates[0].text, "ViberWhisper");
+            assert!(result.metadata_valid);
+        }
+    }
+}
+
+#[test]
 fn realtime_results_keep_segment_text_and_json_limits() {
     // Aggregate HTTP cleanup must not relax the bounds used for Realtime segments.
     for length in [16_384, 16_385] {
@@ -45,18 +72,27 @@ fn realtime_results_keep_segment_text_and_json_limits() {
         assert_eq!(DictationResult::parse(&wire).is_ok(), length == 16_384);
         assert!(DictationResult::parse_transcript(&wire).is_ok());
     }
-    let mut padded = r#"{"text":"ok"}"#.to_owned();
-    padded.push_str(&" ".repeat(64 * 1024 - padded.len()));
-    assert!(DictationResult::parse(&padded).is_ok());
-    padded.push(' ');
-    assert!(DictationResult::parse(&padded).is_err());
+    for padding in [' ', ']'] {
+        let mut padded = r#"{"text":"ok"}"#.to_owned();
+        padded.extend(std::iter::repeat_n(padding, 64 * 1024 - padded.len()));
+        assert!(DictationResult::parse(&padded).is_ok());
+        padded.push(padding);
+        assert!(DictationResult::parse(&padded).is_err());
+    }
     for wire in [
-        "```json\n{}\n```",
+        "```json\n{\"text\":\"ok\"}\n```",
+        r#"prefix {"text":"ok"}"#,
+        r#"[{"text":"ok"}]"#,
+        r#"["ok",null,[]]"#,
+        r#"{"text":"unfinished"#,
+        r#"{"text":"ok",}"#,
+        r#"{}{"text":"ok"}"#,
         "{}",
         r#"{"text":3}"#,
+        r#"{"text":"ok","extra":true}]"#,
         r#"{"text":"\u0000"}"#,
     ] {
-        assert!(DictationResult::parse(wire).is_err());
+        assert!(DictationResult::parse(wire).is_err(), "wire: {wire}");
     }
 }
 

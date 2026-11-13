@@ -191,6 +191,7 @@ mod tests {
                 language: Some("zh".to_string()),
                 temperature: 0.0,
                 prompt: Some("candidate".to_string()),
+                short_prompt: None,
             },
             prompt_sha256: crate::prompt_lab::dataset::sha256_bytes(
                 &serde_json::to_vec(&Some("candidate".to_string())).unwrap(),
@@ -246,6 +247,86 @@ mod tests {
             failures: Vec::new(),
             comparison: None,
         }
+    }
+
+    #[test]
+    fn legacy_reports_without_short_prompt_keep_the_original_digest() {
+        // Existing reports must remain readable, including production reports from before
+        // the source-duration selection policy. No migration of their saved hash is allowed.
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("legacy.json");
+        let original = serde_json::to_value(awaiting_report()).unwrap();
+        for schema in [1, 2, 3] {
+            let mut legacy = original.clone();
+            legacy["schema_version"] = json!(schema);
+            legacy["stt"]
+                .as_object_mut()
+                .unwrap()
+                .remove("short_prompt");
+            if schema == 3 {
+                legacy["execution"] = json!({
+                    "policy":"desktop-recognition-v1",
+                    "config_sha256":"1".repeat(64),
+                    "memory_sha256":"2".repeat(64)
+                });
+            }
+            fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+            let loaded = EvaluationReport::read(&path).unwrap();
+            assert_eq!(loaded.prompt_sha256, original["prompt_sha256"]);
+            assert!(loaded.stt.short_prompt.is_none());
+        }
+    }
+
+    #[test]
+    fn conditional_prompt_digest_binds_both_prompts_and_the_source_duration_policy() {
+        // A report with unchanged normal instructions but a different short branch is a
+        // different candidate. Reusing a legacy single-prompt digest must not hide it.
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("conditional.json");
+        let mut report = serde_json::to_value(awaiting_report()).unwrap();
+        report["schema_version"] = json!(3);
+        report["execution"] = json!({
+            "policy":"desktop-recognition-short-audio-v1",
+            "config_sha256":"1".repeat(64),
+            "memory_sha256":"2".repeat(64)
+        });
+        report["stt"]["endpoint"] = json!("ws://example.test/v1/realtime");
+        report["stt"]["short_prompt"] = json!("short instructions");
+        let conditional_digest = crate::prompt_lab::dataset::sha256_bytes(
+            &serde_json::to_vec(&json!([
+                "candidate",
+                "short instructions",
+                "source-duration-lt-2s-v1"
+            ]))
+            .unwrap(),
+        );
+        report["prompt_sha256"] = json!(conditional_digest);
+        fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        EvaluationReport::read(&path).unwrap();
+
+        for (pointer, value) in [
+            ("/stt/prompt", json!("changed normal")),
+            ("/stt/short_prompt", json!("changed short")),
+            ("/stt/short_prompt", Value::Null),
+            ("/prompt_sha256", json!(awaiting_report().prompt_sha256)),
+        ] {
+            let mut changed = report.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(
+                EvaluationReport::read(&path)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("prompt digest"),
+                "{pointer}"
+            );
+        }
+        let review = directory.path().join("review.json");
+        fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        write_perfect_review(&review);
+        let reviewed = apply_review(&path, &review).unwrap();
+        assert_eq!(reviewed.prompt_sha256, conditional_digest);
+        assert_eq!(reviewed.status, RunStatus::Complete);
     }
 
     fn write_perfect_review(path: &Path) {

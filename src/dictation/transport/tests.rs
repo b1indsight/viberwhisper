@@ -21,12 +21,9 @@ async fn recording_declares_prefix_before_audio_and_orders_final_input() {
         let mut socket = accept_session(&listener).await;
         let declared = expect_event(&mut socket, "conversation.item.create").await;
         assert_eq!(declared["item"]["role"], "user");
-        let stable: Value =
-            serde_json::from_str(declared["item"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            stable["contexts"][0]["long_term"][0]["text"],
-            "ViberWhisper"
-        );
+        let stable = declared["item"]["content"][0]["text"].as_str().unwrap();
+        assert!(stable.contains("话题：project。\n人工参考词：ViberWhisper。"));
+        assert!(serde_json::from_str::<Value>(stable).is_err());
         let mut item = declared["item"].clone();
         item["id"] = json!("prefix");
         item["status"] = json!("completed");
@@ -46,9 +43,11 @@ async fn recording_declares_prefix_before_audio_and_orders_final_input() {
             request["response"]["input"][1],
             json!({"type":"item_reference","id":"audio"})
         );
-        assert_eq!(
-            request["response"]["input"][2]["content"][0]["text"],
-            "{\"contexts\":[]}"
+        assert!(
+            request["response"]["input"][2]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("暂无历史参考资料。")
         );
         complete_response(
             &mut socket,
@@ -218,7 +217,10 @@ async fn truncated_response_is_rejected_even_when_text_done_looks_valid() {
     let input = memory.prompt_input(&memory.stable_prefix(), 0);
     connection.begin(&input.stable, "truncated").await.unwrap();
     connection.append(&[1; 2400]).await.unwrap();
-    let error = connection.finish(&input, "truncated").await.unwrap_err();
+    let error = connection
+        .finish(&input, "truncated", 2400)
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("truncated"));
     server.await.unwrap();
     #[cfg(feature = "diagnostic-logs")]
@@ -254,7 +256,7 @@ async fn cancellation_between_create_and_ack_still_cancels_the_correct_response(
     let input = memory.prompt_input(&memory.stable_prefix(), 0);
     connection.begin(&input.stable, "cancelled").await.unwrap();
     tokio::select! {
-        result = connection.finish(&input, "cancelled") => panic!("unexpected completion {result:?}"),
+        result = connection.finish(&input, "cancelled", 0) => panic!("unexpected completion {result:?}"),
         _ = waiting => {}
     }
     release.send(()).unwrap();
@@ -292,7 +294,10 @@ async fn live_realtime_structured_multiturn() {
         let correlation = format!("live-{round}");
         connection.begin(&input.stable, &correlation).await.unwrap();
         connection.append(&pcm).await.unwrap();
-        let result = connection.finish(&input, &correlation).await.unwrap();
+        let result = connection
+            .finish(&input, &correlation, pcm.len())
+            .await
+            .unwrap();
         assert!(!result.text.is_empty());
         connection.delete_segment().await.unwrap();
         println!(
@@ -319,7 +324,7 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
             let mut replies = Vec::new();
             match event["type"].as_str().unwrap() {
                 "session.update" => {
-                    assert_eq!(event["session"]["instructions"], PROMPT);
+                    assert_eq!(event["session"]["instructions"], "");
                     assert!(event["session"]["audio"]["input"]["turn_detection"].is_null());
                     assert!(event["session"]["audio"]["input"].get("transcription").is_none());
                     replies.push(json!({"type":"session.updated"}));

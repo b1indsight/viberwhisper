@@ -47,7 +47,7 @@ async fn cancellation_during_cleanup_never_repeats_an_item_delete() {
         let mut connection = Connection::connect(&settings, None).await.unwrap();
         connection.begin(&input.stable, "cleanup").await.unwrap();
         connection.append(&[1; 2400]).await.unwrap();
-        connection.finish(&input, "cleanup").await.unwrap();
+        connection.finish(&input, "cleanup", 2400).await.unwrap();
         tokio::select! {
             result = connection.delete_segment() => panic!("unexpected {result:?}"),
             _ = waiting => {}
@@ -166,7 +166,7 @@ async fn cancellation_resolves_pending_prefix_or_commit_before_clearing_items() 
             connection.begin(&input.stable, "cancelled").await.unwrap();
             connection.append(&[1; 2400]).await.unwrap();
             tokio::select! {
-                result = connection.finish(&input, "cancelled") => panic!("unexpected {result:?}"),
+                result = connection.finish(&input, "cancelled", 2400) => panic!("unexpected {result:?}"),
                 _ = waiting => {}
             }
         } else {
@@ -181,7 +181,7 @@ async fn cancellation_resolves_pending_prefix_or_commit_before_clearing_items() 
         connection.begin(&input.stable, "fresh").await.unwrap();
         connection.append(&[1; 2400]).await.unwrap();
         assert_eq!(
-            connection.finish(&input, "fresh").await.unwrap().text,
+            connection.finish(&input, "fresh", 2400).await.unwrap().text,
             "测试"
         );
         connection.delete_segment().await.unwrap();

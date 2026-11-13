@@ -46,6 +46,7 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(90);
 pub(super) struct Connection {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     instructions: String,
+    short_instructions: Option<String>,
     response_id: Option<String>,
     segment: Option<Segment>,
     response_pending: Option<String>,
@@ -85,6 +86,7 @@ impl Connection {
         let mut connection = Self {
             socket,
             instructions: settings.prompt(),
+            short_instructions: settings.short_prompt(),
             response_id: None,
             segment: None,
             response_pending: None,
@@ -98,7 +100,7 @@ impl Connection {
             connection.wait_type("session.created").await?;
             connection.send(json!({"type":"session.update", "session":{
                 "type":"realtime", "model":settings.model, "output_modalities":["text"],
-                "instructions":connection.instructions, "max_output_tokens":4096,
+                "instructions":"", "max_output_tokens":4096,
                 "audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"turn_detection":null}}
             }})).await?;
             connection.wait_type("session.updated").await?;
@@ -199,7 +201,7 @@ impl Connection {
             self.segment.is_none(),
             "previous Realtime segment has not been cleaned up"
         );
-        let text = serde_json::to_string(stable)?;
+        let text = stable.reference_text();
         self.segment = Some(Segment {
             correlation: correlation.to_owned(),
             prefix_text: text.clone(),
@@ -416,8 +418,10 @@ impl Connection {
         &mut self,
         input: &PromptInput,
         correlation: &str,
+        source_samples: usize,
     ) -> Result<DictationResult> {
-        self.finish_streaming(input, correlation, &mut |_| {}).await
+        self.finish_streaming(input, correlation, source_samples, &mut |_| {})
+            .await
     }
 
     /// Provisional decoded body text may differ from the authoritative completion.
@@ -426,11 +430,12 @@ impl Connection {
         &mut self,
         input: &PromptInput,
         correlation: &str,
+        source_samples: usize,
         notify: &mut (dyn FnMut(&str) + Send),
     ) -> Result<DictationResult> {
         timeout(
             RESPONSE_TIMEOUT,
-            self.finish_inner(input, correlation, notify),
+            self.finish_inner(input, correlation, source_samples, notify),
         )
         .await
         .context("Realtime response timeout")?
@@ -440,6 +445,7 @@ impl Connection {
         &mut self,
         input: &PromptInput,
         correlation: &str,
+        source_samples: usize,
         notify: &mut (dyn FnMut(&str) + Send),
     ) -> Result<DictationResult> {
         let segment = self
@@ -448,7 +454,7 @@ impl Connection {
             .context("no declared Realtime segment")?;
         ensure!(
             segment.correlation == correlation
-                && segment.prefix_text == serde_json::to_string(&input.stable)?,
+                && segment.prefix_text == input.stable.reference_text(),
             "Realtime response does not match the declared segment prefix"
         );
         let PrefixState::Ready(prefix_id) = &segment.prefix else {
@@ -469,13 +475,22 @@ impl Connection {
             .to_owned();
         self.segment.as_mut().unwrap().audio = AudioState::Committed(audio_id.clone());
         self.response_pending = Some(correlation.to_owned());
+        // Use captured 24 kHz source duration, excluding protocol silence padding.
+        // Session instructions stay empty so normal examples cannot leak into short requests.
+        let instructions = if source_samples < 48_000 {
+            self.short_instructions
+                .as_ref()
+                .unwrap_or(&self.instructions)
+        } else {
+            &self.instructions
+        };
         let request = json!({"type":"response.create", "response":{
-            "conversation":"none", "output_modalities":["text"], "instructions":self.instructions,
+            "conversation":"none", "output_modalities":["text"], "instructions":instructions,
             "max_output_tokens":4096, "metadata":{"dictation_id":correlation},
             "input":[{"type":"item_reference","id":prefix_id},
                 {"type":"item_reference","id":audio_id},
                 {"type":"message","role":"user","content":[{"type":"input_text",
-                    "text":serde_json::to_string(&input.dynamic)?}]}]
+                    "text":input.dynamic.reference_text()}]}]
         }});
         #[cfg(feature = "diagnostic-logs")]
         logging::model_event(

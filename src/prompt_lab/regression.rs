@@ -405,7 +405,7 @@ impl EvaluationReport {
         }
         self.thresholds.validate()?;
         validate_stt(&self.stt)?;
-        let expected_prompt_digest = sha256_bytes(&serde_json::to_vec(&self.stt.prompt)?);
+        let expected_prompt_digest = prompt_digest(&self.stt)?;
         if self.prompt_sha256 != expected_prompt_digest {
             return Err(RegressionError::Invalid(
                 "report prompt digest does not match its STT prompt".to_string(),
@@ -827,6 +827,7 @@ fn evaluate_with(
         if request.stt.endpoint != run.settings.url
             || request.stt.model != run.settings.model
             || request.stt.prompt.as_deref() != Some(run.settings.prompt().as_str())
+            || request.stt.short_prompt != run.settings.short_prompt()
             || request.stt.input_layout.as_deref() != Some(crate::dictation::INPUT_LAYOUT)
         {
             return Err(RegressionError::Invalid(
@@ -871,7 +872,7 @@ fn evaluate_with(
     }
 
     let created_at_unix_ms = unix_time_ms()?;
-    let prompt_sha256 = sha256_bytes(&serde_json::to_vec(&request.stt.prompt)?);
+    let prompt_sha256 = prompt_digest(&request.stt)?;
     let run_id = next_run_id(created_at_unix_ms);
     let path = request
         .output
@@ -1016,6 +1017,16 @@ fn validate_new_output_path(path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Conditional candidates bind both branches and their fixed source-duration policy.
+/// Without a short branch, retain the original single-prompt hash for legacy reports.
+fn prompt_digest(stt: &SttSnapshot) -> Result<String> {
+    let bytes = match &stt.short_prompt {
+        Some(short) => serde_json::to_vec(&(&stt.prompt, short, "source-duration-lt-2s-v1"))?,
+        None => serde_json::to_vec(&stt.prompt)?,
+    };
+    Ok(sha256_bytes(&bytes))
 }
 
 fn validate_stt(stt: &SttSnapshot) -> Result<()> {
@@ -1315,6 +1326,7 @@ mod tests {
             language: Some("zh".to_string()),
             temperature: 0.0,
             prompt: prompt.map(str::to_string),
+            short_prompt: None,
         }
     }
 
@@ -1353,6 +1365,36 @@ mod tests {
             output: Some(output),
             compare_to: None,
             realtime: None,
+        }
+    }
+
+    #[test]
+    fn reports_distinguish_changed_short_branch_with_identical_normal_instructions() {
+        // Fingerprints must distinguish conditional candidates even when their normal
+        // instructions and returned final text are identical.
+        let directory = tempdir().unwrap();
+        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
+        add_ready_sample(&store, 1, "使用 Codex", "Codex");
+        let mut digests = std::collections::HashSet::new();
+        for (index, short) in [None, Some("short A"), Some("short B")]
+            .into_iter()
+            .enumerate()
+        {
+            let mut request = request(directory.path().join(format!("candidate-{index}.json")));
+            request.stt.endpoint = "ws://example.test/v1/realtime".into();
+            request.stt.short_prompt = short.map(str::to_owned);
+            let execution = Some(super::super::production::Identity {
+                policy: "desktop-recognition-short-audio-v1".into(),
+                config_sha256: "1".repeat(64),
+                memory_sha256: "2".repeat(64),
+            });
+            let outcome = evaluate_with(&store, request, execution, |_| {
+                (Some("使用 Codex".into()), None)
+            })
+            .unwrap();
+            let loaded = EvaluationReport::read(&outcome.path).unwrap();
+            assert_eq!(loaded.stt.short_prompt.as_deref(), short);
+            assert!(digests.insert(loaded.prompt_sha256));
         }
     }
 
@@ -1556,6 +1598,38 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("proper-noun"));
+    }
+
+    #[test]
+    fn explicit_realtime_rejects_missing_or_changed_short_prompt_metadata() {
+        // The diagnostic entry also uses conditional transport instructions. A normal-only
+        // snapshot must not hide its active short branch, even though it has no desktop identity.
+        let directory = tempdir().unwrap();
+        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
+        add_ready_sample(&store, 1, "使用 Codex", "Codex");
+        for short in [None, Some("wrong short instructions")] {
+            let settings = crate::dictation::config::DictationConfig {
+                url: "ws://127.0.0.1:1/v1/realtime".into(),
+                ..Default::default()
+            };
+            let mut next = request(directory.path().join("run.json"));
+            next.stt.endpoint = settings.url.clone();
+            next.stt.model = settings.model.clone();
+            next.stt.prompt = Some(settings.prompt());
+            next.stt.short_prompt = short.map(str::to_owned);
+            next.stt.input_layout = Some(crate::dictation::INPUT_LAYOUT.into());
+            next.realtime = Some(crate::prompt_lab::realtime::RealtimeRun {
+                cases: serde_json::from_value(serde_json::json!({
+                    "schema_version":2,
+                    "cases":[{"id":"case", "at":100, "steps":[{"sample_id":"sample-1-1"}]}]
+                }))
+                .unwrap(),
+                settings,
+                key: None,
+            });
+            let error = evaluate(&store, &SequenceTranscriber::new([]), next).unwrap_err();
+            assert!(error.to_string().contains("settings differ"));
+        }
     }
 
     #[test]

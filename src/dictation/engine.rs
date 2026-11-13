@@ -407,8 +407,8 @@ impl Recording {
             let tail = filter.push(&[], true)?;
             self.push_pcm(connection, memory, &tail).await?;
         }
-        if self.segmenter.finish().is_some() {
-            self.finish_segment(connection, memory).await?;
+        if let Some(cut) = self.segmenter.finish() {
+            self.finish_segment(connection, memory, cut.speech).await?;
             self.segment.clear();
             self.index += 1;
         }
@@ -423,10 +423,10 @@ impl Recording {
     ) -> Result<()> {
         let cuts = self.segmenter.push(pcm);
         let mut start = 0;
-        for (end, reason) in cuts
+        for (end, reason, speech) in cuts
             .into_iter()
-            .map(|cut| (cut.offset, Some(cut.reason)))
-            .chain(std::iter::once((pcm.len(), None)))
+            .map(|cut| (cut.offset, Some(cut.reason), cut.speech))
+            .chain(std::iter::once((pcm.len(), None, None)))
         {
             if start < end {
                 if self.segment.is_empty() {
@@ -445,7 +445,7 @@ impl Recording {
                     samples = self.segment.len(),
                     "Closing Realtime recognition segment"
                 );
-                self.finish_segment(connection, memory).await?;
+                self.finish_segment(connection, memory, speech).await?;
                 self.segment.clear();
                 self.index += 1;
             }
@@ -458,9 +458,11 @@ impl Recording {
         &mut self,
         connection: &mut Connection,
         memory: &mut Memory,
+        speech: Option<bool>,
     ) -> Result<()> {
         // Silence is uploaded to preserve the stream timeline, but cannot invent a final transcript.
-        let wav = crate::audio::chunk::encode_i16_wav(&self.segment, 24_000)?;
+        let source_samples = self.segment.len();
+        let wav = crate::audio::chunk::encode_i16_wav(&self.segment, 24_000)?.with_speech(speech);
         let speech = crate::audio::contains_speech_for_dictation(&wav).unwrap_or_else(|error| {
             tracing::warn!(%error, "Speech classification failed; preserving dictation audio");
             true
@@ -487,7 +489,7 @@ impl Recording {
         let result = if let Some((progress, language)) = &self.progress {
             let prefix = self.text(language.clone());
             connection
-                .finish_streaming(&input, &correlation, &mut |text| {
+                .finish_streaming(&input, &correlation, source_samples, &mut |text| {
                     progress.publish(crate::text::merge_texts(
                         &[prefix.clone(), text.into()],
                         language.clone(),
@@ -495,7 +497,9 @@ impl Recording {
                 })
                 .await?
         } else {
-            connection.finish(&input, &correlation).await?
+            connection
+                .finish(&input, &correlation, source_samples)
+                .await?
         };
         // Log lengths without exposing dictation contents.
         tracing::debug!(

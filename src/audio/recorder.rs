@@ -120,7 +120,7 @@ struct ActiveRecording {
     /// Absolute input cursor, including analyzed PCM not yet emitted.
     analyzed_samples: usize,
     /// Absolute end of a sealed segment, retained if WAV encoding fails.
-    pending_cut: Option<usize>,
+    pending_cut: Option<(usize, Option<bool>)>,
 }
 
 struct RecordingBuffer {
@@ -538,7 +538,7 @@ impl ActiveRecording {
                     let cuts = segmenter.push(part);
                     if let Some(cut) = cuts.first() {
                         debug_assert_eq!(cuts.len(), 1);
-                        self.pending_cut = Some(self.analyzed_samples + cut.offset);
+                        self.pending_cut = Some((self.analyzed_samples + cut.offset, cut.speech));
                         debug!(reason = ?cut.reason, "Closing recorded recognition segment");
                     }
                     self.analyzed_samples += part.len();
@@ -547,7 +547,7 @@ impl ActiveRecording {
                     }
                 }
             }
-            count = self.pending_cut.unwrap() - self.flushed_samples;
+            count = self.pending_cut.unwrap().0 - self.flushed_samples;
         } else {
             let flushed_chunk_count = self.flushed_samples / count;
             if self.shared.ready_chunk_count.load(Ordering::Acquire) <= flushed_chunk_count {
@@ -570,7 +570,7 @@ impl ActiveRecording {
         };
 
         let chunk = match encode_i16_wav(&chunk_samples, self.shared.sample_rate) {
-            Ok(chunk) => chunk,
+            Ok(chunk) => chunk.with_speech(self.pending_cut.and_then(|(_, speech)| speech)),
             Err(error) => {
                 warn!(error = %error, "Failed to encode in-recording chunk; retaining PCM until stop");
                 return None;
@@ -621,19 +621,21 @@ impl ActiveRecording {
                 segmenter
                     .push(&samples[self.analyzed_samples - self.flushed_samples..])
                     .into_iter()
-                    .map(|cut| self.analyzed_samples + cut.offset),
+                    .map(|cut| (self.analyzed_samples + cut.offset, cut.speech)),
             );
-            if segmenter.finish().is_some() {
-                ends.push(self.flushed_samples + samples.len());
+            if let Some(cut) = segmenter.finish() {
+                ends.push((self.flushed_samples + samples.len(), cut.speech));
             }
             let mut start = 0;
             return ends
                 .into_iter()
-                .map(|end| {
+                .map(|(end, speech)| {
                     let end = end - self.flushed_samples;
                     let chunk = encode_i16_wav(&samples[start..end], self.shared.sample_rate);
                     start = end;
-                    chunk.map_err(Into::into)
+                    chunk
+                        .map(|chunk| chunk.with_speech(speech))
+                        .map_err(Into::into)
                 })
                 .collect();
         }
@@ -926,7 +928,7 @@ mod tests {
         pcm.extend(vec![0; 32_000]);
         pcm.extend(voice);
         pcm.extend(vec![0; 32_000]);
-        pcm.push(17);
+        pcm.extend((0..16_000).map(|i| ((i * 7919 % 101) as i16 - 50) * 30));
         for action in ["retry", "stop", "cancel"] {
             let mut recorder = pause_recorder(16_000);
             recorder.active.as_ref().unwrap().shared.push_mono(&pcm);
@@ -967,6 +969,10 @@ mod tests {
             assert!(warning.is_none());
             chunks.extend(tail);
             assert_eq!(chunks.len(), 3);
+            assert_eq!(
+                chunks.iter().map(|c| c.speech).collect::<Vec<_>>(),
+                [Some(true), Some(true), Some(false)]
+            );
             assert_eq!(decode_chunks(chunks), pcm);
         }
     }

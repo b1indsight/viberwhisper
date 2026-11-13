@@ -102,6 +102,7 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
     let outcome = if let Some(path) = command.realtime_cases.as_deref() {
         // Explicit frozen-clock scenarios retain their separate diagnostic contract.
         let settings = dictation_evaluation_settings(document.dictation.clone(), prompt);
+        let short_prompt = settings.short_prompt();
         let realtime = Some(crate::prompt_lab::realtime::RealtimeRun {
             cases: crate::prompt_lab::realtime::RealtimeCases::read(path)?,
             settings: settings.clone(),
@@ -113,6 +114,7 @@ fn evaluate_command(command: EvaluateCommand) -> Result<()> {
             document.transcription.language.clone(),
         )?;
         let mut stt = SttSnapshot::from(transcriber.metadata());
+        stt.short_prompt = short_prompt;
         stt.input_layout = Some(crate::dictation::INPUT_LAYOUT.into());
         evaluate(
             &dataset,

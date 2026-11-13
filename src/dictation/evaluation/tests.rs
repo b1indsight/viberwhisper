@@ -131,21 +131,14 @@ async fn evaluator_sends_production_snapshot_and_rolls_back_cleanup_failure() {
             let declared = commit_segment(&mut socket, "audio").await;
             let event = expect_event(&mut socket, "response.create").await;
             assert_eq!(event["response"]["instructions"], "test instructions");
-            let snapshot: Snapshot = serde_json::from_str(
-                event["response"]["input"][2]["content"][0]["text"]
-                    .as_str()
-                    .unwrap(),
-            )
-            .unwrap();
-            let stable: Value =
-                serde_json::from_str(declared["item"]["content"][0]["text"].as_str().unwrap())
-                    .unwrap();
-            assert_eq!(
-                stable["contexts"][0]["long_term"],
-                serde_json::to_value(seeded().long_term).unwrap()
-            );
+            let reference = event["response"]["input"][2]["content"][0]["text"]
+                .as_str()
+                .unwrap();
+            let stable = declared["item"]["content"][0]["text"].as_str().unwrap();
+            assert!(stable.contains("人工参考词：ViberWhisper。"));
+            assert!(reference.ends_with("暂无历史参考资料。"));
             assert!(
-                snapshot.contexts.is_empty(),
+                !reference.contains("ViberWhisper"),
                 "vocabulary must not be repeated after audio"
             );
             let text = json!({

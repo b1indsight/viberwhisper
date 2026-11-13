@@ -11,6 +11,100 @@ use serde_json::json;
 use tokio::time::{Duration, timeout};
 
 #[tokio::test]
+async fn segment_source_duration_selects_examples_without_session_leakage_or_padding_bias() {
+    use crate::dictation::test_support::accept;
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use futures_util::StreamExt;
+    // One connection must switch back to normal at exactly 2 s. The tiny tail
+    // is padded for the protocol, but its source length still selects short.
+    let lengths = [48_001, 47_999, 48_000, 511, 48_001];
+    let (listener, settings) = listen().await;
+    let normal = settings.prompt();
+    let short = settings.short_prompt().unwrap();
+    assert_ne!(normal, short);
+    let server = tokio::spawn(async move {
+        let mut socket = accept(&listener).await;
+        let session = expect_event(&mut socket, "session.update").await;
+        assert_eq!(session["session"]["instructions"], "");
+        send_json(&mut socket, json!({"type":"session.updated"})).await;
+        for (index, length) in lengths.into_iter().enumerate() {
+            let audio = format!("audio-{index}");
+            declare_prefix(&mut socket, &format!("prefix-{audio}")).await;
+            let mut uploaded = 0;
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let event: serde_json::Value =
+                    serde_json::from_str(message.to_text().unwrap()).unwrap();
+                if event["type"] == "input_audio_buffer.commit" {
+                    break;
+                }
+                assert_eq!(event["type"], "input_audio_buffer.append");
+                uploaded += STANDARD
+                    .decode(event["audio"].as_str().unwrap())
+                    .unwrap()
+                    .len()
+                    / 2;
+            }
+            assert_eq!(uploaded, length.max(2400));
+            send_json(
+                &mut socket,
+                json!({"type":"input_audio_buffer.committed","item_id":audio}),
+            )
+            .await;
+            let request = expect_event(&mut socket, "response.create").await;
+            assert_eq!(
+                request["response"]["instructions"],
+                if length < 48_000 {
+                    short.as_str()
+                } else {
+                    normal.as_str()
+                }
+            );
+            complete_response(
+                &mut socket,
+                &request,
+                &format!("r-{index}"),
+                r#"{"text":"测试","context":"未知语境","memory_candidates":[]}"#,
+            )
+            .await;
+            delete_segment(&mut socket, &audio).await;
+        }
+    });
+    let mut connection = Connection::connect(&settings, None).await.unwrap();
+    let wav = WavChunk::from_encoded_bytes(
+        include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
+    );
+    let (rate, speech) = crate::audio::decode_mono(&wav).unwrap();
+    let voice = PcmResampler::new(rate, 24_000)
+        .unwrap()
+        .push(&speech, true)
+        .unwrap();
+    let mut memory = Memory::frozen(Default::default());
+    for length in lengths {
+        let pcm: Vec<_> = if length < 768 {
+            vec![1_000; length]
+        } else {
+            voice.iter().copied().cycle().take(length).collect()
+        };
+        let mut recording = Recording::new(Segmentation::Fixed);
+        recording
+            .push(
+                &mut connection,
+                &mut memory,
+                &crate::audio::chunk::encode_i16_wav(&pcm, 24_000).unwrap(),
+            )
+            .await
+            .unwrap();
+        recording
+            .finish(&mut connection, &mut memory)
+            .await
+            .unwrap();
+        assert_eq!(recording.text(None), "测试");
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn pause_commits_contiguous_audio_while_fixed_conversion_keeps_one_segment() {
     use crate::audio::segment::Segmentation;
     use base64::{Engine, engine::general_purpose::STANDARD};
@@ -227,20 +321,15 @@ async fn feedback_commits_only_confirmed_text_before_the_next_recording() {
             let audio = format!("audio-{turn}");
             commit_segment(&mut socket, &audio).await;
             let event = expect_event(&mut socket, "response.create").await;
-            let snapshot: serde_json::Value = serde_json::from_str(
-                event["response"]["input"][2]["content"][0]["text"]
-                    .as_str()
-                    .unwrap(),
-            )
-            .unwrap();
+            let reference = event["response"]["input"][2]["content"][0]["text"]
+                .as_str()
+                .unwrap();
+            assert!(serde_json::from_str::<serde_json::Value>(reference).is_err());
             if turn < 2 {
-                assert_eq!(snapshot["contexts"], json!([]));
+                assert!(reference.ends_with("暂无历史参考资料。"));
             } else {
-                assert_eq!(snapshot["contexts"][0]["history"][0], "用ViberWhisper。");
-                assert_eq!(
-                    snapshot["contexts"][0]["corrections"][0]["to"],
-                    "ViberWhisper"
-                );
+                assert!(reference.contains("1. 用ViberWhisper。"));
+                assert!(reference.contains("将“维伯耳语”写作“ViberWhisper”"));
             }
             let text = json!({"text":"用维伯耳语。", "context":"项目",
                 "memory_candidates":["维伯耳语"]})
