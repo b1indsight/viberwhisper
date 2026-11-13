@@ -102,13 +102,20 @@ the selected Realtime or HTTP recognition path without reading or updating perso
 `configure_recognition` first selects ordinary HTTP STT or Realtime, defaulting to the loaded
 mode. Only the selected connection is edited: HTTP retains optional LLM setup, while Realtime
 asks for URL, model, and an environment-variable name (empty disables authentication).
-Inactive connections and all advanced prompt, temperature, preheat, and memory fields stay
-unchanged. Existing LLM enablement and unavailable microphone names remain the defaults.
+Inactive connections and advanced temperature, preheat, and memory fields stay unchanged.
+The build-time embedded example supplies new settings and the HTTP, complete LLM and Realtime
+component prompts written into the candidate before verification. Realtime full text stays null;
+normal/short instructions are composed from saved components, with short source audio only omitting
+independent examples. Existing configuration is prepared and reloaded before listener resolution.
+New microphone gain matches the example's 3.0; existing explicit gain, LLM enablement and unavailable
+microphone names remain unchanged.
 Unchanged input retains the exact original value even when tinyfiledialogs needs a sanitized
 display default. HTTP password inputs start empty; environment secrets never enter saved JSON.
 `core::config` owns configuration
 loading and atomic persistence; the wizard selects when to load, retry, cancel, or save.
-Cancelling an input, declining the final save, or a UI error before that save leaves the file intact.
+Cancelling an input, declining the final save, or a UI error before that save adds no wizard save;
+it does not undo a prior preparation update. Declining initial setup returns no listener, and
+preparation write failures abort startup. Accepted setup saves and reloads before normal listening.
 
 Windows text and password input use in-process Win32 dialogs in `ui/setup/windows.rs`, with
 Unicode controls and a native modal message loop. They do not launch VBScript/HTA input scripts

@@ -98,6 +98,7 @@ async fn upload_preserves_protocol_events_in_a_bounded_queue() {
     let mut connection = Connection::connect(
         &DictationConfig {
             prompt: Some(String::new()),
+            prompt_components: None,
             ..settings
         },
         None,
@@ -267,12 +268,14 @@ async fn cancellation_between_create_and_ack_still_cancels_the_correct_response(
 #[tokio::test]
 #[ignore = "requires an explicitly configured live Realtime service"]
 async fn live_realtime_structured_multiturn() {
+    let document: crate::core::config::ConfigDocument =
+        serde_json::from_str(include_str!("../../../config.example.json")).unwrap();
     let settings = crate::dictation::config::DictationConfig {
         url: std::env::var("VIBERWHISPER_REALTIME_TEST_URL")
             .expect("set VIBERWHISPER_REALTIME_TEST_URL"),
         model: std::env::var("VIBERWHISPER_REALTIME_TEST_MODEL")
-            .unwrap_or_else(|_| DictationConfig::default().model),
-        ..Default::default()
+            .unwrap_or_else(|_| document.dictation.model.clone()),
+        ..document.dictation
     };
     let key = std::env::var("REALTIME_API_KEY").ok();
     let mut connection = Connection::connect(&settings, key.as_deref())
@@ -374,13 +377,8 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
         }
     });
     let settings = crate::dictation::config::DictationConfig {
-        prompt_components: Some(
-            serde_json::from_value(json!({
-                "task": PROMPT, "language": "", "numbers": "", "cleanup": "",
-                "output_format": "", "context": "", "memory": ""
-            }))
-            .unwrap(),
-        ),
+        prompt: Some(PROMPT.into()),
+        prompt_components: None,
         ..settings
     };
     let engine =

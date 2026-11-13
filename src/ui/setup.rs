@@ -20,7 +20,7 @@ use tinyfiledialogs::{MessageBoxIcon, YesNo};
 
 use crate::audio::{AudioRecorder, RecorderStartOutcome, RecorderStopOutcome};
 use crate::core::config::{
-    ConfigDocument, ConfigStore,
+    ConfigDocument, ConfigError, ConfigStore,
     fields::{self, SecretStatus},
 };
 use crate::core::listener::ListenerConfig;
@@ -30,8 +30,6 @@ use crate::transcriber::ApiTranscriber;
 use crate::{audio, text};
 
 const TITLE: &str = "ViberWhisper 设置";
-const DEFAULT_POST_PROCESS_URL: &str = "https://api.openai.com/v1/chat/completions";
-const DEFAULT_POST_PROCESS_MODEL: &str = "gpt-4o-mini";
 const HOTKEY_CAPTURE_HELPER_ENV: &str = "VIBERWHISPER_CAPTURE_HOTKEY";
 const HOTKEY_CAPTURE_EXIT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -70,46 +68,51 @@ pub(crate) fn run_hotkey_capture_helper_if_requested() -> AnyhowResult<bool> {
 
 pub(crate) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
     let store = ConfigStore::discover()?;
-    let (initial, reason) = match store.load() {
+    listener_config_with(&store, &mut NativeSetupUi, &mut NativeVerifier)
+}
+
+fn listener_config_with(
+    store: &ConfigStore,
+    ui: &mut dyn SetupUi,
+    verifier: &mut dyn SetupVerifier,
+) -> AnyhowResult<Option<ListenerConfig>> {
+    let (initial, reason) = match store.prepare() {
         Ok(None) => (
             ConfigDocument::default(),
-            "尚未找到配置文件。是否现在运行配置向导？\n选择“否”将在本次启动使用内置默认值。"
-                .to_string(),
+            "尚未找到配置文件。是否现在运行配置向导？\n选择“否”将退出，不启动监听器。".to_string(),
         ),
         Ok(Some(document)) => match resolve_document(&document) {
             Ok(config) => {
-                store.materialize_dictation_defaults(&document)?;
                 return Ok(Some(config));
             }
             Err(error) => (
                 document,
                 format!(
-                    "当前配置无法启动监听器：\n{}\n\n是否现在修复？\n选择“否”将在本次启动使用内置默认值。",
+                    "当前配置无法启动监听器：\n{}\n\n是否现在修复？\n选择“否”将退出，不启动监听器。",
                     safe_dialog_text(&format!("{error:#}"))
                 ),
             ),
         },
-        Err(error) => (
+        Err(error @ ConfigError::InvalidDocument { .. }) => (
             ConfigDocument::default(),
             format!(
-                "配置文件无法读取：\n{}\n\n是否从默认值开始修复？\n选择“否”将在本次启动使用内置默认值，且不会覆盖原文件。",
+                "配置文件无法读取：\n{}\n\n是否从默认值开始修复？\n选择“否”将退出，且不会覆盖原文件。",
                 safe_dialog_text(&error.to_string())
             ),
         ),
+        Err(error) => return Err(error.into()),
     };
 
-    let mut ui = NativeSetupUi;
     if !ui.confirm(&reason, true)? {
-        return Ok(Some(resolve_document(&ConfigDocument::default())?));
+        return Ok(None);
     }
 
-    let mut verifier = NativeVerifier;
     match run_wizard(
-        &store,
+        store,
         initial,
         audio::recorder::input_device_names(),
-        &mut ui,
-        &mut verifier,
+        ui,
+        verifier,
     )? {
         WizardOutcome::Saved(document) => Ok(Some(resolve_document(&document)?)),
         WizardOutcome::Cancelled => Ok(None),
@@ -118,10 +121,10 @@ pub(crate) fn listener_config() -> AnyhowResult<Option<ListenerConfig>> {
 
 pub(crate) fn run_explicit() -> AnyhowResult<()> {
     let store = ConfigStore::discover()?;
-    let initial = match store.load() {
+    let initial = match store.prepare() {
         Ok(Some(document)) => document,
         Ok(None) => ConfigDocument::default(),
-        Err(error) => {
+        Err(error @ ConfigError::InvalidDocument { .. }) => {
             let mut ui = NativeSetupUi;
             ui.message(&format!(
                 "现有配置无法读取，将从默认值开始。原文件只有在最终确认保存后才会被替换。\n\n{}",
@@ -129,6 +132,7 @@ pub(crate) fn run_explicit() -> AnyhowResult<()> {
             ))?;
             ConfigDocument::default()
         }
+        Err(error) => return Err(error.into()),
     };
     let mut ui = NativeSetupUi;
     let mut verifier = NativeVerifier;
@@ -479,13 +483,15 @@ fn configure_recognition(
     document.post_process.enabled =
         ui.confirm("是否启用 LLM 文本整理？", document.post_process.enabled)?;
     if document.post_process.enabled {
+        let defaults = ConfigDocument::default().inference.api.post_process;
         let current_url = document
             .inference
             .api
             .post_process
             .api_url
             .as_deref()
-            .unwrap_or(DEFAULT_POST_PROCESS_URL);
+            .or(defaults.api_url.as_deref())
+            .unwrap_or_default();
         let Some(url) = required_input(ui, "请输入 LLM Chat Completions API 地址", current_url)?
         else {
             return Ok(false);
@@ -498,7 +504,8 @@ fn configure_recognition(
             .post_process
             .model
             .as_deref()
-            .unwrap_or(DEFAULT_POST_PROCESS_MODEL);
+            .or(defaults.model.as_deref())
+            .unwrap_or_default();
         let Some(model) = required_input(ui, "请输入 LLM 模型名称", current_model)? else {
             return Ok(false);
         };
@@ -530,6 +537,7 @@ fn run_wizard(
     ui: &mut dyn SetupUi,
     verifier: &mut dyn SetupVerifier,
 ) -> AnyhowResult<WizardOutcome> {
+    document.apply_bundled_prompts();
     if !configure_recognition(&mut document, ui)? {
         return Ok(WizardOutcome::Cancelled);
     }
@@ -590,6 +598,9 @@ fn run_wizard(
         return Ok(WizardOutcome::Cancelled);
     }
     store.save(&document)?;
+    let document = store
+        .load()?
+        .ok_or_else(|| anyhow!("configuration disappeared after setup; run setup again"))?;
     ui.message(&format!(
         "配置已保存到：\n{}",
         safe_dialog_text(&store.path().display().to_string())
@@ -902,6 +913,72 @@ mod tests {
 
     struct UnexpectedVerifier;
 
+    #[test]
+    fn declining_initial_setup_never_returns_an_unsaved_listener() {
+        for contents in [None, Some("invalid json")] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("config.json");
+            if let Some(contents) = contents {
+                std::fs::write(&path, contents).unwrap();
+            }
+            let mut ui = ScriptedUi {
+                confirms: VecDeque::from([Ok(false)]),
+                ..Default::default()
+            };
+            assert!(
+                listener_config_with(
+                    &ConfigStore::at(path.clone()),
+                    &mut ui,
+                    &mut UnexpectedVerifier
+                )
+                .unwrap()
+                .is_none()
+            );
+            assert!(ui.confirm_messages.iter().any(|text| text.contains("退出")));
+            assert_eq!(std::fs::read_to_string(path).ok().as_deref(), contents);
+        }
+        // A later repair refusal must not undo the already-saved automatic prompt refresh.
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::at(directory.path().join("config.json"));
+        let mut document = ConfigDocument::default();
+        document.input.hold_hotkey = "invalid hotkey".into();
+        document.transcription.prompt = Some("old instructions".into());
+        store.save(&document).unwrap();
+        let mut ui = ScriptedUi {
+            confirms: VecDeque::from([Ok(false)]),
+            ..Default::default()
+        };
+        assert!(
+            listener_config_with(&store, &mut ui, &mut UnexpectedVerifier)
+                .unwrap()
+                .is_none()
+        );
+        let saved = store.load().unwrap().unwrap();
+        assert_ne!(saved.transcription.prompt, document.transcription.prompt);
+        assert_eq!(saved.input, document.input);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_preparation_write_aborts_before_setup_or_recognition() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let store = ConfigStore::at(path.clone());
+        let mut old = ConfigDocument::default();
+        old.transcription.prompt = Some("old instructions".into());
+        store.save(&old).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let permissions = std::fs::metadata(directory.path()).unwrap().permissions();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        // ScriptedUi has no answers: any fallback to the wizard would fail this test too.
+        let outcome =
+            listener_config_with(&store, &mut ScriptedUi::default(), &mut UnexpectedVerifier);
+        std::fs::set_permissions(directory.path(), permissions).unwrap();
+        assert!(outcome.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
     impl SetupVerifier for UnexpectedVerifier {
         fn verify(
             &mut self,
@@ -917,9 +994,12 @@ mod tests {
     impl SetupVerifier for SuccessfulVerifier {
         fn verify(
             &mut self,
-            _document: &ConfigDocument,
+            document: &ConfigDocument,
             _ui: &mut dyn SetupUi,
         ) -> Result<VerificationResult, String> {
+            assert!(document.post_process.prompt.is_some());
+            assert!(document.dictation.prompt_components.is_some());
+            assert!(document.dictation.short_prompt().is_some());
             Ok(VerificationResult {
                 raw: "测试".to_string(),
                 final_text: "测试".to_string(),
@@ -962,8 +1042,8 @@ mod tests {
 
     #[test]
     fn switching_recognition_keeps_unedited_configuration_and_disk_keys() {
-        // Re-running setup must not reset custom rules, dormant connections, optional LLM
-        // defaults, or a microphone that is temporarily disconnected or cannot be enumerated.
+        // Setup refreshes prompts, but must retain dormant connections, optional LLM
+        // settings, and a microphone that is temporarily disconnected or cannot be enumerated.
         for realtime in [true, false] {
             for prompt in [
                 Some(format!(
@@ -1027,6 +1107,7 @@ mod tests {
                     document.audio.mic_gain = 1.75;
                     document.audio.input_device = Some("Disconnected 'USB' Mic".into());
                     let mut expected = document.clone();
+                    expected.apply_bundled_prompts();
                     expected.dictation.enabled = realtime;
                     let mut ui = KeepCurrentUi {
                         mode: if realtime { "2" } else { "1" },
@@ -1071,6 +1152,7 @@ mod tests {
             ..Default::default()
         };
         let mut expected = document.clone();
+        expected.apply_bundled_prompts();
         expected.dictation.enabled = true;
         expected.dictation.url = "wss://example.com/v1/realtime".into();
         expected.dictation.model = "custom-realtime".into();
@@ -1089,10 +1171,6 @@ mod tests {
             panic!("valid Realtime configuration should save")
         };
         assert_eq!(*saved, expected);
-        assert!(
-            saved.dictation_key().is_some(),
-            "keep the injected secret source"
-        );
         assert_eq!(store.load().unwrap(), Some(expected));
         assert!(
             !std::fs::read_to_string(path)
@@ -1102,52 +1180,27 @@ mod tests {
     }
 
     #[test]
-    fn realtime_setup_rejects_invalid_connections_or_hidden_prompt_conflicts_without_saving() {
-        for (url, model, key_env, conflict, expected_error) in [
-            (
-                "https://example.com/realtime",
-                "model".into(),
-                "",
-                false,
-                "ws://",
-            ),
+    fn realtime_setup_rejects_invalid_connections_without_saving() {
+        for (url, model, key_env, expected_error) in [
+            ("https://example.com/realtime", "model".into(), "", "ws://"),
             (
                 "ws://example.com/realtime?key=secret",
                 "model".into(),
                 "",
-                false,
                 "query",
             ),
-            (
-                "ws://example.com/realtime",
-                "m".repeat(257),
-                "",
-                false,
-                "model",
-            ),
+            ("ws://example.com/realtime", "m".repeat(257), "", "model"),
             (
                 "ws://example.com/realtime",
                 "model".into(),
                 "BAD-NAME",
-                false,
                 "api_key_env",
-            ),
-            (
-                "ws://example.com/realtime",
-                "model".into(),
-                "",
-                true,
-                "both",
             ),
         ] {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join("config.json");
             std::fs::write(&path, "original configuration").unwrap();
-            let mut document = ConfigDocument::default();
-            if conflict {
-                document.dictation.prompt = Some(String::new());
-                document.dictation.prompt_components = Some(Default::default());
-            }
+            let document = ConfigDocument::default();
             let mut ui = ScriptedUi {
                 inputs: VecDeque::from([
                     Ok(Some("2".into())),

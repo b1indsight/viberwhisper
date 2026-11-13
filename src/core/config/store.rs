@@ -16,7 +16,6 @@ impl ConfigStore {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn at(path: PathBuf) -> Self {
         Self { path }
     }
@@ -27,19 +26,9 @@ impl ConfigStore {
 
     /// Loads the document with environment-backed secrets, or `None` for a missing file.
     pub fn load(&self) -> Result<Option<ConfigDocument>, ConfigError> {
-        let contents = match fs::read_to_string(&self.path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(source) => {
-                return Err(ConfigError::Io {
-                    path: self.path.clone(),
-                    source,
-                });
-            }
+        let Some(contents) = self.read()? else {
+            return Ok(None);
         };
-
         serde_json::from_str(&contents)
             .map(Some)
             .map_err(|source| ConfigError::InvalidDocument {
@@ -78,32 +67,51 @@ impl ConfigStore {
         self.save(&document)
     }
 
-    /// Persists absent Realtime fields after the desktop caller validates `document`.
-    /// Explicit values and unrelated sections are retained; ordinary `load` stays read-only.
-    pub(crate) fn materialize_dictation_defaults(
-        &self,
-        document: &ConfigDocument,
-    ) -> Result<bool, ConfigError> {
-        let contents = fs::read_to_string(&self.path).map_err(|source| ConfigError::Io {
-            path: self.path.clone(),
-            source,
+    /// Refreshes bundled instructions on disk before recognition is assembled.
+    /// Strict parsing precedes any write; readers and targeted tray edits remain read-only.
+    pub(crate) fn prepare(&self) -> Result<Option<ConfigDocument>, ConfigError> {
+        let Some(contents) = self.read()? else {
+            return Ok(None);
+        };
+        serde_json::from_str::<ConfigDocument>(&contents).map_err(|source| {
+            ConfigError::InvalidDocument {
+                path: self.path.clone(),
+                source,
+            }
         })?;
         let mut value: serde_json::Value =
             serde_json::from_str(&contents).map_err(|source| ConfigError::InvalidDocument {
                 path: self.path.clone(),
                 source,
             })?;
-        let defaults = serde_json::to_value(&document.dictation).map_err(ConfigError::Serialize)?;
-        let dictation = value
-            .as_object_mut()
-            .expect("validated configuration is an object")
-            .entry("dictation")
-            .or_insert_with(|| serde_json::json!({}));
-        if !fill_missing(dictation, &defaults) {
-            return Ok(false);
+        let original = value.clone();
+        let defaults =
+            serde_json::to_value(ConfigDocument::default()).map_err(ConfigError::Serialize)?;
+        fill_missing(&mut value, &defaults);
+        for section in ["transcription", "post_process", "dictation"] {
+            value[section]["prompt"] = defaults[section]["prompt"].clone();
         }
-        self.write_atomic(&value)?;
-        Ok(true)
+        value["dictation"]["prompt_components"] =
+            defaults["dictation"]["prompt_components"].clone();
+        value["dictation"]
+            .as_object_mut()
+            .expect("validated dictation object")
+            .remove("short_prompt");
+        if value != original {
+            self.write_atomic(&value)?;
+        }
+        self.load()
+    }
+
+    fn read(&self) -> Result<Option<String>, ConfigError> {
+        match fs::read_to_string(&self.path) {
+            Ok(contents) => Ok(Some(contents)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(ConfigError::Io {
+                path: self.path.clone(),
+                source,
+            }),
+        }
     }
 
     fn write_atomic(&self, document: &impl serde::Serialize) -> Result<(), ConfigError> {
@@ -148,23 +156,20 @@ impl ConfigStore {
     }
 }
 
-fn fill_missing(value: &mut serde_json::Value, defaults: &serde_json::Value) -> bool {
+fn fill_missing(value: &mut serde_json::Value, defaults: &serde_json::Value) {
     let (Some(value), Some(defaults)) = (value.as_object_mut(), defaults.as_object()) else {
-        return false;
+        return;
     };
-    let mut changed = false;
     for (key, default) in defaults {
         match value.entry(key.clone()) {
             serde_json::map::Entry::Vacant(entry) => {
                 entry.insert(default.clone());
-                changed = true;
             }
             serde_json::map::Entry::Occupied(mut entry) => {
-                changed |= fill_missing(entry.get_mut(), default);
+                fill_missing(entry.get_mut(), default);
             }
         }
     }
-    changed
 }
 
 /// Canonical shared directory for configuration and local transcription history.

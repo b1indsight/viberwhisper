@@ -126,6 +126,7 @@ async fn evaluator_sends_production_snapshot_and_rolls_back_cleanup_failure() {
     for cleanup in [true, false] {
         let (listener, mut settings) = listen().await;
         settings.prompt = Some("test instructions".into());
+        settings.prompt_components = None;
         let server = tokio::spawn(async move {
             let mut socket = accept_session(&listener).await;
             let declared = commit_segment(&mut socket, "audio").await;

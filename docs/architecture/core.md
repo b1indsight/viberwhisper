@@ -12,31 +12,55 @@ The config package intentionally has four files:
 |---|---|
 | `document.rs` | `ConfigDocument`, nested v3 serde schema, defaults, and bound secret source |
 | `fields.rs` | one canonical catalog for typed field requests and CLI list/get/set |
-| `store.rs` | platform path discovery plus fail-closed load and atomic save |
+| `store.rs` | platform path discovery, fail-closed load, explicit configuration preparation and atomic save |
 | `src/core/config.rs` | facade, config errors, and secret-safe value types |
 
 `ConfigDocument` accepts the canonical document with `schema_version: 3`. Missing or unknown fields,
 wrong versions, invalid JSON, and non-finite floats are errors, except that optional
-`audio.input_device` defaults to the system device and missing `dictation` fields use
-their typed defaults.
+`audio.input_device` defaults to the system device and optional non-prompt `dictation` fields use
+their typed defaults. Missing prompt fields remain missing on deserialization; they do not silently
+acquire bundled text. Component construction rejects missing prompts required by the selected service.
 Retired fields such as `chunking`, `session`, and `inference.api.provider` are not accepted. A
-missing file is represented as `None` by `ConfigStore::load`; ordinary callers explicitly select
-the in-memory defaults while setup uses the absence to trigger the first-run flow.
+missing file is represented as `None` by `ConfigStore::load`; desktop setup uses the absence to
+trigger the first-run flow, while ordinary conversion requires a saved configuration.
 
 `ConfigStore::discover()` gets the application directory from its own `config_dir()` helper and appends
 `config.json`. Reads and writes therefore use the same canonical path independent of the launch
-directory. After successful desktop listener resolution, an explicit store operation
-fills absent keys only under `dictation` and persists them atomically. Existing values,
-including nulls and empty prompts, and unrelated sections are preserved. Complete files
-are not rewritten. Ordinary loads and CLI
-inspection do not trigger this backfill. Missing prompt defaults persist as null,
-so bundled prompt improvements continue to apply.
+directory. `ConfigStore::prepare` runs before desktop or ordinary conversion resolves recognition
+settings. It strictly parses the existing document, fills permitted missing fields from the embedded
+example configuration and updates the prompt fields, compares the actual JSON, atomically saves
+changes, then reloads the saved document. It returns `None` for a missing file; parse or write failures cannot supply an
+unsaved replacement to recognition. Identical content is not rewritten.
+
+`ConfigDocument::apply_bundled_prompts` is confined to preparation and first-setup candidate
+construction. It copies the full HTTP `transcription.prompt`, full LLM `post_process.prompt` system
+text and Realtime `dictation.prompt_components` directly from the embedded
+[`config.example.json`](../../config.example.json). Realtime `dictation.prompt` is set to null, and
+preparation removes the retired `dictation.short_prompt` key rather than saving normal/short full
+texts. Existing custom strings, empty strings, nulls and component overrides are replaced on disk.
+All other explicit settings, including connections, disk secrets, audio, hotkeys and long-term
+vocabulary, are preserved. Runtime Realtime instructions only join saved components in fixed order;
+source audio shorter than two seconds omits the separate examples component without adding an
+empty-result example. Exactly two seconds uses normal instructions, and protocol padding does not
+affect selection. Runtime consumers have no bundled fallback or LLM wrapping.
+
+`load` and `config path/get/list/check` remain read-only and expose saved values. Inspection does not
+apply bundled prompts; `check` reports missing required prompt configuration until preparation is
+completed. Ordinary field edits and tray device/gain saves update only their target fields and do
+not trigger prompt preparation. Realtime rejects simultaneous full-text and component sources;
+neither source means preparation is required. Retired short-prompt values remain parseable only
+for preparation and cannot supply instructions. Older LLM code would wrap the full system text
+again, so downgrades require the corresponding old configuration as well as the old binary.
 Writes use a temporary file in the destination directory followed by atomic
 publication. `ConfigStore::load` is the general read and parse entry point: `None` distinguishes a missing
 file, `Some` carries a loaded document, and malformed or unreadable files remain errors.
 
-`ConfigDocument::new(source)` creates default settings with an owned secret source.
-Default construction and loading bind `EnvironmentSecretSource`.
+`ConfigDocument::new(source)` parses the build-time embedded example and binds the owned secret
+source without reading credentials; `Default` delegates to that constructor. New settings therefore
+match the example, including `audio.mic_gain = 3.0`; preparation preserves any explicit saved gain.
+Structural serde defaults only support old-file parsing: they do not generate prompts or replace
+the example as the source of new settings and preparation defaults. Default construction and
+loading bind `EnvironmentSecretSource`.
 Clones share that source, which is omitted from serialization, debug output, and document
 equality. Reads stay lazy: only requested API-key fields consult `TRANSCRIPTION_API_KEY` or
 `POST_PROCESS_API_KEY`. Environment values override disk secrets without entering the persisted
@@ -65,8 +89,9 @@ named keys and rejects unsupported or conflicting bindings.
 Workflow settings are assembled in `core`. `core::listener::RecordingConfig` combines hotkeys,
 audio, orchestrator, and STT settings for raw dataset capture. `ListenerConfig` adds cleanup
 for normal delivery and setup verification. Offline `ConvertConfig` combines STT, cleanup,
-and merge language; WAV chunk limits remain audio-owned constants. Prompt-lab evaluation
-requests only `TranscriberConfig`, so invalid hotkey or cleanup settings do not block STT.
+and merge language; WAV chunk limits remain audio-owned constants. Ordinary prompt-lab evaluation
+builds desktop recognition settings from an isolated saved configuration; audio candidates are
+written and reloaded before these settings or services are constructed.
 
 Constructors propagate ordinary errors with `?`; there is no separate validation pass or
 configuration-wide issue collection. The CLI's `config check` command builds a `ListenerConfig`
@@ -77,12 +102,18 @@ independent of component construction and support incremental configuration.
 ## CLI (`src/core/cli.rs`)
 
 The no-subcommand listener and the no-console desktop entry point pass through
-`ui::setup` before constructing runtime services. A valid listener document bypasses the
-wizard; missing or invalid configuration opens the same modal flow on macOS and Windows. The
-explicit `setup` command reruns it without starting the listener after saving. Interactive hotkey
+`ui::setup` before constructing runtime services. Existing parseable configuration is prepared,
+saved if changed and reloaded before listener resolution. A valid listener document bypasses the
+wizard; missing or invalid configuration opens the same modal flow on macOS and Windows. Declining
+setup exits without an unsaved default listener or an unconfirmed replacement of a damaged file.
+First setup applies bundled prompts to its candidate before recording verification; final confirmation
+saves and reloads it before normal listening. Cancelling the wizard adds no save and does not roll
+back updates already committed by preparation. Preparation write failures abort startup.
+The explicit `setup` command reruns the wizard without starting the listener after saving. Interactive hotkey
 editing launches a short-lived helper instance of the same executable so the existing `rdev`
 listener can capture one physical key and terminate without leaving a second global listener in the
-main process. Other CLI workflows keep their existing configuration behavior.
+main process. Ordinary `convert` also prepares and reloads configuration before constructing
+recognition services, and requires setup when no configuration exists.
 
 No subcommand runs the recording listener. Other commands are:
 
@@ -99,7 +130,7 @@ No subcommand runs the recording listener. Other commands are:
 | `prompt-lab evaluate` | Freshly transcribe every ready WAV and write local metrics to JSON |
 | `prompt-lab report apply-review` | Validate coding-agent scores and finalize all three gates |
 
-`config set` parses the canonical field type and saves the updated document without running cross-field business validation. This permits incremental configuration; `config check` or the command that consumes the API configuration reports incomplete runtime configuration. Secret and schema fields are read-only. Legacy aliases are rejected.
+`config set` parses the canonical field type and saves the updated document without running cross-field business validation. This permits incremental configuration; `config check` or the command that consumes the API configuration reports incomplete runtime configuration. Secret and schema fields, plus `transcription.prompt` and `post_process.prompt`, are read-only. Legacy aliases are rejected.
 
 ---
 
@@ -213,7 +244,8 @@ listener directly. Before tracing starts, the Windows GUI entry redirects stdout
 the Windows platform boundary into a native error dialog because ordinary diagnostics are not
 visible. macOS packaging continues to expose only the established `.app` entry.
 
-CLI workflows in `core` and desktop setup in `ui` load a `ConfigDocument`; configuration constructors request their typed fields
+CLI workflows in `core` and desktop setup in `ui` obtain a `ConfigDocument` through the read or
+preparation boundary described above; configuration constructors request their typed fields
 through `ConfigDocument::select`, and the workflow passes each narrow value to its runtime consumer. Listener mode then creates one main-thread winit
 `EventLoop<AppEvent>` in `ControlFlow::Wait` mode. Opaque platform input, audio-readiness, and
 background completion producers use `EventLoopProxy` to wake that loop; winit owns AppKit/Win32
@@ -238,14 +270,21 @@ loading at that boundary without being repaired. Exit does not wait for persiste
 already in progress.
 
 The configurable API backend is shared by the recording/orchestration, offline conversion, setup,
-and prompt-lab workflows; their assembly does not rewrite endpoints or persist temporary request
-overrides. Both process entry files only delegate startup to explicit library entry points.
+and prompt-lab workflows. Their runtime assembly consumes configured prompts without rewriting
+endpoints or substituting bundled instructions. Both process entry files only delegate startup to
+explicit library entry points.
 
 See [UI architecture](ui.md) for the desktop interaction boundary. The existing listener and setup
 call chains live there intact and directly use core, audio, and platform services.
 
-Prompt-lab evaluation is a CLI-only workflow: it does not construct winit, a post-processor,
-history, or native typing. It resolves the configured backend, replaces only the consumed
-`TranscriberConfig` prompt in memory, sequentially feeds verified historical WAVs through the
-production offline chunk reader and transcriber, and writes one JSON report. Coding-agent review is
-a separate local JSON validation/rewrite step and makes no inference request.
+Prompt-lab evaluation is a CLI-only workflow: it does not construct winit, normal history, or native
+typing. It saves an isolated configuration in its existing temporary directory, prepares that copy,
+then saves any audio-prompt candidate and reloads it before constructing the production recognition
+owners, including configured HTTP cleanup. `ConfigStore::at` is crate-internal so the copy uses the
+same storage logic. Realtime literal/no-prompt candidates clear components and the retired short
+field, so every duration uses the same literal text; HTTP no-prompt continues to omit the prompt
+parameter. Baseline and candidate runs leave the main configuration and
+source memory untouched; only the private memory copy learns. Verified WAVs use the production
+recording path, and one JSON report records the actual composed prompts, retaining `stt.short_prompt`
+for a conditional short branch. This report field is separate from the retired configuration key.
+Coding-agent review is a separate local JSON validation/rewrite step and makes no inference request.

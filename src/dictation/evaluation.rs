@@ -24,14 +24,11 @@ pub(crate) struct MemorySeed {
 impl MemorySeed {
     /// Reject seeds that production would silently discard or truncate before the first request.
     pub fn validate(&self, at: u64) -> Result<()> {
-        let settings = DictationConfig {
-            memory: MemoryConfig {
-                enabled: true,
-                long_term: self.long_term.clone(),
-            },
-            ..Default::default()
-        };
-        settings.validate()?;
+        MemoryConfig {
+            enabled: true,
+            long_term: self.long_term.clone(),
+        }
+        .validate()?;
         let mut counts = HashMap::new();
         let mut origins = HashSet::new();
         for t in &self.long_term {

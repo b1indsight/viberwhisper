@@ -1274,6 +1274,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::core::config::ConfigDocument;
     use crate::prompt_lab::apply_review;
     use crate::prompt_lab::{CaptureTranscription, ProperNounAnnotation};
     use crate::transcriber::{TranscribeError, Transcriber};
@@ -1608,10 +1609,8 @@ mod tests {
         let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
         add_ready_sample(&store, 1, "使用 Codex", "Codex");
         for short in [None, Some("wrong short instructions")] {
-            let settings = crate::dictation::config::DictationConfig {
-                url: "ws://127.0.0.1:1/v1/realtime".into(),
-                ..Default::default()
-            };
+            let mut settings = ConfigDocument::default().dictation;
+            settings.url = "ws://127.0.0.1:1/v1/realtime".into();
             let mut next = request(directory.path().join("run.json"));
             next.stt.endpoint = settings.url.clone();
             next.stt.model = settings.model.clone();

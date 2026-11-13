@@ -105,7 +105,8 @@ fn service(count: usize, fail_last: bool) -> Service {
 }
 
 fn document(url: &str) -> ConfigDocument {
-    let mut document = ConfigDocument::default();
+    let mut document: ConfigDocument =
+        serde_json::from_str(include_str!("../../../config.example.json")).unwrap();
     document.inference.api.transcription.api_url = format!("{url}/stt");
     document.inference.api.transcription.model = "audio-fixture".into();
     document.transcription.prompt = Some("main audio instructions".into());
@@ -195,7 +196,8 @@ fn request(runner: &Runner, output: PathBuf) -> EvaluationRequest {
 fn ordinary_metadata_records_short_policy_but_literal_overrides_and_http_do_not() {
     // Metadata must describe the actual production candidate, not just its normal branch;
     // explicit prompt-file/no-prompt candidates must never inherit default short examples.
-    let mut document = ConfigDocument::default();
+    let mut document: ConfigDocument =
+        serde_json::from_str(include_str!("../../../config.example.json")).unwrap();
     document.post_process.enabled = false;
     document.post_process.preheat_enabled = false;
     document.dictation.enabled = true;
@@ -214,13 +216,59 @@ fn ordinary_metadata_records_short_policy_but_literal_overrides_and_http_do_not(
         assert!(runner.stt.short_prompt.is_none());
     }
     document.dictation.prompt = Some("saved literal".into());
+    let original = serde_json::to_vec(&document).unwrap();
     let runner = Runner::new(&document, None, None).unwrap();
-    assert_eq!(runner.stt.prompt.as_deref(), Some("saved literal"));
-    assert!(runner.stt.short_prompt.is_none());
+    assert_ne!(runner.stt.prompt.as_deref(), Some("saved literal"));
+    assert!(runner.stt.short_prompt.is_some());
+    let saved = ConfigStore::at(runner._directory.path().join("config.json"))
+        .load()
+        .unwrap()
+        .unwrap();
+    assert_eq!(runner.stt.prompt, Some(saved.dictation.prompt()));
+    assert_eq!(runner.stt.short_prompt, saved.dictation.short_prompt());
+    assert_eq!(serde_json::to_vec(&document).unwrap(), original);
     drop(runner);
     document.dictation.enabled = false;
     let runner = Runner::new(&document, None, None).unwrap();
     assert!(runner.stt.short_prompt.is_none());
+}
+
+#[test]
+fn no_prompt_is_saved_before_http_recognition_without_touching_canonical_config() {
+    // No-prompt is a real isolated config candidate, not a late runtime override.
+    let directory = tempfile::tempdir().unwrap();
+    let Service {
+        url,
+        requests,
+        server,
+    } = service(1, false);
+    let mut document = document(&url);
+    document.post_process.enabled = false;
+    let canonical = ConfigStore::at(directory.path().join("canonical.json"));
+    canonical.save(&document).unwrap();
+    let bytes = std::fs::read(canonical.path()).unwrap();
+    let runner = Runner::new(
+        &canonical.load().unwrap().unwrap(),
+        Some(String::new()),
+        None,
+    )
+    .unwrap();
+    assert!(runner.stt.prompt.is_none());
+    let saved = ConfigStore::at(runner._directory.path().join("config.json"))
+        .load()
+        .unwrap()
+        .unwrap();
+    assert!(saved.transcription.prompt.is_none());
+    assert_eq!(saved.dictation.prompt.as_deref(), Some(""));
+    assert!(saved.dictation.prompt_components.is_none());
+    let audio = directory.path().join("speech.wav");
+    std::fs::write(&audio, SPEECH).unwrap();
+    assert_eq!(runner.recognize(&audio), (Some(RAW.into()), None));
+    drop(runner);
+    server.join().unwrap();
+    let (_, body) = requests.recv().unwrap();
+    assert!(!String::from_utf8_lossy(&body).contains("name=\"prompt\""));
+    assert_eq!(std::fs::read(canonical.path()).unwrap(), bytes);
 }
 
 #[test]
@@ -317,6 +365,12 @@ fn ordinary_http_matches_desktop_pcm_cleanup_and_learning_except_audio_prompt() 
         .map(|(_, body)| serde_json::from_slice::<Value>(body).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(cleanup[..2], cleanup[2..]);
+    let bundled: Value =
+        serde_json::from_str(include_str!("../../../config.example.json")).unwrap();
+    assert_eq!(
+        cleanup[0]["messages"][0]["content"],
+        bundled["post_process"]["prompt"]
+    );
     let first: Value =
         serde_json::from_str(cleanup[2]["messages"][1]["content"].as_str().unwrap()).unwrap();
     let second: Value =
