@@ -1,9 +1,9 @@
 # 72 - 升级时使用新版内置提示词
 
-**阶段：** 配置更新实现已推送；live Realtime 测试夹具已修复并完成本地验证，审查及 CI 的最新状态见 PR。
+**阶段：** 001 实现及 live Realtime 测试修复已推送，macOS / Windows CI 通过；004 组件配置修订待确认，尚未修改产品或测试代码。
 **PR：** [#180（草稿）](https://github.com/b1indsight/viberwhisper/pull/180)，`feat/config-prompt-refresh` → `master`。
 
-**当前方案：** 初始计划保留为历史基线。以下 [001 修订](#001--2026-11-13--默认策略先修改配置识别不做现场覆盖)取代加载时内存重置、以 `null` 触发内置回退及校验后才更新的设计；实施与验证结果见 [002](#002--2026-11-13--完整提示词落盘与直接消费已实现)。
+**当前方案：** 初始计划与 001–003 保留为历史记录；已实现行为见 [002](#002--2026-11-13--完整提示词落盘与直接消费已实现)和 [003](#003--2026-11-13--live-realtime-测试使用完整配置)。用户要求改为单一示例配置来源、保存组件并在识别时拼接，拟按 [004 修订](#004--2026-11-13--示例配置作为默认来源识别只拼接已保存组件)替代 001 的正常/短版全文保存设计，待明确确认后实施。
 
 ## 1. 初始计划
 
@@ -149,3 +149,35 @@
 **验证与限制。** 修改前显式运行 `cargo test --locked --lib live_realtime_structured_multiturn -- --ignored --nocapture`，设置隔离本地地址，复现 `dictation.prompt is missing`。修改后临时复用仓库的本地 WebSocket fixture，在子进程运行原 live 测试，分别验证未设置模型覆盖及指定 `validation-model-override`：服务核对实际模型、空 session instructions、完整保存的 response instructions、两轮关联与清理，两个子进程均通过。临时验证代码随后删除。最终 `cargo fmt --check`、普通及 diagnostic-logs 全套测试、CI 同款全目标 Clippy 通过，默认忽略边界保持不变。[验证日志与审阅结果](https://ampcode.com/artifacts/prompt-f147db30-66c4-40a4-ac98-ec34467c1928)
 
 仅调整现有测试的数据来源，没有新增运行机制，无需新增消融；修改前失败与修改后协议验证已覆盖差异。没有连接外部模型服务、使用真实密钥或修改个人状态，不将模拟服务成功表述为真实模型质量验收。按同一 bookmark / PR 交付，推送前再次运行双路门禁；这次用户要求仅授权本修复及一次后续审查。
+
+### 004 — 2026-11-13 — 示例配置作为默认来源，识别只拼接已保存组件
+
+**要求与状态。** 用户明确要求：“配置都写在config.example.json，更新配置时，更新config.json的对应字段，识别时使用这些组件拼接，短prompt只是少用了一部分组件。”这条要求变更了 [001](#001--2026-11-13--默认策略先修改配置识别不做现场覆盖) 的保存形式：配置保存组件，识别阶段允许对已保存组件作固定顺序的纯拼接；禁止现场读取另一套默认正文或替换组件内容的约束不变。以下是待确认的实施修订，本轮仅更新计划，没有修改产品或测试代码。
+
+**单一默认配置。** `config.example.json` 成为新配置和配置更新的默认来源，构建时嵌入程序，安装后不读取仓库相对路径。示例直接维护 HTTP 的 `transcription.prompt`、LLM 的完整 `post_process.prompt` 和 Realtime 的 `dictation.prompt_components`；Realtime 的 `prompt` 保留为 `null`，不再保存一份重复的正常全文，移除示例中的 `short_prompt`。将现有组件正文移入示例后删除 `assets/dictation-prompt.default.json`、`PromptComponents::default`、Rust 中的 LLM 默认正文生成器和短版替代示例，不保留需要手工同步的第二份 prompt 默认来源。LLM 继续使用配置中的完整 system 文本，不恢复运行时包装。
+
+`ConfigDocument::new(secrets: impl SecretSource + 'static) -> Self` 改为解析嵌入的示例并绑定传入的凭证来源，不触发凭证读取。`ConfigDocument::default()` 仍委托该入口，避免新建配置与示例不同。`apply_bundled_prompts(&mut self)` 保留原接口，改为从示例默认文档复制对应 prompt 字段、清除旧全文和旧短版，不再生成最终 Realtime 文本。serde 解析旧文件所需的结构缺省不能再次调用整份示例解析，避免 `DictationConfig` 的容器级 `#[serde(default)]` 递归；这些兼容缺省不生成 prompt，也不是新配置或准备阶段补缺的默认来源。
+
+**更新只修改对应字段。** `ConfigStore::load(&self) -> Result<Option<ConfigDocument>, ConfigError>` 继续严格只读。`prepare(&self) -> Result<Option<ConfigDocument>, ConfigError>` 继续先严格解析同一份旧文件；补缺的值改为取自示例默认文档，实际覆盖 `transcription.prompt`、`post_process.prompt`、`dictation.prompt`（设为 `null`）和 `dictation.prompt_components`，删除退役的 `dictation.short_prompt` 键。显式非 prompt 设置保留，内容有变化才原子保存，然后重新加载。写失败不创建识别服务，坏 JSON、错误类型和未知字段仍不覆盖。不把整个示例直接覆盖用户配置，也不新增安装器钩子、版本标记、备份、锁或热重载。
+
+**正常与短版的组件规则。** `PromptComponents` 保留现有字段和严格解析形状。`compose(&self) -> String` 按 `task`、`language`、`numbers`、`cleanup`、`output_format`、`context`、`memory`、`examples` 的固定顺序拼接非空组件。`compose_for_segment(&self, short: bool) -> String` 在短段时仅省略 `examples`，其余组件的内容和次序不变；不添加空结果示例或任何代码中的正文。没有独立 `examples` 时两版相同，不扫描或截断其他组件中看似示例的文字。源音频严格小于 2 秒才使用短版，恰好 2 秒使用正常版，协议补零不改变判断。
+
+`DictationConfig::prompt(&self) -> String` 和 `short_prompt(&self) -> Option<String>` 保留调用接口，改为从已保存组件组合正常/短版；已有连接仍可预先组合后按段选择，不在每段补默认。保留全文字段用于旧文件解析和 lab 候选。`validate(&self) -> Result<()>` 要求全文与组件恰好有一个来源：两者都缺时提示先准备配置，两者同时存在时报来源冲突，不静默选择一项。只有全文时原样使用，短段不另外改写；显式空全文仍供 lab 无 prompt 候选使用。继续校验最终文本的 Unicode 字符长度上限。
+
+**旧短版与实验兼容。** 该 PR 尚未发布，但此前分支版本已能保存 `short_prompt`，因此不因删除字段而阻断其配置更新。将现有字段收窄为 `legacy_short_prompt: Option<String>`，以 serde `rename = "short_prompt"` 兼容读取、`skip_serializing` 禁止再次保存；它仅供准备阶段识别并清除，不作为指令来源。带有旧短版值（包括空字符串）的直接识别配置应报需先准备的错误，避免静默忽略用户保存内容。正常保存与更新后不再输出该键，其他未知字段仍严格拒绝。这只是现有字段退役，不增加通用迁移框架。
+
+lab 沿用既有隔离文件顺序：先准备副本，再将候选写入 `dictation.prompt`，同时清除组件和退役短版，保存、重载后才创建服务。无候选时使用保存组件；显式候选和空候选对所有段长使用同一全文，HTTP 空候选仍省略 multipart prompt。报告中的 `stt.short_prompt` 继续记录实际组合结果，该报告字段与退役的配置字段是不同接口，不随配置字段一起删除。主配置和源记忆保持不变。
+
+**取舍与影响。** 不采用继续保存两份全文、维护重复 asset 或运行时替换短示例的方案；不新增可配置组件选择列表。相比 001，正常 Realtime 和完整 LLM / HTTP 文本应逐字保持，短版有一项有意变更：只省略全部独立示例，不再附加空结果示例。示例的其他值也成为新安装默认值，例如当前 `audio.mic_gain` 为 `3.0`，已有显式增益不变。旧版 LLM 会重新包装完整 system 文本，降级仍应配套旧配置；不承诺本次变更提高真实模型识别质量。
+
+**实施顺序与模块。** 确认后先扩展现有配置升级和本地 WebSocket 测试，观察当前实现不能满足组件落盘与短版纯省略；随后修改 `config.example.json`、`src/core/config/document.rs` / `store.rs`、`src/dictation/config.rs`、`src/prompt_lab/production.rs` 及相应 setup / 识别测试，移除冗余资源。保留桌面、setup、convert 的准备入口和取消边界。同步配置、Realtime、core/dictation/postprocess/prompt-lab 架构文档、CLI / UI 的关联描述、changelog 和本 feature record；仍在原 bookmark / PR 交付，代码推送前运行同一双路审查门禁。
+
+**待执行的验证与消融。** 使用现有测试文件覆盖用户可观察的契约，不按每个 helper 增加重复测试：
+
+- 从旧全文、空值、缺字段、旧组件和上一轮正常/短版文件准备配置，实际磁盘 prompt 字段与示例一致、旧短版键消失，非 prompt 设置逐项保持；第二次准备的字节和修改时间不变。错误类型、非法 JSON、未知字段和写失败不改变安全边界。
+- 用各组件不同的诊断文本作独立期望，验证正常固定次序、短版仅省略 `examples`；空/缺少示例时两版相同，其他组件中的示例状文字保留。直接用非默认组件构造识别服务，核对真实本地 WebSocket 请求没有默认回退或额外正文。
+- 复用 47,999 / 48,000 / 48,001 样本、补零短尾和同连接多轮 fixture，核对请求恰好等于保存组件的对应拼接结果，排除阈值及会话串用错误。
+- HTTP 和完整 LLM 请求逐字匹配示例落盘值；新配置与示例一致，缺配置 / setup 拒绝和取消、只读检查与普通字段更新不回归。隔离 lab 候选能覆盖全部段长，元数据、主配置和源记忆边界不变。
+- 临时恢复当前硬编码短例子时，同一个短版测试必须失败；临时略过组件落盘或保留 lab 组件时，对应升级或来源冲突测试必须失败。恢复后重跑 fmt、普通 / diagnostic-logs 测试、CI 同款 Clippy 和文档链接 / JSON 检查。
+
+上述产品检查尚未执行。修订草拟经本地 Claude Opus 5.5 无工具咨询，已核对其模型及空工具列表；不采纳“拒绝分支内旧短版文件”和删除全文键的建议，以保留更新路径及稳定的可空字段形状。咨询不构成执行验证。此前 [be36aab 的 macOS / Windows CI](https://github.com/b1indsight/viberwhisper/actions/runs/43450252609) 已全部通过，仅覆盖 001–003 的实现，不能用作本修订的通过证据。
