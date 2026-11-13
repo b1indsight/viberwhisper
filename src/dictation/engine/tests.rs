@@ -17,91 +17,98 @@ async fn segment_source_duration_selects_examples_without_session_leakage_or_pad
     use futures_util::StreamExt;
     // One connection must switch back to normal at exactly 2 s. The tiny tail
     // is padded for the protocol, but its source length still selects short.
-    let lengths = [48_001, 47_999, 48_000, 511, 48_001];
-    let (listener, settings) = listen().await;
-    let normal = settings.prompt();
-    let short = settings.short_prompt().unwrap();
-    assert_ne!(normal, short);
-    let server = tokio::spawn(async move {
-        let mut socket = accept(&listener).await;
-        let session = expect_event(&mut socket, "session.update").await;
-        assert_eq!(session["session"]["instructions"], "");
-        send_json(&mut socket, json!({"type":"session.updated"})).await;
-        for (index, length) in lengths.into_iter().enumerate() {
-            let audio = format!("audio-{index}");
-            declare_prefix(&mut socket, &format!("prefix-{audio}")).await;
-            let mut uploaded = 0;
-            loop {
-                let message = socket.next().await.unwrap().unwrap();
-                let event: serde_json::Value =
-                    serde_json::from_str(message.to_text().unwrap()).unwrap();
-                if event["type"] == "input_audio_buffer.commit" {
-                    break;
-                }
-                assert_eq!(event["type"], "input_audio_buffer.append");
-                uploaded += STANDARD
-                    .decode(event["audio"].as_str().unwrap())
-                    .unwrap()
-                    .len()
-                    / 2;
-            }
-            assert_eq!(uploaded, length.max(2400));
-            send_json(
-                &mut socket,
-                json!({"type":"input_audio_buffer.committed","item_id":audio}),
-            )
-            .await;
-            let request = expect_event(&mut socket, "response.create").await;
-            assert_eq!(
-                request["response"]["instructions"],
-                if length < 48_000 {
-                    short.as_str()
-                } else {
-                    normal.as_str()
-                }
-            );
-            complete_response(
-                &mut socket,
-                &request,
-                &format!("r-{index}"),
-                r#"{"text":"测试","context":"未知语境","memory_candidates":[]}"#,
-            )
-            .await;
-            delete_segment(&mut socket, &audio).await;
+    for diagnostic in [false, true] {
+        let lengths = [48_001, 47_999, 48_000, 511, 48_001];
+        let (listener, mut settings) = listen().await;
+        if diagnostic {
+            // Direct consumers must send saved non-default instructions literally too.
+            settings.prompt = Some("  diagnostic normal\n".into());
+            settings.short_prompt = Some("diagnostic short {literal}".into());
         }
-    });
-    let mut connection = Connection::connect(&settings, None).await.unwrap();
-    let wav = WavChunk::from_encoded_bytes(
-        include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-    );
-    let (rate, speech) = crate::audio::decode_mono(&wav).unwrap();
-    let voice = PcmResampler::new(rate, 24_000)
-        .unwrap()
-        .push(&speech, true)
-        .unwrap();
-    let mut memory = Memory::frozen(Default::default());
-    for length in lengths {
-        let pcm: Vec<_> = if length < 768 {
-            vec![1_000; length]
-        } else {
-            voice.iter().copied().cycle().take(length).collect()
-        };
-        let mut recording = Recording::new(Segmentation::Fixed);
-        recording
-            .push(
-                &mut connection,
-                &mut memory,
-                &crate::audio::chunk::encode_i16_wav(&pcm, 24_000).unwrap(),
-            )
-            .await
+        let normal = settings.prompt();
+        let short = settings.short_prompt().unwrap();
+        assert_ne!(normal, short);
+        let server = tokio::spawn(async move {
+            let mut socket = accept(&listener).await;
+            let session = expect_event(&mut socket, "session.update").await;
+            assert_eq!(session["session"]["instructions"], "");
+            send_json(&mut socket, json!({"type":"session.updated"})).await;
+            for (index, length) in lengths.into_iter().enumerate() {
+                let audio = format!("audio-{index}");
+                declare_prefix(&mut socket, &format!("prefix-{audio}")).await;
+                let mut uploaded = 0;
+                loop {
+                    let message = socket.next().await.unwrap().unwrap();
+                    let event: serde_json::Value =
+                        serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    if event["type"] == "input_audio_buffer.commit" {
+                        break;
+                    }
+                    assert_eq!(event["type"], "input_audio_buffer.append");
+                    uploaded += STANDARD
+                        .decode(event["audio"].as_str().unwrap())
+                        .unwrap()
+                        .len()
+                        / 2;
+                }
+                assert_eq!(uploaded, length.max(2400));
+                send_json(
+                    &mut socket,
+                    json!({"type":"input_audio_buffer.committed","item_id":audio}),
+                )
+                .await;
+                let request = expect_event(&mut socket, "response.create").await;
+                assert_eq!(
+                    request["response"]["instructions"],
+                    if length < 48_000 {
+                        short.as_str()
+                    } else {
+                        normal.as_str()
+                    }
+                );
+                complete_response(
+                    &mut socket,
+                    &request,
+                    &format!("r-{index}"),
+                    r#"{"text":"测试","context":"未知语境","memory_candidates":[]}"#,
+                )
+                .await;
+                delete_segment(&mut socket, &audio).await;
+            }
+        });
+        let mut connection = Connection::connect(&settings, None).await.unwrap();
+        let wav = WavChunk::from_encoded_bytes(
+            include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
+        );
+        let (rate, speech) = crate::audio::decode_mono(&wav).unwrap();
+        let voice = PcmResampler::new(rate, 24_000)
+            .unwrap()
+            .push(&speech, true)
             .unwrap();
-        recording
-            .finish(&mut connection, &mut memory)
-            .await
-            .unwrap();
-        assert_eq!(recording.text(None), "测试");
+        let mut memory = Memory::frozen(Default::default());
+        for length in lengths {
+            let pcm: Vec<_> = if length < 768 {
+                vec![1_000; length]
+            } else {
+                voice.iter().copied().cycle().take(length).collect()
+            };
+            let mut recording = Recording::new(Segmentation::Fixed);
+            recording
+                .push(
+                    &mut connection,
+                    &mut memory,
+                    &crate::audio::chunk::encode_i16_wav(&pcm, 24_000).unwrap(),
+                )
+                .await
+                .unwrap();
+            recording
+                .finish(&mut connection, &mut memory)
+                .await
+                .unwrap();
+            assert_eq!(recording.text(None), "测试");
+        }
+        server.await.unwrap();
     }
-    server.await.unwrap();
 }
 
 #[tokio::test]

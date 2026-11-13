@@ -14,7 +14,7 @@ pub struct LlmConfig {
     endpoint: reqwest::Url,
     auth: ApiAuth,
     model: String,
-    prompt: Option<String>,
+    prompt: String,
     temperature: f32,
     preheat_enabled: bool,
 }
@@ -51,7 +51,9 @@ impl PostProcessConfig {
                     model: model.context(
                         "inference.api.post_process.model is required when cleanup is enabled",
                     )?,
-                    prompt,
+                    prompt: prompt.context(
+                        "post_process.prompt is missing; prepare the configuration before cleanup",
+                    )?,
                     temperature,
                     preheat_enabled,
                 }))
@@ -195,6 +197,25 @@ mod tests {
         let result = p.process_for_delivery("hello world").unwrap();
         assert_eq!(result.text, "hello world");
         assert!(result.confirmation.is_none());
+    }
+
+    #[test]
+    fn enabled_cleanup_requires_a_complete_saved_prompt() {
+        let mut document = ConfigDocument::default();
+        document.post_process.enabled = true;
+        document.inference.api.post_process.api_url = Some("http://127.0.0.1:1/cleanup".into());
+        document.inference.api.post_process.model = Some("fixture".into());
+        assert!(
+            PostProcessConfig::from_config(&document)
+                .unwrap_err()
+                .to_string()
+                .contains("post_process.prompt")
+        );
+        document.post_process.prompt = Some(String::new());
+        assert!(matches!(
+            PostProcessConfig::from_config(&document),
+            Ok(PostProcessConfig::Llm(_))
+        ));
     }
 
     #[test]

@@ -5,7 +5,9 @@
 Prompt lab builds a reusable, human-corrected audio dataset. Ordinary evaluation uses desktop
 recognition and scores its pre-edit final text, including configured cleanup and local corrections.
 It does not write normal `history.jsonl`, inject text, call a Judge service, or persist a candidate
-prompt into application configuration. One prompt-lab process owns a dataset at a time.
+prompt into the main application configuration. Baseline and candidate runs use an isolated saved
+configuration and private memory; the source configuration and memory remain read-only.
+One prompt-lab process owns a dataset at a time.
 
 ## Modules
 
@@ -21,8 +23,9 @@ src/prompt_lab/
 src/core/prompt_lab.rs — CLI/config/backend assembly
 ```
 
-The domain modules contain no winit or native platform types. Ordinary evaluation resolves
-`ListenerConfig`, constructs the same `SessionOrchestrator` and `PostProcessor` as desktop, and calls
+The domain modules contain no winit or native platform types. Ordinary evaluation prepares and
+reloads its isolated configuration before resolving `ListenerConfig`, constructs the same
+`SessionOrchestrator` and `PostProcessor` as desktop, and calls
 their shared `core::recognition::finish_transcription`. Desktop's backend and cleanup selection,
 protocol, short-tail padding, failure fallback and confirmation behavior are unchanged.
 
@@ -66,16 +69,27 @@ one scoreable reference token, and one expected proper-noun occurrence are requi
 The evaluation request's STT snapshot owns the language used for both HTTP chunk merging and
 Realtime segment merging, as well as the language persisted in the report.
 
-The selected audio recognizer receives an in-memory prompt override. Realtime evaluates the full
-integrated task instructions; `--prompt-file` replaces them and `--no-prompt` sends empty instructions.
-HTTP overrides only its audio prompt, leaving configured text cleanup unchanged. Candidates do not
-modify application configuration. Reports store the actual audio prompt.
-Realtime resolves the fixed-order `dictation.prompt_components` object, or the embedded JSON
-default components, through the same configuration-owned composition used by live requests.
-Full-string and no-prompt evaluation overrides clear the cloned component selection, so a saved
-component object cannot conflict with an invocation-scoped full override. Reports and prompt
-digests describe the actual composed or overridden instructions, never just one component.
-Conditional Realtime defaults also record `stt.short_prompt`. Their prompt digest hashes JSON
+Before runtime assembly, evaluation saves an isolated configuration in its existing temporary
+directory and runs the same `ConfigStore::prepare` operation on that copy. The store strictly parses
+old fields, materializes current full bundled prompts and optional Realtime defaults, atomically
+saves changes, then reloads. `ConfigStore::at` is crate-internal so lab reuses the production storage
+boundary. Baseline preparation never writes the main configuration.
+
+`--prompt-file` writes the full audio candidate into the prepared copy; `--no-prompt` clears its
+audio prompt. Realtime candidates also clear `dictation.short_prompt`, so every duration uses the
+same literal candidate; no-prompt sends empty instructions. HTTP no-prompt retains omission of the
+multipart prompt parameter. HTTP candidates affect only the audio prompt, leaving the prepared full
+LLM system text unchanged. Candidate changes are saved and reloaded before settings or services are
+constructed, without another preparation pass that would replace them. No override is applied to an
+already constructed transcriber or Realtime settings object. Persistent prompt customization is
+paused outside these isolated experiments.
+
+Realtime reads full `dictation.prompt` and optional `dictation.short_prompt` text from that saved
+configuration. `prompt_components` is only a strict old-file compatibility field, set to null during
+preparation, and never selects runtime instructions. Recognition does not compose defaults, replace
+examples or wrap the LLM prompt. Missing required prompt configuration is a validation error.
+Reports and prompt digests describe the actual saved audio instructions.
+Conditional Realtime prompts also record `stt.short_prompt`. Their prompt digest hashes JSON
 containing the normal prompt, short prompt and `source-duration-lt-2s-v1`; literal overrides and
 legacy reports without a short branch retain the single-prompt digest. Selection uses each
 production segment's source duration, including pauses and excluding protocol padding.
@@ -93,7 +107,8 @@ is read-only; disabled or unused memory is not read. One set of production owner
 clocks serves all samples in stable ID order. Successful nonempty finals are confirmed unchanged in
 the private copy, simulating Enter; the serial owners handle feedback before their next job.
 References remain scoring-only and never enter recognition or feedback. No native preview or real
-delivery is performed. Existing `convert`, setup verification and raw capture keep their behavior.
+delivery is performed. `convert`, setup verification and raw capture retain their separate execution
+boundaries; lab preparation and candidates do not change their configuration.
 
 ## Realtime Context and Memory Scenarios
 
@@ -205,7 +220,7 @@ The scoring policy is versioned as `stt-prompt-scoring-v2`:
 A successful ordinary run writes schema-3 JSON with `execution.policy=desktop-recognition-reference-text-v1`
 for Realtime's natural-language references, or `desktop-recognition-short-audio-v1` for HTTP,
 credential-free saved-settings and normalized-initial-memory hashes, and the existing scoring fields.
-Only the candidate audio prompt is excluded from the saved-settings hash. This conservatively
+Only the candidate audio-prompt fields are excluded from the saved-settings hash. This conservatively
 requires other saved settings to match, including settings unused by a selected backend. It adds
 no worker clocks, acknowledgment protocol, stage traces or Memory replay. Historical schema-1/2
 reports remain readable, including `desktop-recognition-v1`; they cannot serve as a baseline for

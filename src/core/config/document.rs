@@ -35,6 +35,18 @@ impl Default for ConfigDocument {
 }
 
 impl ConfigDocument {
+    /// Writes complete version-owned instructions into a configuration candidate.
+    /// Recognition consumes these values without consulting the bundled rules again.
+    pub(crate) fn apply_bundled_prompts(&mut self) {
+        let rules = crate::dictation::config::PromptComponents::default();
+        self.transcription.prompt = TranscriptionSection::default().prompt;
+        self.post_process.prompt =
+            Some(crate::dictation::config::PromptComponents::postprocess_prompt());
+        self.dictation.prompt = Some(rules.compose());
+        self.dictation.short_prompt = Some(rules.compose_for_segment(true));
+        self.dictation.prompt_components = None;
+    }
+
     pub(crate) fn dictation_key(&self) -> Option<super::SecretValue> {
         if self.dictation.api_key_env.is_empty() {
             return None;

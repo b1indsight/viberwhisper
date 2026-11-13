@@ -374,13 +374,8 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
         }
     });
     let settings = crate::dictation::config::DictationConfig {
-        prompt_components: Some(
-            serde_json::from_value(json!({
-                "task": PROMPT, "language": "", "numbers": "", "cleanup": "",
-                "output_format": "", "context": "", "memory": ""
-            }))
-            .unwrap(),
-        ),
+        prompt: Some(PROMPT.into()),
+        short_prompt: None,
         ..settings
     };
     let engine =

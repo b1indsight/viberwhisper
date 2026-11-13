@@ -35,9 +35,11 @@ pub(super) async fn expect_event(socket: &mut WebSocketStream<TcpStream>, kind: 
 /// Bind an isolated local service and point the client configuration at it.
 pub(super) async fn listen() -> (TcpListener, DictationConfig) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let document: crate::core::config::ConfigDocument =
+        serde_json::from_str(include_str!("../../config.example.json")).unwrap();
     let settings = DictationConfig {
         url: format!("ws://{}/v1/realtime", listener.local_addr().unwrap()),
-        ..Default::default()
+        ..document.dictation
     };
     (listener, settings)
 }

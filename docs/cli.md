@@ -28,7 +28,9 @@ viberwhisper
 viberwhisper setup
 ```
 
-监听启动时若配置缺失、不可读或无效，会进入配置向导。配置和离线转写命令不启动托盘或录音监听。
+监听启动时若配置缺失、无法解析或无效，会进入配置向导；拒绝时退出，不启动未保存默认监听器。
+已有可解析配置先更新并保存当前版本的完整提示词，再重新读取；读取或保存的 I/O 错误会中止启动。
+配置和离线转写命令不启动托盘或录音监听。
 在终端启动的监听可用 Ctrl+C 退出，也可从托盘右键菜单退出。
 
 ## 配置命令
@@ -46,9 +48,10 @@ viberwhisper config check
 `set` 只接受[字段表](configuration.md)中的 canonical dotted key，保存前检查类型；跨字段和平台支持情况由 `check` 或实际启动验证。
 `check` 构建并检查当前桌面配置，不录音、不发起 API 验证请求；需要实际语音验证时用 `setup`。
 
-`schema_version` 和 API secret 字段只读，密钥可通过向导或[环境变量](configuration.md#配置文件与首次设置)配置。
+`schema_version`、API secret 字段、`transcription.prompt` 和 `post_process.prompt` 只读，密钥可通过向导或[环境变量](configuration.md#配置文件与首次设置)配置。
 `setup` 提供普通识别 / Realtime 二选一，并配置所选路径的连接。Realtime 鉴权只填写环境变量名，不录入密钥值。
-`dictation.*` 不属于 `list/get/set` 的字段目录；提示词、组件和记忆等高级字段仍通过配置文件编辑，向导保留已有值。
+`dictation.*` 不属于 `list/get/set` 的字段目录；连接和记忆等高级字段仍通过配置文件编辑，向导保留已有值。
+提示词自定义暂时关闭：下次桌面启动或普通转换会将手改值实际替换为新版默认全文；`path/get/list/check` 只读，不更新提示词。
 修改后需重新启动已运行的应用。
 
 ## 离线 WAV 转写
@@ -62,6 +65,7 @@ viberwhisper convert input.wav --output output.txt
 ```
 
 使用当前配置选择的识别路径：默认 HTTP STT，若启用 `dictation.enabled` 则使用 Realtime。
+转换前先准备、保存并重新读取配置；缺少配置时要求先运行 `setup`，写入失败不继续识别。
 HTTP 路径按 `post_process.enabled` 决定是否整理文字；失败时回退原始 STT。Realtime 不再调用第二个后处理服务。
 长 WAV 自动分段，静音分段会在请求前过滤。语言相关的分段拼接规则由 `transcription.language` 决定。
 

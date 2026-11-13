@@ -4,13 +4,13 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::{SttSnapshot, dataset::sha256_bytes};
 use crate::{
     core::{
-        config::ConfigDocument,
+        config::{ConfigDocument, ConfigStore},
         listener::ListenerConfig,
         orchestrator::{SessionError, SessionOrchestrator},
         recognition::{RecognitionConfig, finish_transcription},
@@ -58,43 +58,38 @@ pub(crate) struct Runner {
     _directory: tempfile::TempDir,
 }
 
+/// Prepare and persist an isolated lab candidate before any recognition service is built.
+/// Both production evaluation and frozen-clock diagnostics use the same config boundary.
+pub(crate) fn prepare_config(
+    directory: &Path,
+    document: &ConfigDocument,
+    prompt: Option<String>,
+) -> Result<ConfigDocument> {
+    let store = ConfigStore::at(directory.join("config.json"));
+    store.save(document)?;
+    let mut candidate = store
+        .prepare()?
+        .context("missing isolated lab configuration")?;
+    if let Some(prompt) = prompt {
+        candidate.transcription.prompt = (!prompt.is_empty()).then(|| prompt.clone());
+        candidate.dictation.prompt = Some(prompt);
+        candidate.dictation.short_prompt = None;
+        store.save(&candidate)?;
+    }
+    store.load()?.context("missing isolated lab candidate")
+}
+
 impl Runner {
     pub fn new(
         document: &ConfigDocument,
         prompt: Option<String>,
         source_memory: Option<PathBuf>,
     ) -> Result<Self> {
-        // This is the same configuration gate used by desktop, including Realtime's
-        // existing cleanup suppression. Validate saved settings before the candidate.
-        let config = ListenerConfig::from_config(document)?;
-        let recognition = match config.recording.recognition {
-            RecognitionConfig::Http {
-                transcriber,
-                orchestrator,
-            } => RecognitionConfig::Http {
-                transcriber: match prompt {
-                    Some(prompt) => transcriber.with_prompt((!prompt.is_empty()).then_some(prompt)),
-                    None => transcriber,
-                },
-                orchestrator,
-            },
-            RecognitionConfig::Realtime {
-                mut settings,
-                key,
-                language,
-            } => {
-                if let Some(prompt) = prompt {
-                    settings.prompt = Some(prompt);
-                    settings.prompt_components = None;
-                    settings.validate()?;
-                }
-                RecognitionConfig::Realtime {
-                    settings,
-                    key,
-                    language,
-                }
-            }
-        };
+        let directory = tempfile::tempdir()?;
+        let document = prepare_config(directory.path(), document, prompt)?;
+        // This is desktop's configuration gate, including Realtime cleanup suppression.
+        let config = ListenerConfig::from_config(&document)?;
+        let recognition = config.recording.recognition;
         let stt = match &recognition {
             RecognitionConfig::Http { transcriber, .. } => transcriber.metadata().into(),
             RecognitionConfig::Realtime {
@@ -109,7 +104,6 @@ impl Runner {
                 input_layout: Some(crate::dictation::INPUT_LAYOUT.into()),
             },
         };
-        let directory = tempfile::tempdir()?;
         let memory = directory.path().join("dictation-memory.json");
         let owns_memory =
             recognition.is_realtime() || matches!(&config.post_process, PostProcessConfig::Llm(_));
@@ -126,6 +120,7 @@ impl Runner {
         settings.set_post_process_api_key(None);
         settings.transcription.prompt = None;
         settings.dictation.prompt = None;
+        settings.dictation.short_prompt = None;
         settings.dictation.prompt_components = None;
         let identity = Identity {
             policy: if recognition.is_realtime() {

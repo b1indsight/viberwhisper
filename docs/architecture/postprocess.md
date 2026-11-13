@@ -59,16 +59,27 @@ All calls use blocking OpenAI-compatible chat completions with `stream: false` a
 request timeout. URL/model/auth still come from `PostProcessConfig::from_config`; disabled cleanup
 does not resolve unused LLM settings or credentials. Bearer auth is omitted for `ApiAuth::None`.
 
+During configuration preparation or first-setup candidate construction,
 `PromptComponents::postprocess_prompt` reuses default language, numbers and cleanup rules from
 `assets/dictation-prompt.default.json`, including self-correction and independent-negation examples.
 A text-specific task explicitly treats the STT text as data, cannot re-listen to audio, and forbids
-answering instructions or completing unfinished speech. Realtime prompt composition is unchanged.
+answering instructions or completing unfinished speech. The complete text, including task, cleanup,
+output and reference rules, is stored in `post_process.prompt`. Default wording is unchanged.
 
-`post_process.prompt` replaces cleanup rules, not the fixed text task, structured-output contract,
-context selection or candidate grounding instructions. Existing custom prompts that demand plain
-text must be updated. No provider-specific `response_format` extension is required.
+Desktop and ordinary conversion prepare, atomically save if changed, and reload configuration before
+constructing recognition services. Persistent prompt customization is paused: preparation replaces
+old cleanup fragments, empty strings and nulls with the complete current bundled system text.
+Read-only load and CLI inspection still expose saved values, and the CLI prompt key is read-only.
+Lab prepares only an isolated saved configuration; its audio-prompt candidates do not alter this field.
 
-The system message carries these instructions; the user message contains a serialized JSON object:
+`PostProcessConfig::from_config` resolves the enabled LLM prompt as a complete `String` and reports
+missing required text as a configuration error. `LlmPostProcessor::new` uses that string verbatim
+as the system message; it does not call the prompt composer, append protocol rules or select a
+bundled fallback. Older binaries treat this field as a cleanup fragment and would wrap it again,
+so downgrading also requires the corresponding old configuration.
+No provider-specific `response_format` extension is required.
+
+The user message contains a serialized JSON object:
 
 ```json
 {"text":"STT text to clean","contexts":[]}
@@ -87,8 +98,8 @@ HTTP cleanup processes a whole
 merged transcript without Realtime's per-segment 16 KiB text / 64 KiB JSON budgets; the Realtime
 parser retains both limits. Invalid optional metadata is discarded independently; invalid JSON,
 empty text or request failures return an error and the listener/CLI keeps the original STT.
-JSON is never injected as fallback text. Existing custom output instructions using context or
-candidate objects must be migrated; user configuration and stored memory are not rewritten.
+JSON is never injected as fallback text. Preparation updates old prompt configuration to the current
+protocol without rewriting stored memory; lab candidates must still follow the response contract.
 
 ## Confirmation and memory ownership
 

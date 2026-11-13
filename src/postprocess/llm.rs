@@ -1,9 +1,7 @@
 use crate::core::config::ApiAuth;
 #[cfg(feature = "diagnostic-logs")]
 use crate::core::logging;
-use crate::dictation::{
-    DictationResult, LearningWorker, Snapshot, Transcript, config::PromptComponents,
-};
+use crate::dictation::{DictationResult, LearningWorker, Snapshot, Transcript};
 use crate::postprocess::{LlmConfig, PostProcessError};
 use reqwest::blocking::Client;
 use std::sync::{Arc, Condvar, Mutex};
@@ -39,7 +37,7 @@ impl LlmPostProcessor {
                 auth: config.auth,
                 api_url: config.endpoint,
                 model: config.model,
-                prompt: PromptComponents::postprocess_prompt(config.prompt.as_deref()),
+                prompt: config.prompt,
                 temperature: config.temperature,
                 client: Client::builder().timeout(LLM_REQUEST_TIMEOUT).build()?,
                 snapshot: Snapshot::default(),
@@ -364,7 +362,11 @@ mod tests {
             auth: ApiAuth::Bearer(SecretValue::new("test_key")),
             model: "gpt-4o-mini".to_string(),
             preheat_enabled,
-            prompt: prompt.map(str::to_string),
+            prompt: prompt.map(str::to_string).unwrap_or_else(|| {
+                let document: crate::core::config::ConfigDocument =
+                    serde_json::from_str(include_str!("../../config.example.json")).unwrap();
+                document.post_process.prompt.unwrap()
+            }),
             temperature: 0.0,
         }
     }
@@ -400,15 +402,12 @@ mod tests {
             p.request.api_url.as_str(),
             "https://api.example.com/v1/chat/completions"
         );
-        assert_eq!(p.request.prompt, PromptComponents::postprocess_prompt(None));
+        assert_eq!(p.request.prompt, config_with_postprocess(true, None).prompt);
         assert!(p.preheat_enabled);
 
         let custom =
             LlmPostProcessor::new(config_with_postprocess(false, Some("custom prompt"))).unwrap();
-        assert_eq!(
-            custom.request.prompt,
-            PromptComponents::postprocess_prompt(Some("custom prompt"))
-        );
+        assert_eq!(custom.request.prompt, "custom prompt");
         assert!(!custom.preheat_enabled);
     }
 
@@ -420,12 +419,16 @@ mod tests {
         let (log, dispatch) = logging::test_support::capture();
         #[cfg(feature = "diagnostic-logs")]
         let _guard = tracing::dispatcher::set_default(&dispatch);
-        let (endpoint, _requests) = stub(vec![json!({"text":"clean"}).to_string()]);
-        let mut config = config_with_postprocess(true, None);
+        let (endpoint, requests) = stub(vec![json!({"text":"clean"}).to_string()]);
+        let mut config = config_with_postprocess(true, Some("  diagnostic full system\n"));
         config.endpoint = endpoint;
         let processor = PostProcessor::new(PostProcessConfig::Llm(config));
 
         assert_eq!(processor.process_text("raw").unwrap(), "clean");
+        assert_eq!(
+            requests.recv().unwrap().body["messages"][0]["content"],
+            "  diagnostic full system\n"
+        );
         #[cfg(feature = "diagnostic-logs")]
         assert!(log.as_file().metadata().unwrap().len() > 0);
     }
@@ -641,8 +644,7 @@ mod tests {
                 serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
             assert_eq!(input["contexts"], json!([]));
             let prompt = request["messages"][0]["content"].as_str().unwrap();
-            assert!(prompt.contains("保留换行"));
-            assert!(prompt.contains("memory_candidates"));
+            assert_eq!(prompt, "保留换行");
         }
     }
 }

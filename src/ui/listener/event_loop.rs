@@ -1058,6 +1058,7 @@ mod tests {
             response("项目"),
         ]);
         let mut document = ConfigDocument::default();
+        document.apply_bundled_prompts();
         document.dictation.url = "unused invalid Realtime URL".into();
         document.post_process.enabled = true;
         document.post_process.preheat_enabled = false;

@@ -13,25 +13,29 @@ viberwhisper config path
 - macOS：`~/Library/Application Support/com.b1indsight.viberwhisper/config.json`
 - Windows：`%APPDATA%\ViberWhisper\config.json`
 
-正常监听启动时，如果配置文件不存在、无法读取或不能通过运行时校验，程序会显示跨平台的首次配置向导。
+正常监听启动时，如果配置文件不存在、无法解析或不能通过运行时校验，程序会显示跨平台的首次配置向导；读取文件的 I/O 错误会中止启动。
+已有可解析配置会先完成[内置提示词更新](#内置提示词与升级)，保存并重新读取后才创建识别服务；写入失败会中止启动。
 向导首先选择识别方式，默认当前配置：`1` 为普通识别（HTTP STT，可选 LLM 整理），`2` 为 Realtime。
 普通识别收集 STT 和可选 LLM 的连接与密钥；Realtime 只收集 WebSocket 地址、模型和鉴权环境变量名，
 环境变量名留空表示不鉴权，不能在这里填密钥值。另一条路径的配置保留，不会被询问或重置。
 随后设置热键和麦克风，并可录制一段真实语音验证转写。热键步骤先显示当前值；
 需要修改时依次记录 Hold 和 Toggle 按键，最终确认后才应用。验证录音也使用这两个候选热键的正常语义，
-验证确认窗口会说明关闭后如何说“测试”并结束录音，不通过对话框点击开始或停止。完成向导后才会原子
-写入 `config.json`。输入步骤取消、最终拒绝保存或保存前发生 UI 错误时，不创建或覆盖文件。
-选择跳过只会让本次启动使用内置默认值，不创建或覆盖文件。以后可随时重新运行：
+验证确认窗口会说明关闭后如何说“测试”并结束录音，不通过对话框点击开始或停止。首次设置先在候选配置中
+填入完整默认提示词，再用该候选配置验证；最终确认后才原子写入 `config.json`，重新读取后进入正常监听。
+输入步骤取消、最终拒绝保存或保存前发生 UI 错误时，向导不追加保存；之前准备阶段已经落盘的更新不回滚。
+没有有效配置时拒绝设置会直接退出，不运行未保存的默认监听器，也不覆盖无法解析的文件。以后可随时重新运行：
 
 ```bash
 viberwhisper setup
 ```
 
 重新设置时，LLM 开关默认沿用当前值；麦克风暂时断开或枚举失败时默认保留原设备设置，可明确改选系统默认或其他设备。
-向导不编辑提示词、提示词组件、温度、预热、记忆开关或长期词表，也不增加语言和增益页面；这些已有值和自定义内容保持原样。
+向导不提供提示词或组件编辑页，也不增加温度、预热、记忆、词表、语言和增益页面；这些非 prompt 设置保持原样。
+已有有效配置的 prompt 更新在向导编辑之前完成，切换识别方式不会再次修改提示词。
 
 也可将 [`config.example.json`](../config.example.json) 复制到上述路径，或使用 `config set` 修改普通字段。
-已有文件必须包含 `schema_version: 3` 和当前结构；`audio.input_device` 缺失时使用系统默认设备，`dictation` 及其可选字段缺失时使用内置默认值。
+已有文件必须包含 `schema_version: 3` 和当前结构；`audio.input_device` 缺失时使用系统默认设备，缺失的 Realtime 可缺省字段在准备阶段补齐并保存。
+只读加载不补写 prompt；服务所需的 prompt 缺失会使配置验证报错。
 必需字段缺失、未知字段、损坏 JSON 或 schema 版本错误会进入恢复向导。已退役的 `chunking`、`session`
 和 `inference.api.provider` 均视为未知字段。由 v2 升级时，把 `schema_version` 改为 `3`，并删除
 `inference.active` 与整个 `inference.local` 对象；原 Local 用户还需要填写可用的 API endpoint 和模型。
@@ -58,12 +62,35 @@ secret key 也不能通过 `config set` 修改。向导密码框输入的密钥�
 
 - `viberwhisper setup`：选择普通识别或 Realtime，设置所选连接、热键和麦克风，并可验证录音。
 - `viberwhisper config set <key> <value>`：修改下表中的普通字段。只做类型解析和保存，修改后用 `viberwhisper config check` 检查组合配置。
-- 手动编辑 `viberwhisper config path` 指向的文件：包括 Realtime 提示词、组件和记忆等高级字段。`config list/get/set` 仍不提供 `dictation.*` 键。
+- 手动编辑 `viberwhisper config path` 指向的文件：修改 Realtime 连接、记忆和长期词表等高级字段。提示词自定义暂时关闭，`config list/get/set` 仍不提供 `dictation.*` 键。
 
 修改配置或环境变量后重新启动桌面应用。图形入口需要从它实际继承的环境中取得变量；普通识别也可直接在向导密码框中输入密钥，Realtime 仅使用环境变量。
 
 CLI 只接受下表中的 canonical dotted key；`hotkey`、`model`、`local_mode` 等旧别名不再支持。
 可空字段使用字面值 `null` 清空，例如 `viberwhisper config set audio.input_device null`。
+
+## 内置提示词与升级
+
+安装器不修改用户配置。安装新版后，首次运行桌面应用或普通 `convert` 时，`ConfigStore::prepare`
+先严格读取旧配置，写入当前版本的完整内置提示词并补齐可缺省的 Realtime 字段；实际内容有变化时原子保存，
+然后重新读取，才创建识别服务。再次准备且内容相同就不重写。缺少整个 `dictation` 时补入的 `enabled` 仍为 `false`。
+连接、模型、磁盘密钥、鉴权环境变量名、音频、热键、温度、开关、记忆和长期词表等其余设置保留。
+
+保存的提示词包括 HTTP 的 `transcription.prompt`、LLM 的 `post_process.prompt`、Realtime 的
+`dictation.prompt` 和 `dictation.short_prompt`。LLM 字段保存包含任务、整理、输出和参考规则的完整 system 文本；
+Realtime 保存正常和短音频两个完整版本。`dictation.prompt_components` 只用于解析旧文件，准备时置为 `null`，
+不参与识别选择。默认措辞和短段阈值不变；运行时只读取配置，不补内置默认、拼接组件或重新包装 LLM 提示词。
+
+提示词自定义暂时关闭。`transcription.prompt`、`post_process.prompt` 两个 CLI 键可读但不能 `config set`；
+手工写入的全文、空字符串、`null` 或旧组件在下次准备时会被实际替换。`config path/get/list/check` 保持只读，
+显示或校验保存内容，不展示另一套内存覆盖值；旧文件缺少必需 prompt 时，`check` 会报错并要求先完成配置更新。
+普通字段修改和托盘设备、增益保存只更新目标字段，不触发 prompt 更新。普通 `convert` 缺少配置时要求先运行 setup。
+JSON 损坏、未知字段或错误类型仍严格报错，自动准备不会覆盖坏文件；写入失败不会继续识别。
+
+Prompt-lab 的 `--prompt-file` / `--no-prompt` 仍可做隔离实验：先准备临时配置，再保存候选并重新加载后创建服务，
+不写主配置或源记忆。清空音频 prompt 时同时清除短版；HTTP 保持省略 prompt 的语义。
+新版配置新增 `dictation.short_prompt`，且 LLM 字段改为完整 system 文本；旧版不能直接读取或正确使用这些内容，
+降级时需同时使用对应旧配置。
 
 ## 输入与音频
 
@@ -138,7 +165,7 @@ HTTP 识别路径的内部可靠性策略不作为用户配置：实时与离线
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `transcription.language` | 字符串/null | `zh` | 语言代码；`null` 为自动检测 |
-| `transcription.prompt` | 字符串/null | 中文提示词 | 转写提示词 |
+| `transcription.prompt` | 字符串/null | 完整中文提示词 | 只读；准备阶段保存当前内置正文，`null` 不触发运行时默认回退 |
 | `transcription.temperature` | 数字 | `0` | 转写温度 |
 | `inference.api.transcription.api_url` | URL | `https://api.groq.com/openai/v1/audio/transcriptions` | OpenAI-compatible multipart 地址 |
 | `inference.api.transcription.model` | 字符串 | `whisper-large-v3-turbo` | 转写模型 |
@@ -164,7 +191,7 @@ viberwhisper config set inference.api.transcription.model whisper-1
 |------|------|--------|------|
 | `post_process.enabled` | 布尔 | `false` | 是否启用 LLM 后处理 |
 | `post_process.preheat_enabled` | 布尔 | `true` | 是否使用后台预热请求模式 |
-| `post_process.prompt` | 字符串/null | 内置默认 | 自定义整理规则；结构化输出协议始终保留 |
+| `post_process.prompt` | 字符串/null | 完整内置 system 文本 | 只读；准备阶段保存完整规则，识别时原样使用，不再追加包装 |
 | `post_process.temperature` | 数字 | `0.0` | 后处理温度 |
 | `inference.api.post_process.api_url` | URL/null | 无 | OpenAI-compatible chat completions 地址 |
 | `inference.api.post_process.model` | 字符串/null | 无 | LLM 模型名 |
@@ -191,8 +218,8 @@ viberwhisper config set inference.api.transcription.model whisper-1
 
 接口继续使用 OpenAI-compatible chat completions，`stream=false`。模型现在必须返回
 `context`、`memory_candidates`、`text` 三个字段的 JSON；程序只显示/交付 `text`。
-`post_process.prompt` 替换默认整理规则，程序仍附加任务边界、JSON 格式及候选定位说明。
-旧自定义提示词中的“只输出纯文本”等要求应移除，以免与协议冲突。整个 JSON 无效、正文为空
+`post_process.prompt` 已包含任务边界、整理规则、JSON 格式及候选定位说明；请求直接使用保存的完整文本。
+旧自定义片段在配置准备时替换为当前内置完整文本。整个 JSON 无效、正文为空
 或请求失败时回退原始 STT；个别候选无效时只跳过该候选，不丢弃有效正文。
 
 ### 启用方法

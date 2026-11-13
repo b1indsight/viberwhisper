@@ -12,7 +12,7 @@ Realtime is disabled by default. An omitted URL resolves to
 ## Ownership
 
 - `config`: typed optional v3 configuration, endpoint validation, environment authentication,
-  strict prompt components, full-string overrides and user-owned long-term terms. Debug output omits content.
+  saved normal/short prompt validation, legacy component parsing and user-owned long-term terms. Debug output omits content.
 - `engine`: one persistent async worker and reusable connection, recording-scoped I/O and cancellation,
   bounded backlog, ordered pause-aware response segments capped at 30 seconds, final text concatenation without deduplication.
 - `audio::PcmResampler`: shared stateful conversion with explicit output rate, filter-delay and final-tail compensation; Realtime output remains 24 kHz.
@@ -45,14 +45,18 @@ Realtime is disabled by default. An omitted URL resolves to
 
 `assets/dictation-prompt.default.json` is the source of default Realtime instruction text and the
 shared cleanup/protocol rules used by ordinary HTTP post-processing. The JSON resource is embedded
-for portable macOS/Windows packaging; Rust defines seven required fields and optional `examples`, source selection,
-validation, composition and a text-specific post-processing task. Users edit `dictation.prompt_components` in
-their existing config file and restart; no compilation or auxiliary files are needed.
+for portable macOS/Windows packaging. Configuration preparation and first-setup candidate construction
+compose the bundled rules into complete saved text; recognition never loads the resource as a fallback.
+Persistent prompt customization is paused. Desktop and ordinary conversion strictly prepare, atomically
+save if changed, and reload configuration before constructing recognition services. Read-only load and
+`config path/get/list/check` expose saved values without preparation.
 
-Components are joined in the fixed order task, language, numbers, cleanup, output_format, context,
+During preparation, bundled components are joined in the fixed order task, language, numbers, cleanup, output_format, context,
 memory, examples. Each string is trimmed at its edges; empty components are skipped; remaining components
-are separated by a newline. Content is literal, with no template substitutions. All seven keys
-are required for a custom object; unknown keys and non-string values are rejected.
+are separated by a newline. Content is literal, with no template substitutions. The legacy
+`prompt_components` field remains strictly parseable: all seven rule keys are required, `examples`
+is optional, and unknown keys or non-string values are rejected. Preparation sets this field to null;
+it does not participate in runtime prompt selection.
 The final instructions retain the 4096-Unicode-character limit, including separators.
 
 The bundled default distributes the rules across seven components and separates the examples.
@@ -61,27 +65,32 @@ self-correction to explicitly withdrawn values while preserving independent nega
 objects and later clauses. `output_format` requests context, memory_candidates, then text in one
 JSON object. Context selection and memory extraction remain in their respective fields, with
 the first eight proper-noun occurrences requested, including repeated mentions. All 16 replacement
-examples and one repeated-name example follow the memory rules at the very end. Normal-length
-instructions and HTTP text post-processing retain the pre-split text byte for byte. For a Realtime
-segment strictly shorter than two seconds, explicit examples are replaced by one empty-result
-example; the remaining rules and JSON field order stay unchanged. Duration includes captured
-pauses and excludes protocol padding: at 24 kHz, 47,999 samples are short and 48,000 are normal.
-Legacy seven-field objects without `examples` stay literal, including examples inside `memory`.
+examples and one repeated-name example follow the memory rules at the very end. Preparation writes
+the complete normal instructions to `dictation.prompt` and the complete short-audio instructions to
+the new optional `dictation.short_prompt`. The short version already contains one empty-result example
+in place of the normal examples; the remaining rules and JSON field order stay unchanged. Default
+Realtime and HTTP text-cleanup wording is unchanged.
 
-`prompt` and `prompt_components` default to null. With both absent/null, the embedded JSON provides
-the default components. A full-string `prompt`, including an empty string, replaces all components;
-explicitly configuring both sources is an error. Old full-string configs remain valid and are
-not rewritten on read. Config examples include complete editable default components.
+`prompt()` and `short_prompt()` read configured text only. Each Realtime segment strictly shorter
+than two seconds selects the saved short version when present; other segments use the saved normal
+version. Duration includes captured pauses and excludes protocol padding: at 24 kHz, 47,999 samples
+are short and 48,000 are normal. No examples are replaced or recomposed during recognition.
+Missing required prompt configuration is an error, not a request for bundled defaults. Old full
+strings, empty strings, nulls and component overrides are replaced during preparation, while all
+non-prompt settings remain intact. Config examples show complete normal and short texts.
 Session instructions are empty; each response carries its complete selected instructions, so a
-short segment cannot inherit normal examples from session setup. Full overrides never get rewritten
-based on duration. Ordinary prompt-lab reports record both effective branches and their selection
-policy, preserving production confirmation in private memory. Literal prompt-file/no-prompt
-overrides clear component selection; saved configuration is untouched.
+short segment cannot inherit normal examples from session setup. Ordinary prompt-lab reports record
+both saved branches and their selection policy, preserving production confirmation in private memory.
+Lab first saves and prepares an isolated configuration, then writes and reloads any literal
+prompt-file/no-prompt candidate before creating services. Candidates clear the short branch so all
+durations use the same candidate; clearing the audio prompt also clears the short text. Neither the
+main configuration nor source memory is written.
 
 The default context component explicitly ties the natural-language history after audio to the same preceding audio.
-It explains that matching topic names combine the configured vocabulary and runtime reference. Custom full prompts and
-saved component objects retain their exact text; authors should include equivalent guidance for
-the new input order. Default-component updates do not rewrite those user-owned overrides.
+It explains that matching topic names combine the configured vocabulary and runtime reference.
+That guidance is part of both saved bundled versions. Lab candidates must supply any equivalent
+guidance themselves. The new short field may be rejected by older binaries, and the full LLM system
+text has different semantics from old cleanup fragments; downgrading requires the matching old configuration.
 
 ## Audio and lifecycle
 
@@ -188,7 +197,7 @@ only when its supplied count equals all remaining eligible occurrences and none 
 or cross another name. The retained candidates preserve model spelling separately from UTF-8 source
 ranges and are sorted by source position. The client cannot select one of two same-spelled mentions
 from a single string: that whole name is skipped, rather than guessing an occurrence or globally
-replacing the spelling. Custom prompts must use this new protocol; old context/candidate objects
+replacing the spelling. Lab candidates must use this protocol; old context/candidate objects
 degrade metadata without discarding valid text. The result boundary separately reports metadata
 validity: fewer than eight entries must cover the supplied names' owned occurrences, while exactly
 eight may be their grounded source-order prefix. Thus nine mentions with eight supplied strings
@@ -283,9 +292,10 @@ and its source lacks further response controls; real quality/latency comparisons
 
 Realtime's sampling behavior is provider-owned. The legacy report's numeric temperature metadata
 does not imply that a Realtime temperature parameter is sent. Prompt metadata includes the exact
-resolved instructions and any conditional short branch. Ordinary evaluation initializes private
+saved instructions and any conditional short branch. Ordinary evaluation initializes private
 memory from read-only source state and confirms actual finals; explicit scenario diagnostics keep
-their frozen isolation. Literal candidates replace the whole prompt, including an empty prompt.
+their frozen isolation. Literal candidates are saved and reloaded in isolated configuration before
+service construction, replace the whole audio prompt and clear the short branch, including for an empty prompt.
 HTTP and Realtime use the same evaluation, metrics,
 report writing and review flow.
 Evaluation and report loading accept sanitized HTTP(S) and WS(S) endpoint metadata; userinfo,

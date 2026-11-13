@@ -6,10 +6,10 @@
 |---|---|
 | [快速上手](../README.md) | 下载、首次设置、录音、预览确认与常用命令 |
 | [使用详情与故障排查](usage.md) | 安装校验、原生气泡、平台权限、剪贴板、本地历史与诊断测试包日志 |
-| [配置指南](configuration.md) | 严格 v3 配置、密钥、麦克风、单键热键、HTTP STT 与可选 LLM 整理 |
-| [Realtime 与确认后学习](dictation.md) | WebSocket 服务、提示词组件、两条桌面路径共用的语境记忆和人工纠错 |
+| [配置指南](configuration.md) | 严格 v3 配置、识别前提示词落盘、只读检查、密钥、音频、热键与可选 LLM 整理 |
+| [Realtime 与确认后学习](dictation.md) | WebSocket 服务、保存的正常/短版提示词、两条桌面路径共用的语境记忆和人工纠错 |
 | [命令行参考](cli.md) | CLI 入口、setup、config、离线 WAV 转写与 Prompt-lab 入口 |
-| [配置示例](../config.example.json) | 不含密钥的完整 v3 示例，含可编辑提示词组件；增益示例为 3.0，内置默认值为 1.0 |
+| [配置示例](../config.example.json) | 不含密钥的完整 v3 示例，含 HTTP、完整 LLM system 与 Realtime 正常/短版提示词；增益示例为 3.0，内置默认值为 1.0 |
 
 ## 贡献与维护
 
@@ -23,14 +23,14 @@
 | 文档 | 当前职责 |
 |---|---|
 | [audio](architecture/audio.md) | 麦克风录音、分段、增益与 Silero VAD 静音过滤 |
-| [core](architecture/core.md) | 进程入口、严格 v3 配置、CLI、录音状态机与会话编排 |
+| [core](architecture/core.md) | 进程入口、严格 v3 配置、提示词准备/保存/重载、CLI、录音状态机与会话编排 |
 | [ui](architecture/ui.md) | 桌面事件循环、首次设置、原生预览与确认投递 |
 | [input](architecture/input.md) | 热键与托盘驱动、文字投递契约 |
 | [platform](architecture/platform.md) | macOS / Windows 原生预览、目标恢复、文字输入、剪贴板与权限 |
 | [transcriber](architecture/transcriber.md) | HTTP STT、分段请求、固定重试与文字拼接 |
-| [dictation](architecture/dictation.md) | Realtime 生命周期、流式正文、提示词组合、语境与确认后学习 |
-| [postprocess](architecture/postprocess.md) | HTTP LLM 整理、结构化校验、共用纠错规则及记忆所有权 |
-| [prompt-lab](architecture/prompt-lab.md) | 录音数据集、WER / 专有名词指标、语义复核与 JSON 报告 |
+| [dictation](architecture/dictation.md) | Realtime 生命周期、流式正文、配置内正常/短版提示词、语境与确认后学习 |
+| [postprocess](architecture/postprocess.md) | 完整 system 配置的直接消费、HTTP LLM 整理、结构化校验、共用纠错规则及记忆所有权 |
+| [prompt-lab](architecture/prompt-lab.md) | 隔离配置候选、录音数据集、WER / 专有名词指标、语义复核与 JSON 报告 |
 | [Realtime 评测记录](architecture/realtime-prompt-evaluation.md) | 2026-10-12 的指定服务与模型实验，包含质量和兼容性限制 |
 
 ## 实现记录
@@ -60,3 +60,4 @@
 | [测试包诊断日志](plan/65-diagnostic-test-package-logs.md) | 发布表单开关、配置同目录当天日志与模型输入/输出记录 |
 | [停顿分段](plan/67-pause-aware-recognition-segments.md) | 两条桌面路径已本地实现停顿提前提交与 30 秒上限；真实语料及服务验收待完成 |
 | [托盘音频增益](plan/70-tray-microphone-gain.md) | −10～+10 dB 原生滑块、自动保存、下一次录音生效与旧值兼容 |
+| [提示词更新](plan/72-bundled-prompt-config-refresh.md#001--2026-11-13--默认策略先修改配置识别不做现场覆盖) | 001 修订：暂停持久化自定义，完整提示词先落盘再识别，只读检查与 lab 隔离候选 |

@@ -116,7 +116,7 @@ define_config_fields! {
         read: |document| document.transcription.language.clone()
     },
     TranscriptionPrompt => {
-        name: "transcription.prompt", writable: true, value: Option<String>,
+        name: "transcription.prompt", writable: false, value: Option<String>,
         read: |document| document.transcription.prompt.clone()
     },
     TranscriptionTemperature => {
@@ -132,7 +132,7 @@ define_config_fields! {
         read: |document| document.post_process.preheat_enabled
     },
     PostProcessPrompt => {
-        name: "post_process.prompt", writable: true, value: Option<String>,
+        name: "post_process.prompt", writable: false, value: Option<String>,
         read: |document| document.post_process.prompt.clone()
     },
     PostProcessTemperature => {
@@ -308,7 +308,6 @@ impl ConfigDocument {
                 self.audio.mic_gain = parse_f32(value).map_err(invalid)?;
             }
             ConfigKey::TranscriptionLanguage => self.transcription.language = parse_optional(value),
-            ConfigKey::TranscriptionPrompt => self.transcription.prompt = parse_optional(value),
             ConfigKey::TranscriptionTemperature => {
                 self.transcription.temperature = parse_f32(value).map_err(invalid)?;
             }
@@ -318,7 +317,6 @@ impl ConfigDocument {
             ConfigKey::PostProcessPreheatEnabled => {
                 self.post_process.preheat_enabled = parse_number::<bool>(value).map_err(invalid)?;
             }
-            ConfigKey::PostProcessPrompt => self.post_process.prompt = parse_optional(value),
             ConfigKey::PostProcessTemperature => {
                 self.post_process.temperature = parse_f32(value).map_err(invalid)?;
             }
@@ -335,6 +333,8 @@ impl ConfigDocument {
                 self.inference.api.post_process.model = parse_optional(value)
             }
             ConfigKey::SchemaVersion
+            | ConfigKey::TranscriptionPrompt
+            | ConfigKey::PostProcessPrompt
             | ConfigKey::ApiTranscriptionKey
             | ConfigKey::ApiPostProcessKey => unreachable!(),
         }

@@ -92,6 +92,9 @@ fn convert_speech(status: &'static str, body: &'static str, filter: &str) -> (Ou
         listener.local_addr().unwrap()
     );
     let sandbox = Sandbox::new(&endpoint);
+    let path = sandbox.command().args(["config", "path"]).output().unwrap();
+    assert!(path.status.success());
+    let sandbox_config = PathBuf::from(String::from_utf8(path.stdout).unwrap().trim());
     let input = sandbox.directory.path().join("speech.wav");
     fs::write(&input, include_bytes!("fixtures/audio/speech.wav")).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -125,9 +128,25 @@ fn convert_speech(status: &'static str, body: &'static str, filter: &str) -> (Ou
                 }
             }
             let length = length.expect("multipart request must have a known length");
+            let mut body = Vec::new();
             assert_eq!(
-                io::copy(&mut request.take(length), &mut io::sink()).unwrap(),
+                request.take(length).read_to_end(&mut body).unwrap() as u64,
                 length
+            );
+            // Convert must persist the new version's instructions before its first request.
+            let saved: serde_json::Value =
+                serde_json::from_slice(&fs::read(&sandbox_config).unwrap()).unwrap();
+            let bundled: serde_json::Value =
+                serde_json::from_str(include_str!("../config.example.json")).unwrap();
+            assert_eq!(
+                saved["transcription"]["prompt"],
+                bundled["transcription"]["prompt"]
+            );
+            let expected = saved["transcription"]["prompt"].as_str().unwrap();
+            assert_ne!(expected, "CLI prompt sentinel");
+            assert!(
+                String::from_utf8_lossy(&body)
+                    .contains(&format!("name=\"prompt\"\r\n\r\n{expected}\r\n"))
             );
         }
         let response = format!(
@@ -159,6 +178,77 @@ fn convert_speech(status: &'static str, body: &'static str, filter: &str) -> (Ou
                 && entry.metadata().unwrap().len() > 0
         });
     (output, has_logs)
+}
+
+#[test]
+fn inspection_and_targeted_edits_do_not_refresh_prompts_and_missing_convert_requires_setup() {
+    // Inspection and unrelated edits must not conceal a pending upgrade; only recognition
+    // startup may replace the prompt. Missing config must never start an unsaved default.
+    let sandbox = Sandbox::new("http://127.0.0.1:1/stt");
+    let output = sandbox.command().args(["config", "path"]).output().unwrap();
+    assert!(output.status.success());
+    let path = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    let output = sandbox
+        .command()
+        .args(["config", "set", "audio.mic_gain", "1.0"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let before = fs::read(&path).unwrap();
+    for args in [
+        vec!["config", "get", "transcription.prompt"],
+        vec!["config", "list"],
+        vec!["config", "check"],
+    ] {
+        let output = sandbox.command().args(&args).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        if args[1] != "check" {
+            assert!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .contains("CLI prompt sentinel")
+            );
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    for key in ["transcription.prompt", "post_process.prompt"] {
+        let output = sandbox
+            .command()
+            .args(["config", "set", key, "replacement"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("read-only")
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    let output = sandbox
+        .command()
+        .args(["config", "set", "audio.mic_gain", "1.75"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let mut expected: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    expected["audio"]["mic_gain"] = serde_json::json!(1.75);
+    let after: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(after, expected);
+
+    fs::remove_file(&path).unwrap();
+    let output = sandbox
+        .command()
+        .args(["convert", "unused.wav"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("run setup first")
+    );
+    assert!(!path.exists());
 }
 
 #[test]

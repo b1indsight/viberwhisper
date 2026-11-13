@@ -11,7 +11,7 @@ pub mod recording_session;
 
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::{error, info, warn};
 
@@ -109,7 +109,9 @@ fn run_listener_with_setup() -> Result<()> {
 
 fn load_config() -> Result<(ConfigStore, ConfigDocument)> {
     let store = ConfigStore::discover()?;
-    let document = store.load()?.unwrap_or_default();
+    let document = store
+        .load()?
+        .context("configuration is missing; run setup first")?;
     Ok((store, document))
 }
 
@@ -157,7 +159,9 @@ fn handle_convert(input: &str, output: Option<&str>) -> Result<()> {
 
     info!(input, "Transcribing audio file");
 
-    let (_, document) = load_config()?;
+    let document = ConfigStore::discover()?
+        .prepare()?
+        .context("configuration is missing; run setup first")?;
     if document.dictation.enabled {
         let mut settings = document.dictation.clone();
         // Offline conversion is reproducible and does not use personal memory by default.
@@ -237,6 +241,7 @@ mod tests {
     #[test]
     fn api_configuration_defers_model_and_protocol_checks_to_requests() {
         let mut document = ConfigDocument::new(EmptySecrets);
+        document.apply_bundled_prompts();
         document.inference.api.transcription.api_url = "file:///transcriptions".to_string();
         document.inference.api.transcription.model.clear();
         document.post_process.enabled = true;
@@ -255,6 +260,7 @@ mod tests {
     #[test]
     fn conversion_settings_ignore_hotkeys_and_allow_unauthenticated_endpoints() {
         let mut document = ConfigDocument::new(EmptySecrets);
+        document.apply_bundled_prompts();
         document.input.hold_hotkey = "not a hotkey".to_string();
         document.inference.api.transcription.api_url =
             "http://127.0.0.1:8080/v1/audio/transcriptions".to_string();

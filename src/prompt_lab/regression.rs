@@ -1610,6 +1610,8 @@ mod tests {
         for short in [None, Some("wrong short instructions")] {
             let settings = crate::dictation::config::DictationConfig {
                 url: "ws://127.0.0.1:1/v1/realtime".into(),
+                prompt: Some("normal saved instructions".into()),
+                short_prompt: Some("short saved instructions".into()),
                 ..Default::default()
             };
             let mut next = request(directory.path().join("run.json"));

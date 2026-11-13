@@ -80,6 +80,7 @@ mod tests {
     #[test]
     fn raw_capture_settings_ignore_invalid_cleanup_configuration() {
         let mut document = ConfigDocument::new(EmptySecrets);
+        document.apply_bundled_prompts();
         document.post_process.enabled = true;
         document.inference.api.post_process.api_url = Some("not a URL".to_string());
         // Dataset capture archives raw STT, so an incomplete cleanup setup must not block it.
