@@ -1,6 +1,6 @@
 # 72 - 升级时使用新版内置提示词
 
-**阶段：** 001 修订已实现，本地验证完成，待代码审查及推送实现。
+**阶段：** 配置更新实现已推送；live Realtime 测试夹具已修复并完成本地验证，审查及 CI 的最新状态见 PR。
 **PR：** [#180（草稿）](https://github.com/b1indsight/viberwhisper/pull/180)，`feat/config-prompt-refresh` → `master`。
 
 **当前方案：** 初始计划保留为历史基线。以下 [001 修订](#001--2026-11-13--默认策略先修改配置识别不做现场覆盖)取代加载时内存重置、以 `null` 触发内置回退及校验后才更新的设计；实施与验证结果见 [002](#002--2026-11-13--完整提示词落盘与直接消费已实现)。
@@ -141,3 +141,11 @@
 **定向消融。** 对同一临时旧配置运行 `cargo test --locked startup_replaces_old_prompts_on_disk_without_changing_other_settings -- --nocapture`：旧实现先复现失败；实现后分别临时移除 `document.apply_bundled_prompts()`、仅移除 `self.write_atomic(&value)?`，迁移回归都因磁盘仍保留旧 prompt 而失败。两项均已恢复，最终全套测试通过。因此保留显式默认生成和条件原子保存，未引入版本标记、备份、锁或热重载。[审阅摘要与本地验证证据](https://ampcode.com/artifacts/prompt-f147db30-66c4-40a4-ac98-ec34467c1928)
 
 **完成的检查与限制。** `cargo fmt --check`、`cargo test --locked`、`cargo test --locked --features diagnostic-logs`、`cargo clippy --locked --all-targets --features diagnostic-logs -- -D warnings` 和 `git diff --check` 均通过。已有 vendor/rdev 警告未改动；原有忽略测试保持忽略。setup 的交互语义通过注入 UI 测试验证，未执行物理麦克风或真实模型服务验收。本地验证为 macOS；此前纯文档提交的 Windows CI 在无产品代码改动时因 `scrollbar_probe.ps1` 的 `Pointer coordinates differ` 失败，不将其计为本次实现的通过证据，也不在本次修改滚动条。实现推送后的 macOS/Windows CI 仍待执行。新增短版字段及完整 LLM 文本的旧版兼容限制沿用 001，安装器、发布和个人安装仍不在范围内。
+
+### 003 — 2026-11-13 — live Realtime 测试使用完整配置
+
+**触发与实现。** 双路审查报告 `live_realtime_structured_multiturn` 使用 `DictationConfig::default()`，在新增的必需 prompt 校验处提前失败。用户了解测试范围后要求更新。测试现从 `config.example.json` 读取完整 Realtime 配置，只用既有环境变量覆盖服务地址、模型和可选密钥；正常/短版 prompt 直接来自示例。保留 `#[ignore]`、同连接两轮识别和清理，不改变生产代码，也不恢复运行时默认回退或新增 helper。
+
+**验证与限制。** 修改前显式运行 `cargo test --locked --lib live_realtime_structured_multiturn -- --ignored --nocapture`，设置隔离本地地址，复现 `dictation.prompt is missing`。修改后临时复用仓库的本地 WebSocket fixture，在子进程运行原 live 测试，分别验证未设置模型覆盖及指定 `validation-model-override`：服务核对实际模型、空 session instructions、完整保存的 response instructions、两轮关联与清理，两个子进程均通过。临时验证代码随后删除。最终 `cargo fmt --check`、普通及 diagnostic-logs 全套测试、CI 同款全目标 Clippy 通过，默认忽略边界保持不变。[验证日志与审阅结果](https://ampcode.com/artifacts/prompt-f147db30-66c4-40a4-ac98-ec34467c1928)
+
+仅调整现有测试的数据来源，没有新增运行机制，无需新增消融；修改前失败与修改后协议验证已覆盖差异。没有连接外部模型服务、使用真实密钥或修改个人状态，不将模拟服务成功表述为真实模型质量验收。按同一 bookmark / PR 交付，推送前再次运行双路门禁；这次用户要求仅授权本修复及一次后续审查。
