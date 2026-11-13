@@ -29,7 +29,7 @@ viberwhisper setup
 ```
 
 监听启动时若配置缺失、无法解析或无效，会进入配置向导；拒绝时退出，不启动未保存默认监听器。
-已有可解析配置先更新并保存当前版本的完整提示词，再重新读取；读取或保存的 I/O 错误会中止启动。
+已有可解析配置先从构建时嵌入的示例更新 HTTP、完整 LLM 提示词及 Realtime 组件，补缺、必要时保存后重新读取；读取或保存的 I/O 错误会中止启动。
 配置和离线转写命令不启动托盘或录音监听。
 在终端启动的监听可用 Ctrl+C 退出，也可从托盘右键菜单退出。
 
@@ -51,7 +51,8 @@ viberwhisper config check
 `schema_version`、API secret 字段、`transcription.prompt` 和 `post_process.prompt` 只读，密钥可通过向导或[环境变量](configuration.md#配置文件与首次设置)配置。
 `setup` 提供普通识别 / Realtime 二选一，并配置所选路径的连接。Realtime 鉴权只填写环境变量名，不录入密钥值。
 `dictation.*` 不属于 `list/get/set` 的字段目录；连接和记忆等高级字段仍通过配置文件编辑，向导保留已有值。
-提示词自定义暂时关闭：下次桌面启动或普通转换会将手改值实际替换为新版默认全文；`path/get/list/check` 只读，不更新提示词。
+提示词自定义暂时关闭：下次桌面启动或普通转换会将手改值实际替换为[示例中的提示词及组件](configuration.md#内置提示词与升级)，清除退役短版；`path/get/list/check` 只读，不更新提示词。
+普通字段修改和托盘设备、增益保存不触发 prompt 更新；`check` 对缺少必需指令或仍带旧短版值的配置要求先准备，对 Realtime 全文与组件共存报来源冲突。
 修改后需重新启动已运行的应用。
 
 ## 离线 WAV 转写
@@ -89,5 +90,6 @@ viberwhisper prompt-lab evaluate --help
 完整命令及评分流程见[贡献指南](../CONTRIBUTING.md#stt-prompt-回归调试)，数据格式见[Prompt-lab 架构](architecture/prompt-lab.md)。
 Realtime 的临时提示词覆盖与场景评估见[Realtime 回归说明](dictation.md#离线转写与-prompt-回归)。
 采集仍使用 HTTP raw-STT。普通评估以 1 倍速 WAV 输入复用桌面 HTTP/Realtime 识别与收尾，
-只读取得个人记忆初态，确认学习仅写临时副本；候选只覆盖音频提示词，不改变主流程行为。
+只读取得个人记忆初态，确认学习仅写临时副本；先准备隔离配置，再保存候选并重载后装配服务，不写主配置。
+候选只覆盖音频提示词；Realtime 同时清除组件和退役短版，所有段长使用同一字面全文，HTTP 空候选省略 prompt。
 `--realtime-cases` 保留独立的冻结时钟诊断合同，不读取个人记忆，不能与普通评估直接比较。

@@ -73,7 +73,7 @@ pub(crate) fn prepare_config(
     if let Some(prompt) = prompt {
         candidate.transcription.prompt = (!prompt.is_empty()).then(|| prompt.clone());
         candidate.dictation.prompt = Some(prompt);
-        candidate.dictation.short_prompt = None;
+        candidate.dictation.prompt_components = None;
         store.save(&candidate)?;
     }
     store.load()?.context("missing isolated lab candidate")
@@ -120,7 +120,6 @@ impl Runner {
         settings.set_post_process_api_key(None);
         settings.transcription.prompt = None;
         settings.dictation.prompt = None;
-        settings.dictation.short_prompt = None;
         settings.dictation.prompt_components = None;
         let identity = Identity {
             policy: if recognition.is_realtime() {

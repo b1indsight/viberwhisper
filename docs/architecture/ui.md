@@ -103,9 +103,12 @@ the selected Realtime or HTTP recognition path without reading or updating perso
 mode. Only the selected connection is edited: HTTP retains optional LLM setup, while Realtime
 asks for URL, model, and an environment-variable name (empty disables authentication).
 Inactive connections and advanced temperature, preheat, and memory fields stay unchanged.
-Bundled prompts are written into the candidate before verification; existing configuration is
-prepared and reloaded before listener resolution. Existing LLM enablement and unavailable
-microphone names remain the defaults.
+The build-time embedded example supplies new settings and the HTTP, complete LLM and Realtime
+component prompts written into the candidate before verification. Realtime full text stays null;
+normal/short instructions are composed from saved components, with short source audio only omitting
+independent examples. Existing configuration is prepared and reloaded before listener resolution.
+New microphone gain matches the example's 3.0; existing explicit gain, LLM enablement and unavailable
+microphone names remain unchanged.
 Unchanged input retains the exact original value even when tinyfiledialogs needs a sanitized
 display default. HTTP password inputs start empty; environment secrets never enter saved JSON.
 `core::config` owns configuration

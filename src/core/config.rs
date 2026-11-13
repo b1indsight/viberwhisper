@@ -129,6 +129,9 @@ mod tests {
     fn canonical_example_round_trips_as_v3() {
         let document: ConfigDocument =
             serde_json::from_str(include_str!("../../config.example.json")).unwrap();
+        // Fresh setup and upgrades must share the example's defaults, not a second
+        // constructor that silently supplies different audio or prompt settings.
+        assert_eq!(ConfigDocument::default(), document);
         assert_eq!(document.schema_version, 3);
         let encoded = serde_json::to_string(&document).unwrap();
         let encoded_value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
@@ -293,11 +296,21 @@ mod tests {
             let mut original = bundled.clone();
             original["transcription"]["prompt"] = prompt.clone();
             original["post_process"]["prompt"] = prompt.clone();
+            // Cover both the branch's full/short files and older component files.
+            original["dictation"]["prompt_components"] = if prompt.is_null() {
+                let mut components = bundled["dictation"]["prompt_components"].clone();
+                components["task"] = serde_json::json!("旧组件");
+                components
+            } else {
+                serde_json::Value::Null
+            };
+            let old_short = if prompt.as_str() == Some("") {
+                ""
+            } else {
+                "旧短版"
+            };
             original["dictation"]["prompt"] = prompt;
-            original["dictation"]["short_prompt"] = serde_json::json!("旧短版");
-            original["dictation"]["prompt_components"] =
-                serde_json::from_str(include_str!("../../assets/dictation-prompt.default.json"))
-                    .unwrap();
+            original["dictation"]["short_prompt"] = serde_json::json!(old_short);
             original["audio"]["mic_gain"] = serde_json::json!(1.75);
             original["input"]["hold_hotkey"] = serde_json::json!("F7");
             original["inference"]["api"]["transcription"]["api_key"] =
@@ -306,15 +319,28 @@ mod tests {
             let bytes = serde_json::to_vec(&original).unwrap();
             std::fs::write(&path, &bytes).unwrap();
             let loaded = store.load().unwrap().unwrap();
-            assert_eq!(serde_json::to_value(&loaded).unwrap(), original);
+            assert_eq!(
+                loaded.dictation.legacy_short_prompt.as_deref(),
+                Some(old_short)
+            );
+            let mut serializable = original.clone();
+            serializable["dictation"]
+                .as_object_mut()
+                .unwrap()
+                .remove("short_prompt");
+            assert_eq!(serde_json::to_value(&loaded).unwrap(), serializable);
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             let prepared = store.prepare().unwrap().unwrap();
             let mut expected = original;
             for section in ["transcription", "post_process", "dictation"] {
                 expected[section]["prompt"] = bundled[section]["prompt"].clone();
             }
-            expected["dictation"]["short_prompt"] = bundled["dictation"]["short_prompt"].clone();
-            expected["dictation"]["prompt_components"] = serde_json::Value::Null;
+            expected["dictation"]
+                .as_object_mut()
+                .unwrap()
+                .remove("short_prompt");
+            expected["dictation"]["prompt_components"] =
+                bundled["dictation"]["prompt_components"].clone();
             let updated: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(updated, expected);
@@ -342,17 +368,15 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let loaded = store.load().unwrap().unwrap();
         assert!(loaded.dictation.prompt.is_none());
-        assert!(loaded.dictation.short_prompt.is_none());
+        assert!(loaded.dictation.prompt_components.is_none());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let prepared = store.prepare().unwrap().unwrap();
         let updated: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(updated["dictation"]["enabled"], false);
-        assert!(updated["dictation"]["prompt"].is_string());
-        assert_eq!(
-            updated["dictation"]["prompt_components"],
-            serde_json::Value::Null
-        );
+        assert!(updated["dictation"]["prompt"].is_null());
+        assert!(updated["dictation"]["prompt_components"].is_object());
+        assert!(updated["dictation"].get("short_prompt").is_none());
         let mut expected = original;
         expected["dictation"] = serde_json::to_value(&prepared.dictation).unwrap();
         expected["post_process"]["prompt"] =
@@ -370,10 +394,8 @@ mod tests {
         let store = ConfigStore::at(path.clone());
         let mut original: serde_json::Value =
             serde_json::from_str(include_str!("../../config.example.json")).unwrap();
-        let components = serde_json::from_str::<serde_json::Value>(include_str!(
-            "../../assets/dictation-prompt.default.json"
-        ))
-        .unwrap();
+        let mut components = original["dictation"]["prompt_components"].clone();
+        components["task"] = serde_json::json!("旧任务");
         original["dictation"] = serde_json::json!({
             "enabled": true,
             "url": "ws://example.test:8080/v1/realtime",
@@ -391,8 +413,8 @@ mod tests {
         let bundled: serde_json::Value =
             serde_json::from_str(include_str!("../../config.example.json")).unwrap();
         original["dictation"]["prompt"] = bundled["dictation"]["prompt"].clone();
-        original["dictation"]["short_prompt"] = bundled["dictation"]["short_prompt"].clone();
-        original["dictation"]["prompt_components"] = serde_json::Value::Null;
+        original["dictation"]["prompt_components"] =
+            bundled["dictation"]["prompt_components"].clone();
         assert_eq!(updated, original);
 
         // Empty instructions in an old config are also replaced during preparation.
@@ -404,10 +426,13 @@ mod tests {
             .remove("memory");
         std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
         store.prepare().unwrap();
-        assert_eq!(
-            store.load().unwrap().unwrap().dictation.prompt.as_deref(),
-            bundled["dictation"]["prompt"].as_str()
-        );
+        let updated: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut expected = original;
+        for key in ["prompt", "prompt_components", "memory"] {
+            expected["dictation"][key] = bundled["dictation"][key].clone();
+        }
+        assert_eq!(updated, expected);
     }
 
     #[test]
@@ -429,6 +454,7 @@ mod tests {
             ),
         ] {
             let mut value = valid.clone();
+            value["dictation"]["short_prompt"] = serde_json::Value::Null;
             *value.pointer_mut(pointer).unwrap() = invalid;
             let bytes = serde_json::to_vec(&value).unwrap();
             std::fs::write(&path, &bytes).unwrap();
@@ -491,6 +517,7 @@ mod tests {
     #[test]
     fn field_get_set_distinguishes_unknown_unset_and_read_only() {
         let mut document = ConfigDocument::new(MapSecrets(HashMap::new()));
+        document.inference.api.post_process.model = None;
         assert_eq!(
             document
                 .get_field("inference.api.post_process.model")

@@ -98,6 +98,7 @@ async fn upload_preserves_protocol_events_in_a_bounded_queue() {
     let mut connection = Connection::connect(
         &DictationConfig {
             prompt: Some(String::new()),
+            prompt_components: None,
             ..settings
         },
         None,
@@ -377,7 +378,7 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
     });
     let settings = crate::dictation::config::DictationConfig {
         prompt: Some(PROMPT.into()),
-        short_prompt: None,
+        prompt_components: None,
         ..settings
     };
     let engine =

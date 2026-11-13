@@ -71,26 +71,33 @@ Realtime segment merging, as well as the language persisted in the report.
 
 Before runtime assembly, evaluation saves an isolated configuration in its existing temporary
 directory and runs the same `ConfigStore::prepare` operation on that copy. The store strictly parses
-old fields, materializes current full bundled prompts and optional Realtime defaults, atomically
-saves changes, then reloads. `ConfigStore::at` is crate-internal so lab reuses the production storage
-boundary. Baseline preparation never writes the main configuration.
+old fields, copies HTTP and complete LLM text plus Realtime components from the build-time embedded
+[`config.example.json`](../../config.example.json), clears Realtime full/retired short text and fills
+permitted missing fields from the same example. It atomically saves only actual changes, then reloads.
+`ConfigStore::at` is crate-internal so lab reuses the production storage boundary. Baseline preparation
+never writes the main configuration.
 
 `--prompt-file` writes the full audio candidate into the prepared copy; `--no-prompt` clears its
-audio prompt. Realtime candidates also clear `dictation.short_prompt`, so every duration uses the
-same literal candidate; no-prompt sends empty instructions. HTTP no-prompt retains omission of the
-multipart prompt parameter. HTTP candidates affect only the audio prompt, leaving the prepared full
+audio prompt. Realtime candidates write `dictation.prompt` and clear `dictation.prompt_components`
+and the retired short field, so every duration uses the same literal candidate; no-prompt sends
+empty instructions. HTTP no-prompt retains omission of the multipart prompt parameter.
+HTTP candidates affect only the audio prompt, leaving the prepared full
 LLM system text unchanged. Candidate changes are saved and reloaded before settings or services are
 constructed, without another preparation pass that would replace them. No override is applied to an
 already constructed transcriber or Realtime settings object. Persistent prompt customization is
 paused outside these isolated experiments.
 
-Realtime reads full `dictation.prompt` and optional `dictation.short_prompt` text from that saved
-configuration. `prompt_components` is only a strict old-file compatibility field, set to null during
-preparation, and never selects runtime instructions. Recognition does not compose defaults, replace
-examples or wrap the LLM prompt. Missing required prompt configuration is a validation error.
-Reports and prompt digests describe the actual saved audio instructions.
-Conditional Realtime prompts also record `stt.short_prompt`. Their prompt digest hashes JSON
-containing the normal prompt, short prompt and `source-duration-lt-2s-v1`; literal overrides and
+Realtime baselines compose saved components in the fixed order task, language, numbers, cleanup,
+output_format, context, memory, examples. A source segment strictly shorter than two seconds omits
+only the independent examples component, with no empty-result example or other added text. Exactly
+two seconds uses the normal combination. Recognition never reads default content or wraps the LLM
+prompt. Full text and components together are a source conflict; when both are absent, preparation
+is required.
+Legacy configuration `short_prompt` is parse-only and removed by preparation, never an instruction source.
+Reports and prompt digests describe the actual composed audio instructions or literal candidate.
+Conditional Realtime prompts still record `stt.short_prompt`, a report interface separate from the
+retired configuration key. Their prompt digest hashes JSON containing the normal prompt, short
+prompt and `source-duration-lt-2s-v1`; literal overrides and
 legacy reports without a short branch retain the single-prompt digest. Selection uses each
 production segment's source duration, including pauses and excluding protocol padding.
 Explicit Realtime scenarios record and validate the same short-branch metadata without changing

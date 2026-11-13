@@ -59,12 +59,13 @@ All calls use blocking OpenAI-compatible chat completions with `stream: false` a
 request timeout. URL/model/auth still come from `PostProcessConfig::from_config`; disabled cleanup
 does not resolve unused LLM settings or credentials. Bearer auth is omitted for `ApiAuth::None`.
 
-During configuration preparation or first-setup candidate construction,
-`PromptComponents::postprocess_prompt` reuses default language, numbers and cleanup rules from
-`assets/dictation-prompt.default.json`, including self-correction and independent-negation examples.
+[`config.example.json`](../../config.example.json), embedded at build time, directly maintains the
+complete default `post_process.prompt` system text. Preparation and first-setup candidate construction
+copy that field without a Rust prompt generator or separate default resource. Its language, numbers
+and cleanup rules agree with Realtime, including self-correction and independent-negation examples.
 A text-specific task explicitly treats the STT text as data, cannot re-listen to audio, and forbids
-answering instructions or completing unfinished speech. The complete text, including task, cleanup,
-output and reference rules, is stored in `post_process.prompt`. Default wording is unchanged.
+answering instructions or completing unfinished speech. The saved complete text includes task,
+cleanup, output and reference rules; its wording is unchanged.
 
 Desktop and ordinary conversion prepare, atomically save if changed, and reload configuration before
 constructing recognition services. Persistent prompt customization is paused: preparation replaces

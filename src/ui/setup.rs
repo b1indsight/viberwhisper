@@ -30,8 +30,6 @@ use crate::transcriber::ApiTranscriber;
 use crate::{audio, text};
 
 const TITLE: &str = "ViberWhisper 设置";
-const DEFAULT_POST_PROCESS_URL: &str = "https://api.openai.com/v1/chat/completions";
-const DEFAULT_POST_PROCESS_MODEL: &str = "gpt-4o-mini";
 const HOTKEY_CAPTURE_HELPER_ENV: &str = "VIBERWHISPER_CAPTURE_HOTKEY";
 const HOTKEY_CAPTURE_EXIT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -485,13 +483,15 @@ fn configure_recognition(
     document.post_process.enabled =
         ui.confirm("是否启用 LLM 文本整理？", document.post_process.enabled)?;
     if document.post_process.enabled {
+        let defaults = ConfigDocument::default().inference.api.post_process;
         let current_url = document
             .inference
             .api
             .post_process
             .api_url
             .as_deref()
-            .unwrap_or(DEFAULT_POST_PROCESS_URL);
+            .or(defaults.api_url.as_deref())
+            .unwrap_or_default();
         let Some(url) = required_input(ui, "请输入 LLM Chat Completions API 地址", current_url)?
         else {
             return Ok(false);
@@ -504,7 +504,8 @@ fn configure_recognition(
             .post_process
             .model
             .as_deref()
-            .unwrap_or(DEFAULT_POST_PROCESS_MODEL);
+            .or(defaults.model.as_deref())
+            .unwrap_or_default();
         let Some(model) = required_input(ui, "请输入 LLM 模型名称", current_model)? else {
             return Ok(false);
         };
@@ -964,7 +965,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.json");
         let store = ConfigStore::at(path.clone());
-        store.save(&ConfigDocument::default()).unwrap();
+        let mut old = ConfigDocument::default();
+        old.transcription.prompt = Some("old instructions".into());
+        store.save(&old).unwrap();
         let before = std::fs::read(&path).unwrap();
         let permissions = std::fs::metadata(directory.path()).unwrap().permissions();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
@@ -995,8 +998,8 @@ mod tests {
             _ui: &mut dyn SetupUi,
         ) -> Result<VerificationResult, String> {
             assert!(document.post_process.prompt.is_some());
-            assert!(document.dictation.prompt.is_some());
-            assert!(document.dictation.short_prompt.is_some());
+            assert!(document.dictation.prompt_components.is_some());
+            assert!(document.dictation.short_prompt().is_some());
             Ok(VerificationResult {
                 raw: "测试".to_string(),
                 final_text: "测试".to_string(),

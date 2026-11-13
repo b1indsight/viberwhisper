@@ -73,25 +73,30 @@ impl ConfigStore {
         let Some(contents) = self.read()? else {
             return Ok(None);
         };
-        let mut document: ConfigDocument =
-            serde_json::from_str(&contents).map_err(|source| ConfigError::InvalidDocument {
+        serde_json::from_str::<ConfigDocument>(&contents).map_err(|source| {
+            ConfigError::InvalidDocument {
                 path: self.path.clone(),
                 source,
-            })?;
+            }
+        })?;
         let mut value: serde_json::Value =
             serde_json::from_str(&contents).map_err(|source| ConfigError::InvalidDocument {
                 path: self.path.clone(),
                 source,
             })?;
         let original = value.clone();
-        document.apply_bundled_prompts();
-        let defaults = serde_json::to_value(&document).map_err(ConfigError::Serialize)?;
+        let defaults =
+            serde_json::to_value(ConfigDocument::default()).map_err(ConfigError::Serialize)?;
         fill_missing(&mut value, &defaults);
         for section in ["transcription", "post_process", "dictation"] {
             value[section]["prompt"] = defaults[section]["prompt"].clone();
         }
-        value["dictation"]["short_prompt"] = defaults["dictation"]["short_prompt"].clone();
-        value["dictation"]["prompt_components"] = serde_json::Value::Null;
+        value["dictation"]["prompt_components"] =
+            defaults["dictation"]["prompt_components"].clone();
+        value["dictation"]
+            .as_object_mut()
+            .expect("validated dictation object")
+            .remove("short_prompt");
         if value != original {
             self.write_atomic(&value)?;
         }

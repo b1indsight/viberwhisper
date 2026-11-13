@@ -203,6 +203,7 @@ mod tests {
     fn enabled_cleanup_requires_a_complete_saved_prompt() {
         let mut document = ConfigDocument::default();
         document.post_process.enabled = true;
+        document.post_process.prompt = None;
         document.inference.api.post_process.api_url = Some("http://127.0.0.1:1/cleanup".into());
         document.inference.api.post_process.model = Some("fixture".into());
         assert!(

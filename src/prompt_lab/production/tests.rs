@@ -224,8 +224,8 @@ fn ordinary_metadata_records_short_policy_but_literal_overrides_and_http_do_not(
         .load()
         .unwrap()
         .unwrap();
-    assert_eq!(runner.stt.prompt, saved.dictation.prompt);
-    assert_eq!(runner.stt.short_prompt, saved.dictation.short_prompt);
+    assert_eq!(runner.stt.prompt, Some(saved.dictation.prompt()));
+    assert_eq!(runner.stt.short_prompt, saved.dictation.short_prompt());
     assert_eq!(serde_json::to_vec(&document).unwrap(), original);
     drop(runner);
     document.dictation.enabled = false;
@@ -260,7 +260,7 @@ fn no_prompt_is_saved_before_http_recognition_without_touching_canonical_config(
         .unwrap();
     assert!(saved.transcription.prompt.is_none());
     assert_eq!(saved.dictation.prompt.as_deref(), Some(""));
-    assert!(saved.dictation.short_prompt.is_none());
+    assert!(saved.dictation.prompt_components.is_none());
     let audio = directory.path().join("speech.wav");
     std::fs::write(&audio, SPEECH).unwrap();
     assert_eq!(runner.recognize(&audio), (Some(RAW.into()), None));

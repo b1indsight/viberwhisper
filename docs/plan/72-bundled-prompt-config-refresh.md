@@ -181,3 +181,17 @@ lab 沿用既有隔离文件顺序：先准备副本，再将候选写入 `dicta
 - 临时恢复当前硬编码短例子时，同一个短版测试必须失败；临时略过组件落盘或保留 lab 组件时，对应升级或来源冲突测试必须失败。恢复后重跑 fmt、普通 / diagnostic-logs 测试、CI 同款 Clippy 和文档链接 / JSON 检查。
 
 上述产品检查尚未执行。修订草拟经本地 Claude Opus 5.5 无工具咨询，已核对其模型及空工具列表；不采纳“拒绝分支内旧短版文件”和删除全文键的建议，以保留更新路径及稳定的可空字段形状。咨询不构成执行验证。此前 [be36aab 的 macOS / Windows CI](https://github.com/b1indsight/viberwhisper/actions/runs/43450252609) 已全部通过，仅覆盖 001–003 的实现，不能用作本修订的通过证据。
+
+### 005 — 2026-11-13 — 组件配置落盘与旧执行路径删除
+
+**触发与实际实现。** 用户确认 004 并要求“实现，把旧路径删掉”。本次按 004 替代 001 的双全文保存形式；001 的原子保存、重新加载、只读检查、setup 取消和 lab 隔离边界继续保留。`ConfigDocument::new/default` 解析构建时嵌入的 `config.example.json`，不读取凭证；`prepare` 从同一示例补缺并覆盖对应 prompt 字段，实际保存 Realtime 组件、将全文设为 `null`、删除旧短版键。显式非 prompt 设置保持，重复准备不重写。
+
+`PromptComponents` 只拼接保存的规则，短版仅省略 `examples`。删除独立默认 asset、组件 Default、Rust LLM 默认正文生成器和硬编码短版示例；setup 原有的两项 LLM 连接默认常量也改为读取示例默认文档。新配置的增益以及 LLM 地址/模型与示例一致，已有显式值不替换。serde 旧文件结构缺省不解析整份示例，也不生成 prompt，避免递归。没有引入新运行模块、组件选择配置、版本标记、备份、锁或热重载。
+
+旧 `short_prompt` 只兼容读取为 `legacy_short_prompt`，不序列化、不参与识别；直接识别带旧值（包括空字符串）的配置会要求先准备。全文和组件恰好一个来源，来源冲突直接报错；隔离 lab 在准备副本后保存候选，清除组件再重载，显式空候选合法且所有段长一致。报告的 `stt.short_prompt` 仍记录实际组合文本，不删除报告接口。现行配置、Realtime、core/dictation/postprocess/prompt-lab/UI 架构、CLI、索引和 changelog 已同步；历史计划保留原文。
+
+**测试先行与定向消融。** 修改产品代码前，扩展的 `short_segments_omit_only_examples`、`canonical_example_round_trips_as_v3` 和 `startup_replaces_old_prompts_on_disk_without_changing_other_settings` 分别以断言失败复现旧行为。实现后使用相同输入逐项临时变更：恢复硬编码短例子使短版测试失败；仅略过组件覆盖使磁盘迁移回归失败；仅保留 lab 组件使候选在来源冲突校验处失败。三项均已恢复。消融支持保留纯省略、显式组件更新和候选清组件，不支持增加另一套默认或优先级回退。[本轮验证与消融证据](https://ampcode.com/artifacts/prompt-f147db30-66c4-40a4-ac98-ec34467c1928)
+
+**验证边界。** 临时目录的升级回归覆盖旧全文/短版、旧组件、空/null/过长正文、缺省字段、只读加载、错误类型及写失败；逐份比较磁盘 JSON，验证非 prompt 设置和重复准备的字节/修改时间。真实本地 WebSocket 请求用独立组件期望检查固定次序与纯省略，同连接交替 48,001 / 47,999 / 48,000 / 511 / 48,001 个源样本，核对 2 秒边界与协议补零；字面候选及空候选使用同组时长检查不发生短版替换。HTTP / LLM fixture、setup 和 lab 隔离测试保持通过。独立 Python 比较确认移动前后组件正文、正常 Realtime 拼接、HTTP 和完整 LLM 文本逐字一致；仅短版按 004 有意移除替代示例。
+
+本地 `cargo fmt --check`、`cargo test --locked`、`cargo test --locked --features diagnostic-logs`、`cargo clippy --locked --all-targets --features diagnostic-logs -- -D warnings` 及 `git diff --check` 通过。现有 vendor/rdev 警告及两个默认忽略的测试保持；live Realtime 夹具仍从完整示例读取组件，没有恢复运行时默认回退。本次没有连接真实模型、使用物理麦克风或更改个人配置/安装，不能据此判断识别质量。推送前仍须完成本次双路审查；实现提交的 macOS/Windows CI 待推送后执行，004 纯计划提交的跨平台成功不替代本次产品验证。

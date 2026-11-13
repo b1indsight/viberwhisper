@@ -27,33 +27,40 @@ trigger the first-run flow, while ordinary conversion requires a saved configura
 `ConfigStore::discover()` gets the application directory from its own `config_dir()` helper and appends
 `config.json`. Reads and writes therefore use the same canonical path independent of the launch
 directory. `ConfigStore::prepare` runs before desktop or ordinary conversion resolves recognition
-settings. It strictly reads the existing document, fills absent optional Realtime fields and applies
-the current bundled prompts, compares the actual JSON, atomically saves changes, then reloads the
-saved document. It returns `None` for a missing file; parse or write failures cannot supply an
+settings. It strictly parses the existing document, fills permitted missing fields from the embedded
+example configuration and updates the prompt fields, compares the actual JSON, atomically saves
+changes, then reloads the saved document. It returns `None` for a missing file; parse or write failures cannot supply an
 unsaved replacement to recognition. Identical content is not rewritten.
 
 `ConfigDocument::apply_bundled_prompts` is confined to preparation and first-setup candidate
-construction. It materializes the full HTTP `transcription.prompt`, full LLM system text in
-`post_process.prompt`, and full normal/short Realtime texts in `dictation.prompt` and the new optional
-`dictation.short_prompt`. `dictation.prompt_components` remains strictly parseable for old-file
-compatibility, is set to null during preparation, and never selects runtime instructions. Existing
-custom strings, empty strings, nulls and component overrides are replaced on disk. All other explicit
-settings, including connections, disk secrets, audio, hotkeys and long-term vocabulary, are preserved.
-Prompt wording and the short-segment threshold do not change. Runtime consumers use saved text
-without bundled fallbacks or LLM wrapping.
+construction. It copies the full HTTP `transcription.prompt`, full LLM `post_process.prompt` system
+text and Realtime `dictation.prompt_components` directly from the embedded
+[`config.example.json`](../../config.example.json). Realtime `dictation.prompt` is set to null, and
+preparation removes the retired `dictation.short_prompt` key rather than saving normal/short full
+texts. Existing custom strings, empty strings, nulls and component overrides are replaced on disk.
+All other explicit settings, including connections, disk secrets, audio, hotkeys and long-term
+vocabulary, are preserved. Runtime Realtime instructions only join saved components in fixed order;
+source audio shorter than two seconds omits the separate examples component without adding an
+empty-result example. Exactly two seconds uses normal instructions, and protocol padding does not
+affect selection. Runtime consumers have no bundled fallback or LLM wrapping.
 
 `load` and `config path/get/list/check` remain read-only and expose saved values. Inspection does not
 apply bundled prompts; `check` reports missing required prompt configuration until preparation is
 completed. Ordinary field edits and tray device/gain saves update only their target fields and do
-not trigger prompt preparation. The new optional short field is a schema-v3 extension that older
-binaries may reject; older LLM code would also wrap the full system text again. Downgrades require
-the corresponding old configuration as well as the old binary.
+not trigger prompt preparation. Realtime rejects simultaneous full-text and component sources;
+neither source means preparation is required. Retired short-prompt values remain parseable only
+for preparation and cannot supply instructions. Older LLM code would wrap the full system text
+again, so downgrades require the corresponding old configuration as well as the old binary.
 Writes use a temporary file in the destination directory followed by atomic
 publication. `ConfigStore::load` is the general read and parse entry point: `None` distinguishes a missing
 file, `Some` carries a loaded document, and malformed or unreadable files remain errors.
 
-`ConfigDocument::new(source)` creates default settings with an owned secret source.
-Default construction and loading bind `EnvironmentSecretSource`.
+`ConfigDocument::new(source)` parses the build-time embedded example and binds the owned secret
+source without reading credentials; `Default` delegates to that constructor. New settings therefore
+match the example, including `audio.mic_gain = 3.0`; preparation preserves any explicit saved gain.
+Structural serde defaults only support old-file parsing: they do not generate prompts or replace
+the example as the source of new settings and preparation defaults. Default construction and
+loading bind `EnvironmentSecretSource`.
 Clones share that source, which is omitted from serialization, debug output, and document
 equality. Reads stay lazy: only requested API-key fields consult `TRANSCRIPTION_API_KEY` or
 `POST_PROCESS_API_KEY`. Environment values override disk secrets without entering the persisted
@@ -274,8 +281,10 @@ Prompt-lab evaluation is a CLI-only workflow: it does not construct winit, norma
 typing. It saves an isolated configuration in its existing temporary directory, prepares that copy,
 then saves any audio-prompt candidate and reloads it before constructing the production recognition
 owners, including configured HTTP cleanup. `ConfigStore::at` is crate-internal so the copy uses the
-same storage logic. Realtime literal/no-prompt candidates clear the short branch; HTTP no-prompt
-continues to omit the prompt parameter. Baseline and candidate runs leave the main configuration and
+same storage logic. Realtime literal/no-prompt candidates clear components and the retired short
+field, so every duration uses the same literal text; HTTP no-prompt continues to omit the prompt
+parameter. Baseline and candidate runs leave the main configuration and
 source memory untouched; only the private memory copy learns. Verified WAVs use the production
-recording path, and one JSON report records the actual prompts. Coding-agent review is a separate
-local JSON validation/rewrite step and makes no inference request.
+recording path, and one JSON report records the actual composed prompts, retaining `stt.short_prompt`
+for a conditional short branch. This report field is separate from the retired configuration key.
+Coding-agent review is a separate local JSON validation/rewrite step and makes no inference request.

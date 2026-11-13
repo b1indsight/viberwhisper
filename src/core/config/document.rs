@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use super::{EnvironmentSecretSource, SecretSource};
 
-const DEFAULT_TRANSCRIPTION_API_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
-
 /// Persisted configuration with a lazily consulted secret source, shared by clones.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,16 +33,15 @@ impl Default for ConfigDocument {
 }
 
 impl ConfigDocument {
-    /// Writes complete version-owned instructions into a configuration candidate.
-    /// Recognition consumes these values without consulting the bundled rules again.
+    /// Copies version-owned prompt fields from the embedded example into a candidate.
+    /// Recognition composes only these saved components, never another default source.
     pub(crate) fn apply_bundled_prompts(&mut self) {
-        let rules = crate::dictation::config::PromptComponents::default();
-        self.transcription.prompt = TranscriptionSection::default().prompt;
-        self.post_process.prompt =
-            Some(crate::dictation::config::PromptComponents::postprocess_prompt());
-        self.dictation.prompt = Some(rules.compose());
-        self.dictation.short_prompt = Some(rules.compose_for_segment(true));
-        self.dictation.prompt_components = None;
+        let defaults = Self::default();
+        self.transcription.prompt = defaults.transcription.prompt;
+        self.post_process.prompt = defaults.post_process.prompt;
+        self.dictation.prompt = defaults.dictation.prompt;
+        self.dictation.prompt_components = defaults.dictation.prompt_components;
+        self.dictation.legacy_short_prompt = None;
     }
 
     pub(crate) fn dictation_key(&self) -> Option<super::SecretValue> {
@@ -56,19 +53,13 @@ impl ConfigDocument {
             .filter(|key| !key.is_empty())
             .map(super::SecretValue::new)
     }
-    /// Creates default configuration bound to an owned source without reading credentials.
-    /// Default construction and deserialization otherwise use environment variables.
+    /// Creates configuration from the embedded example without reading credentials.
+    /// The supplied lazy secret source replaces the example's environment-backed source.
     pub fn new(secrets: impl SecretSource + 'static) -> Self {
-        Self {
-            schema_version: 3,
-            input: InputSection::default(),
-            audio: AudioSection::default(),
-            transcription: TranscriptionSection::default(),
-            post_process: PostProcessSection::default(),
-            inference: InferenceSection::default(),
-            dictation: Default::default(),
-            secrets: Arc::new(secrets),
-        }
+        let mut document: Self = serde_json::from_str(include_str!("../../../config.example.json"))
+            .expect("bundled example configuration must be valid");
+        document.secrets = Arc::new(secrets);
+        document
     }
 
     pub(crate) fn set_transcription_api_key(&mut self, value: Option<String>) {
@@ -143,15 +134,6 @@ pub(crate) struct InputSection {
     pub(crate) toggle_hotkey: String,
 }
 
-impl Default for InputSection {
-    fn default() -> Self {
-        Self {
-            hold_hotkey: "F8".to_string(),
-            toggle_hotkey: "F9".to_string(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AudioSection {
@@ -161,15 +143,6 @@ pub(crate) struct AudioSection {
     pub(crate) mic_gain: f32,
 }
 
-impl Default for AudioSection {
-    fn default() -> Self {
-        Self {
-            input_device: None,
-            mic_gain: 1.0,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TranscriptionSection {
@@ -177,16 +150,6 @@ pub(crate) struct TranscriptionSection {
     pub(crate) prompt: Option<String>,
     #[serde(deserialize_with = "deserialize_finite_f32")]
     pub(crate) temperature: f32,
-}
-
-impl Default for TranscriptionSection {
-    fn default() -> Self {
-        Self {
-            language: Some("zh".to_string()),
-            prompt: Some("以下是一段简体中文的普通话句子，去掉首尾的语气词".to_string()),
-            temperature: 0.0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -199,24 +162,13 @@ pub(crate) struct PostProcessSection {
     pub(crate) temperature: f32,
 }
 
-impl Default for PostProcessSection {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            preheat_enabled: true,
-            prompt: None,
-            temperature: 0.0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InferenceSection {
     pub(crate) api: ApiInferenceSection,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ApiInferenceSection {
     pub(crate) transcription: ApiTranscriptionSection,
@@ -243,17 +195,7 @@ impl fmt::Debug for ApiTranscriptionSection {
     }
 }
 
-impl Default for ApiTranscriptionSection {
-    fn default() -> Self {
-        Self {
-            api_url: DEFAULT_TRANSCRIPTION_API_URL.to_string(),
-            model: "whisper-large-v3-turbo".to_string(),
-            api_key: None,
-        }
-    }
-}
-
-#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ApiPostProcessSection {
     pub(crate) api_url: Option<String>,

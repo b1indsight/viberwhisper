@@ -389,8 +389,10 @@ mod tests {
 
     #[test]
     fn constructs_default_disabled_and_invalid_hotkey_sections() {
-        let config =
-            HotkeyConfig::from_section::<TestHotkeyPolicy>(&InputSection::default()).unwrap();
+        let config = HotkeyConfig::from_section::<TestHotkeyPolicy>(
+            &crate::core::config::ConfigDocument::default().input,
+        )
+        .unwrap();
         assert_eq!(config.hold.map(|binding| binding.key), Some(Key::F8));
         assert_eq!(config.toggle.map(|binding| binding.key), Some(Key::F9));
 

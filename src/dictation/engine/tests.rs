@@ -17,17 +17,53 @@ async fn segment_source_duration_selects_examples_without_session_leakage_or_pad
     use futures_util::StreamExt;
     // One connection must switch back to normal at exactly 2 s. The tiny tail
     // is padded for the protocol, but its source length still selects short.
-    for diagnostic in [false, true] {
+    for source in ["example", "components", "literal", "empty"] {
         let lengths = [48_001, 47_999, 48_000, 511, 48_001];
-        let (listener, mut settings) = listen().await;
-        if diagnostic {
-            // Direct consumers must send saved non-default instructions literally too.
-            settings.prompt = Some("  diagnostic normal\n".into());
-            settings.short_prompt = Some("diagnostic short {literal}".into());
+        let (listener, settings) = listen().await;
+        let mut saved = serde_json::to_value(&settings).unwrap();
+        if source == "components" {
+            // Compose the supplied components, not an embedded default or replacement example.
+            saved["prompt_components"] = json!({
+                "task":"  diagnostic {literal}\n", "language":"language",
+                "numbers":"numbers", "cleanup":"cleanup", "output_format":"format",
+                "context":"context", "memory":"memory\n口述：not an example component",
+                "examples":"normal-only example"
+            });
         }
-        let normal = settings.prompt();
-        let short = settings.short_prompt().unwrap();
-        assert_ne!(normal, short);
+        let (normal, short) = if matches!(source, "literal" | "empty") {
+            // Isolated candidates use one exact text for every source duration.
+            let literal = if source == "literal" {
+                "  candidate {literal}\n"
+            } else {
+                ""
+            };
+            saved["prompt"] = json!(literal);
+            saved["prompt_components"] = serde_json::Value::Null;
+            (literal.to_owned(), literal.to_owned())
+        } else {
+            let components = &saved["prompt_components"];
+            let short = [
+                "task",
+                "language",
+                "numbers",
+                "cleanup",
+                "output_format",
+                "context",
+                "memory",
+            ]
+            .map(|key| components[key].as_str().unwrap().trim())
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+            let normal = format!(
+                "{short}\n{}",
+                components["examples"].as_str().unwrap().trim()
+            );
+            assert_ne!(normal, short);
+            (normal, short)
+        };
+        let settings = serde_json::from_value(saved).unwrap();
         let server = tokio::spawn(async move {
             let mut socket = accept(&listener).await;
             let session = expect_event(&mut socket, "session.update").await;

@@ -21,7 +21,7 @@ viberwhisper config path
 随后设置热键和麦克风，并可录制一段真实语音验证转写。热键步骤先显示当前值；
 需要修改时依次记录 Hold 和 Toggle 按键，最终确认后才应用。验证录音也使用这两个候选热键的正常语义，
 验证确认窗口会说明关闭后如何说“测试”并结束录音，不通过对话框点击开始或停止。首次设置先在候选配置中
-填入完整默认提示词，再用该候选配置验证；最终确认后才原子写入 `config.json`，重新读取后进入正常监听。
+填入示例中的 HTTP、完整 LLM 提示词和 Realtime 组件，再用该候选配置验证；最终确认后才原子写入 `config.json`，重新读取后进入正常监听。
 输入步骤取消、最终拒绝保存或保存前发生 UI 错误时，向导不追加保存；之前准备阶段已经落盘的更新不回滚。
 没有有效配置时拒绝设置会直接退出，不运行未保存的默认监听器，也不覆盖无法解析的文件。以后可随时重新运行：
 
@@ -71,26 +71,31 @@ CLI 只接受下表中的 canonical dotted key；`hotkey`、`model`、`local_mod
 
 ## 内置提示词与升级
 
+[`config.example.json`](../config.example.json) 在构建时嵌入程序，是新配置以及准备阶段更新提示词、补缺默认值的来源；
+安装后不读取仓库相对路径，也不从另一份资源或代码生成默认正文。
 安装器不修改用户配置。安装新版后，首次运行桌面应用或普通 `convert` 时，`ConfigStore::prepare`
-先严格读取旧配置，写入当前版本的完整内置提示词并补齐可缺省的 Realtime 字段；实际内容有变化时原子保存，
+先严格读取旧配置，替换对应 prompt 字段并从示例补齐允许缺省的字段；实际内容有变化时原子保存，
 然后重新读取，才创建识别服务。再次准备且内容相同就不重写。缺少整个 `dictation` 时补入的 `enabled` 仍为 `false`。
-连接、模型、磁盘密钥、鉴权环境变量名、音频、热键、温度、开关、记忆和长期词表等其余设置保留。
+连接、模型、磁盘密钥、鉴权环境变量名、音频、热键、温度、开关、记忆和长期词表等显式非 prompt 设置保留。
 
-保存的提示词包括 HTTP 的 `transcription.prompt`、LLM 的 `post_process.prompt`、Realtime 的
-`dictation.prompt` 和 `dictation.short_prompt`。LLM 字段保存包含任务、整理、输出和参考规则的完整 system 文本；
-Realtime 保存正常和短音频两个完整版本。`dictation.prompt_components` 只用于解析旧文件，准备时置为 `null`，
-不参与识别选择。默认措辞和短段阈值不变；运行时只读取配置，不补内置默认、拼接组件或重新包装 LLM 提示词。
+HTTP 的 `transcription.prompt` 和 LLM 的 `post_process.prompt` 直接保存示例正文；LLM 字段是包含任务、整理、
+输出和参考规则的完整 system 文本。Realtime 的 `dictation.prompt_components` 保存完整组件，`dictation.prompt`
+设为 `null`，不再保存正常/短版全文。识别只按 `task`、`language`、`numbers`、`cleanup`、`output_format`、
+`context`、`memory`、`examples` 的固定顺序拼接已保存组件；源音频严格小于 2 秒时仅省略独立的 `examples`，
+不添加或替换内容，也不附加空结果示例。恰好 2 秒使用正常版，协议补零不影响选择。运行时不补内置默认，
+也不重新包装 LLM 提示词。旧配置的 `dictation.short_prompt` 仅兼容解析，准备时删除，不参与识别。
 
 提示词自定义暂时关闭。`transcription.prompt`、`post_process.prompt` 两个 CLI 键可读但不能 `config set`；
 手工写入的全文、空字符串、`null` 或旧组件在下次准备时会被实际替换。`config path/get/list/check` 保持只读，
-显示或校验保存内容，不展示另一套内存覆盖值；旧文件缺少必需 prompt 时，`check` 会报错并要求先完成配置更新。
+显示或校验保存内容，不展示另一套内存覆盖值。Realtime 全文与组件同时存在时报来源冲突，两者都缺时要求先准备配置；
+仍带旧短版值的文件也须先准备。只有全文时原样使用，所有段长一致；这一入口保留给隔离实验候选。
 普通字段修改和托盘设备、增益保存只更新目标字段，不触发 prompt 更新。普通 `convert` 缺少配置时要求先运行 setup。
 JSON 损坏、未知字段或错误类型仍严格报错，自动准备不会覆盖坏文件；写入失败不会继续识别。
 
 Prompt-lab 的 `--prompt-file` / `--no-prompt` 仍可做隔离实验：先准备临时配置，再保存候选并重新加载后创建服务，
-不写主配置或源记忆。清空音频 prompt 时同时清除短版；HTTP 保持省略 prompt 的语义。
-新版配置新增 `dictation.short_prompt`，且 LLM 字段改为完整 system 文本；旧版不能直接读取或正确使用这些内容，
-降级时需同时使用对应旧配置。
+不写主配置或源记忆。Realtime 候选同时清除组件和退役短版，所有段长使用同一全文；HTTP 空候选省略 prompt。
+报告字段 `stt.short_prompt` 仍记录组件实际组合的短版文本，与退役的配置字段无关。
+旧版 LLM 会把完整 system 文本当作整理片段再次包装，降级时需同时使用对应旧配置。
 
 ## 输入与音频
 
@@ -99,9 +104,9 @@ Prompt-lab 的 `--prompt-file` / `--no-prompt` 仍可做隔离实验：先准备
 | `input.hold_hotkey` | 字符串 | `F8` | 按住录音的具名单键；空字符串可禁用 |
 | `input.toggle_hotkey` | 字符串 | `F9` | 切换录音的具名单键；空字符串可禁用 |
 | `audio.input_device` | 字符串或 `null` | `null` | 输入设备的精确名称；`null` 使用系统默认设备 |
-| `audio.mic_gain` | 数字 | `1.0` | 麦克风增益倍数 |
+| `audio.mic_gain` | 数字 | `3.0` | 麦克风增益倍数 |
 
-[配置示例](../config.example.json) 将增益设为 `3.0`，可按麦克风情况调整；上表列出内置默认值。
+新配置的默认值与[配置示例](../config.example.json)一致；已有显式增益不因准备或升级而改变，可按麦克风情况调整。
 
 托盘右键菜单的「音频增益」以 −10～+10 dB 的滑块调节，步长 0.1 dB；macOS 菜单内嵌，Windows 使用无标题浮层，无保存/取消按钮。松开滑块或使用方向键调整就自动持久化，从下一次录音生效，当前录音不变。Esc、Enter 或点击外部只收起菜单，不撤销调整；保存失败保留原运行时值、恢复滑块位置并显示提示，可重新调整重试。
 配置仍保存线性倍数，换算为 \(g = 10^{d/20}\)：−10、0、+10 dB 约为 0.3162、1、3.1623 倍。只打开菜单或原位点击不会取整既有值，也不会覆盖超范围、静音或负系数配置；只有实际调整才替换。该功能只调节应用采集增益，不修改系统麦克风音量，也不能修复已经削波的采样。
@@ -193,8 +198,8 @@ viberwhisper config set inference.api.transcription.model whisper-1
 | `post_process.preheat_enabled` | 布尔 | `true` | 是否使用后台预热请求模式 |
 | `post_process.prompt` | 字符串/null | 完整内置 system 文本 | 只读；准备阶段保存完整规则，识别时原样使用，不再追加包装 |
 | `post_process.temperature` | 数字 | `0.0` | 后处理温度 |
-| `inference.api.post_process.api_url` | URL/null | 无 | OpenAI-compatible chat completions 地址 |
-| `inference.api.post_process.model` | 字符串/null | 无 | LLM 模型名 |
+| `inference.api.post_process.api_url` | URL/null | `https://api.openai.com/v1/chat/completions` | OpenAI-compatible chat completions 地址 |
+| `inference.api.post_process.model` | 字符串/null | `gpt-4o-mini` | LLM 模型名 |
 | `inference.api.post_process.api_key` | secret | 无 | 只读状态；环境变量为 `POST_PROCESS_API_KEY` |
 
 > **注意**：`config.json` 已在 `.gitignore` 中排除，避免误提交真实密钥。程序不会把环境变量中的密钥写入磁盘；手工写在 `config.json` 中的密钥会在更新其他配置项时原样保留。
@@ -205,7 +210,7 @@ viberwhisper config set inference.api.transcription.model whisper-1
 启用后，转写结果会在输出前经过 LLM 整理，补标点、去掉明确无意义的语气词及卡顿，并按
 最终说法合并明确改口。例如“订七张票，哦不，订八张票，都选靠窗的”整理为“订8张票，
 都选靠窗的”；独立否定、重复强调、原有措辞和未完成的句子保留，不凭常识猜测识别错误。
-默认语言、数字、改口和保真规则复用 [Realtime 提示词](../assets/dictation-prompt.default.json)，
+默认语言、数字、改口和保真规则与 Realtime 保持一致，完整文本直接维护在[配置示例](../config.example.json)的 `post_process.prompt`，
 普通后处理只依据 STT 文本，不能重新听音频。
 
 普通桌面路径在同一次推理中提取话题字符串及专名字符串数组，复用[语境记忆与确认后学习](dictation.md#确认后学习)，
