@@ -435,8 +435,8 @@ fn ordinary_http_matches_desktop_pcm_cleanup_and_learning_except_audio_prompt() 
     )
     .unwrap();
     let complete = crate::prompt_lab::apply_review(&output, &review).unwrap();
+    let runner = Runner::new(&document, None, Some(source.clone())).unwrap();
     for variant in 0..5 {
-        let runner = Runner::new(&document, None, Some(source.clone())).unwrap();
         let mut prior = complete.clone();
         match variant {
             0 => {

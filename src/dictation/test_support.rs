@@ -5,6 +5,13 @@ use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
+/// Three seconds of voiced audio for VAD and segmentation tests.
+pub(super) fn speech_frame() -> crate::audio::WavChunk {
+    crate::audio::WavChunk::from_encoded_bytes(
+        include_bytes!("../../tests/fixtures/audio/speech.wav").to_vec(),
+    )
+}
+
 pub(super) async fn accept(listener: &TcpListener) -> WebSocketStream<TcpStream> {
     let (stream, _) = listener.accept().await.unwrap();
     let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -68,13 +75,26 @@ pub(super) async fn commit_segment(socket: &mut WebSocketStream<TcpStream>, id: 
     prefix
 }
 
-pub(super) async fn commit_audio(socket: &mut WebSocketStream<TcpStream>, id: &str) {
-    expect_event(socket, "input_audio_buffer.commit").await;
+/// Acknowledge a commit and return the PCM bytes uploaded since the previous control event.
+pub(super) async fn commit_audio(socket: &mut WebSocketStream<TcpStream>, id: &str) -> Vec<u8> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let mut uploaded = Vec::new();
+    loop {
+        let message = socket.next().await.expect("client disconnected").unwrap();
+        let event: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+        if event["type"] == "input_audio_buffer.commit" {
+            break;
+        }
+        assert_eq!(event["type"], "input_audio_buffer.append");
+        uploaded.extend(STANDARD.decode(event["audio"].as_str().unwrap()).unwrap());
+    }
     send_json(
         socket,
         json!({"type":"input_audio_buffer.committed","item_id":id}),
     )
     .await;
+    uploaded
 }
 
 pub(super) async fn delete_audio(socket: &mut WebSocketStream<TcpStream>, id: &str) {

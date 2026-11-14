@@ -336,49 +336,12 @@ mod tests {
 
     // --- structured error tests against a local HTTP stub ---
 
-    use std::io::{Read, Write};
+    use std::cell::RefCell;
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
 
-    /// Minimal HTTP server that answers every connection with a fixed response
-    /// and counts how many requests it served.
-    fn spawn_http_stub(status_line: &'static str, body: &'static str) -> (u16, Arc<AtomicUsize>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let requests = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&requests);
-        std::thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                counter.fetch_add(1, Ordering::SeqCst);
-                let mut stream = stream;
-                // Drain the request (multipart body arrives in several reads);
-                // a short read timeout marks the end of the client's send.
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(100)));
-                let mut buf = [0u8; 16384];
-                loop {
-                    match stream.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {}
-                    }
-                }
-                let response = format!(
-                    "{status_line}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-            }
-        });
-        (port, requests)
-    }
-
-    fn spawn_request_stub() -> (u16, mpsc::Receiver<Vec<u8>>) {
-        spawn_request_sequence(&["200 OK"])
-    }
-
-    fn spawn_request_sequence(statuses: &'static [&'static str]) -> (u16, mpsc::Receiver<Vec<u8>>) {
-        let body = r#"{"text":"ok"}"#;
+    fn spawn_request_sequence(statuses: &[&str], body: &str) -> (u16, mpsc::Receiver<Vec<u8>>) {
         spawn_response_sequence(
             statuses
                 .iter()
@@ -400,16 +363,25 @@ mod tests {
             for response in responses {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
-                    .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                    .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
+                let mut reader = BufReader::new(&mut stream);
                 let mut request = Vec::new();
-                let mut buffer = [0u8; 16_384];
+                let mut length = None;
                 loop {
-                    match stream.read(&mut buffer) {
-                        Ok(0) | Err(_) => break,
-                        Ok(size) => request.extend_from_slice(&buffer[..size]),
+                    let mut line = String::new();
+                    assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                    request.extend_from_slice(line.as_bytes());
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = Some(value.trim().parse::<usize>().unwrap());
                     }
                 }
+                let body_start = request.len();
+                request.resize(body_start + length.unwrap(), 0);
+                reader.read_exact(&mut request[body_start..]).unwrap();
                 sender.send(request).unwrap();
                 stream.write_all(response.as_bytes()).unwrap();
             }
@@ -426,10 +398,6 @@ mod tests {
         WavChunk::from_encoded_bytes(b"fake wav bytes".to_vec())
     }
 
-    fn silent_chunk() -> WavChunk {
-        encode_i16_wav(&vec![0; 3_200], 16_000).unwrap()
-    }
-
     fn audible_chunk() -> WavChunk {
         WavChunk::from_encoded_bytes(
             include_bytes!("../../tests/fixtures/audio/speech.wav").to_vec(),
@@ -437,13 +405,17 @@ mod tests {
     }
 
     #[test]
-    fn audible_non_speech_does_not_send_an_http_request() {
-        let (port, requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\":\"hallucination\"}");
-        let transcriber = transcriber_for_port(port);
-        // Audible DC input passed the old energy-only gate despite containing no speech.
-        let noise = encode_i16_wav(&vec![200; 16_000], 16_000).unwrap();
-        assert_eq!(transcriber.transcribe(&noise).unwrap(), "");
-        assert_eq!(requests.load(Ordering::SeqCst), 0);
+    fn silence_and_audible_non_speech_do_not_send_http_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let transcriber = transcriber_for_port(listener.local_addr().unwrap().port());
+        // Audible DC passed the old energy-only gate despite containing no speech.
+        for (level, samples) in [(0, 3_200), (200, 16_000)] {
+            let chunk = encode_i16_wav(&vec![level; samples], 16_000).unwrap();
+            assert_eq!(transcriber.transcribe(&chunk).unwrap(), "");
+            assert!(matches!(listener.accept(), Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock));
+        }
     }
 
     #[test]
@@ -453,7 +425,8 @@ mod tests {
         #[cfg(feature = "diagnostic-logs")]
         let _guard = tracing::dispatcher::set_default(&dispatch);
         let prepared = prepare_for_transcription(&audible_chunk()).unwrap();
-        let (port, requests) = spawn_request_sequence(&["503 Service Unavailable", "200 OK"]);
+        let (port, requests) =
+            spawn_request_sequence(&["503 Service Unavailable", "200 OK"], r#"{"text":"ok"}"#);
         let transcriber = transcriber_for_port(port);
         assert_eq!(
             transcriber.upload_with_wait(&prepared, |_| {}).unwrap(),
@@ -478,7 +451,7 @@ mod tests {
         let samples: Vec<_> = reader.samples::<i16>().map(|s| s.unwrap() / 4).collect();
         let quiet = encode_i16_wav(&samples, 16_000).unwrap();
         let source = quiet.shared_bytes();
-        let (port, request) = spawn_request_stub();
+        let (port, request) = spawn_request_sequence(&["200 OK"], r#"{"text":"ok"}"#);
         assert_eq!(transcriber_for_port(port).transcribe(&quiet).unwrap(), "ok");
         let request = request.recv_timeout(Duration::from_secs(2)).unwrap();
         let start = request.windows(4).position(|b| b == b"RIFF").unwrap();
@@ -490,50 +463,6 @@ mod tests {
         let power = |samples: &[i16]| samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>();
         assert!(power(&uploaded) > power(&samples));
         assert_eq!(source, quiet.shared_bytes());
-    }
-
-    #[test]
-    fn silent_chunk_returns_empty_without_an_http_request() {
-        let (port, requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\":\"hallucination\"}");
-        let transcriber = transcriber_for_port(port);
-
-        let result = transcriber.transcribe(&silent_chunk());
-
-        assert_eq!(result.unwrap(), "");
-        assert_eq!(requests.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn audible_chunk_still_uses_the_normal_upload_path() {
-        let (port, requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\":\"spoken\"}");
-        let transcriber = transcriber_for_port(port);
-
-        let result = transcriber.transcribe(&audible_chunk());
-
-        assert_eq!(result.unwrap(), "spoken");
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn signal_classification_failure_preserves_the_upload_path() {
-        let (port, requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\":\"fallback\"}");
-        let transcriber = transcriber_for_port(port);
-
-        let result = transcriber.transcribe(&test_chunk());
-
-        assert_eq!(result.unwrap(), "fallback");
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn test_upload_success_returns_trimmed_text() {
-        let (port, _requests) = spawn_http_stub("HTTP/1.1 200 OK", "{\"text\": \" hello \"}");
-        let t = transcriber_for_port(port);
-        let chunk = test_chunk();
-
-        let result = t.upload_chunk_with_retry(&chunk);
-
-        assert_eq!(result.unwrap(), "hello");
     }
 
     fn assert_network_error_omits_request_url(response: &str) {
@@ -592,7 +521,7 @@ mod tests {
                 Some("authorization: bearer header-token"),
             ),
         ] {
-            let (port, request) = spawn_request_stub();
+            let (port, request) = spawn_request_sequence(&["200 OK"], r#"{"text":"ok"}"#);
             let config = test_config_with_auth(
                 &format!(
                     "http://127.0.0.1:{port}/v1/audio/transcriptions?token=request-token&region=local#request-fragment"
@@ -621,11 +550,12 @@ mod tests {
 
     #[test]
     fn multipart_upload_contains_the_shared_chunk_bytes() {
-        let (port, request) = spawn_request_stub();
+        let (port, request) = spawn_request_sequence(&["200 OK"], r#"{"text":" hello "}"#);
         let transcriber = transcriber_for_port(port);
+        // Invalid WAV metadata must preserve the original upload, not discard speech.
         let chunk = test_chunk();
 
-        assert_eq!(transcriber.upload_chunk(&chunk).unwrap(), "ok");
+        assert_eq!(transcriber.transcribe(&chunk).unwrap(), "hello");
         let request = request.recv().unwrap();
         let request_text = String::from_utf8_lossy(&request);
         assert!(request_text.contains("filename=\"audio.wav\""));
@@ -639,11 +569,11 @@ mod tests {
     #[test]
     fn test_client_error_is_structured_and_not_retried() {
         let (port, requests) =
-            spawn_http_stub("HTTP/1.1 400 Bad Request", "{\"error\":\"bad model\"}");
+            spawn_request_sequence(&["400 Bad Request"], r#"{"error":"bad model"}"#);
         let t = transcriber_for_port(port);
         let chunk = test_chunk();
-
-        let result = t.upload_chunk_with_retry(&chunk);
+        let waits = RefCell::new(Vec::new());
+        let result = t.upload_with_wait(&chunk, |wait| waits.borrow_mut().push(wait));
 
         match result {
             Err(TranscribeError::Api { status: 400, body }) => {
@@ -651,24 +581,25 @@ mod tests {
             }
             other => panic!("expected structured 400 error, got {:?}", other),
         }
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(waits.into_inner().is_empty());
+        assert_eq!(requests.try_iter().count(), 1);
     }
 
     #[test]
     fn test_server_error_is_retried_and_kept_structured() {
         let (port, requests) =
-            spawn_http_stub("HTTP/1.1 503 Service Unavailable", "{\"error\":\"busy\"}");
+            spawn_request_sequence(&["503 Service Unavailable"; 2], r#"{"error":"busy"}"#);
         let t = transcriber_for_port(port);
         let chunk = test_chunk();
-
-        let result = t.upload_chunk_with_retry(&chunk);
+        let waits = RefCell::new(Vec::new());
+        let result = t.upload_with_wait(&chunk, |wait| waits.borrow_mut().push(wait));
 
         assert!(matches!(
             result,
             Err(TranscribeError::Api { status: 503, .. })
         ));
-        // Initial attempt + one retry.
-        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(waits.into_inner(), [Duration::from_secs(1)]);
+        assert_eq!(requests.try_iter().count(), 2);
     }
 
     #[test]

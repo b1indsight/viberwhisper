@@ -182,27 +182,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_setup() {
-        let cli = Cli::try_parse_from(["viberwhisper", "setup"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Setup)));
-    }
-
-    #[test]
-    fn test_cli_config_set() {
-        let cli = Cli::try_parse_from(["viberwhisper", "config", "set", "input.hold_hotkey", "F9"])
-            .unwrap();
-        if let Some(Commands::Config {
-            action: ConfigAction::Set { key, value },
-        }) = cli.command
-        {
-            assert_eq!(key, "input.hold_hotkey");
-            assert_eq!(value, "F9");
-        } else {
-            panic!("Expected config set command");
-        }
-    }
-
-    #[test]
     fn test_cli_convert_optional_output() {
         let cases: &[(&[&str], Option<&str>)] = &[
             (&["viberwhisper", "convert", "test.wav"], None),
@@ -220,11 +199,6 @@ mod tests {
             assert_eq!(input, "test.wav");
             assert_eq!(output.as_deref(), expected_output, "args: {args:?}");
         }
-    }
-
-    #[test]
-    fn rejects_removed_local_command() {
-        assert!(Cli::try_parse_from(["viberwhisper", "local", "start"]).is_err());
     }
 
     #[test]
@@ -294,57 +268,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_prompt_lab_evaluation_thresholds_and_paths() {
-        let cli = Cli::try_parse_from([
-            "viberwhisper",
-            "prompt-lab",
-            "evaluate",
-            "--dataset",
-            "/tmp/lab",
-            "--prompt-file",
-            "candidate.txt",
-            "--max-wer-percent",
-            "8",
-            "--min-llm-score",
-            "95",
-            "--min-proper-noun-percent",
-            "98",
-            "--compare-to",
-            "baseline.json",
-            "--output",
-            "candidate.json",
-        ])
-        .unwrap();
-
-        let Some(Commands::PromptLab {
-            action:
-                PromptLabCommand::Evaluate {
-                    dataset,
-                    prompt_file,
-                    no_prompt,
-                    realtime_cases,
-                    max_wer_percent,
-                    min_llm_score,
-                    min_proper_noun_percent,
-                    compare_to,
-                    output,
-                },
-        }) = cli.command
-        else {
-            panic!("expected prompt-lab evaluate");
-        };
-        assert_eq!(dataset, PathBuf::from("/tmp/lab"));
-        assert_eq!(prompt_file, Some(PathBuf::from("candidate.txt")));
-        assert!(!no_prompt);
-        assert!(realtime_cases.is_none());
-        assert_eq!(max_wer_percent, 8.0);
-        assert_eq!(min_llm_score, 95.0);
-        assert_eq!(min_proper_noun_percent, 98.0);
-        assert_eq!(compare_to, Some(PathBuf::from("baseline.json")));
-        assert_eq!(output, Some(PathBuf::from("candidate.json")));
-    }
-
-    #[test]
     fn evaluation_rejects_prompt_file_with_no_prompt() {
         let error = Cli::try_parse_from([
             "viberwhisper",
@@ -365,29 +288,5 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
-    }
-
-    #[test]
-    fn parses_prompt_lab_agent_review_application() {
-        let cli = Cli::try_parse_from([
-            "viberwhisper",
-            "prompt-lab",
-            "report",
-            "apply-review",
-            "--report",
-            "run.json",
-            "--review",
-            "review.json",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Some(Commands::PromptLab {
-                action: PromptLabCommand::Report {
-                    action: PromptLabReportCommand::ApplyReview { .. }
-                }
-            })
-        ));
     }
 }

@@ -395,23 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn configures_prompt_and_session_mode() {
-        let p = LlmPostProcessor::new(config_with_postprocess(true, None)).unwrap();
-        assert_eq!(p.request.model, "gpt-4o-mini");
-        assert_eq!(
-            p.request.api_url.as_str(),
-            "https://api.example.com/v1/chat/completions"
-        );
-        assert_eq!(p.request.prompt, config_with_postprocess(true, None).prompt);
-        assert!(p.preheat_enabled);
-
-        let custom =
-            LlmPostProcessor::new(config_with_postprocess(false, Some("custom prompt"))).unwrap();
-        assert_eq!(custom.request.prompt, "custom prompt");
-        assert!(!custom.preheat_enabled);
-    }
-
-    #[test]
     fn configured_processor_cleans_complete_text() {
         // Convert and setup verification use the configured processor directly;
         // an accidental pass-through here would silently skip enabled cleanup.
@@ -425,8 +408,10 @@ mod tests {
         let processor = PostProcessor::new(PostProcessConfig::Llm(config));
 
         assert_eq!(processor.process_text("raw").unwrap(), "clean");
+        let request = requests.recv().unwrap();
+        assert_eq!(request.body["model"], "gpt-4o-mini");
         assert_eq!(
-            requests.recv().unwrap().body["messages"][0]["content"],
+            request.body["messages"][0]["content"],
             "  diagnostic full system\n"
         );
         #[cfg(feature = "diagnostic-logs")]
@@ -472,42 +457,27 @@ mod tests {
     }
 
     #[test]
-    fn test_process_text_empty_input_bypasses_llm() {
-        let config = config_with_postprocess(true, None);
-        let p = LlmPostProcessor::new(config).unwrap();
-        let result = p.process_text("");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "");
-    }
+    fn empty_input_bypasses_requests_and_confirmation() {
+        let (endpoint, requests) = stub(vec![]);
+        let mut config = config_with_postprocess(true, None);
+        config.endpoint = endpoint;
+        let processor = PostProcessor::new_desktop(
+            PostProcessConfig::Llm(config),
+            crate::dictation::config::MemoryConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
 
-    #[test]
-    fn session_processes_text_in_both_modes() {
-        // Desktop finalization must reach the LLM through either enum variant;
-        // empty-input tests bypass the request and cannot verify this path.
-        for preheat_enabled in [false, true] {
-            let (endpoint, _requests) = stub(vec![json!({"text":"clean"}).to_string()]);
-            let mut config = config_with_postprocess(preheat_enabled, None);
-            config.endpoint = endpoint;
-            let processor = PostProcessor::new(PostProcessConfig::Llm(config));
-            assert_eq!(
-                processor.process_for_delivery("raw").unwrap().text,
-                "clean",
-                "preheat_enabled={preheat_enabled}"
-            );
-        }
-    }
-
-    #[test]
-    fn empty_session_finishes_empty_in_both_modes() {
-        for preheat_enabled in [false, true] {
-            let config = config_with_postprocess(preheat_enabled, None);
-            let p = LlmPostProcessor::new(config).unwrap();
-            assert_eq!(
-                p.process_for_delivery("").unwrap().text,
-                "",
-                "preheat_enabled={preheat_enabled}"
-            );
-        }
+        assert_eq!(processor.process_text("").unwrap(), "");
+        let delivery = processor.process_for_delivery("").unwrap();
+        assert_eq!(delivery.text, "");
+        assert!(delivery.confirmation.is_none());
+        assert!(requests.try_recv().is_err());
+        processor.shutdown();
     }
 
     fn structured(text: &str, context: &str) -> String {

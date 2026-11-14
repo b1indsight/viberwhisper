@@ -199,7 +199,6 @@ fn action_from_tray(action: TrayAction) -> PlatformAction {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     use rdev::{EventType, Key};
     use tray_icon::menu::{MenuEvent, MenuId};
@@ -207,9 +206,7 @@ mod tests {
     use crate::core::config::ConfigDocument;
     use crate::input::hotkey::HotkeyPolicy;
     use crate::input::tray::TrayPolicy;
-
-    static RECORDING: AtomicBool = AtomicBool::new(false);
-    static TYPED_TEXT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    use crate::input::typer::MockTyper;
 
     struct FakeHotkeys;
 
@@ -227,18 +224,6 @@ mod tests {
         }
     }
 
-    struct RecordingTyper;
-
-    impl TextTyper for RecordingTyper {
-        fn type_text(&self, text: &str) -> Result<()> {
-            TYPED_TEXT
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(text.to_string());
-            Ok(())
-        }
-    }
-
     struct FakeBackend;
 
     impl PlatformBackend for FakeBackend {
@@ -247,7 +232,7 @@ mod tests {
 
         fn text_typer_and_hotkey_filter()
         -> (Arc<dyn TextTyper>, super::super::backend::HotkeyFilter) {
-            (Arc::new(RecordingTyper), Box::new(Some))
+            (Arc::new(MockTyper), Box::new(Some))
         }
 
         fn copy_to_clipboard(_text: &str) -> Result<()> {
@@ -264,16 +249,13 @@ mod tests {
     impl PlatformTray for FakeTray {
         fn handle_event(&mut self, event: TrayEvent) -> Option<TrayAction> {
             match event {
+                TrayEvent::Menu(event) if event.id == MenuId::new("toggle") => {
+                    Some(TrayAction::ToggleRecording)
+                }
                 TrayEvent::Menu(_) => Some(TrayAction::Exit),
                 TrayEvent::Icon(_) => Some(TrayAction::ToggleRecording),
                 TrayEvent::MicGain(gain) => Some(TrayAction::SelectMicGain(gain)),
             }
-        }
-    }
-
-    impl FakeTray {
-        fn set_recording(&mut self, recording: bool) {
-            RECORDING.store(recording, Ordering::SeqCst);
         }
     }
 
@@ -288,27 +270,30 @@ mod tests {
             notify: InputNotify,
         ) {
             if filter(EventType::KeyPress(Key::F8)).is_some() {
-                notify(InputEvent::Hotkey(HotkeyEvent::Pressed(HotkeySource::Hold)));
+                for event in [
+                    HotkeyEvent::Pressed(HotkeySource::Hold),
+                    HotkeyEvent::Released(HotkeySource::Hold),
+                    HotkeyEvent::Pressed(HotkeySource::Toggle),
+                    HotkeyEvent::Released(HotkeySource::Toggle),
+                ] {
+                    notify(InputEvent::Hotkey(event));
+                }
             }
             notify(InputEvent::PointerReleased);
         }
 
         fn start_tray(notify: TrayNotify) -> Result<Self::Tray> {
-            notify(TrayEvent::Menu(MenuEvent {
-                id: MenuId::new("exit"),
-            }));
+            for id in ["toggle", "exit"] {
+                notify(TrayEvent::Menu(MenuEvent {
+                    id: MenuId::new(id),
+                }));
+            }
             Ok(FakeTray)
         }
     }
 
     #[test]
-    fn runtime_wires_drivers_events_state_and_text_delivery() {
-        RECORDING.store(false, Ordering::SeqCst);
-        TYPED_TEXT
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-
+    fn runtime_wires_drivers_and_platform_actions() {
         let hotkeys =
             HotkeyConfig::from_section::<FakeHotkeys>(&ConfigDocument::default().input).unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -332,51 +317,15 @@ mod tests {
             actions.as_slice(),
             [
                 PlatformAction::HoldPressed,
+                PlatformAction::HoldReleased,
+                PlatformAction::ToggleRecording,
                 PlatformAction::PointerReleased {
                     point: (-317.0, 521.0),
                     ..
                 },
+                PlatformAction::ToggleRecording,
                 PlatformAction::ExitRequested,
             ]
         ));
-
-        runtime.tray.set_recording(true);
-        assert!(RECORDING.load(Ordering::SeqCst));
-
-        runtime.text_typer().type_text("hello").unwrap();
-        assert_eq!(
-            *TYPED_TEXT
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            ["hello"]
-        );
-    }
-
-    #[test]
-    fn native_input_maps_to_platform_neutral_actions() {
-        assert_eq!(
-            action_from_hotkey(HotkeyEvent::Pressed(HotkeySource::Hold)),
-            Some(PlatformAction::HoldPressed)
-        );
-        assert_eq!(
-            action_from_hotkey(HotkeyEvent::Released(HotkeySource::Hold)),
-            Some(PlatformAction::HoldReleased)
-        );
-        assert_eq!(
-            action_from_hotkey(HotkeyEvent::Pressed(HotkeySource::Toggle)),
-            Some(PlatformAction::ToggleRecording)
-        );
-        assert_eq!(
-            action_from_hotkey(HotkeyEvent::Released(HotkeySource::Toggle)),
-            None
-        );
-        assert_eq!(
-            action_from_tray(TrayAction::ToggleRecording),
-            PlatformAction::ToggleRecording
-        );
-        assert_eq!(
-            action_from_tray(TrayAction::Exit),
-            PlatformAction::ExitRequested
-        );
     }
 }

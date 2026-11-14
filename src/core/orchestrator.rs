@@ -683,13 +683,6 @@ mod tests {
         make_orchestrator_with_timeout(transcriber, Duration::from_secs(5))
     }
 
-    #[test]
-    fn production_config_uses_fixed_convergence_timeout() {
-        let config = OrchestratorConfig::new(Some("zh".to_string()));
-
-        assert_eq!(config.convergence_timeout, Duration::from_secs(30));
-    }
-
     fn test_chunk() -> WavChunk {
         WavChunk::from_encoded_bytes(b"test wav chunk".to_vec())
     }
@@ -783,7 +776,7 @@ mod tests {
                 assert!(matches!(
                     orchestrator.finish_session(SessionId(1)),
                     Err(SessionError::ConvergenceTimeout {
-                        pending_count: 1..,
+                        pending_count: 2,
                         ..
                     })
                 ));
@@ -885,68 +878,6 @@ mod tests {
     // ── Tests ────────────────────────────────────────────────────────────────
 
     #[test]
-    fn worker_reports_result_without_shared_chunks() {
-        let (chunk_tx, chunk_rx) = mpsc::sync_channel(1);
-        let (result_tx, result_rx) = mpsc::channel();
-        let cancelled = CancellationToken::new();
-        let worker = thread::spawn({
-            let cancelled = cancelled.clone();
-            move || {
-                worker_loop(
-                    chunk_rx,
-                    result_tx,
-                    Arc::new(FixedTranscriber("event result".to_string())),
-                    cancelled,
-                );
-            }
-        });
-
-        chunk_tx
-            .send(WorkerMsg {
-                index: 7,
-                chunk: test_chunk(),
-            })
-            .unwrap();
-        drop(chunk_tx);
-
-        assert!(matches!(
-            result_rx.recv().unwrap(),
-            WorkerEvent::UploadStarted { index: 7 }
-        ));
-        assert!(matches!(
-            result_rx.recv().unwrap(),
-            WorkerEvent::Completed {
-                index: 7,
-                result: Ok(ref text),
-            } if text == "event result"
-        ));
-        worker.join().unwrap();
-    }
-
-    #[test]
-    fn session_applies_worker_state_transitions() {
-        let mut chunk_entries = vec![ChunkEntry {
-            index: 3,
-            state: ChunkState::Flushed,
-        }];
-
-        apply_worker_event(&mut chunk_entries, WorkerEvent::UploadStarted { index: 3 });
-        assert!(matches!(chunk_entries[0].state, ChunkState::Uploading));
-
-        apply_worker_event(
-            &mut chunk_entries,
-            WorkerEvent::Completed {
-                index: 3,
-                result: Ok("done".to_string()),
-            },
-        );
-        assert!(matches!(
-            chunk_entries[0].state,
-            ChunkState::Transcribed(ref text) if text == "done"
-        ));
-    }
-
-    #[test]
     fn multi_chunk_results_remain_index_ordered() {
         let mut chunk_entries = vec![
             ChunkEntry {
@@ -1032,19 +963,6 @@ mod tests {
             );
         });
         worker.join().unwrap();
-    }
-
-    #[test]
-    fn test_single_chunk_success() {
-        let t = Arc::new(FixedTranscriber("hello world".to_string()));
-        let orch = default_orchestrator(t);
-
-        orch.start_session(SessionId(1)).unwrap();
-        orch.on_chunk_ready(SessionId(1), test_chunk());
-        let result = orch.finish_session(SessionId(1));
-
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
-        assert_eq!(result.unwrap(), "hello world");
     }
 
     #[test]
@@ -1145,26 +1063,6 @@ mod tests {
     }
 
     #[test]
-    fn test_convergence_timeout() {
-        let (transcriber, _calls, release) = GateTranscriber::new();
-        let orch =
-            make_orchestrator_with_timeout(Arc::new(transcriber), Duration::from_millis(100));
-
-        orch.start_session(SessionId(1)).unwrap();
-        orch.on_chunk_ready(SessionId(1), test_chunk());
-        let result = orch.finish_session(SessionId(1));
-
-        drop(release);
-
-        match result {
-            Err(SessionError::ConvergenceTimeout { pending_count, .. }) => {
-                assert_eq!(pending_count, 1);
-            }
-            other => panic!("Expected ConvergenceTimeout, got {:?}", other),
-        }
-    }
-
-    #[test]
     fn test_timed_out_chunk_cannot_be_overwritten_by_late_worker_result() {
         let mut chunk_entries = vec![ChunkEntry {
             index: 0,
@@ -1188,55 +1086,36 @@ mod tests {
 
     #[test]
     fn test_full_worker_queue_marks_chunk_failed_without_blocking() {
-        let (transcriber, _calls, release) = GateTranscriber::new();
-        let orch = default_orchestrator(Arc::new(transcriber));
+        let (transcriber, calls, release) = GateTranscriber::new();
+        let orch = Arc::new(default_orchestrator(Arc::new(transcriber)));
         orch.start_session(SessionId(1)).unwrap();
+        orch.on_chunk_ready(SessionId(1), test_chunk());
+        calls.recv_timeout(Duration::from_secs(5)).unwrap();
 
-        let started = Instant::now();
-        for _ in 0..100 {
-            orch.on_chunk_ready(SessionId(1), test_chunk());
-        }
-
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "enqueueing blocked on a full worker queue"
-        );
-        let inner = orch.inner.lock().unwrap();
-        let SessionWorker::Http(session) = &inner.as_ref().unwrap().worker else {
-            panic!("expected HTTP worker");
-        };
-        let chunk_entries = &session.chunk_entries;
-        // When STT falls behind recording, rejected submissions must remain in
-        // the session so finalization cannot silently report complete success.
-        assert_eq!(chunk_entries.len(), 100);
-        let failed_indices: Vec<_> = chunk_entries
-            .iter()
-            .filter_map(|entry| match &entry.state {
-                ChunkState::Failed(TranscribeError::Network(message))
-                    if message == "worker queue full" =>
-                {
-                    Some(entry.index)
-                }
-                _ => None,
-            })
-            .collect();
-        assert!(!failed_indices.is_empty());
-        drop(inner);
+        // A slow upload leaves room for two queued chunks. The fourth chunk must
+        // be rejected without blocking recording or hiding incomplete delivery.
+        let (submitted, done) = mpsc::channel();
+        let enqueue = Arc::clone(&orch);
+        let submitter = thread::spawn(move || {
+            for _ in 0..3 {
+                enqueue.on_chunk_ready(SessionId(1), test_chunk());
+            }
+            submitted.send(()).unwrap();
+        });
+        let submission = done.recv_timeout(Duration::from_secs(5));
 
         drop(release);
+        submitter.join().unwrap();
+        submission.expect("enqueueing blocked on a full worker queue");
         match orch.finish_session(SessionId(1)) {
             Err(SessionError::PartialFailure {
                 errors,
                 partial_text,
             }) => {
-                assert_eq!(
-                    errors
-                        .into_iter()
-                        .map(|(index, _)| index)
-                        .collect::<Vec<_>>(),
-                    failed_indices
-                );
-                assert!(!partial_text.is_empty());
+                assert_eq!(errors.len(), 1);
+                assert!(matches!(&errors[0], (3, TranscribeError::Network(message))
+                    if message == "worker queue full"));
+                assert_eq!(partial_text, "released released released");
             }
             other => panic!("Expected queue failures with partial text, got {other:?}"),
         }

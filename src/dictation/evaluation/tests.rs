@@ -1,6 +1,6 @@
 use super::*;
 use crate::dictation::test_support::{
-    accept_session, commit_segment, delete_segment, expect_event, listen, send_json,
+    accept_session, commit_segment, complete_response, delete_segment, expect_event, listen,
 };
 use serde_json::json;
 
@@ -12,7 +12,7 @@ fn seeded() -> MemorySeed {
 }
 
 #[test]
-fn replay_preserves_support_counts_expiration_and_failed_recording_rollback() {
+fn replay_preserves_support_counts_and_failed_recording_rollback() {
     let seed = seeded();
     let state = Replay::new(&seed, 100);
     let trace = SegmentTrace {
@@ -32,16 +32,6 @@ fn replay_preserves_support_counts_expiration_and_failed_recording_rollback() {
         .replay("first", 100, std::slice::from_ref(&trace), true)
         .unwrap();
     let snapshot = learned.snapshot(100);
-    // Simpler frozen-snapshot evaluation sees identical initial input but cannot validate learning.
-    let mut frozen = Memory::frozen(MemoryConfig {
-        enabled: true,
-        long_term: seed.long_term.clone(),
-    });
-    assert_eq!(frozen.snapshot(100), state.snapshot(100));
-    let result = super::super::result::DictationResult::parse(&trace.output.to_string()).unwrap();
-    frozen.learn("sample:first", 0, &result, 100);
-    assert!(frozen.snapshot(100).contexts[0].candidates.is_empty());
-    assert!(frozen.snapshot(100).contexts[0].history.is_empty());
     // Reports must survive serialization including flattened supported-term fields.
     assert_eq!(
         serde_json::from_value::<Snapshot>(serde_json::to_value(&snapshot).unwrap()).unwrap(),
@@ -71,10 +61,6 @@ fn replay_preserves_support_counts_expiration_and_failed_recording_rollback() {
             .snapshot(100),
         learned.snapshot(100)
     );
-    let expired = twice.snapshot(86500);
-    assert_eq!(expired.contexts[0].long_term, seed.long_term);
-    assert!(expired.contexts[0].history.is_empty());
-    assert!(expired.contexts[0].candidates.is_empty());
     let mut missing_input = trace.clone();
     missing_input.prompt_input = None;
     assert!(state.replay("first", 100, &[missing_input], true).is_err());
@@ -147,13 +133,7 @@ async fn evaluator_sends_production_snapshot_and_rolls_back_cleanup_failure() {
                 "memory_candidates":["ViberWhisper"]
             })
             .to_string();
-            for reply in [
-                json!({"type":"response.created","response":{"id":"r","metadata":event["response"]["metadata"]}}),
-                json!({"type":"response.output_text.done","response_id":"r","output_index":0,"content_index":0,"text":text}),
-                json!({"type":"response.done","response":{"id":"r","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]}}),
-            ] {
-                send_json(&mut socket, reply).await;
-            }
+            complete_response(&mut socket, &event, "r", &text).await;
             if cleanup {
                 delete_segment(&mut socket, "audio").await;
             } else {

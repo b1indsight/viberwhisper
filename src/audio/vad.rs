@@ -326,14 +326,21 @@ mod tests {
         let speech = crate::audio::WavChunk::from_encoded_bytes(
             include_bytes!("../../tests/fixtures/audio/speech.wav").to_vec(),
         );
-        let (rate, mut pcm) = crate::audio::decode_mono(&speech).unwrap();
+        let decoded = DecodedWav::read(&speech).unwrap();
+        // This fixed mono i16 fixture supplies both paths from one validated decode.
+        let rate = decoded.spec.sample_rate;
+        let mut pcm: Vec<i16> = decoded
+            .samples
+            .iter()
+            .map(|sample| (sample * 32768.0) as i16)
+            .collect();
         pcm.extend(vec![0; rate as usize * 2]);
         let expected = StreamingVad::new(rate).unwrap().push(&pcm).unwrap();
         let mut streaming = StreamingVad::new(rate).unwrap();
         let mut actual = Vec::new();
         for packet in pcm.chunks(317) {
             actual.extend(streaming.push(packet).unwrap());
-            assert!(contains_speech(&DecodedWav::read(&speech).unwrap()).unwrap());
+            assert!(contains_speech(&decoded).unwrap());
         }
         assert_eq!(actual, expected);
         assert!(actual.iter().any(|p| p.probability >= SPEECH_THRESHOLD));

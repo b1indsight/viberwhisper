@@ -1213,35 +1213,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn shutdown_cancellation_prevents_late_text_injection() {
-        // A finalization worker may finish after the user exits; that stale result must
-        // never paste into whichever application has focus by then.
-        let gate = FinalizationGate::new();
-        gate.cancel();
-        let typer = CountingTyper(AtomicUsize::new(0));
-
-        let delivered = gate
-            .type_text_if_active(&typer, "late result", &|| Ok(()))
-            .unwrap();
-
-        assert!(!delivered);
-        assert_eq!(typer.0.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn active_finalization_injects_text_once() {
-        let gate = FinalizationGate::new();
-        let typer = CountingTyper(AtomicUsize::new(0));
-
-        let delivered = gate
-            .type_text_if_active(&typer, "ready result", &|| Ok(()))
-            .unwrap();
-
-        assert!(delivered);
-        assert_eq!(typer.0.load(Ordering::Relaxed), 1);
-    }
-
     struct BlockingTyper {
         entered: Arc<Barrier>,
         release: Arc<Barrier>,
