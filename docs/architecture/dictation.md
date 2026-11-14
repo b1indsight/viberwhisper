@@ -83,7 +83,11 @@ example. These instructions request the contract; runtime metadata checks still 
 combinations before selecting by segment. Each Realtime segment strictly shorter than two seconds
 selects the short combination; exactly two seconds and longer use normal instructions. Duration
 includes captured pauses and excludes protocol padding: at 24 kHz, 47,999 samples are short and
-48,000 are normal. No default content is loaded during selection.
+48,000 are normal. Independently, segments below one second (24,000 source samples) omit all
+runtime history topics, candidates, corrections and sentences, while retaining the configured
+vocabulary. The second user message remains the empty-history placeholder so the task's third
+message still refers to audio. Exactly one second retains history; stored memory and learning
+are unchanged. No default content is loaded during selection.
 Full text and components are mutually exclusive instruction sources. Both present is a conflict;
 both absent requires configuration preparation. Full text alone, including an explicit empty string,
 is sent verbatim for every duration. The old `short_prompt` key is parsed as `legacy_short_prompt`
@@ -99,9 +103,10 @@ prompt-file/no-prompt candidate before creating services. Candidates clear compo
 short field so all durations use the same candidate. Neither the
 main configuration nor source memory is written.
 
-The default context component explicitly ties the natural-language history after audio to the same preceding audio.
-It explains that matching topic names combine the configured vocabulary and runtime reference.
-That saved guidance appears in both combinations. Lab candidates must supply any equivalent
+The default task component identifies vocabulary, history and audio as the first, second and third
+user messages. The runtime reference ends by directing transcription to the following audio;
+matching topic names combine the configured vocabulary and runtime reference.
+That saved task guidance appears in both combinations. Lab candidates must supply any equivalent
 guidance themselves. The full LLM system text has different semantics from old cleanup fragments;
 downgrading requires the matching old configuration.
 
@@ -141,11 +146,17 @@ task instructions are supplied separately with every response.
 The vocabulary bytes remain frozen for the recording, including its later segments.
 
 After commit, `response.create` uses explicit `input` in this order: accepted vocabulary item
-reference, committed audio item reference, inline dynamic-context text. It retains
+reference, inline dynamic-context text, committed audio item reference. It retains
 `conversation=none`, correlation `metadata`, output settings and exactly the declared instructions.
-The prefix and suffix use natural-language topic and word lists. The suffix includes candidate
-spellings, numbered recent confirmed sentences and persistent confirmed word corrections;
-matching topic names combine both text parts, and configured vocabulary is sent only once.
+Below one second, the dynamic context is empty before request construction and trace capture;
+traces record the unpadded source sample count, and replay applies the same visibility policy.
+The prefix and runtime reference use natural-language topic and word lists. Each historical topic
+lists confirmed word corrections as quoted old/correct spelling pairs, then nonempty candidate
+spellings, then recent sentences as individually JSON-escaped string quotations. Sentence order,
+duplicates and content are preserved; embedded line breaks cannot create new prompt headings.
+The reference identifies old utterances as quotations, excludes them as answers or gap filling,
+and ends with an explicit boundary before audio. Empty fields are omitted; matching topic names
+combine both text parts, and configured vocabulary is sent only once.
 Candidate support counts still control retrieval internally but are not shown to the model, nor
 are `kind` or JSON envelopes. Empty references explicitly say that no vocabulary/history is available.
 No timestamps or random IDs enter text. Storage and business snapshots remain structured JSON.

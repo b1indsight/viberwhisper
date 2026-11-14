@@ -179,8 +179,8 @@ strings therefore pass metadata while the incomplete name group remains absent f
 candidates. Invented names, ambiguous overlaps, overflow, shorter incomplete arrays and unknown
 context with nonempty candidates fail metadata even when production preserves the text.
 
-The response uses the production declared vocabulary reference, audio reference and inline dynamic
-context, in that order. Segment traces retain both wire text parts and the reconstructed Snapshot;
+The response uses the production declared vocabulary reference, inline dynamic context and audio
+reference, in that order. Segment traces retain both prompt parts and the reconstructed Snapshot;
 replay validates them against the seeded memory and the recording's frozen vocabulary. References,
 assertions and forbidden strings are never sent. Reports include seeds and history, so store them appropriately.
 Schema-2 reports replay traces through production Memory and recompute assertions on read and review.
@@ -194,15 +194,19 @@ a topic from reusing a known label.
 
 Realtime policy `realtime-context-memory-v5` requires cases schema 2, topic strings and proper-noun
 occurrence strings, with the production NFKC/lowercase, full-name, count and overlap checks. It retains
-the stable-prefix / audio / dynamic input layout and requires its wire input evidence in every segment
+the stable-prefix / dynamic / audio input layout and requires its input evidence in every segment
 trace. Readers preflight versions before deserializing nested assertions, so old Realtime cases and
 policy-v1/v2/v3/v4 reports fail with migration/rerun guidance instead of being rescored under the new
 rules. Cross-policy comparisons are rejected before networking; migrate the cases and rerun the
 baseline to compare with policy v5. All new Realtime evaluations,
-including ordinary runs without scenarios, record `stt.input_layout=stable-prefix-audio-dynamic-v1`.
-Legacy reports omit that optional field; different layouts cannot compare as identical request
-identities. HTTP metadata retains its existing shape. Historical WER from context-before-audio
-does not establish the quality of this input order.
+including ordinary runs without scenarios, record `stt.input_layout=stable-prefix-dynamic-audio-v3`.
+This identity covers history's quoted-record representation and reference-ending boundary as well
+as input order and omission of runtime history below one second. Segment traces include the
+captured 24 kHz sample count before padding; replay recomputes history visibility from that count,
+without clearing stored memory or configured vocabulary. Earlier layouts or reference formats
+cannot compare as identical request identities.
+HTTP metadata retains its existing shape. Historical WER does not establish the quality of the
+current input order and reference representation.
 
 ## Metrics
 

@@ -16,6 +16,7 @@ fn replay_preserves_support_counts_and_failed_recording_rollback() {
     let seed = seeded();
     let state = Replay::new(&seed, 100);
     let trace = SegmentTrace {
+        source_samples: 24_000,
         prompt_input: Some(
             state
                 .memory
@@ -54,6 +55,22 @@ fn replay_preserves_support_counts_and_failed_recording_rollback() {
         twice.snapshot(100).contexts[0].candidates[0].supporting_recordings,
         2
     );
+    let mut short = second.clone();
+    short.source_samples = 23_999;
+    let input = learned
+        .memory
+        .prompt_input(&learned.memory.stable_prefix(), 100)
+        .for_segment(short.source_samples);
+    short.input = input.snapshot();
+    short.prompt_input = Some(input);
+    assert!(short.input.history_is_empty());
+    let after_short = learned
+        .replay("second", 100, std::slice::from_ref(&short), true)
+        .unwrap();
+    assert_eq!(after_short.snapshot(100), twice.snapshot(100));
+    // Replay rejects a duration claiming that omitted history should have been visible.
+    short.source_samples = 24_000;
+    assert!(learned.replay("second", 100, &[short], true).is_err());
     assert_eq!(
         learned
             .replay("second", 100, &[second], false)
@@ -118,7 +135,7 @@ async fn evaluator_sends_production_snapshot_and_rolls_back_cleanup_failure() {
             let declared = commit_segment(&mut socket, "audio").await;
             let event = expect_event(&mut socket, "response.create").await;
             assert_eq!(event["response"]["instructions"], "test instructions");
-            let reference = event["response"]["input"][2]["content"][0]["text"]
+            let reference = event["response"]["input"][1]["content"][0]["text"]
                 .as_str()
                 .unwrap();
             let stable = declared["item"]["content"][0]["text"].as_str().unwrap();
@@ -126,7 +143,7 @@ async fn evaluator_sends_production_snapshot_and_rolls_back_cleanup_failure() {
             assert!(reference.ends_with("暂无历史参考资料。"));
             assert!(
                 !reference.contains("ViberWhisper"),
-                "vocabulary must not be repeated after audio"
+                "vocabulary must not be repeated in dynamic history"
             );
             let text = json!({
                 "text":"ViberWhisper ready", "context":"project",
