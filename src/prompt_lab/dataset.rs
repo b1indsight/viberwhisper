@@ -908,11 +908,11 @@ mod tests {
         store
             .correct_sample(
                 &id,
-                "使用 ViberWhisper",
+                "使用Codex检查",
                 vec![ProperNounAnnotation {
-                    canonical: "ViberWhisper".to_string(),
-                    accepted: vec!["Viber Whisper".to_string()],
-                    case_sensitive: false,
+                    canonical: "Codex".to_string(),
+                    accepted: Vec::new(),
+                    case_sensitive: true,
                     expected_occurrences: 1,
                 }],
             )
@@ -920,7 +920,7 @@ mod tests {
 
         let sample = store.load_sample(&id).unwrap();
         assert_eq!(sample.reference.status, ReferenceStatus::Ready);
-        assert_eq!(sample.reference.text.as_deref(), Some("使用 ViberWhisper"));
+        assert_eq!(sample.reference.text.as_deref(), Some("使用Codex检查"));
         assert!(!sample.audio.sha256.is_empty());
         let ready = store.validate().unwrap();
         assert_eq!(ready.ready_count, 1);
@@ -936,21 +936,24 @@ mod tests {
         let path = store.sample_path(&id).unwrap();
         let before = fs::read(&path).unwrap();
 
-        let error = store
-            .correct_sample(
-                &id,
-                "只出现一次 Example",
-                vec![ProperNounAnnotation {
-                    canonical: "Example".to_string(),
-                    accepted: Vec::new(),
-                    case_sensitive: true,
-                    expected_occurrences: 2,
-                }],
-            )
-            .unwrap_err();
+        // A real name with the wrong count must fail too, not just an embedded substring.
+        for (text, expected_occurrences) in [("MyCodexTool", 1), ("使用Codex检查", 2)] {
+            let error = store
+                .correct_sample(
+                    &id,
+                    text,
+                    vec![ProperNounAnnotation {
+                        canonical: "Codex".to_string(),
+                        accepted: Vec::new(),
+                        case_sensitive: true,
+                        expected_occurrences,
+                    }],
+                )
+                .unwrap_err();
 
-        assert!(error.to_string().contains("expected_occurrences"));
-        assert_eq!(fs::read(path).unwrap(), before);
+            assert!(error.to_string().contains("expected_occurrences"));
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
     }
 
     #[cfg(unix)]
@@ -976,50 +979,6 @@ mod tests {
         assert!(store.load_sample(&id).is_err());
         assert!(store.list_samples(None).is_err());
         assert_eq!(store.validate().unwrap().invalid_count, 1);
-    }
-
-    #[test]
-    fn correction_uses_scoring_boundaries_for_proper_noun_occurrences() {
-        let directory = tempdir().unwrap();
-        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
-        let id = captured_sample(&store, 42);
-
-        let error = store
-            .correct_sample(
-                &id,
-                "MyCodexTool",
-                vec![ProperNounAnnotation {
-                    canonical: "Codex".to_string(),
-                    accepted: Vec::new(),
-                    case_sensitive: true,
-                    expected_occurrences: 1,
-                }],
-            )
-            .unwrap_err();
-
-        assert!(error.to_string().contains("contains 0"));
-    }
-
-    #[test]
-    fn correction_counts_latin_proper_nouns_next_to_han_text() {
-        let directory = tempdir().unwrap();
-        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
-        let id = captured_sample(&store, 42);
-
-        store
-            .correct_sample(
-                &id,
-                "使用Codex检查",
-                vec![ProperNounAnnotation {
-                    canonical: "Codex".to_string(),
-                    accepted: Vec::new(),
-                    case_sensitive: true,
-                    expected_occurrences: 1,
-                }],
-            )
-            .unwrap();
-
-        assert_eq!(store.validate().unwrap().ready_count, 1);
     }
 
     #[test]

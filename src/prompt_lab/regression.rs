@@ -1369,6 +1369,22 @@ mod tests {
         }
     }
 
+    fn completed_baseline(directory: &Path) -> (DatasetStore, EvaluationReport) {
+        let store = DatasetStore::open_or_create(directory.join("dataset")).unwrap();
+        add_ready_sample(&store, 1, "使用 Codex", "Codex");
+        let baseline_path = directory.join("baseline.json");
+        let baseline = evaluate(
+            &store,
+            &SequenceTranscriber::new([Ok("使用 Codex".to_string())]),
+            request(baseline_path.clone()),
+        )
+        .unwrap();
+        let review_path = directory.join("baseline-review.json");
+        write_review(&review_path, &baseline.report.run_id, 100, false);
+        let baseline = apply_review(&baseline_path, &review_path).unwrap();
+        (store, baseline)
+    }
+
     #[test]
     fn reports_distinguish_changed_short_branch_with_identical_normal_instructions() {
         // Fingerprints must distinguish conditional candidates even when their normal
@@ -1488,19 +1504,7 @@ mod tests {
     #[test]
     fn compatible_complete_run_produces_local_and_reviewed_deltas() {
         let directory = tempdir().unwrap();
-        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
-        add_ready_sample(&store, 1, "使用 Codex", "Codex");
-
-        let baseline_path = directory.path().join("baseline.json");
-        let baseline = evaluate(
-            &store,
-            &SequenceTranscriber::new([Ok("使用 Codex".to_string())]),
-            request(baseline_path.clone()),
-        )
-        .unwrap();
-        let baseline_review = directory.path().join("baseline-review.json");
-        write_review(&baseline_review, &baseline.report.run_id, 100, false);
-        let baseline = apply_review(&baseline_path, &baseline_review).unwrap();
+        let (store, baseline) = completed_baseline(directory.path());
 
         let candidate_path = directory.path().join("candidate.json");
         let mut candidate_request = request(candidate_path.clone());
@@ -1528,18 +1532,7 @@ mod tests {
     #[test]
     fn incompatible_comparison_is_rejected_before_transcription() {
         let directory = tempdir().unwrap();
-        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
-        add_ready_sample(&store, 1, "使用 Codex", "Codex");
-        let baseline_path = directory.path().join("baseline.json");
-        let baseline = evaluate(
-            &store,
-            &SequenceTranscriber::new([Ok("使用 Codex".to_string())]),
-            request(baseline_path.clone()),
-        )
-        .unwrap();
-        let review_path = directory.path().join("review.json");
-        write_review(&review_path, &baseline.report.run_id, 100, false);
-        let mut baseline = apply_review(&baseline_path, &review_path).unwrap();
+        let (store, mut baseline) = completed_baseline(directory.path());
         baseline.stt.model = "another-model".to_string();
         let mut candidate_request = request(directory.path().join("candidate.json"));
         candidate_request.compare_to = Some(baseline);
@@ -1553,18 +1546,7 @@ mod tests {
     fn v1_comparison_is_rejected_before_v2_transcription() {
         assert_eq!(SCORING_POLICY_VERSION, "stt-prompt-scoring-v2");
         let directory = tempdir().unwrap();
-        let store = DatasetStore::open_or_create(directory.path().join("dataset")).unwrap();
-        add_ready_sample(&store, 1, "使用 Codex", "Codex");
-        let baseline_path = directory.path().join("baseline.json");
-        let baseline = evaluate(
-            &store,
-            &SequenceTranscriber::new([Ok("使用 Codex".to_string())]),
-            request(baseline_path.clone()),
-        )
-        .unwrap();
-        let review_path = directory.path().join("review.json");
-        write_review(&review_path, &baseline.report.run_id, 100, false);
-        let mut baseline = apply_review(&baseline_path, &review_path).unwrap();
+        let (store, mut baseline) = completed_baseline(directory.path());
         baseline.scoring_policy_version = "stt-prompt-scoring-v1".to_string();
         let mut candidate_request = request(directory.path().join("candidate.json"));
         candidate_request.compare_to = Some(baseline);
@@ -1697,14 +1679,6 @@ mod tests {
             let mut legacy = report.clone();
             legacy.realtime.as_mut().unwrap().policy_version = old_policy.into();
             let error = legacy.validate_contract().unwrap_err().to_string();
-            assert!(error.contains("realtime-context-memory-v5") && error.contains("rerun"));
-            let error = legacy
-                .realtime
-                .as_ref()
-                .unwrap()
-                .validate(&legacy.samples, legacy.stt.language.clone())
-                .unwrap_err()
-                .to_string();
             assert!(error.contains("realtime-context-memory-v5") && error.contains("rerun"));
             let mut value = serde_json::to_value(&legacy).unwrap();
             // Preflight must run before old nested objects fail the new string assertion types.

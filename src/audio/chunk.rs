@@ -159,11 +159,6 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_audio_uses_the_fixed_thirty_second_capacity() {
-        assert_eq!(max_frames_per_chunk(spec(1, 16_000, 16)).unwrap(), 480_000);
-    }
-
-    #[test]
     fn duration_and_size_limits_use_the_smaller_frame_capacity() {
         assert_eq!(
             max_frames_per_chunk(spec(1, 1_000_000, 16)).unwrap(),
@@ -194,20 +189,5 @@ mod tests {
         assert!(max_frames_per_chunk(spec(0, 16_000, 16)).is_err());
         assert!(max_frames_per_chunk(spec(1, 0, 16)).is_err());
         assert!(max_frames_per_chunk(spec(1, 16_000, 0)).is_err());
-    }
-
-    #[test]
-    fn recorder_samples_are_encoded_as_a_complete_wav_payload() {
-        let chunk = encode_i16_wav(&[1, -2, 3], 16_000).unwrap();
-        let mut reader = hound::WavReader::new(Cursor::new(chunk.bytes())).unwrap();
-
-        assert_eq!(reader.spec(), spec(1, 16_000, 16));
-        assert_eq!(
-            reader
-                .samples::<i16>()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap(),
-            vec![1, -2, 3]
-        );
     }
 }

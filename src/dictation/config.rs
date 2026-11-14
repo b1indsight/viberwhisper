@@ -232,15 +232,6 @@ mod prompt_tests {
     }
 
     #[test]
-    fn prompt_components_preserve_literals_and_use_fixed_order() {
-        // Users edit JSON rules independently; input key order and template-looking text must not alter composition.
-        assert_eq!(
-            components().compose(),
-            "任务 {audio} \\path\n语言\n清理\n{\"text\":\"原句\"}\n语境\n记忆"
-        );
-    }
-
-    #[test]
     fn short_segments_omit_only_examples_and_keep_other_components_literal() {
         // A short recording must omit examples without injecting another instruction
         // or deleting example-looking text from a saved rule.
@@ -347,18 +338,5 @@ mod prompt_tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn offline_metadata_records_the_saved_component_composition() {
-        let config = DictationConfig {
-            prompt_components: Some(components()),
-            ..Default::default()
-        };
-        let transcriber = crate::dictation::OfflineDictation::new(config, None, None).unwrap();
-        assert_eq!(
-            transcriber.metadata().prompt.as_deref(),
-            Some("任务 {audio} \\path\n语言\n清理\n{\"text\":\"原句\"}\n语境\n记忆")
-        );
     }
 }

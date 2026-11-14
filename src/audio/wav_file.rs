@@ -136,49 +136,36 @@ mod tests {
     #[test]
     fn chunks_stream_the_whole_file_in_order() {
         let path = test_path("ordered");
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: 4,
-            bits_per_sample: 16,
-            sample_format: SampleFormat::Int,
-        };
-        // The same reader must preserve all samples when a 65-second file yields 30/30/5 seconds.
-        write_int_wav(&path, spec, 260);
+        // Preserve an initial short file and every sample of a 65-second file's 30/30/5 split.
+        for (sample_rate, sample_count, expected_lengths) in
+            [(16_000, 100, &[100][..]), (4, 260, &[120, 120, 20][..])]
+        {
+            let spec = WavSpec {
+                channels: 1,
+                sample_rate,
+                bits_per_sample: 16,
+                sample_format: SampleFormat::Int,
+            };
+            write_int_wav(&path, spec, sample_count);
+            let chunks = WavChunkReader::open(&path)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
 
-        let reader = WavChunkReader::open(&path).unwrap();
-        let chunks = reader.collect::<Result<Vec<_>, _>>().unwrap();
-
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(
-            chunks
-                .iter()
-                .map(|chunk| read_i16_samples(chunk).len())
-                .collect::<Vec<_>>(),
-            [120, 120, 20]
-        );
-        assert_eq!(
-            chunks.iter().flat_map(read_i16_samples).collect::<Vec<_>>(),
-            (0..260).collect::<Vec<_>>()
-        );
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn short_file_returns_one_tail_chunk() {
-        let path = test_path("short");
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: 16_000,
-            bits_per_sample: 16,
-            sample_format: SampleFormat::Int,
-        };
-        write_int_wav(&path, spec, 100);
-
-        let reader = WavChunkReader::open(&path).unwrap();
-        let chunks = reader.collect::<Result<Vec<_>, _>>().unwrap();
-
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(read_i16_samples(&chunks[0]).len(), 100);
+            assert_eq!(
+                chunks
+                    .iter()
+                    .map(|chunk| read_i16_samples(chunk).len())
+                    .collect::<Vec<_>>(),
+                expected_lengths,
+                "{sample_rate}/{sample_count}"
+            );
+            assert_eq!(
+                chunks.iter().flat_map(read_i16_samples).collect::<Vec<_>>(),
+                (0..sample_count as i16).collect::<Vec<_>>(),
+                "{sample_rate}/{sample_count}"
+            );
+        }
         let _ = std::fs::remove_file(path);
     }
 

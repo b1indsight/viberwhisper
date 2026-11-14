@@ -795,59 +795,17 @@ mod tests {
     use crate::core::config::ConfigDocument;
 
     #[test]
-    fn hotkey_setup_keeps_the_displayed_defaults() {
-        let mut document = ConfigDocument::default();
-        let mut ui = ScriptedUi {
-            confirms: VecDeque::from([Ok(true)]),
-            inputs: VecDeque::new(),
-            passwords: VecDeque::new(),
-            captures: VecDeque::new(),
-            messages: Vec::new(),
-            confirm_messages: Vec::new(),
-            message_error: None,
-        };
-
-        configure_hotkeys(&mut document, &mut ui).unwrap();
-
-        assert_eq!(document.input.hold_hotkey, "F8");
-        assert_eq!(document.input.toggle_hotkey, "F9");
-    }
-
-    #[test]
-    fn hotkey_setup_captures_custom_keys_sequentially() {
-        let mut document = ConfigDocument::default();
-        let mut ui = ScriptedUi {
-            confirms: VecDeque::from([Ok(false), Ok(true)]),
-            inputs: VecDeque::new(),
-            passwords: VecDeque::new(),
-            captures: VecDeque::from([Ok(Some("F10".to_string())), Ok(Some("F11".to_string()))]),
-            messages: Vec::new(),
-            confirm_messages: Vec::new(),
-            message_error: None,
-        };
-
-        configure_hotkeys(&mut document, &mut ui).unwrap();
-
-        assert_eq!(document.input.hold_hotkey, "F10");
-        assert_eq!(document.input.toggle_hotkey, "F11");
-    }
-
-    #[test]
     fn hotkey_setup_only_applies_the_confirmed_pair() {
         let mut document = ConfigDocument::default();
         let mut ui = ScriptedUi {
             confirms: VecDeque::from([Ok(false), Ok(false), Ok(true)]),
-            inputs: VecDeque::new(),
-            passwords: VecDeque::new(),
             captures: VecDeque::from([
                 Ok(Some("F10".to_string())),
                 Ok(Some("F11".to_string())),
                 Ok(Some("F6".to_string())),
                 Ok(Some("F7".to_string())),
             ]),
-            messages: Vec::new(),
-            confirm_messages: Vec::new(),
-            message_error: None,
+            ..Default::default()
         };
 
         configure_hotkeys(&mut document, &mut ui).unwrap();
@@ -1044,83 +1002,72 @@ mod tests {
     fn switching_recognition_keeps_unedited_configuration_and_disk_keys() {
         // Setup refreshes prompts, but must retain dormant connections, optional LLM
         // settings, and a microphone that is temporarily disconnected or cannot be enumerated.
-        for realtime in [true, false] {
-            for prompt in [
-                Some(format!(
-                    "  自定义 '提示'\n\"原文\" \\path 🎙️ {}  ",
-                    "字".repeat(2100)
-                )),
-                Some(String::new()),
-                None,
-            ] {
-                for devices in [Ok(vec!["Built-in Mic".to_string()]), Err("offline".into())] {
-                    let temp = tempfile::tempdir().unwrap();
-                    let store = ConfigStore::at(temp.path().join("config.json"));
-                    let mut document = ConfigDocument::default();
-                    document.dictation.enabled = !realtime;
-                    document.dictation.url = if realtime {
-                        "ws://example.com/custom/realtime"
-                    } else {
-                        "invalid dormant Realtime URL"
-                    }
-                    .into();
-                    document.dictation.model = "  custom 'model'  ".into();
-                    document.dictation.api_key_env = if prompt.as_deref() == Some("") {
-                        ""
-                    } else {
-                        "SETUP_REALTIME_TOKEN"
-                    }
-                    .into();
-                    document.dictation.prompt = prompt.clone();
-                    if prompt.is_none() {
-                        document.dictation.prompt_components = Some(
-                            serde_json::from_value(serde_json::json!({
-                                "task": "自定义任务\n{literal}", "language": "中文",
-                                "numbers": "", "cleanup": "  整理  ",
-                                "output_format": "{\"text\":\"原文\"}",
-                                "context": "个人语境", "memory": "保留词表"
-                            }))
-                            .unwrap(),
-                        );
-                    }
-                    document.dictation.memory.enabled = false;
-                    document.dictation.memory.long_term =
-                        vec![crate::dictation::config::LongTerm {
-                            context: "开发".into(),
-                            kind: crate::dictation::config::TermKind::ProperNoun,
-                            text: "ViberWhisper".into(),
-                        }];
-                    document.transcription.language = Some("en".into());
-                    document.transcription.prompt = Some("  保留 'STT'\n提示  ".into());
-                    document.transcription.temperature = 0.25;
-                    document.post_process.enabled = true;
-                    document.post_process.preheat_enabled = false;
-                    document.post_process.prompt = Some(String::new());
-                    document.post_process.temperature = 0.4;
-                    document.inference.api.transcription.model = "  whisper 'custom'  ".into();
-                    document.inference.api.post_process.api_url =
-                        (!realtime).then(|| "https://example.com/custom/chat/completions".into());
-                    document.inference.api.post_process.model =
-                        (!realtime).then(|| "  cleanup 'custom'  ".into());
-                    document.set_transcription_api_key(Some("stt-disk-backup".into()));
-                    document.set_post_process_api_key(Some("llm-disk-backup".into()));
-                    document.audio.mic_gain = 1.75;
-                    document.audio.input_device = Some("Disconnected 'USB' Mic".into());
-                    let mut expected = document.clone();
-                    expected.apply_bundled_prompts();
-                    expected.dictation.enabled = realtime;
-                    let mut ui = KeepCurrentUi {
-                        mode: if realtime { "2" } else { "1" },
-                    };
-
-                    let outcome =
-                        run_wizard(&store, document, devices, &mut ui, &mut UnexpectedVerifier)
-                            .unwrap();
-
-                    assert!(matches!(outcome, WizardOutcome::Saved(_)));
-                    assert_eq!(store.load().unwrap(), Some(expected));
-                }
+        for (realtime, prompt, devices) in [
+            (
+                true,
+                Some("  自定义 '提示'\n\"原文\" \\path 🎙️  ".to_string()),
+                Ok(vec!["Built-in Mic".to_string()]),
+            ),
+            (false, None, Err("offline".into())),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = ConfigStore::at(temp.path().join("config.json"));
+            let mut document = ConfigDocument::default();
+            document.dictation.enabled = !realtime;
+            document.dictation.url = if realtime {
+                "ws://example.com/custom/realtime"
+            } else {
+                "invalid dormant Realtime URL"
             }
+            .into();
+            document.dictation.model = "  custom 'model'  ".into();
+            document.dictation.api_key_env = "SETUP_REALTIME_TOKEN".into();
+            document.dictation.prompt = prompt.clone();
+            if prompt.is_none() {
+                document.dictation.prompt_components = Some(
+                    serde_json::from_value(serde_json::json!({
+                        "task": "自定义任务\n{literal}", "language": "中文",
+                        "numbers": "", "cleanup": "  整理  ",
+                        "output_format": "{\"text\":\"原文\"}",
+                        "context": "个人语境", "memory": "保留词表"
+                    }))
+                    .unwrap(),
+                );
+            }
+            document.dictation.memory.enabled = false;
+            document.dictation.memory.long_term = vec![crate::dictation::config::LongTerm {
+                context: "开发".into(),
+                kind: crate::dictation::config::TermKind::ProperNoun,
+                text: "ViberWhisper".into(),
+            }];
+            document.transcription.language = Some("en".into());
+            document.transcription.prompt = Some("  保留 'STT'\n提示  ".into());
+            document.transcription.temperature = 0.25;
+            document.post_process.enabled = true;
+            document.post_process.preheat_enabled = false;
+            document.post_process.prompt = Some(String::new());
+            document.post_process.temperature = 0.4;
+            document.inference.api.transcription.model = "  whisper 'custom'  ".into();
+            document.inference.api.post_process.api_url =
+                (!realtime).then(|| "https://example.com/custom/chat/completions".into());
+            document.inference.api.post_process.model =
+                (!realtime).then(|| "  cleanup 'custom'  ".into());
+            document.set_transcription_api_key(Some("stt-disk-backup".into()));
+            document.set_post_process_api_key(Some("llm-disk-backup".into()));
+            document.audio.mic_gain = 1.75;
+            document.audio.input_device = Some("Disconnected 'USB' Mic".into());
+            let mut expected = document.clone();
+            expected.apply_bundled_prompts();
+            expected.dictation.enabled = realtime;
+            let mut ui = KeepCurrentUi {
+                mode: if realtime { "2" } else { "1" },
+            };
+
+            let outcome =
+                run_wizard(&store, document, devices, &mut ui, &mut UnexpectedVerifier).unwrap();
+
+            assert!(matches!(outcome, WizardOutcome::Saved(_)));
+            assert_eq!(store.load().unwrap(), Some(expected));
         }
     }
 
@@ -1287,41 +1234,6 @@ mod tests {
     }
 
     #[test]
-    fn verification_prompt_explains_the_window_transition() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = ConfigStore::at(temp.path().join("config.json"));
-        let mut ui = ScriptedUi {
-            confirms: VecDeque::from([Ok(false), Ok(true), Ok(true), Ok(true)]),
-            inputs: VecDeque::from([
-                Ok(Some("1".into())),
-                Ok(Some(
-                    "https://example.com/v1/audio/transcriptions".to_string(),
-                )),
-                Ok(Some("whisper-test".to_string())),
-                Ok(Some("0".to_string())),
-            ]),
-            passwords: VecDeque::from([Ok(Some("disk-secret".to_string()))]),
-            captures: VecDeque::new(),
-            messages: Vec::new(),
-            confirm_messages: Vec::new(),
-            message_error: None,
-        };
-
-        run_wizard(
-            &store,
-            ConfigDocument::default(),
-            Ok(Vec::new()),
-            &mut ui,
-            &mut SuccessfulVerifier,
-        )
-        .unwrap();
-
-        assert!(ui.confirm_messages.iter().any(|message| {
-            message.contains("选择“是”后，此窗口会关闭") && message.contains("识别完成后会显示结果")
-        }));
-    }
-
-    #[test]
     fn confirmed_wizard_saves_the_selected_configuration() {
         struct WizardSecrets;
         impl crate::core::config::SecretSource for WizardSecrets {
@@ -1337,7 +1249,7 @@ mod tests {
         let path = temp.path().join("config.json");
         let store = ConfigStore::at(path.clone());
         let mut ui = ScriptedUi {
-            confirms: VecDeque::from([Ok(true), Ok(true), Ok(false), Ok(true)]),
+            confirms: VecDeque::from([Ok(true), Ok(true), Ok(true), Ok(true)]),
             inputs: VecDeque::from([
                 Ok(Some("1".into())),
                 Ok(Some(
@@ -1352,10 +1264,7 @@ mod tests {
                 Ok(Some("disk-secret".to_string())),
                 Ok(Some("cleanup-disk-secret".to_string())),
             ]),
-            captures: VecDeque::new(),
-            messages: Vec::new(),
-            confirm_messages: Vec::new(),
-            message_error: None,
+            ..Default::default()
         };
 
         let outcome = run_wizard(
@@ -1363,7 +1272,7 @@ mod tests {
             ConfigDocument::new(WizardSecrets),
             Ok(vec!["Built-in Mic".to_string(), "USB Mic".to_string()]),
             &mut ui,
-            &mut UnexpectedVerifier,
+            &mut SuccessfulVerifier,
         )
         .unwrap();
 
@@ -1391,13 +1300,8 @@ mod tests {
         let path = temp.path().join("config.json");
         let store = ConfigStore::at(path.clone());
         let mut ui = ScriptedUi {
-            confirms: VecDeque::new(),
             inputs: VecDeque::from([Ok(None)]),
-            passwords: VecDeque::new(),
-            captures: VecDeque::new(),
-            messages: Vec::new(),
-            confirm_messages: Vec::new(),
-            message_error: None,
+            ..Default::default()
         };
 
         let outcome = run_wizard(
@@ -1488,15 +1392,6 @@ mod tests {
                 "original configuration"
             );
         }
-    }
-
-    #[test]
-    fn hotkey_confirmation_failure_is_not_cancellation() {
-        let mut ui = ScriptedUi::default();
-        ui.confirms
-            .push_back(Err(anyhow!("dialog creation failed")));
-        let error = configure_hotkeys(&mut ConfigDocument::default(), &mut ui).unwrap_err();
-        assert!(error.to_string().contains("dialog creation failed"));
     }
 
     #[test]

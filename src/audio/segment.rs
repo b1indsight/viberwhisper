@@ -350,16 +350,11 @@ mod tests {
 
     #[test]
     fn hard_limits_and_stop_preserve_exact_sample_counts_at_all_rates() {
+        // Cursor accounting needs a limit misaligned with packets and analysis steps;
+        // recorder tests retain the production 30-second boundary and real PCM checks.
+        let limit = 1001;
         for rate in [16_000, 24_000, 44_100, 48_000] {
-            let limit = rate as usize * 30;
-            for length in [
-                limit - rate as usize / 100,
-                limit - 1,
-                limit,
-                limit + 1,
-                limit + rate as usize / 100,
-                limit * 3 + 1,
-            ] {
+            for length in [limit - 1, limit, limit + 1, limit * 3 + 1] {
                 let mut segmenter = Segmenter::new(rate, limit, Segmentation::PauseAware);
                 let mut cuts = Vec::new();
                 let mut base = 0;

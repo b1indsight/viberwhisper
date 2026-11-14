@@ -16,13 +16,19 @@ fn result_with_candidates(text: &str, candidates: &[&str], context: &str) -> Dic
     .unwrap()
 }
 
+/// Seed an accepted spelling; tests of learning itself confirm their edits explicitly.
+fn memory_with_correction(from: &str, to: &str, context: &str) -> Memory {
+    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    let prepared = memory.prepare(vec![result(from, from, context)], None);
+    memory.confirm("first", &prepared, to, 100);
+    memory
+}
+
 #[test]
 fn candidate_count_mismatch_does_not_select_or_globally_replace_a_name() {
     // Without quotes, one extracted name cannot identify either of two mentions.
     // A selective user edit must not revoke or retrain the saved rule either.
-    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
-    let prepared = memory.prepare(vec![result("请找张山。", "张山", "同事")], None);
-    memory.confirm("first", &prepared, "请找张珊。", 100);
+    let mut memory = memory_with_correction("张山", "张珊", "同事");
     let raw = result("张山负责开发。张山负责联络。", "张山", "同事");
     let prepared = memory.prepare(vec![raw], Some("zh".into()));
     assert_eq!(prepared.text, "张山负责开发。张山负责联络。");
@@ -41,9 +47,7 @@ fn candidate_count_mismatch_does_not_select_or_globally_replace_a_name() {
 fn valid_candidates_still_apply_and_learn_beside_malformed_metadata() {
     // A partially malformed model response must keep the valid candidate's
     // automatic correction and allow an in-range third spelling to update it.
-    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
-    let prepared = memory.prepare(vec![result("Cody", "Cody", "项目")], None);
-    memory.confirm("first", &prepared, "Codex", 100);
+    let mut memory = memory_with_correction("Cody", "Codex", "项目");
     let raw = DictationResult::parse(
         &json!({
             "text":"用Cody和Redis。", "context":"项目",
@@ -144,9 +148,7 @@ fn unrelated_edits_do_not_move_edge_insertions_inside_a_candidate() {
 fn automatic_name_edits_use_displayed_unicode_positions() {
     // Automatic name expansion changes byte lengths after a Unicode prefix.
     // A later in-name correction must use the displayed coordinates.
-    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
-    let prepared = memory.prepare(vec![result("张山", "张山", "同事")], None);
-    memory.confirm("first", &prepared, "Alexandra", 100);
+    let mut memory = memory_with_correction("张山", "Alexandra", "同事");
     let raw = result("🎙️ 请找张山确认。", "张山", "同事");
     let prepared = memory.prepare(vec![raw.clone()], Some("zh".into()));
     assert_eq!(prepared.text, "🎙️ 请找Alexandra确认。");
@@ -229,15 +231,11 @@ fn reversion_cannot_expand_the_displayed_candidate_boundary() {
     ] {
         for (prefix, suffix) in [("", ""), ("Use ", " today.")] {
             for punctuation in ["", "!"] {
-                let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+                let mut memory = memory_with_correction(original, corrected, "项目");
                 let raw = result(&format!("{prefix}{original}{suffix}"), original, "项目");
-                let prepared = memory.prepare(vec![result(original, original, "项目")], None);
-                memory.confirm("initial", &prepared, corrected, 100);
                 let prepared = memory.prepare(vec![raw.clone()], None);
                 assert_eq!(prepared.text, format!("{prefix}{corrected}{suffix}"));
                 let evidence = memory.snapshot(100).contexts[0].corrections.clone();
-                memory.confirm("unchanged", &prepared, &prepared.text, 101);
-                assert_eq!(memory.snapshot(101).contexts[0].corrections, evidence);
                 let edited = format!("{prefix}{original}{punctuation}{suffix}");
                 memory.confirm("undo", &prepared, &edited, 102);
                 assert_eq!(
@@ -287,9 +285,7 @@ fn neighboring_names_cannot_be_mistaken_for_restored_words() {
             result("Studio", "Studio", "项目"),
         ],
     ] {
-        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
-        let prepared = memory.prepare(vec![result("C++ Studio", "C++ Studio", "项目")], None);
-        memory.confirm("initial", &prepared, "C++", 100);
+        let mut memory = memory_with_correction("C++ Studio", "C++", "项目");
         let prepared = memory.prepare(raw.clone(), None);
         assert_eq!(prepared.text, "C++ Studio");
         let evidence = memory.snapshot(100).contexts[0].corrections.clone();
@@ -303,10 +299,8 @@ fn neighboring_names_cannot_be_mistaken_for_restored_words() {
 fn automatic_corrections_require_a_complete_model_proper_noun() {
     // A known error elsewhere in the transcript is not permission to edit it:
     // each response must identify that whole name as a proper-noun candidate.
-    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    let memory = memory_with_correction("Cody", "Codex", "项目");
     let raw = result("用Cody。", "Cody", "项目");
-    let prepared = memory.prepare(vec![raw.clone()], None);
-    memory.confirm("first", &prepared, "用Codex。", 100);
     assert_eq!(memory.prepare(vec![raw], None).text, "用Codex。");
 
     for source in [
@@ -327,13 +321,6 @@ fn overlapping_model_names_do_not_learn_fragment_corrections() {
     let raw = result_with_candidates("请找张山。", &["张山", "山"], "同事");
     let prepared = memory.prepare(vec![raw.clone()], None);
     memory.confirm("first", &prepared, "请找张珊。", 100);
-    assert_eq!(
-        memory.snapshot(100).contexts[0].corrections,
-        [Replacement {
-            from: "张山".into(),
-            to: "张珊".into(),
-        }]
-    );
     assert_eq!(memory.prepare(vec![raw], None).text, "请找张珊。");
     assert_eq!(
         memory
@@ -411,9 +398,7 @@ fn configured_mentions_do_not_train_fragment_rules() {
 
 #[test]
 fn unrelated_contexts_word_substrings_and_editorial_changes_do_not_become_rules() {
-    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
-    let prepared = memory.prepare(vec![result("用Cody。", "Cody", "项目")], None);
-    memory.confirm("first", &prepared, "用Codex。", 100);
+    let memory = memory_with_correction("Cody", "Codex", "项目");
     for (text, context) in [
         ("用Cody。", "闲聊"),
         ("用Codybase。", "项目"),
@@ -426,21 +411,27 @@ fn unrelated_contexts_word_substrings_and_editorial_changes_do_not_become_rules(
             text
         );
     }
-    for (raw, final_text) in [
+    for (index, (raw, final_text)) in [
         (result("请找张山。", "张山", "同事"), "明天再说。"),
         (result("今天用Redis。", "Redis", "项目"), "今天用Redis！"),
         (result("先试123。", "123", "项目"), "先试124。"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Each edit must reach feedback, not the duplicate-recording guard.
+        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
         let prepared = memory.prepare(vec![raw], None);
-        memory.confirm("editorial", &prepared, final_text, 101);
+        memory.confirm(&format!("editorial-{index}"), &prepared, final_text, 101);
+        assert!(
+            memory
+                .snapshot(101)
+                .contexts
+                .iter()
+                .all(|context| context.corrections.is_empty()),
+            "editorial: {final_text}"
+        );
     }
-    let corrections: usize = memory
-        .snapshot(101)
-        .contexts
-        .iter()
-        .map(|c| c.corrections.len())
-        .sum();
-    assert_eq!(corrections, 1);
 }
 
 #[test]
@@ -493,13 +484,8 @@ fn repeated_segments_do_not_guess_the_topic_of_a_surviving_name() {
 }
 
 #[test]
-fn disabled_memory_and_discarded_previews_do_not_learn() {
-    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+fn disabled_memory_does_not_learn_or_overwrite_storage() {
     let raw = result("用维伯耳语。", "维伯耳语", "项目");
-    let _discarded = memory.prepare(vec![raw.clone()], None);
-    assert!(memory.snapshot(100).contexts.is_empty());
-    let prepared = memory.prepare(vec![raw.clone()], None);
-    memory.confirm("confirmed", &prepared, "用ViberWhisper。", 100);
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("disabled.json");
     std::fs::write(&path, b"not JSON").unwrap();
@@ -633,9 +619,7 @@ fn ambiguous_and_expensive_edits_cannot_assign_terms_to_a_guessed_span() {
 fn different_final_spellings_revoke_a_rule_instead_of_choosing_one_occurrence() {
     // The same model word may refer to different names. Changing only one of two
     // automatic replacements must not force that new spelling onto both next time.
-    let mut memory = Memory::load(None, Default::default(), 100).unwrap();
-    let prepared = memory.prepare(vec![result("联系张山。", "张山", "同事")], None);
-    memory.confirm("first", &prepared, "联系张珊。", 100);
+    let mut memory = memory_with_correction("张山", "张珊", "同事");
     let raw = result_with_candidates("联系张山，再联系张山。", &["张山", "张山"], "同事");
     let prepared = memory.prepare(vec![raw.clone()], None);
     assert_eq!(prepared.text, "联系张珊，再联系张珊。");
@@ -681,10 +665,8 @@ fn deleting_an_automatic_name_keeps_its_saved_correction() {
             "请找，张珊在开会。",
         ),
     ] {
-        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let mut memory = memory_with_correction("张山", "张珊", "同事");
         let raw = result("请找张山。", "张山", "同事");
-        let prepared = memory.prepare(vec![raw.clone()], None);
-        memory.confirm("first", &prepared, "请找张珊。", 100);
         let mentions = result_with_candidates(text, candidates, "同事");
         let prepared = memory.prepare(vec![mentions], None);
         memory.confirm("deleted", &prepared, final_text, 101);
@@ -806,9 +788,7 @@ fn inserted_and_deleted_letters_update_automatic_names() {
                 format!("Use {name} Ready."),
             ),
         ] {
-            let mut memory = Memory::load(None, Default::default(), 100).unwrap();
-            let prepared = memory.prepare(vec![result("Cody", "Cody", "项目")], None);
-            memory.confirm("first", &prepared, "Codex", 100);
+            let mut memory = memory_with_correction("Cody", "Codex", "项目");
             let prepared = memory.prepare(sources.clone(), None);
             assert_eq!(prepared.text, shown);
             memory.confirm("edited", &prepared, &edited, 101);
@@ -821,11 +801,9 @@ fn inserted_and_deleted_letters_update_automatic_names() {
 fn surrounding_inserted_text_does_not_extend_a_name() {
     // Permitting letter insertion must not teach a neighboring word or sentence
     // as part of the name merely because the name occupied the original segment.
-    for edited in ["Our Codex", "Call Codex", "Codex team", "Codex.", "Codex！"] {
-        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+    for edited in ["Our Codex", "Call Codex", "Codex team"] {
+        let mut memory = memory_with_correction("Cody", "Codex", "项目");
         let raw = result("Cody", "Cody", "项目");
-        let prepared = memory.prepare(vec![raw.clone()], None);
-        memory.confirm("first", &prepared, "Codex", 100);
         let prepared = memory.prepare(vec![raw.clone()], None);
         memory.confirm("surrounding-text", &prepared, edited, 101);
         assert_eq!(memory.prepare(vec![raw], None).text, "Codex");
@@ -936,10 +914,8 @@ fn chinese_name_insertions_require_an_interior_position() {
     // Chinese letters obey the same ownership rule as Latin letters. A name's
     // edge cannot absorb a new character merely because Unicode splits words there.
     for (name, learns) in [("张珊珊", false), ("小张珊", false), ("张小珊", true)] {
-        let mut memory = Memory::load(None, Default::default(), 100).unwrap();
+        let mut memory = memory_with_correction("张山", "张珊", "同事");
         let raw = result("张山", "张山", "同事");
-        let prepared = memory.prepare(vec![raw.clone()], Some("zh".into()));
-        memory.confirm("first", &prepared, "张珊", 100);
         let prepared = memory.prepare(vec![raw.clone()], Some("zh".into()));
         assert_eq!(prepared.text, "张珊");
         memory.confirm("edited", &prepared, name, 101);

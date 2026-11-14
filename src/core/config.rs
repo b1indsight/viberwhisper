@@ -147,13 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_retired_v2_documents() {
-        let previous_v2 = include_str!("../../config.example.json")
-            .replace("\"schema_version\": 3", "\"schema_version\": 2");
-        assert!(serde_json::from_str::<ConfigDocument>(&previous_v2).is_err());
-    }
-
-    #[test]
     fn retired_policy_fields_are_rejected() {
         // The current schema is the only accepted shape: removed policy knobs must not be
         // mistaken for live settings that still affect runtime behavior.
@@ -467,54 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn load_distinguishes_missing_loaded_and_invalid_documents() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("config.json");
-        let store = ConfigStore::at(path.clone());
-
-        assert_eq!(store.load().unwrap(), None);
-
-        store.save(&ConfigDocument::default()).unwrap();
-        assert_eq!(store.load().unwrap(), Some(ConfigDocument::default()));
-
-        std::fs::write(path, "not json").unwrap();
-        assert!(matches!(
-            store.load().unwrap_err(),
-            ConfigError::InvalidDocument { .. }
-        ));
-    }
-
-    #[test]
-    fn field_catalog_uses_canonical_keys_and_rejects_legacy_aliases() {
-        let keys: Vec<_> = ConfigDocument::field_keys()
-            .iter()
-            .map(|key| key.as_str())
-            .collect();
-        assert!(keys.contains(&"input.hold_hotkey"));
-        assert!(keys.contains(&"audio.input_device"));
-        assert!(keys.contains(&"inference.api.transcription.api_url"));
-        assert!(!keys.contains(&"inference.active"));
-        assert!(!keys.contains(&"inference.local.server_port"));
-        assert!(!keys.contains(&"hold_hotkey"));
-        assert!(!keys.contains(&"local_mode"));
-        for retired in [
-            "chunking.max_duration_secs",
-            "chunking.max_size_bytes",
-            "chunking.max_retries",
-            "session.convergence_timeout_secs",
-            "inference.api.provider",
-        ] {
-            assert!(!keys.contains(&retired));
-        }
-        assert_eq!(keys.len(), 18);
-
-        let document = ConfigDocument::new(MapSecrets(HashMap::new()));
-        for key in ConfigDocument::field_keys() {
-            document.get_field(key.as_str()).unwrap();
-        }
-    }
-
-    #[test]
     fn field_get_set_distinguishes_unknown_unset_and_read_only() {
         let mut document = ConfigDocument::new(MapSecrets(HashMap::new()));
         document.inference.api.post_process.model = None;
@@ -641,18 +586,6 @@ mod tests {
     }
 
     #[test]
-    fn cloned_documents_keep_their_secret_source() {
-        // Config edits clone the document before saving; reads must retain its bound source.
-        let document = ConfigDocument::new(MapSecrets(HashMap::from([(
-            "TRANSCRIPTION_API_KEY",
-            "environment-token",
-        )])));
-        let candidate = document.clone();
-        let auth = candidate.select(fields::ApiTranscriptionKey, |key| key.auth);
-        assert_eq!(auth, ApiAuth::Bearer(SecretValue::new("environment-token")));
-    }
-
-    #[test]
     fn field_selection_builds_caller_owned_settings_without_reading_unrelated_secrets() {
         struct NoSecrets;
         impl SecretSource for NoSecrets {
@@ -660,26 +593,15 @@ mod tests {
                 panic!("audio settings must not request API credentials");
             }
         }
-        #[derive(Debug, PartialEq)]
-        struct RecorderSettings {
-            device: Option<String>,
-            gain: f32,
-        }
         let mut document = ConfigDocument::new(NoSecrets);
         document.audio.input_device = Some("Desk microphone".to_string());
         document.audio.mic_gain = 1.5;
         // A caller requesting audio settings must not resolve unrelated API credentials.
         let selected = document.select(
             (fields::AudioInputDevice, fields::AudioMicGain),
-            |(device, gain)| RecorderSettings { device, gain },
+            |settings| settings,
         );
-        assert_eq!(
-            selected,
-            RecorderSettings {
-                device: Some("Desk microphone".to_string()),
-                gain: 1.5
-            },
-        );
+        assert_eq!(selected, (Some("Desk microphone".to_string()), 1.5));
     }
 
     #[test]

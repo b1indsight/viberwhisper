@@ -343,6 +343,15 @@ mod tests {
 
     use super::{WerOperation, score_proper_nouns, score_wer};
 
+    fn noun(canonical: &str) -> ProperNounAnnotation {
+        ProperNounAnnotation {
+            canonical: canonical.to_string(),
+            accepted: Vec::new(),
+            case_sensitive: true,
+            expected_occurrences: 1,
+        }
+    }
+
     #[test]
     fn wer_aligns_substitutions_deletions_and_insertions() {
         let score = score_wer(
@@ -402,12 +411,7 @@ mod tests {
 
     #[test]
     fn proper_noun_alphanumeric_forms_require_token_boundaries() {
-        let annotations = vec![ProperNounAnnotation {
-            canonical: "Codex".to_string(),
-            accepted: Vec::new(),
-            case_sensitive: true,
-            expected_occurrences: 1,
-        }];
+        let annotations = vec![noun("Codex")];
 
         let embedded = score_proper_nouns("MyCodexTool", &annotations);
         let standalone = score_proper_nouns("Use Codex now", &annotations);
@@ -425,24 +429,9 @@ mod tests {
                 case_sensitive: false,
                 expected_occurrences: 2,
             },
-            ProperNounAnnotation {
-                canonical: "Cargo.toml".to_string(),
-                accepted: Vec::new(),
-                case_sensitive: true,
-                expected_occurrences: 1,
-            },
-            ProperNounAnnotation {
-                canonical: "Visual Studio Code".to_string(),
-                accepted: Vec::new(),
-                case_sensitive: true,
-                expected_occurrences: 1,
-            },
-            ProperNounAnnotation {
-                canonical: "V3".to_string(),
-                accepted: Vec::new(),
-                case_sensitive: true,
-                expected_occurrences: 1,
-            },
+            noun("Cargo.toml"),
+            noun("Visual Studio Code"),
+            noun("V3"),
         ];
 
         // Chinese STT commonly omits spaces around Latin names while preserving their spelling.
@@ -462,20 +451,7 @@ mod tests {
 
     #[test]
     fn punctuated_and_multiword_forms_reject_latin_token_embedding() {
-        let annotations = vec![
-            ProperNounAnnotation {
-                canonical: "Cargo.toml".to_string(),
-                accepted: Vec::new(),
-                case_sensitive: true,
-                expected_occurrences: 1,
-            },
-            ProperNounAnnotation {
-                canonical: "Visual Studio Code".to_string(),
-                accepted: Vec::new(),
-                case_sensitive: true,
-                expected_occurrences: 1,
-            },
-        ];
+        let annotations = vec![noun("Cargo.toml"), noun("Visual Studio Code")];
 
         let score = score_proper_nouns("MyCargo.tomlFile MyVisual Studio CodeTool", &annotations);
 
@@ -484,20 +460,7 @@ mod tests {
 
     #[test]
     fn proper_noun_overlaps_are_consumed_longest_first() {
-        let annotations = vec![
-            ProperNounAnnotation {
-                canonical: "OpenAI Codex".to_string(),
-                accepted: Vec::new(),
-                case_sensitive: true,
-                expected_occurrences: 1,
-            },
-            ProperNounAnnotation {
-                canonical: "Codex".to_string(),
-                accepted: Vec::new(),
-                case_sensitive: true,
-                expected_occurrences: 1,
-            },
-        ];
+        let annotations = vec![noun("OpenAI Codex"), noun("Codex")];
 
         let score = score_proper_nouns("OpenAI Codex", &annotations);
 

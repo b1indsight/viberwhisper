@@ -74,11 +74,11 @@ mod tests {
         let progress = Progress::new(move || {
             notified.fetch_add(1, Ordering::Relaxed);
         });
-        for index in 0..1000 {
-            progress.publish(index.to_string());
+        for text in ["first", "second", "latest"] {
+            progress.publish(text.into());
         }
         assert_eq!(notifications.load(Ordering::Relaxed), 1);
-        assert_eq!(progress.latest(), "999");
+        assert_eq!(progress.latest(), "latest");
         progress.publish("final".into());
         assert_eq!(notifications.load(Ordering::Relaxed), 2);
         progress.cancel();

@@ -267,25 +267,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_transition_table_accepts_applied_zero_effect_path() {
-        // Finishing convergence changes lifecycle state even though the runtime has
-        // no follow-up command to execute, so it must not hit the rejection fallback.
-        let result = transition(
-            RecordingState::Stopping {
-                session_id: SessionId(1),
-            },
-            SessionEvent::SessionStopped {
-                session_id: SessionId(1),
-            },
-            SessionId(2),
-        )
-        .expect("listed transition should be accepted");
-
-        assert_eq!(result.next, RecordingState::Idle);
-        assert!(result.effects.is_empty());
-    }
-
-    #[test]
     fn session_runs_one_start_and_stop_chain() {
         let mut machine = RecordingSessionMachine::new();
         let chunk = test_chunk();

@@ -1,7 +1,7 @@
 use super::*;
 use crate::dictation::test_support::{
-    accept_session, commit_segment, complete_response, declare_prefix, delete_segment,
-    expect_event, listen, send_json,
+    accept_session, commit_audio, commit_segment, complete_response, declare_prefix,
+    delete_segment, expect_event, listen, send_json, speech_frame,
 };
 use crate::{
     core::orchestrator::{SessionOrchestrator, SessionRoutingError},
@@ -13,8 +13,6 @@ use tokio::time::{Duration, timeout};
 #[tokio::test]
 async fn segment_duration_selects_saved_instructions_across_recordings() {
     use crate::dictation::test_support::accept;
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    use futures_util::StreamExt;
     const SHORT: &str = "saved instructions";
     const NORMAL: &str = "saved instructions\nnormal-only example";
     // One connection must switch back to normal at exactly 2 s. The tiny tail
@@ -54,27 +52,8 @@ async fn segment_duration_selects_saved_instructions_across_recordings() {
             for (index, (length, instructions)) in requests.into_iter().enumerate() {
                 let audio = format!("audio-{index}");
                 declare_prefix(&mut socket, &format!("prefix-{audio}")).await;
-                let mut uploaded = 0;
-                loop {
-                    let message = socket.next().await.unwrap().unwrap();
-                    let event: serde_json::Value =
-                        serde_json::from_str(message.to_text().unwrap()).unwrap();
-                    if event["type"] == "input_audio_buffer.commit" {
-                        break;
-                    }
-                    assert_eq!(event["type"], "input_audio_buffer.append");
-                    uploaded += STANDARD
-                        .decode(event["audio"].as_str().unwrap())
-                        .unwrap()
-                        .len()
-                        / 2;
-                }
-                assert_eq!(uploaded, length.max(2400));
-                send_json(
-                    &mut socket,
-                    json!({"type":"input_audio_buffer.committed","item_id":audio}),
-                )
-                .await;
+                let uploaded = commit_audio(&mut socket, &audio).await;
+                assert_eq!(uploaded.len() / 2, length.max(2400));
                 let request = expect_event(&mut socket, "response.create").await;
                 assert_eq!(request["response"]["instructions"], instructions);
                 complete_response(
@@ -88,9 +67,7 @@ async fn segment_duration_selects_saved_instructions_across_recordings() {
             }
         });
         let mut connection = Connection::connect(&settings, None).await.unwrap();
-        let wav = WavChunk::from_encoded_bytes(
-            include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-        );
+        let wav = speech_frame();
         let (rate, speech) = crate::audio::decode_mono(&wav).unwrap();
         let voice = PcmResampler::new(rate, 24_000)
             .unwrap()
@@ -125,12 +102,8 @@ async fn segment_duration_selects_saved_instructions_across_recordings() {
 #[tokio::test]
 async fn pause_commits_contiguous_audio_while_fixed_conversion_keeps_one_segment() {
     use crate::audio::segment::Segmentation;
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    use futures_util::StreamExt;
     for mode in [Segmentation::PauseAware, Segmentation::Fixed] {
-        let speech = WavChunk::from_encoded_bytes(
-            include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-        );
+        let speech = speech_frame();
         let (rate, speech) = crate::audio::decode_mono(&speech).unwrap();
         let speech = PcmResampler::new(rate, 24_000)
             .unwrap()
@@ -146,30 +119,15 @@ async fn pause_commits_contiguous_audio_while_fixed_conversion_keeps_one_segment
             for index in 0..if mode == Segmentation::Fixed { 1 } else { 2 } {
                 let audio = format!("audio-{index}");
                 declare_prefix(&mut socket, &format!("prefix-{audio}")).await;
-                let mut segment = Vec::new();
-                loop {
-                    let message = socket.next().await.unwrap().unwrap();
-                    let event: serde_json::Value =
-                        serde_json::from_str(message.to_text().unwrap()).unwrap();
-                    if event["type"] == "input_audio_buffer.commit" {
-                        break;
-                    }
-                    assert_eq!(event["type"], "input_audio_buffer.append");
-                    let bytes = STANDARD.decode(event["audio"].as_str().unwrap()).unwrap();
-                    segment.extend(
-                        bytes
-                            .as_chunks::<2>()
-                            .0
-                            .iter()
-                            .map(|s| i16::from_le_bytes(*s)),
-                    );
-                }
-                segments.push(segment);
-                send_json(
-                    &mut socket,
-                    json!({"type":"input_audio_buffer.committed","item_id":audio}),
-                )
-                .await;
+                let uploaded = commit_audio(&mut socket, &audio).await;
+                segments.push(
+                    uploaded
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|s| i16::from_le_bytes(*s))
+                        .collect::<Vec<_>>(),
+                );
                 let request = expect_event(&mut socket, "response.create").await;
                 complete_response(
                     &mut socket,
@@ -251,12 +209,7 @@ async fn failed_recording_reconnects_with_a_complete_prefix_and_fresh_audio() {
             for turn in 0..2 {
                 let id = SessionId(turn);
                 engine.start_session(id).unwrap();
-                engine.on_chunk_ready(
-                    id,
-                    WavChunk::from_encoded_bytes(
-                        include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-                    ),
-                );
+                engine.on_chunk_ready(id, speech_frame());
                 let result = engine.finish_for_delivery(id);
                 if turn == 0 {
                     assert!(result.is_err());
@@ -310,12 +263,7 @@ async fn silence_and_empty_recordings_leave_no_prefix_for_the_next_recording() {
                         crate::audio::chunk::encode_i16_wav(&vec![0; 720_001], 24000).unwrap(),
                     );
                 } else if turn == 2 {
-                    engine.on_chunk_ready(
-                        id,
-                        WavChunk::from_encoded_bytes(
-                            include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-                        ),
-                    );
+                    engine.on_chunk_ready(id, speech_frame());
                 }
                 let text = engine.finish_for_delivery(id).unwrap().text;
                 assert_eq!(text, if turn == 2 { "有声音" } else { "" });
@@ -367,12 +315,7 @@ async fn feedback_commits_only_confirmed_text_before_the_next_recording() {
             for turn in 0..3 {
                 let id = SessionId(turn);
                 engine.start_session(id).unwrap();
-                engine.on_chunk_ready(
-                    id,
-                    WavChunk::from_encoded_bytes(
-                        include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-                    ),
-                );
+                engine.on_chunk_ready(id, speech_frame());
                 let transcript = engine.finish_for_delivery(id).unwrap();
                 if turn == 0 {
                     assert!(!path.exists(), "unconfirmed memory must not be saved");
@@ -431,12 +374,7 @@ async fn shutdown_drains_confirmation_without_another_recording() {
             tokio::task::spawn_blocking(move || {
                 let id = SessionId(1);
                 engine.start_session(id).unwrap();
-                engine.on_chunk_ready(
-                    id,
-                    WavChunk::from_encoded_bytes(
-                        include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-                    ),
-                );
+                engine.on_chunk_ready(id, speech_frame());
                 let confirmation = engine
                     .finish_for_delivery(id)
                     .unwrap()
@@ -481,9 +419,7 @@ async fn shutdown_does_not_wait_for_an_in_flight_recording_response() {
     let engine = SessionOrchestrator::new_realtime(settings, None, None, None).unwrap();
     let id = SessionId(1);
     engine.start_session(id).unwrap();
-    let frame = WavChunk::from_encoded_bytes(
-        include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-    );
+    let frame = speech_frame();
     for _ in 0..11 {
         engine.on_chunk_ready(id, frame.clone());
     }
@@ -526,12 +462,7 @@ async fn disconnect_after_completed_response_preserves_only_validated_text() {
         let error = tokio::task::spawn_blocking(move || {
             let id = SessionId(1);
             engine.start_session(id).unwrap();
-            engine.on_chunk_ready(
-                id,
-                WavChunk::from_encoded_bytes(
-                    include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-                ),
-            );
+            engine.on_chunk_ready(id, speech_frame());
             engine.finish_session(id).unwrap_err()
         })
         .await
@@ -591,9 +522,7 @@ async fn completed_segment_survives_faults_but_not_user_cancellation() {
         let id = SessionId(9);
         engine.start_session(id).unwrap();
         // Feed the 3-second fixture until two 30-second commits are reached.
-        let frame = WavChunk::from_encoded_bytes(
-            include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-        );
+        let frame = speech_frame();
         for _ in 0..21 {
             engine.on_chunk_ready(id, frame.clone());
         }
@@ -710,12 +639,7 @@ async fn provisional_text_precedes_completion_but_only_validated_final_text_is_d
         engine
             .start_session_with_progress(id, Some(progress.clone()))
             .unwrap();
-        engine.on_chunk_ready(
-            id,
-            WavChunk::from_encoded_bytes(
-                include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-            ),
-        );
+        engine.on_chunk_ready(id, speech_frame());
         let finalizer = engine.clone();
         let finished = tokio::task::spawn_blocking(move || finalizer.finish_for_delivery(id));
         timeout(Duration::from_secs(5), updates.recv())

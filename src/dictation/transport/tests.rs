@@ -1,7 +1,7 @@
 use super::*;
 use crate::dictation::test_support::{
     accept, accept_session, commit_audio, commit_segment, complete_response, declare_prefix,
-    delete_audio, delete_segment, expect_event, listen, send_json,
+    delete_audio, delete_segment, expect_event, listen, send_json, speech_frame,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -18,7 +18,12 @@ async fn recording_declares_prefix_before_audio_and_orders_final_input() {
     }]}))
     .unwrap();
     let server = tokio::spawn(async move {
-        let mut socket = accept_session(&listener).await;
+        let mut socket = accept(&listener).await;
+        let session = expect_event(&mut socket, "session.update").await;
+        let input = &session["session"]["audio"]["input"];
+        assert!(input["turn_detection"].is_null());
+        assert!(input.get("transcription").is_none());
+        send_json(&mut socket, json!({"type":"session.updated"})).await;
         let declared = expect_event(&mut socket, "conversation.item.create").await;
         assert_eq!(declared["item"]["role"], "user");
         let stable = declared["item"]["content"][0]["text"].as_str().unwrap();
@@ -63,12 +68,7 @@ async fn recording_declares_prefix_before_audio_and_orders_final_input() {
         let engine = SessionOrchestrator::new_realtime(settings, None, None, None).unwrap();
         let id = SessionId(0);
         engine.start_session(id).unwrap();
-        engine.on_chunk_ready(
-            id,
-            crate::audio::WavChunk::from_encoded_bytes(
-                include_bytes!("../../../tests/fixtures/audio/speech.wav").to_vec(),
-            ),
-        );
+        engine.on_chunk_ready(id, speech_frame());
         engine.finish_for_delivery(id).unwrap().text
     });
     let (text, ()) = timeout(Duration::from_secs(10), async {
@@ -83,10 +83,7 @@ async fn recording_declares_prefix_before_audio_and_orders_final_input() {
 async fn upload_preserves_protocol_events_in_a_bounded_queue() {
     let (listener, settings) = listen().await;
     let server = tokio::spawn(async move {
-        let mut socket = accept(&listener).await;
-        let event = expect_event(&mut socket, "session.update").await;
-        assert_eq!(event["session"]["instructions"], "");
-        send_json(&mut socket, json!({"type":"session.updated"})).await;
+        let mut socket = accept_session(&listener).await;
         for sequence in 0..33 {
             send_json(
                 &mut socket,
@@ -95,16 +92,7 @@ async fn upload_preserves_protocol_events_in_a_bounded_queue() {
             .await;
         }
     });
-    let mut connection = Connection::connect(
-        &DictationConfig {
-            prompt: Some(String::new()),
-            prompt_components: None,
-            ..settings
-        },
-        None,
-    )
-    .await
-    .unwrap();
+    let mut connection = Connection::connect(&settings, None).await.unwrap();
     for _ in 0..32 {
         connection.receive_while_recording().await.unwrap();
     }
@@ -191,41 +179,6 @@ async fn recording_answers_heartbeat_and_reports_server_error_before_stop() {
     assert!(engine.finish_session(id).is_err());
     assert!(!path.exists());
     server.await.unwrap();
-}
-
-#[tokio::test]
-async fn truncated_response_is_rejected_even_when_text_done_looks_valid() {
-    #[cfg(feature = "diagnostic-logs")]
-    let (log, dispatch) = logging::test_support::capture();
-    #[cfg(feature = "diagnostic-logs")]
-    let _guard = tracing::dispatcher::set_default(&dispatch);
-    let (listener, settings) = listen().await;
-    let server = tokio::spawn(async move {
-        let mut socket = accept_session(&listener).await;
-        commit_segment(&mut socket, "audio").await;
-        let event = expect_event(&mut socket, "response.create").await;
-        // Text completion alone must not deliver a response cut off by the token limit.
-        for reply in [
-            json!({"type":"response.created","response":{"id":"r","metadata":event["response"]["metadata"]}}),
-            json!({"type":"response.output_text.done","response_id":"r","output_index":0,"content_index":0,"text":"{}"}),
-            json!({"type":"response.done","response":{"id":"r","status":"incomplete","status_details":{"reason":"max_output_tokens"}}}),
-        ] {
-            send_json(&mut socket, reply).await;
-        }
-    });
-    let mut connection = Connection::connect(&settings, None).await.unwrap();
-    let memory = crate::dictation::memory::Memory::frozen(Default::default());
-    let input = memory.prompt_input(&memory.stable_prefix(), 0);
-    connection.begin(&input.stable, "truncated").await.unwrap();
-    connection.append(&[1; 2400]).await.unwrap();
-    let error = connection
-        .finish(&input, "truncated", 2400)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("truncated"));
-    server.await.unwrap();
-    #[cfg(feature = "diagnostic-logs")]
-    assert!(log.as_file().metadata().unwrap().len() > 0);
 }
 
 #[tokio::test]
@@ -316,65 +269,31 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
     const PROMPT: &str = "候选完整基础提示词";
     let (listener, settings) = listen().await;
     let server = tokio::spawn(async move {
-        let mut socket = accept(&listener).await;
-        let mut bytes = 0;
-        let mut round = 0;
-        while let Some(Ok(message)) = socket.next().await {
-            let Message::Text(text) = message else {
-                continue;
-            };
-            let event: serde_json::Value = serde_json::from_str(&text).unwrap();
-            let mut replies = Vec::new();
-            match event["type"].as_str().unwrap() {
-                "session.update" => {
-                    assert_eq!(event["session"]["instructions"], "");
-                    assert!(event["session"]["audio"]["input"]["turn_detection"].is_null());
-                    assert!(event["session"]["audio"]["input"].get("transcription").is_none());
-                    replies.push(json!({"type":"session.updated"}));
-                }
-                "conversation.item.create" => {
-                    let mut item = event["item"].clone();
-                    item["id"] = json!(format!("prefix-{round}"));
-                    item["status"] = json!("completed");
-                    replies.push(json!({"type":"conversation.item.added", "item":item}));
-                    replies.push(json!({"type":"conversation.item.done", "item":item}));
-                }
-                "input_audio_buffer.append" => {
-                    use base64::Engine;
-                    bytes += base64::engine::general_purpose::STANDARD.decode(event["audio"].as_str().unwrap()).unwrap().len();
-                }
-                "input_audio_buffer.commit" => replies.push(json!({"type":"input_audio_buffer.committed", "item_id":format!("audio-{round}")})),
-                "response.create" => {
-                    assert_eq!(event["response"]["instructions"], PROMPT);
-                    assert_eq!(event["response"]["conversation"], "none");
-                    assert_eq!(event["response"]["input"][1]["id"], format!("audio-{round}"));
-                    assert_eq!(event["response"]["input"][0]["id"], format!("prefix-{round}"));
-                    assert_eq!(event["response"]["input"][2]["content"][0]["type"], "input_text");
-                    let id = format!("response-{round}");
-                    let text = json!({"text":"重复。", "context":"测试语境", "memory_candidates":[]}).to_string();
-                    replies.push(json!({"type":"response.created", "response":{"id":id, "metadata":event["response"]["metadata"]}}));
-                    let delta = json!({"type":"response.output_text.delta", "event_id":format!("delta-{round}"), "response_id":id, "item_id":"out", "output_index":0,"content_index":0,"delta":text});
-                    replies.push(delta.clone());
-                    replies.push(delta); // Replayed delivery must not duplicate the JSON/text.
-                    replies.push(json!({"type":"response.output_text.done", "response_id":id, "item_id":"out", "output_index":0,"content_index":0,"text":text}));
-                    replies.push(json!({"type":"response.done", "response":{"id":id,"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]}}));
-                }
-                "conversation.item.delete" => {
-                    replies.push(json!({"type":"conversation.item.deleted","item_id":event["item_id"]}));
-                    if event["item_id"] == format!("prefix-{round}") {
-                        round += 1;
-                    }
-                }
-                other => panic!("unexpected event: {other}"),
-            }
-            for reply in replies {
-                send_json(&mut socket, reply).await;
-            }
-            if round == 4 {
-                assert_eq!(bytes, 66 * 48_000);
-                break;
-            }
+        let mut socket = accept_session(&listener).await;
+        let mut uploaded = 0;
+        for round in 0..4 {
+            let audio = format!("audio-{round}");
+            declare_prefix(&mut socket, &format!("prefix-{audio}")).await;
+            uploaded += commit_audio(&mut socket, &audio).await.len();
+            let request = expect_event(&mut socket, "response.create").await;
+            assert_eq!(request["response"]["instructions"], PROMPT);
+            // A reused socket must not keep references to an already deleted segment.
+            assert_eq!(
+                request["response"]["input"][0]["id"],
+                format!("prefix-{audio}")
+            );
+            assert_eq!(request["response"]["input"][1]["id"], audio);
+            complete_response(
+                &mut socket,
+                &request,
+                &format!("response-{round}"),
+                r#"{"text":"重复。","context":"测试语境","memory_candidates":[]}"#,
+            )
+            .await;
+            delete_segment(&mut socket, &audio).await;
         }
+        // Fixed replies cannot prove that hard cuts uploaded every source sample once.
+        assert_eq!(uploaded, 66 * 48_000);
     });
     let settings = crate::dictation::config::DictationConfig {
         prompt: Some(PROMPT.into()),

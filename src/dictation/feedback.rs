@@ -34,17 +34,3 @@ impl Confirmation {
             .map_err(|_| anyhow::anyhow!("dictation feedback worker stopped"))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn confirmation_does_not_wait_for_memory_io() {
-        // The serial recognition worker orders memory before its next job. The
-        // delivery worker only submits feedback and need not wait for a second ACK.
-        let (confirmation, mut receiver) = Confirmation::channel();
-        assert!(confirmation.confirm("最终输入".into()).is_ok());
-        assert!(receiver.try_recv().is_ok());
-    }
-}

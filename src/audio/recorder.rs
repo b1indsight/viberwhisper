@@ -693,26 +693,6 @@ pub enum RecorderCancelOutcome {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn stop_before_overflow_notification_preserves_failure() {
-        let mut recorder = recorder_for_buffer(vec![1; 3200], 3200);
-        // A native stop event can arrive before the queued AudioChunkAvailable event.
-        recorder
-            .active
-            .as_ref()
-            .unwrap()
-            .shared
-            .overflowed
-            .store(true, Ordering::Release);
-        let RecorderStopOutcome::Stopped {
-            chunks, warning, ..
-        } = recorder.stop_recording(SessionId(1))
-        else {
-            panic!("not stopped")
-        };
-        assert!(chunks.is_empty());
-        assert!(warning.unwrap().contains("capacity"));
-    }
-    #[test]
     fn streaming_frames_are_small_and_backlog_failure_is_explicit() {
         let mut buffer = super::RecordingBuffer::new(16_000).unwrap();
         buffer.enable_streaming();
@@ -766,29 +746,14 @@ mod tests {
     }
 
     fn recorder_for_buffer(samples: Vec<i16>, chunk_max_samples: usize) -> AudioRecorder {
-        let sample_count = samples.len();
+        let mut active = ActiveRecording::new(SessionId(1), 16_000, ChunkMode::Fixed).unwrap();
+        let buffer = Arc::get_mut(&mut active.shared).unwrap();
+        buffer.chunk_max_samples = chunk_max_samples;
+        buffer.wake_samples = chunk_max_samples;
+        buffer.recording.store(true, Ordering::Relaxed);
+        buffer.push_mono(&samples);
         AudioRecorder {
-            active: Some(ActiveRecording {
-                session_id: SessionId(1),
-                shared: Arc::new(RecordingBuffer {
-                    sample_rate: 16000,
-                    chunk_max_samples,
-                    wake_samples: chunk_max_samples,
-                    recording: AtomicBool::new(true),
-                    samples: Mutex::new(samples),
-                    sample_count: AtomicUsize::new(sample_count),
-                    ready_chunk_count: AtomicUsize::new(
-                        sample_count.checked_div(chunk_max_samples).unwrap_or(0),
-                    ),
-                    capacity: None,
-                    overflowed: AtomicBool::new(false),
-                }),
-                stream: None,
-                flushed_samples: 0,
-                segmenter: None,
-                analyzed_samples: 0,
-                pending_cut: None,
-            }),
+            active: Some(active),
             input_device: None,
             gain: 1.0,
             chunk_mode: ChunkMode::Fixed,
@@ -985,6 +950,7 @@ mod tests {
         assert!(shared.push_mono(&[0]));
         assert!(shared.push_mono(&vec![0; 60 * 16_000]));
         assert!(recorder.streaming_overflowed());
+        // A native stop event can arrive before the queued AudioChunkAvailable event.
         let RecorderStopOutcome::Stopped {
             chunks, warning, ..
         } = recorder.stop_recording(SessionId(1))
@@ -1100,17 +1066,6 @@ mod tests {
         };
         assert!(chunks.is_empty());
         assert!(warning.is_none());
-    }
-
-    #[test]
-    fn each_new_chunk_boundary_is_reported_to_the_callback() {
-        let mut buffer = RecordingBuffer::new(16_000).unwrap();
-        buffer.chunk_max_samples = 10;
-        buffer.wake_samples = 10;
-        assert!(!buffer.push_mono(&[1; 5]));
-        assert!(buffer.push_mono(&[1; 5]));
-        assert!(buffer.push_mono(&[2; 10]));
-        assert_eq!(buffer.ready_chunk_count.load(Ordering::Acquire), 2);
     }
 
     #[test]

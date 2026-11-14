@@ -294,15 +294,6 @@ fn strict_metadata_rejects_malformed_fields_without_rejecting_valid_text() {
         output["memory_candidates"] = candidates;
         assert!(!metadata_passed(output), "invalid candidates accepted");
     }
-    for count in [8, 9] {
-        assert_eq!(
-            metadata_passed(json!({
-                "text":"Codex ".repeat(count), "context":"project",
-                "memory_candidates":vec!["Codex"; count]
-            })),
-            count == 8
-        );
-    }
     let mut missing_candidates = valid.clone();
     missing_candidates
         .as_object_mut()

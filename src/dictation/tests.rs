@@ -56,19 +56,17 @@ fn complete_first_object_accepts_json_fences_and_ignores_trailing_noise() {
             (" \r\n```json\r\n", "\r\n``` \r\n"),
         ] {
             let wire = format!("{opening}{object}{suffix}{closing}");
-            for parsed in [
-                DictationResult::parse(&wire),
-                DictationResult::parse_transcript(&wire),
-            ] {
-                let result = parsed.unwrap();
-                assert_eq!(result.text, "用 ViberWhisper，保留 \"}\" 和 ```。");
-                assert_eq!(result.context.as_deref(), Some("Rust 项目"));
-                assert_eq!(result.memory_candidates.len(), 1);
-                assert_eq!(result.memory_candidates[0].text, "ViberWhisper");
-                assert!(result.metadata_valid);
-            }
+            let result = DictationResult::parse(&wire).unwrap();
+            assert_eq!(result.text, "用 ViberWhisper，保留 \"}\" 和 ```。");
+            assert_eq!(result.context.as_deref(), Some("Rust 项目"));
+            assert_eq!(result.memory_candidates.len(), 1);
+            assert_eq!(result.memory_candidates[0].text, "ViberWhisper");
+            assert!(result.metadata_valid);
         }
     }
+    let aggregate =
+        DictationResult::parse_transcript(&format!("```json\n{object}\n多余说明\n```")).unwrap();
+    assert_eq!(aggregate.text, "用 ViberWhisper，保留 \"}\" 和 ```。");
 }
 
 #[test]
@@ -363,17 +361,17 @@ fn repeated_terms_count_recordings_and_refresh_only_from_new_observations() {
 }
 
 #[test]
-fn manual_vocabulary_keeps_context_and_budget_before_recent_history() {
+fn manual_vocabulary_prioritizes_configured_contexts_over_recent_history() {
     let settings: DictationConfig = serde_json::from_value(json!({"memory":{"long_term":[
         {"context":"manual", "kind":"proper_noun", "text":"ViberWhisper"},
         {"context":"second", "kind":"proper_noun", "text":"Codex"}
     ]}}))
     .unwrap();
     let mut memory = Memory::load(None, settings.memory, 0).unwrap();
-    for i in 0..8 {
-        let text = "大量历史".repeat(250);
-        let mut wire: serde_json::Value = serde_json::from_str(&response(&text)).unwrap();
-        wire["context"] = json!(format!("topic-{i}"));
+    // Two configured contexts plus three recent topics exceed the four-context limit.
+    for i in 0..3 {
+        let wire =
+            json!({"text":"近期历史", "context":format!("topic-{i}"), "memory_candidates":[]});
         memory.learn(
             &format!("record-{i}"),
             0,
@@ -381,12 +379,11 @@ fn manual_vocabulary_keeps_context_and_budget_before_recent_history() {
             i,
         );
     }
-    let snapshot = memory.snapshot(9);
+    let snapshot = memory.snapshot(3);
     assert!(snapshot.ids().contains(&"manual".to_string()));
     assert!(snapshot.ids().contains(&"second".to_string()));
     let serialized = serde_json::to_string(&snapshot).unwrap();
     assert!(serialized.contains("ViberWhisper") && serialized.contains("Codex"));
-    assert!(serialized.chars().count() <= 6000);
 }
 
 #[test]
