@@ -481,10 +481,12 @@ impl Recording {
             .as_ref()
             .map(|(at, _)| *at)
             .unwrap_or_else(now);
-        let input = memory.prompt_input(
-            self.stable.as_ref().expect("uploaded audio has a prefix"),
-            at,
-        );
+        let input = memory
+            .prompt_input(
+                self.stable.as_ref().expect("uploaded audio has a prefix"),
+                at,
+            )
+            .for_segment(source_samples);
         let correlation = format!("{}-{}", self.id, self.index);
         let result = if let Some((progress, language)) = &self.progress {
             let prefix = self.text(language.clone());
@@ -509,6 +511,7 @@ impl Recording {
         if let Some((_, traces)) = &mut self.evaluation {
             traces.push(super::evaluation::SegmentTrace {
                 index: self.index,
+                source_samples,
                 input: input.snapshot(),
                 prompt_input: Some(input),
                 output: result.raw.clone(),

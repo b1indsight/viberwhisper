@@ -45,11 +45,11 @@ async fn recording_declares_prefix_before_audio_and_orders_final_input() {
             json!({"type":"item_reference","id":"prefix"})
         );
         assert_eq!(
-            request["response"]["input"][1],
+            request["response"]["input"][2],
             json!({"type":"item_reference","id":"audio"})
         );
         assert!(
-            request["response"]["input"][2]["content"][0]["text"]
+            request["response"]["input"][1]["content"][0]["text"]
                 .as_str()
                 .unwrap()
                 .ends_with("暂无历史参考资料。")
@@ -282,7 +282,7 @@ async fn recordings_reuse_connection_over_sixty_seconds_and_preserve_repetitions
                 request["response"]["input"][0]["id"],
                 format!("prefix-{audio}")
             );
-            assert_eq!(request["response"]["input"][1]["id"], audio);
+            assert_eq!(request["response"]["input"][2]["id"], audio);
             complete_response(
                 &mut socket,
                 &request,

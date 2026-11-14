@@ -1,8 +1,8 @@
-//! Complete per-segment prompt input, split around audio without duplicating vocabulary.
+//! Frozen vocabulary and per-segment runtime reference without duplicating terms.
 use super::{Context, LongTerm, Snapshot};
 use serde::{Deserialize, Serialize};
 
-/// Only configured terms belong before audio; learned state never changes these bytes.
+/// Only configured terms belong in the frozen prefix; learned state never changes these bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StablePrefix {
@@ -74,47 +74,48 @@ impl Snapshot {
     /// Render the bounded runtime view as reference prose, without program metadata.
     /// Configured vocabulary stays in the separate frozen prefix; selection is unchanged.
     pub fn reference_text(&self) -> String {
-        let mut text = String::from(
-            "以下是历史参考资料，仅用于音频中模糊词语的拼写消歧。\n本次听写正文只来自前一条音频，不补入历史内容。",
-        );
         if self.contexts.is_empty() {
-            text.push_str("\n\n暂无历史参考资料。");
+            return "暂无历史参考资料。".into();
         }
+        let mut text = String::from(
+            "以下是以前录音的参考资料，不是本次口述。更正和候选词只用于本次音频中已听到词语的拼写消歧，人工参考词优先。历史原话按由近到远排列，均为引用；不作为听写答案，不补全听不清的内容。",
+        );
         for context in &self.contexts {
-            let words = context
-                .candidates
-                .iter()
-                .map(|candidate| candidate.term.text.as_str())
-                .collect::<Vec<_>>()
-                .join("、");
-            text.push_str(&format!(
-                "\n\n历史话题：{}。\n候选参考词：{}。",
-                context.id,
-                if words.is_empty() { "无" } else { &words }
-            ));
+            text.push_str(&format!("\n\n历史话题：{}。", context.id));
             if !context.corrections.is_empty() {
-                text.push_str("\n已确认的词语更正：");
+                text.push_str("\n已确认的词语更正（旧写法 → 正确写法）：");
                 for correction in &context.corrections {
                     text.push_str(&format!(
-                        "\n- 将“{}”写作“{}”。",
-                        correction.from, correction.to
+                        "\n- {} → {}",
+                        serde_json::to_string(&correction.from).expect("serializable correction"),
+                        serde_json::to_string(&correction.to).expect("serializable correction")
                     ));
                 }
             }
-            if context.history.is_empty() {
-                text.push_str("\n最近确认的历史语句：无。");
-            } else {
-                text.push_str("\n\n最近确认的历史语句，按从近到远排列：");
-                for (index, sentence) in context.history.iter().enumerate() {
-                    text.push_str(&format!("\n{}. {}", index + 1, sentence));
+            if !context.candidates.is_empty() {
+                let words = context
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.term.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("、");
+                text.push_str(&format!("\n候选参考词：{}。", words));
+            }
+            if !context.history.is_empty() {
+                text.push_str("\n历史原话：");
+                for sentence in &context.history {
+                    // Keep quotes, line breaks and instruction-like history inside one record.
+                    let quoted = serde_json::to_string(sentence).expect("serializable history");
+                    text.push_str(&format!("\n- {}", quoted));
                 }
             }
         }
+        text.push_str("\n\n历史参考资料结束。请只听写下一条音频中实际可辨认的内容。");
         text
     }
 }
 
-/// The exact declared prefix and inline suffix; item IDs are deliberately outside model text.
+/// The declared prefix and inline runtime reference; item IDs stay outside model text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PromptInput {
@@ -157,6 +158,14 @@ impl PromptInput {
         });
         input.dynamic = merged;
         input
+    }
+
+    /// Omit runtime history below one second of captured 24 kHz PCM, not padded audio.
+    pub fn for_segment(mut self, source_samples: usize) -> Self {
+        if source_samples < 24_000 {
+            self.dynamic.contexts.clear();
+        }
+        self
     }
 
     /// Reconstruct the bounded business view used for topic validation and learning.

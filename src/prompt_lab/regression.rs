@@ -1636,6 +1636,7 @@ mod tests {
         .unwrap();
         let empty = crate::dictation::Snapshot { contexts: vec![] };
         let segments = vec![crate::dictation::SegmentTrace {
+            source_samples: 24_000,
             prompt_input: Some(
                 serde_json::from_value(serde_json::json!({
                     "stable":{"contexts":[]}, "dynamic":{"contexts":[]}

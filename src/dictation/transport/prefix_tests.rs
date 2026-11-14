@@ -154,7 +154,7 @@ async fn cancellation_resolves_pending_prefix_or_commit_before_clearing_items() 
             commit_audio(&mut socket, "fresh-audio").await;
             let request = expect_event(&mut socket, "response.create").await;
             assert_eq!(request["response"]["input"][0]["id"], "fresh-prefix");
-            assert_eq!(request["response"]["input"][1]["id"], "fresh-audio");
+            assert_eq!(request["response"]["input"][2]["id"], "fresh-audio");
             complete_response(&mut socket, &request, "fresh-response", RESULT).await;
             delete_audio(&mut socket, "fresh-audio").await;
             delete_audio(&mut socket, "fresh-prefix").await;

@@ -704,14 +704,14 @@ fn ordinary_realtime_keeps_main_protocol_memory_and_one_connection() {
         let prefix = pair[0]["item"]["content"][0]["text"].as_str().unwrap();
         assert!(prefix.contains("ConfiguredPersonalSentinel"));
         assert!(serde_json::from_str::<Value>(prefix).is_err());
-        let reference = pair[1]["response"]["input"][2]["content"][0]["text"]
+        let reference = pair[1]["response"]["input"][1]["content"][0]["text"]
             .as_str()
             .unwrap();
         assert!(serde_json::from_str::<Value>(reference).is_err());
         assert!(reference.contains("先前使用ViberWhisper。"));
         assert!(reference.contains("维伯耳语"));
         assert!(reference.contains(&format!(
-            "1. {}",
+            "历史原话：\n- \"{}\"",
             if index == 0 {
                 "先前使用ViberWhisper。"
             } else {

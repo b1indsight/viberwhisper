@@ -80,6 +80,8 @@ impl MemorySeed {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SegmentTrace {
     pub index: usize,
+    /// Captured 24 kHz sample count before protocol padding; controls history visibility.
+    pub source_samples: usize,
     pub input: Snapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_input: Option<super::memory::PromptInput>,
@@ -120,7 +122,11 @@ impl MemoryReplay {
                 anyhow::anyhow!("Realtime trace lacks the current prompt input; rerun evaluation")
             })?;
             ensure!(
-                *input == memory.prompt_input(&stable, at) && trace.input == input.snapshot(),
+                *input
+                    == memory
+                        .prompt_input(&stable, at)
+                        .for_segment(trace.source_samples)
+                    && trace.input == input.snapshot(),
                 "trace prompt input differs from replayed memory"
             );
             let result = super::result::DictationResult::parse(&trace.output.to_string())?;

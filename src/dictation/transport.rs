@@ -413,7 +413,7 @@ impl Connection {
     }
 
     /// Return a validated response independently of item cleanup (see `delete_segment`).
-    /// Model input is the accepted prefix, this segment's audio, then its dynamic context.
+    /// Model input is the accepted prefix, duration-filtered history, then this segment's audio.
     pub async fn finish(
         &mut self,
         input: &PromptInput,
@@ -488,9 +488,9 @@ impl Connection {
             "conversation":"none", "output_modalities":["text"], "instructions":instructions,
             "max_output_tokens":4096, "metadata":{"dictation_id":correlation},
             "input":[{"type":"item_reference","id":prefix_id},
-                {"type":"item_reference","id":audio_id},
                 {"type":"message","role":"user","content":[{"type":"input_text",
-                    "text":input.dynamic.reference_text()}]}]
+                    "text":input.dynamic.reference_text()}]},
+                {"type":"item_reference","id":audio_id}]
         }});
         #[cfg(feature = "diagnostic-logs")]
         logging::model_event(

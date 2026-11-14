@@ -96,6 +96,7 @@ fn discarded_metadata_and_history_leaks_fail_local_checks() {
     let segments = vec![crate::dictation::SegmentTrace {
         prompt_input: None,
         index: 0,
+        source_samples: 24_000,
         input: crate::dictation::Snapshot { contexts: vec![] },
         output: json!({"text":"old secret", "context":{"kind":"existing","id":"invented"},
             "memory_candidates":[{"kind":"proper_noun","text":"invented"}]}),
@@ -127,6 +128,7 @@ fn a_topic_string_can_reuse_an_existing_snapshot_label_without_a_kind() {
     let traces = vec![SegmentTrace {
         prompt_input: None,
         index: 0,
+        source_samples: 24_000,
         input: snapshot.clone(),
         output: json!({
             "text":"ready", "context":"project", "memory_candidates":[]
@@ -151,6 +153,7 @@ fn ungrounded_candidates_fail_metadata_checks_even_when_text_is_valid() {
             .unwrap(),
         ),
         index: 0,
+        source_samples: 24_000,
         input: empty.clone(),
         output: json!({
             "text":"使用Redis缓存。", "context":"开发",
@@ -196,6 +199,7 @@ fn metadata_passed(output: serde_json::Value) -> bool {
             &[SegmentTrace {
                 prompt_input: None,
                 index: 0,
+                source_samples: 24_000,
                 input: empty.clone(),
                 output,
             }],
@@ -237,6 +241,7 @@ fn context_assertions_round_trip_and_compare_exact_raw_strings() {
                 &[SegmentTrace {
                     prompt_input: None,
                     index: 0,
+                    source_samples: 24_000,
                     input: empty.clone(),
                     output: json!({"text":"ready", "context":actual, "memory_candidates":[]}),
                 }],

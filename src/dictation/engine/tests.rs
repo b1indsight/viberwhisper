@@ -15,15 +15,30 @@ async fn segment_duration_selects_saved_instructions_across_recordings() {
     use crate::dictation::test_support::accept;
     const SHORT: &str = "saved instructions";
     const NORMAL: &str = "saved instructions\nnormal-only example";
-    // One connection must switch back to normal at exactly 2 s. The tiny tail
-    // is padded for the protocol and must still upload successfully with short instructions.
+    // History switches at 1 s independently of examples at 2 s. Alternating durations
+    // on one connection must neither leak suppressed history nor delete stored history.
     for candidate in [None, Some("  candidate {literal}\n"), Some("")] {
         let (listener, mut settings) = listen().await;
+        settings.memory = serde_json::from_value(json!({"long_term":[{
+            "context":"manual", "kind":"proper_noun", "text":"ManualSentinel"
+        }]}))
+        .unwrap();
+        let seed = super::super::evaluation::MemorySeed {
+            long_term: settings.memory.long_term.clone(),
+            observations: vec![super::super::memory::Observation::new(
+                "prior",
+                0,
+                100,
+                "old-topic",
+                "HistorySentinel",
+                vec![],
+            )],
+        };
         let segments = if let Some(text) = candidate {
-            // Literal lab candidates need only one request on either side of the threshold.
+            // Literal instructions stay unchanged on both sides of either threshold.
             settings.prompt = Some(text.into());
             settings.prompt_components = None;
-            vec![(47_999, text), (48_001, text)]
+            vec![(23_999, text), (24_000, text), (48_001, text)]
         } else {
             // Composition details belong to config::prompt_tests; here saved rules
             // differ from defaults so a runtime replacement cannot pass unnoticed.
@@ -37,6 +52,9 @@ async fn segment_duration_selects_saved_instructions_across_recordings() {
             );
             vec![
                 (48_001, NORMAL),
+                (23_999, SHORT),
+                (24_000, SHORT),
+                (24_001, SHORT),
                 (47_999, SHORT),
                 (48_000, NORMAL),
                 (511, SHORT),
@@ -51,11 +69,25 @@ async fn segment_duration_selects_saved_instructions_across_recordings() {
             send_json(&mut socket, json!({"type":"session.updated"})).await;
             for (index, (length, instructions)) in requests.into_iter().enumerate() {
                 let audio = format!("audio-{index}");
-                declare_prefix(&mut socket, &format!("prefix-{audio}")).await;
+                let declared = declare_prefix(&mut socket, &format!("prefix-{audio}")).await;
+                assert!(
+                    declared["item"]["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("ManualSentinel")
+                );
                 let uploaded = commit_audio(&mut socket, &audio).await;
                 assert_eq!(uploaded.len() / 2, length.max(2400));
                 let request = expect_event(&mut socket, "response.create").await;
                 assert_eq!(request["response"]["instructions"], instructions);
+                let history = request["response"]["input"][1]["content"][0]["text"]
+                    .as_str()
+                    .unwrap();
+                if length < 24_000 {
+                    assert_eq!(history, "暂无历史参考资料。", "source samples: {length}");
+                } else {
+                    assert!(history.contains("HistorySentinel"));
+                }
                 complete_response(
                     &mut socket,
                     &request,
@@ -73,14 +105,14 @@ async fn segment_duration_selects_saved_instructions_across_recordings() {
             .unwrap()
             .push(&speech, true)
             .unwrap();
-        let mut memory = Memory::frozen(Default::default());
-        for (length, _) in segments {
+        let mut memory = seed.memory(100);
+        for (index, (length, _)) in segments.into_iter().enumerate() {
             let pcm: Vec<_> = if length < 768 {
                 vec![1_000; length]
             } else {
                 voice.iter().copied().cycle().take(length).collect()
             };
-            let mut recording = Recording::new(Segmentation::Fixed);
+            let mut recording = Recording::for_evaluation(format!("sample:duration-{index}"), 100);
             recording
                 .push(
                     &mut connection,
@@ -94,6 +126,10 @@ async fn segment_duration_selects_saved_instructions_across_recordings() {
                 .await
                 .unwrap();
             assert_eq!(recording.text(None), "测试");
+            let replayed = super::super::evaluation::Replay::new(&seed, 100)
+                .replay(&format!("duration-{index}"), 100, &recording.traces(), true)
+                .unwrap();
+            assert_eq!(replayed.snapshot(100), memory.snapshot(100));
         }
         server.await.unwrap();
     }
@@ -192,7 +228,7 @@ async fn failed_recording_reconnects_with_a_complete_prefix_and_fresh_audio() {
         assert_eq!(first["item"]["content"], next["item"]["content"]);
         let request = expect_event(&mut socket, "response.create").await;
         assert_eq!(request["response"]["input"][0]["id"], "prefix-new-audio");
-        assert_eq!(request["response"]["input"][1]["id"], "new-audio");
+        assert_eq!(request["response"]["input"][2]["id"], "new-audio");
         complete_response(
             &mut socket,
             &request,
@@ -287,15 +323,15 @@ async fn feedback_commits_only_confirmed_text_before_the_next_recording() {
             let audio = format!("audio-{turn}");
             commit_segment(&mut socket, &audio).await;
             let event = expect_event(&mut socket, "response.create").await;
-            let reference = event["response"]["input"][2]["content"][0]["text"]
+            let reference = event["response"]["input"][1]["content"][0]["text"]
                 .as_str()
                 .unwrap();
             assert!(serde_json::from_str::<serde_json::Value>(reference).is_err());
             if turn < 2 {
                 assert!(reference.ends_with("暂无历史参考资料。"));
             } else {
-                assert!(reference.contains("1. 用ViberWhisper。"));
-                assert!(reference.contains("将“维伯耳语”写作“ViberWhisper”"));
+                assert!(reference.contains("- \"用ViberWhisper。\""));
+                assert!(reference.contains("\"维伯耳语\" → \"ViberWhisper\""));
             }
             let text = json!({"text":"用维伯耳语。", "context":"项目",
                 "memory_candidates":["维伯耳语"]})
